@@ -207,9 +207,10 @@ concept minimizer_lookup_index = requires (
     { const_index.target_length() }          -> std::convertible_to<bioseq::storage::sequence_size_t>;
 } && (contiguous_minimizer_lookup_index<p_index> || segmented_minimizer_lookup_index<p_index>);
 
-/// Structural interface for an MPF reader that prepares one query wave into
-/// final chaining anchors.  The concrete request/scratch/batch types remain
-/// owned by the reader module; aliases avoid a circular dependency from this
+/// Structural interface for a minimizer-fragment reader that prepares one
+/// query wave into final chaining anchors. The concrete request, scratch, and
+/// batch types remain owned by the reader module; aliases avoid a circular
+/// dependency from this
 /// common concept module back to the hashmap implementation.
 template <typename p_index>
 concept prepared_fragment_anchor_batch_reader = requires (

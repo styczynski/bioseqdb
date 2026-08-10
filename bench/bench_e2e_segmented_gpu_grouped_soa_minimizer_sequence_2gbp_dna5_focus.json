@@ -1,0 +1,66 @@
+{
+  "params": {
+    "bioseq_block_gpu_dp_gpu_seed_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "2 Gbp segmented GPU dna5 grouped-SoA minimizer-sequence just_index focused validation"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_sequence", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index"},
+      "pipeline_mode": {"type": "string", "default": "task_parallel", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "scheduler concurrency mode"}
+    },
+    "bioseq_block_gpu_dp_gpu_seed_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "2 Gbp segmented GPU dna5 grouped-SoA minimizer-sequence no_index focused validation"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_sequence", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index"},
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "off = pure from-scratch no-index measure"},
+      "pipeline_mode": {"type": "string", "default": "task_parallel", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "scheduler concurrency mode"}
+    }
+  },
+
+  "test_cases": {
+    "E2E_2GBP_DNA5_GROUPED_SOA_MINIMIZER_SEQUENCE_FOCUS": { "concurrency": 1, "data": {
+        "alphabet": "dna5", "size_label": "2gbp_dna5_grouped_soa_minimizer_sequence_focus", "reference_length": 2000000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000000352, "seed": 7782451,
+        "skip_minimap2_baseline_setup": true,
+        "just_index_setup_only": "minimizers_per_sequence" },
+      "description": "dna5 2 Gbp segmented GPU grouped-SoA minimizer-sequence validation, one 5 Mbp HiFi-error query (generic Vulkan frontend, sorted-pair seam)" }
+  },
+
+  "bench_e2e": {
+    "description": "Focused segmented GPU validation: 2 Gbp dna5, grouped-SoA minimizer-sequence only, just_index/no_index.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "E2E_2GBP_DNA5_GROUPED_SOA_MINIMIZER_SEQUENCE_FOCUS": 1 },
+      "over": {
+        "bioseq_block_gpu_dp_gpu_seed_just_index": {
+          "minimizer_index": ["minimizers_per_sequence"],
+          "pipeline_mode": ["task_parallel"]
+        },
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {
+          "minimizer_index": ["minimizers_per_sequence"],
+          "pipeline_mode": ["task_parallel"],
+          "recompute_async_persistence": ["off"]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "region_visits":   { "type": "region", "rules": [] },
+        "match_count":            { "type": "evaluation" },
+        "mean_position_offset_bp":{ "type": "evaluation", "rules": [] },
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb":   { "type": "evaluation", "rules": [] },
+        "peak_bench_rss_mb":      { "type": "evaluation", "rules": [] },
+        "peak_swap_used_mb":      { "type": "evaluation", "rules": [] },
+        "audit_selected_minimizer_is_sequence": { "type": "evaluation", "rules": [] },
+        "audit_minimizer_fragment_rows":         { "type": "evaluation", "rules": [] },
+        "audit_minimizer_sequence_rows":         { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "regression_rules": []
+}

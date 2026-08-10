@@ -70,18 +70,18 @@ struct rank_pack_result {
 
 /**
  * @brief Packed-unit sink that appends to an owned vector.
- * @tparam unit_type Unsigned storage word selected by the sequence traits.
+ * @tparam p_unit_type Unsigned storage word selected by the sequence traits.
  */
-template <class unit_type>
+template <class p_unit_type>
 class growing_rank_pack_unit_sink {
 public:
-    using storage_unit = unit_type;
+    using storage_unit = p_unit_type;
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::grow_vector;
 
     /** @param output Vector that receives completed packed units. */
     explicit growing_rank_pack_unit_sink(
-            std::vector<unit_type>& output) noexcept
+            std::vector<p_unit_type>& output) noexcept
         : output_(&output), start_(output.size()) {}
 
     /**
@@ -89,7 +89,7 @@ public:
      * @param value Packed unit to append.
      * @return Always `true`; allocation failure propagates as an exception.
      */
-    [[nodiscard]] bool try_write(unit_type value) {
+    [[nodiscard]] bool try_write(p_unit_type value) {
         output_->push_back(value);
         return true;
     }
@@ -100,23 +100,23 @@ public:
     }
 
 private:
-    std::vector<unit_type>* output_{};
+    std::vector<p_unit_type>* output_{};
     std::size_t start_{};
 };
 
 /**
  * @brief Packed-unit sink over a fixed borrowed span.
- * @tparam unit_type Unsigned storage word selected by the sequence traits.
+ * @tparam p_unit_type Unsigned storage word selected by the sequence traits.
  */
-template <class unit_type>
+template <class p_unit_type>
 class fixed_rank_pack_unit_sink {
 public:
-    using storage_unit = unit_type;
+    using storage_unit = p_unit_type;
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::fixed_span;
 
     /** @param output Borrowed destination span. */
-    explicit fixed_rank_pack_unit_sink(std::span<unit_type> output) noexcept
+    explicit fixed_rank_pack_unit_sink(std::span<p_unit_type> output) noexcept
         : output_(output) {}
 
     /**
@@ -124,7 +124,7 @@ public:
      * @param value Packed unit to write.
      * @return `false` when the fixed span is already full.
      */
-    [[nodiscard]] bool try_write(unit_type value) noexcept {
+    [[nodiscard]] bool try_write(p_unit_type value) noexcept {
         if (written_ >= output_.size()) {
             return false;
         }
@@ -138,39 +138,40 @@ public:
     }
 
 private:
-    std::span<unit_type> output_{};
+    std::span<p_unit_type> output_{};
     std::size_t written_{};
 };
 
 /**
  * @brief Stateful checked rank packer shared by materialization paths.
- * @tparam output_instance Compact-sequence instance defining packing traits.
- * @tparam invalid_policy Compile-time invalid-rank handling policy.
- * @tparam capacity_policy Compile-time sink capacity model.
- * @tparam unit_sink_type Sink receiving completed packed units.
+ * @tparam p_output_instance Compact-sequence instance defining packing traits.
+ * @tparam p_invalid_policy Compile-time invalid-rank handling policy.
+ * @tparam p_capacity_policy Compile-time sink capacity model.
+ * @tparam p_unit_sink_type Sink receiving completed packed units.
  */
-template <class output_instance,
-          invalid_rank_policy invalid_policy,
-          pack_capacity_policy capacity_policy,
-          class unit_sink_type>
+template <class p_output_instance,
+          invalid_rank_policy p_invalid_policy,
+          pack_capacity_policy p_capacity_policy,
+          class p_unit_sink_type>
 class checked_rank_pack_sink {
 public:
-    using output_range = compact_sequence_range<output_instance>;
+    using output_range = compact_sequence_range<p_output_instance>;
     using traits = typename output_range::traits;
     using storage_unit = typename traits::storage_unit;
 
     static_assert(std::is_unsigned_v<storage_unit>);
     static_assert(
-        std::same_as<typename unit_sink_type::storage_unit, storage_unit>);
-    static_assert(unit_sink_type::capacity_policy == capacity_policy);
+        std::same_as<typename p_unit_sink_type::storage_unit, storage_unit>);
+    static_assert(
+        p_unit_sink_type::capacity_policy == p_capacity_policy);
     static_assert(traits::bits_per_char > 0);
     static_assert(traits::letters_per_unit > 0);
     static_assert(traits::letters_per_unit
                   <= (std::numeric_limits<std::uint16_t>::max)());
 
     /** @param sink Storage policy that receives completed packed units. */
-    explicit checked_rank_pack_sink(unit_sink_type sink) noexcept(
-            std::is_nothrow_move_constructible_v<unit_sink_type>)
+    explicit checked_rank_pack_sink(p_unit_sink_type sink) noexcept(
+            std::is_nothrow_move_constructible_v<p_unit_sink_type>)
         : sink_(std::move(sink)) {}
 
     /**
@@ -183,7 +184,7 @@ public:
             return status_;
         }
         if (rank >= traits::alphabet_size) {
-            if constexpr (invalid_policy == invalid_rank_policy::drop) {
+            if constexpr (p_invalid_policy == invalid_rank_policy::drop) {
                 return status_;
             }
             status_ = rank_pack_status::invalid_rank;
@@ -275,7 +276,7 @@ public:
     }
 
 private:
-    unit_sink_type sink_;
+    p_unit_sink_type sink_;
     storage_unit partial_word_{};
     std::size_t partial_letters_{};
     std::uint64_t emitted_symbols_{};

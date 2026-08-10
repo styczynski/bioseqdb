@@ -10,16 +10,17 @@ BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUILD_MCP_DIR.parent
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import protocol  # noqa: E402
 
 
 MODE = "highway-gcc-canary"
 NESTED_BINARY_SUBDIR = (
-    "codegen/namespace_materialization/tests/module_canary/"
+    "codegen/namespace_materialization/tests/integration/module_canary/"
     "highway-gcc-canary/nested/bin"
 )
 HIGHWAY_CANARY_MAIN = (
-    "codegen/namespace_materialization/tests/module_canary/"
+    "codegen/namespace_materialization/tests/integration/module_canary/"
     "highway_canary/main.cpp"
 )
 EXPECTED_CACHE = {
@@ -61,7 +62,7 @@ class HighwayGccCanaryPresetContractTest(unittest.TestCase):
 
 class HighwayGccCanaryModeContractTest(unittest.TestCase):
     def test_mode_owns_compile_only_and_runtime_receipts(self) -> None:
-        details = server.MODES[MODE]
+        details = build_presets.MODES[MODE]
         self.assertFalse(details.requires_build_only)
         self.assertEqual(details.lock_group, "tests")
         self.assertEqual(details.preset_override, MODE)
@@ -74,22 +75,22 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
         self.assertEqual(details.post_build_targets, ())
         self.assertFalse(details.install_extension)
         self.assertEqual(details.required_cache_variables, EXPECTED_CACHE)
-        self.assertEqual(server.preset_for(MODE, False), MODE)
-        self.assertEqual(server.preset_for(MODE, True), MODE)
+        self.assertEqual(build_presets.preset_for(MODE, False), MODE)
+        self.assertEqual(build_presets.preset_for(MODE, True), MODE)
         self.assertEqual(
-            server.build_dir_for(MODE, False),
+            build_presets.build_dir_for(MODE, False),
             REPOSITORY_ROOT / "build" / MODE,
         )
         self.assertEqual(
-            server.bin_dir_for(MODE, False),
+            build_presets.bin_dir_for(MODE, False),
             REPOSITORY_ROOT / "build" / MODE / NESTED_BINARY_SUBDIR,
         )
-        self.assertNotIn(MODE, server.FIXED_BUILD_ONLY_MODES)
-        self.assertIn(MODE, server.REMOTE_RUN_REJECTED_MODES)
-        self.assertNotIn(MODE, server.REMOTE_RUN_BUILD_MODES)
+        self.assertNotIn(MODE, build_presets.FIXED_BUILD_ONLY_MODES)
+        self.assertIn(MODE, build_presets.REMOTE_RUN_REJECTED_MODES)
+        self.assertNotIn(MODE, build_presets.REMOTE_RUN_BUILD_MODES)
 
     def test_mode_documents_its_narrow_evidence_boundary(self) -> None:
-        docs = server.MODES[MODE].docs
+        docs = build_presets.MODES[MODE].docs
         self.assertIn("paired Homebrew gcc/g++ >= 16.1", docs)
         self.assertIn("libstdc++.modules.json", docs)
         self.assertIn("sole HWY_EXPORT/HWY_DYNAMIC_DISPATCH", docs)
@@ -122,11 +123,11 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
 
     def test_local_schema_includes_mode_but_remote_schema_does_not(self) -> None:
         local_schema = next(
-            definition for definition in server.TOOL_DEFINITIONS
+            definition for definition in protocol.TOOL_DEFINITIONS
             if definition["name"] == "start_build"
         )["inputSchema"]
         remote_schema = next(
-            definition for definition in server.TOOL_DEFINITIONS
+            definition for definition in protocol.TOOL_DEFINITIONS
             if definition["name"] == "remote-run"
         )["inputSchema"]
         remote_build_shape = next(

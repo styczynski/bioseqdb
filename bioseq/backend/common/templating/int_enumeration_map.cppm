@@ -18,60 +18,60 @@ export namespace bioseq::common::templating {
 
 /**
  * @brief Assigns consecutive values to a non-empty pack of structural keys.
- * @tparam start_index Value assigned to the first key.
- * @tparam keys Unique structural keys in enumeration order.
+ * @tparam p_start_index Value assigned to the first key.
+ * @tparam p_keys Unique structural keys in enumeration order.
  */
-template <auto start_index, auto... keys>
+template <auto p_start_index, auto... p_keys>
 struct int_enumeration_map {
     /// Identifies this type as an integer-enumeration map.
     static constexpr bool is_int_enumeration_map = true;
 
     /// Number of keys in the map.
-    static constexpr std::size_t count = sizeof...(keys);
+    static constexpr std::size_t count = sizeof...(p_keys);
     static_assert(count > 0u, "int_enumeration_map: key pack must be non-empty");
     static_assert(
-        unique_values_pack<keys...>(),
+        unique_values_pack<p_keys...>(),
         "int_enumeration_map: keys must be unique");
 
     /// Integer type used for assigned values.
-    using value_type = decltype(start_index);
+    using value_type = decltype(p_start_index);
 
     /// Value assigned to the first key.
-    static constexpr value_type start = start_index;
+    static constexpr value_type start = p_start_index;
 
     /**
      * @brief Value assigned to a key.
-     * @tparam key Structural key to find; absence is a compile-time error.
+     * @tparam p_key Structural key to find; absence is a compile-time error.
      */
-    template <auto key>
+    template <auto p_key>
     static constexpr value_type field = static_cast<value_type>(
-        static_cast<std::size_t>(start_index)
-        + index_of_value_pack<key, keys...>());
+        static_cast<std::size_t>(p_start_index)
+        + index_of_value_pack<p_key, p_keys...>());
 
     /// Value assigned to the final key.
     static constexpr value_type max_value = static_cast<value_type>(
-        static_cast<std::size_t>(start_index) + (count - 1u));
+        static_cast<std::size_t>(p_start_index) + (count - 1u));
 
     /**
      * @brief Reports whether a key belongs to the map.
-     * @tparam key Structural key to probe.
+     * @tparam p_key Structural key to probe.
      */
-    template <auto key>
-    static constexpr bool contains = contains_value_pack<key, keys...>();
+    template <auto p_key>
+    static constexpr bool contains = contains_value_pack<p_key, p_keys...>();
 };
 
 /**
  * @brief String-literal facade over `int_enumeration_map`.
- * @tparam start_index Value assigned to the first string key.
- * @tparam names Unique string keys in enumeration order.
+ * @tparam p_start_index Value assigned to the first string key.
+ * @tparam p_names Unique string keys in enumeration order.
  *
  * Constraining the key pack to `compile_time_string` permits bare string
  * literals in both the map declaration and its lookup expressions.
  */
-template <auto start_index, compile_time_string... names>
+template <auto p_start_index, compile_time_string... p_names>
 struct string_enumeration_map {
     /// Underlying generic map implementation.
-    using core_type = int_enumeration_map<start_index, names...>;
+    using core_type = int_enumeration_map<p_start_index, p_names...>;
 
     /// Integer type used for assigned values.
     using value_type = typename core_type::value_type;
@@ -87,17 +87,17 @@ struct string_enumeration_map {
 
     /**
      * @brief Value assigned to a string key.
-     * @tparam key String key to find; absence is a compile-time error.
+     * @tparam p_key String key to find; absence is a compile-time error.
      */
-    template <compile_time_string key>
-    static constexpr value_type field = core_type::template field<key>;
+    template <compile_time_string p_key>
+    static constexpr value_type field = core_type::template field<p_key>;
 
     /**
      * @brief Reports whether a string key belongs to the map.
-     * @tparam key String key to probe.
+     * @tparam p_key String key to probe.
      */
-    template <compile_time_string key>
-    static constexpr bool contains = core_type::template contains<key>;
+    template <compile_time_string p_key>
+    static constexpr bool contains = core_type::template contains<p_key>;
 };
 
 } // namespace bioseq::common::templating

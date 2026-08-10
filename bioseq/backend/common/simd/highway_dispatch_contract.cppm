@@ -134,7 +134,7 @@ struct highway_alphabet_identity_entry final {
     highway_alphabet_identity type_identity = nullptr;
     /** Scheduler-owned packed alphabet code. */
     std::uint8_t alphabet_code =
-        ::bioseq::minimizers::unbound_packed_alphabet_code;
+        ::bioseq::minimizers::k_unbound_packed_alphabet_code;
 };
 
 static_assert(std::is_standard_layout_v<highway_alphabet_identity_entry>);

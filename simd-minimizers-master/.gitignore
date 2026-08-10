@@ -1,8 +1,0 @@
-/target
-/.ipynb_checkpoints/
-/data/
-/fig/
-perf.data*
-flamegraph.svg
-human-genome.fa
-/.env/

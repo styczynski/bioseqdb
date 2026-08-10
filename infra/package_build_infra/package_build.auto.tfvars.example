@@ -10,5 +10,5 @@ arm64_ami_id    = ""
 x64_ami_id      = ""
 artifact_prefix = "bioseq"
 
-# DOC0390 requires at least 500 GiB. Validation rejects smaller values.
+# Current builders require at least 500 GiB. Validation rejects smaller values.
 root_volume_size_gb = 500

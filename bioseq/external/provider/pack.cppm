@@ -42,7 +42,7 @@ struct pack_dispatch_probe {
 };
 
 // Uniqueness on the stable id *views* rather than on the heterogeneous
-// CompTimeStr<N> value types (provider ids differ in length), so the check
+// compile_time_string<N> value types (provider ids differ in length), so the check
 // works regardless of how each adapter sizes its compile-time id string.
 template <class... p_provider_types>
 consteval bool has_unique_provider_id_views() {

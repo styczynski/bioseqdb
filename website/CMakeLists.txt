@@ -10,7 +10,7 @@ endif()
 
 # --- Generator + extension handles --------------------------------------------
 # The reusable isolated generator (GCC 16.1/libstdc++) is provisioned by the
-# root via BioseqCodegen.cmake. bioseq_codegen_project is the ExternalProject
+# root via bioseq_codegen.cmake. bioseq_codegen_project is the ExternalProject
 # build target to DEPENDS on; BIOSEQ_CODEGEN_EXECUTABLE is its byproduct path.
 if(NOT BIOSEQ_CODEGEN_EXECUTABLE)
   message(FATAL_ERROR
@@ -305,7 +305,11 @@ file(CONFIGURE
   OUTPUT "${_entrypoint_units_file}"
   CONTENT "${_entrypoint_units_lines}\n"
   @ONLY)
-set(_universe_json "{\n  \"schema\": \"source_universe/v1\",\n  \"owner\": \"bioseq_website\",\n  \"units\": [\n")
+string(CONCAT _universe_json
+  "{\n  \"schema\": \"source_universe\",\n"
+  "  \"schema_revision\": 1,\n"
+  "  \"owner\": \"bioseq_website\",\n"
+  "  \"units\": [\n")
 set(_first TRUE)
 foreach(_unit ${_module_units})
   if(_first)
@@ -448,16 +452,18 @@ endif()
 set(_runner_tests_stamp "${_output_root}/private-runner-tests.stamp")
 add_custom_command(
   OUTPUT "${_runner_tests_stamp}"
-  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/test_private_postgres.py"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_SOURCE_DIR}/cmake/tests/integration/test_private_postgres.py"
           --pg-bin-dir "${_pg_bindir}"
           --scratch-root "${_output_root}/private-runner-tests"
   COMMAND "${Python3_EXECUTABLE}"
-          "${CMAKE_SOURCE_DIR}/cmake/test_stage_private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/tests/integration/test_private_postgres_stage.py"
           --cmake "${CMAKE_COMMAND}"
           --scratch-root "${_output_root}/private-stage-tests"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_runner_tests_stamp}"
-  DEPENDS "${CMAKE_SOURCE_DIR}/cmake/test_private_postgres.py"
-          "${CMAKE_SOURCE_DIR}/cmake/test_stage_private_postgres.py"
+  DEPENDS
+          "${CMAKE_SOURCE_DIR}/cmake/tests/integration/test_private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/tests/integration/test_private_postgres_stage.py"
           "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
           "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
           "${CMAKE_SOURCE_DIR}/cmake/private_postgres.py"
@@ -585,48 +591,162 @@ add_custom_command(
 set(_stage_root "${_output_root}/postgres-prefix")
 set(_stage_manifest "${_output_root}/stage-manifest.json")
 set(_stage_extension_hash "${_output_root}/staged-extension.sha256")
+set(_stage_artifact_spec "${_output_root}/extension-artifacts.json")
+set(_stage_artifact_input_root "${_output_root}/artifact-inputs")
 string(REGEX REPLACE "^/+" "" _pg_bindir_rel "${_pg_bindir}")
 set(_staged_bindir "${_stage_root}/${_pg_bindir_rel}")
-get_target_property(
-  _extension_control_file postgresql_bioseq BIOSEQ_EXTENSION_CONTROL_FILE)
-get_target_property(
-  _extension_install_sql postgresql_bioseq BIOSEQ_EXTENSION_INSTALL_SQL)
-get_target_property(
-  _extension_sql_manifest postgresql_bioseq BIOSEQ_EXTENSION_SQL_MANIFEST)
-if(NOT _extension_control_file
-   OR NOT _extension_install_sql
-   OR NOT _extension_sql_manifest)
-  message(FATAL_ERROR
-    "postgresql_bioseq must publish its generated control, install-SQL, "
-    "and SQL-manifest paths")
-endif()
+get_target_property(_cache_extension_control_file
+  postgresql_bioseq_cache BIOSEQ_EXTENSION_CONTROL_FILE)
+get_target_property(_cache_extension_install_sql
+  postgresql_bioseq_cache BIOSEQ_EXTENSION_INSTALL_SQL)
+get_target_property(_cache_extension_sql_manifest
+  postgresql_bioseq_cache BIOSEQ_EXTENSION_SQL_MANIFEST)
+get_target_property(_cache_extension_dso_property
+  postgresql_bioseq_cache BIOSEQ_EXTENSION_DSO)
+get_target_property(_bioseq_extension_control_file
+  postgresql_bioseq BIOSEQ_EXTENSION_CONTROL_FILE)
+get_target_property(_bioseq_extension_install_sql
+  postgresql_bioseq BIOSEQ_EXTENSION_INSTALL_SQL)
+get_target_property(_bioseq_extension_sql_manifest
+  postgresql_bioseq BIOSEQ_EXTENSION_SQL_MANIFEST)
+get_target_property(_bioseq_extension_dso_property
+  postgresql_bioseq BIOSEQ_EXTENSION_DSO)
+foreach(_extension_artifact_variable IN ITEMS
+    _cache_extension_control_file
+    _cache_extension_install_sql
+    _cache_extension_sql_manifest
+    _cache_extension_dso_property
+    _bioseq_extension_control_file
+    _bioseq_extension_install_sql
+    _bioseq_extension_sql_manifest
+    _bioseq_extension_dso_property)
+  if(NOT DEFINED ${_extension_artifact_variable}
+     OR "${${_extension_artifact_variable}}" STREQUAL ""
+     OR "${${_extension_artifact_variable}}" MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR
+      "website: production extension target did not publish "
+      "${_extension_artifact_variable}")
+  endif()
+endforeach()
+set(_cache_extension_dso
+  "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache,${_cache_extension_dso_property}>")
+set(_bioseq_extension_dso
+  "$<TARGET_GENEX_EVAL:postgresql_bioseq,${_bioseq_extension_dso_property}>")
 
-# The website stage is also the packaging acceptance seam: prove that the
-# extension publishes the generated install artifact, that its bytes match
-# the manifest digest, and that the
-# Doxygen-derived public projection remains the approved 11-identity set.
+# The website package gate independently validates the control, generated
+# install SQL, authoritative SQL manifest, and DSO for both production
+# extensions before one ordered, relocatable stage can be materialized.
 set(_sql_package_verifier
-  "${_source_dir}/tests/verify_generated_sql_package.py")
-set(_sql_public_identity_golden
+  "${_source_dir}/tests/contract/test_generated_sql_package.py")
+set(_cache_sql_public_identity_golden
+  "${_source_dir}/tests/fixtures/sql_cache_public_identities.json")
+set(_bioseq_sql_public_identity_golden
   "${_source_dir}/tests/fixtures/sql_public_identities.json")
 set(_sql_package_verification_stamp
   "${_output_root}/generated-sql-package-tests.stamp")
 add_custom_command(
   OUTPUT "${_sql_package_verification_stamp}"
   COMMAND "${Python3_EXECUTABLE}" "${_sql_package_verifier}"
-          --install-sql "${_extension_install_sql}"
-          --manifest "${_extension_sql_manifest}"
-          --public-identities "${_sql_public_identity_golden}"
+          --artifact
+            bioseq_cache
+            "${_cache_extension_control_file}"
+            "${_cache_extension_install_sql}"
+            "${_cache_extension_sql_manifest}"
+            "${_cache_extension_dso}"
+            "${_cache_sql_public_identity_golden}"
+          --artifact
+            bioseq
+            "${_bioseq_extension_control_file}"
+            "${_bioseq_extension_install_sql}"
+            "${_bioseq_extension_sql_manifest}"
+            "${_bioseq_extension_dso}"
+            "${_bioseq_sql_public_identity_golden}"
           --stamp "${_sql_package_verification_stamp}"
-  DEPENDS postgresql_bioseq
-          "${_extension_install_sql}"
-          "${_extension_sql_manifest}"
+  DEPENDS postgresql_bioseq_cache postgresql_bioseq
+          "${_cache_extension_control_file}"
+          "${_cache_extension_install_sql}"
+          "${_cache_extension_sql_manifest}"
+          "${_bioseq_extension_control_file}"
+          "${_bioseq_extension_install_sql}"
+          "${_bioseq_extension_sql_manifest}"
           "${_sql_package_verifier}"
-          "${_sql_public_identity_golden}"
-  COMMENT "website: verify generated SQL packaging and public manifest identity set"
+          "${_cache_sql_public_identity_golden}"
+          "${_bioseq_sql_public_identity_golden}"
+  COMMENT "website: qualify cache and Bioseq production extension artifacts"
   VERBATIM)
 add_custom_target(bioseq_generated_sql_package_tests
   DEPENDS "${_sql_package_verification_stamp}")
+
+set(_cache_stage_artifact_name_input
+  "${_stage_artifact_input_root}/0-name.txt")
+set(_cache_stage_control_input
+  "${_stage_artifact_input_root}/0-control.path")
+set(_cache_stage_install_sql_input
+  "${_stage_artifact_input_root}/0-install_sql.path")
+set(_cache_stage_library_input
+  "${_stage_artifact_input_root}/0-library.path")
+set(_cache_stage_module_override_input
+  "${_stage_artifact_input_root}/0-module_pathname_override.txt")
+set(_bioseq_stage_artifact_name_input
+  "${_stage_artifact_input_root}/1-name.txt")
+set(_bioseq_stage_control_input
+  "${_stage_artifact_input_root}/1-control.path")
+set(_bioseq_stage_install_sql_input
+  "${_stage_artifact_input_root}/1-install_sql.path")
+set(_bioseq_stage_library_input
+  "${_stage_artifact_input_root}/1-library.path")
+set(_bioseq_stage_module_override_input
+  "${_stage_artifact_input_root}/1-module_pathname_override.txt")
+set(_stage_artifact_inputs
+  "${_cache_stage_artifact_name_input}"
+  "${_cache_stage_control_input}"
+  "${_cache_stage_install_sql_input}"
+  "${_cache_stage_library_input}"
+  "${_cache_stage_module_override_input}"
+  "${_bioseq_stage_artifact_name_input}"
+  "${_bioseq_stage_control_input}"
+  "${_bioseq_stage_install_sql_input}"
+  "${_bioseq_stage_library_input}"
+  "${_bioseq_stage_module_override_input}")
+file(GENERATE
+  OUTPUT "${_cache_stage_artifact_name_input}" CONTENT "bioseq_cache")
+file(GENERATE
+  OUTPUT "${_cache_stage_control_input}"
+  CONTENT "${_cache_extension_control_file}")
+file(GENERATE
+  OUTPUT "${_cache_stage_install_sql_input}"
+  CONTENT "${_cache_extension_install_sql}")
+file(GENERATE
+  OUTPUT "${_cache_stage_library_input}"
+  CONTENT "${_cache_extension_dso}")
+file(GENERATE
+  OUTPUT "${_cache_stage_module_override_input}" CONTENT "-")
+file(GENERATE
+  OUTPUT "${_bioseq_stage_artifact_name_input}" CONTENT "bioseq")
+file(GENERATE
+  OUTPUT "${_bioseq_stage_control_input}"
+  CONTENT "${_bioseq_extension_control_file}")
+file(GENERATE
+  OUTPUT "${_bioseq_stage_install_sql_input}"
+  CONTENT "${_bioseq_extension_install_sql}")
+file(GENERATE
+  OUTPUT "${_bioseq_stage_library_input}"
+  CONTENT "${_bioseq_extension_dso}")
+file(GENERATE
+  OUTPUT "${_bioseq_stage_module_override_input}" CONTENT "-")
+
+set(_stage_artifact_writer
+  "${CMAKE_SOURCE_DIR}/cmake/write_private_postgres_artifacts.cmake")
+add_custom_command(
+  OUTPUT "${_stage_artifact_spec}"
+  COMMAND "${CMAKE_COMMAND}"
+          "-Dartifact_input_root=${_stage_artifact_input_root}"
+          -Dartifact_count=2
+          "-Dartifact_spec_output=${_stage_artifact_spec}"
+          -P "${_stage_artifact_writer}"
+  DEPENDS ${_stage_artifact_inputs} "${_stage_artifact_writer}"
+  COMMENT "website: write ordered cache and Bioseq artifact specification"
+  VERBATIM)
 
 add_custom_command(
   OUTPUT "${_stage_manifest}" "${_stage_extension_hash}"
@@ -634,19 +754,19 @@ add_custom_command(
           -DPG_CONFIG=${PostgreSQL_CONFIG}
           -DSTAGE_ROOT=${_stage_root}
           -DSTAGE_PARENT=${_output_root}
-          "-DCONTROL_FILE=${_extension_control_file}"
-          "-DINSTALL_SQL=${_extension_install_sql}"
-          "-DLIBRARY_FILE=$<TARGET_FILE:postgresql_bioseq>"
-          -DEXTENSION_VERSION=${_version}
+          "-DARTIFACT_SPEC=${_stage_artifact_spec}"
           -DMANIFEST_OUT=${_stage_manifest}
           -DHASH_OUT=${_stage_extension_hash}
           -P "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
-  DEPENDS postgresql_bioseq
+  DEPENDS postgresql_bioseq_cache postgresql_bioseq
           "${_sql_package_verification_stamp}"
-          "${_extension_control_file}"
-          "${_extension_install_sql}"
+          "${_stage_artifact_spec}"
+          "${_cache_extension_control_file}"
+          "${_cache_extension_install_sql}"
+          "${_bioseq_extension_control_file}"
+          "${_bioseq_extension_install_sql}"
           "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
-  COMMENT "website: stage relocatable PostgreSQL + current extension artifacts"
+  COMMENT "website: stage relocatable PostgreSQL + both production extensions"
   VERBATIM)
 
 # Exercise the generator's database-per-example security and result projection
@@ -665,7 +785,7 @@ add_custom_command(
           --database wtmpl
           --address-space-limit-mib 4096
           -- "${Python3_EXECUTABLE}"
-             "${CMAKE_SOURCE_DIR}/cmake/test_website_isolation.py"
+             "${CMAKE_SOURCE_DIR}/website/tests/integration/test_sql_isolation.py"
              --generator "${_gen}"
              --pg-bin-dir "${_staged_bindir}"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_isolation_tests_stamp}"
@@ -673,19 +793,18 @@ add_custom_command(
           "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
           "${CMAKE_SOURCE_DIR}/cmake/private_postgres.py"
           "${CMAKE_SOURCE_DIR}/cmake/private_postgresql.conf.in"
-          "${CMAKE_SOURCE_DIR}/cmake/test_website_isolation.py"
+          "${CMAKE_SOURCE_DIR}/website/tests/integration/test_sql_isolation.py"
   COMMENT "website: isolated SQL executor + result metadata integration tests"
   USES_TERMINAL VERBATIM)
 add_custom_target(bioseq_website_isolation_tests
   DEPENDS "${_isolation_tests_stamp}")
 
 # --- catalog + execute on the staged cluster (§17.3 step 7) -------------------
-# One owner process starts the copied server under RLIMIT_AS containment, applies
-# CREATE EXTENSION bioseq, then launches a single generator child: it captures the
-# live SQL catalog into sql-entities.json and then runs `execute`, which resolves
-# and runs every landing/tutorial runnable example against the live extension and
-# writes the database-independent resolved site model (schema site_model/v1, §180).
-# Nothing after this step needs a cluster.
+# One owner process starts the copied server under RLIMIT_AS containment,
+# installs bioseq_cache before bioseq, then launches one generator child. Both
+# authoritative manifests are supplied in that same provider-before-consumer
+# order for catalog capture and isolated tutorial execution. Nothing after this
+# step needs a cluster.
 set(_sql_entities "${_output_root}/sql-entities.json")
 set(_site_model "${_output_root}/site-model.json")
 set(_landing_fasta "${_source_dir}/tests/fixtures/landing_reads.fasta")
@@ -698,6 +817,7 @@ endif()
 # ACLs needed inside that clone; direct per-clone grants keep PostgreSQL 13
 # compatibility because pg_database_owner exists only in PostgreSQL 14+.
 file(WRITE "${_output_root}/create-extension.sql"
+  "CREATE EXTENSION bioseq_cache;\n"
   "CREATE EXTENSION bioseq;\n"
   "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA bioseq_internal FROM PUBLIC;\n")
 
@@ -718,16 +838,20 @@ file(WRITE "${_cluster_child}"
 "  exit 1\n"
 "fi\n"
 "PRELOAD=$(\"${_staged_bindir}/psql\" -tAqX --dbname \"$ADMIN_CONN\" -c 'SHOW shared_preload_libraries')\n"
-"if [[ \"$PRELOAD\" != 'bioseq' ]]; then\n"
-"  echo \"website: expected shared_preload_libraries=bioseq, got $PRELOAD\" >&2\n"
+"if [[ \"$PRELOAD\" != 'bioseq_cache,bioseq' ]]; then\n"
+"  echo \"website: expected shared_preload_libraries=bioseq_cache,bioseq, got $PRELOAD\" >&2\n"
 "  exit 1\n"
 "fi\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
-"  --sql-manifest '${_extension_sql_manifest}' --output '${_sql_entities}'\n"
+"  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
+"  --sql-manifest '${_bioseq_extension_sql_manifest}' \\\n"
+"  --output '${_sql_entities}'\n"
 "\"${_gen}\" website execute \\\n"
 "  --source '${_source_dir}' --version '${_version}' \\\n"
-"  --site-config '${_site_config}' --sql-manifest '${_extension_sql_manifest}' \\\n"
+"  --site-config '${_site_config}' \\\n"
+"  --sql-manifest '${_cache_extension_sql_manifest}' \\\n"
+"  --sql-manifest '${_bioseq_extension_sql_manifest}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --staged-extension-sha256 \"$STAGED_EXTENSION_SHA256\" \\\n"
@@ -754,12 +878,15 @@ add_custom_command(
           --log-dir "${_output_root}/cluster-log"
           --database bioseq_site
           --address-space-limit-mib 4096
+          --preload-library bioseq_cache
           --preload-library bioseq
           --disable-prepared-transactions
           --bootstrap "${_output_root}/create-extension.sql"
           -- bash "${_cluster_child}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}" "${_cluster_child}"
-          "${_cpp_entities}" "${_plan_json}" "${_extension_sql_manifest}"
+          "${_cpp_entities}" "${_plan_json}"
+          "${_cache_extension_sql_manifest}"
+          "${_bioseq_extension_sql_manifest}"
           "${_landing_fasta}"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
@@ -793,12 +920,13 @@ add_custom_command(
 set(_html_validation_stamp "${_output_root}/html-validation.stamp")
 add_custom_command(
   OUTPUT "${_html_validation_stamp}"
-  COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+  COMMAND "${_venv_python}"
+          "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           --site "${_staging_dir}"
           --stamp "${_html_validation_stamp}"
           --asset-lock "${_static_dir}/third_party.lock.yaml"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
-          "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+          "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
           "${_static_dir}/third_party.lock.yaml"
   COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
@@ -829,37 +957,39 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             --site-config "${_site_config}" --templates "${_templates_dir}"
             --static "${_static_dir}" --base-path "/bioseqdb/"
             --source-revision "${_revision}" --output "${_fixture_root_bioseqdb}"
-    COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+    COMMAND "${_venv_python}"
+            "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             --site "${_fixture_root_slash}"
             --stamp "${_output_root}/fixture-root-validation.stamp"
             --asset-lock "${_static_dir}/third_party.lock.yaml"
-    COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
+    COMMAND "${_venv_python}"
+            "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
             --site "${_fixture_root_bioseqdb}"
             --stamp "${_output_root}/fixture-bioseqdb-validation.stamp"
             --asset-lock "${_static_dir}/third_party.lock.yaml"
     COMMAND "${CMAKE_COMMAND}"
             -DPYTHON=${_venv_python}
-            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py
             -DSITE=${_staging_dir} -DBASE_PATH=${_base_path} -DVERSION=${_version}
             -DMODEL=${_site_model}
             -DDESIGN_SOURCE=${_design_reference_dir}
             -DARTIFACT_DIR=${_output_root}/browser-artifacts/deployment-base
             -DSTAMP=${_browser_deploy_stamp}
             -DBROWSERS_PATH=${_output_root}/playwright-browsers
-            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+            -P "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
     COMMAND "${CMAKE_COMMAND}"
             -DPYTHON=${_venv_python}
-            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py
             -DSITE=${_fixture_root_slash} -DBASE_PATH=/ -DVERSION=${_version}
             -DMODEL=${_site_model}
             -DDESIGN_SOURCE=${_design_reference_dir}
             -DARTIFACT_DIR=${_output_root}/browser-artifacts/root-base
             -DSTAMP=${_browser_root_stamp}
             -DBROWSERS_PATH=${_output_root}/playwright-browsers
-            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+            -P "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
     COMMAND "${CMAKE_COMMAND}"
             -DPYTHON=${_venv_python}
-            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py
             -DSITE=${_fixture_root_bioseqdb} -DBASE_PATH=/bioseqdb/
             -DVERSION=${_version}
             -DMODEL=${_site_model}
@@ -867,14 +997,16 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             -DARTIFACT_DIR=${_output_root}/browser-artifacts/bioseqdb-base
             -DSTAMP=${_browser_bioseqdb_stamp}
             -DBROWSERS_PATH=${_output_root}/playwright-browsers
-            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+            -P "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
     COMMAND "${CMAKE_COMMAND}" -E touch "${_browser_stamp}"
     DEPENDS ${_gen_dep} "${_html_validation_stamp}" "${_site_model}"
             "${_venv_stamp}"
             "${_design_translation_stamp}"
-            "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
-            "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
-            "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+            "${CMAKE_SOURCE_DIR}/website/tests/integration/test_browser.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/support/static_fixture_server.py"
+            "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
+            "${CMAKE_SOURCE_DIR}/website/tests/fixtures/search_tokens_golden.json"
             ${_design_reference_files}
     COMMENT "website: two-base-path render + pinned browser acceptance"
     USES_TERMINAL VERBATIM)

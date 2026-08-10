@@ -10,8 +10,8 @@
  *   - Linux: one read() on a perf-event group fd, ~200-400 ns depending
  *     on kernel version.
  *
- * The cost is paid only when configuration_type::enable_counters is true and the
- * region is taken (skipped == false). The enable_counters bool sits
+ * The cost is paid only when the selected profiling configuration enables
+ * counters and the region is taken (skipped == false). The enable_counters bool sits
  * directly on production_profiling_configuration so the compiler eliminates
  * every PMU read in instantiations that don't ask for them.
  */

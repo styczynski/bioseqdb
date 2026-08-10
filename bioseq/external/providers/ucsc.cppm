@@ -343,8 +343,8 @@ private:
 static_assert(prov::external_api_session_compatible<ucsc_session>);
 
 struct ucsc_provider {
-  static constexpr auto id = bioseq::common::templating::CompTimeStr("ucsc");
-  static constexpr auto name = bioseq::common::templating::CompTimeStr("UCSC");
+  static constexpr auto id = bioseq::common::templating::compile_time_string("ucsc");
+  static constexpr auto name = bioseq::common::templating::compile_time_string("UCSC");
   static constexpr bool supports_sequence_retrieval = true;
 
   using plan_type = ucsc_plan;

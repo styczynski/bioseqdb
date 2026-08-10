@@ -187,15 +187,15 @@ namespace {
     }
     bioseq::pg_types::seq::dispatch_instance(
         target.alphabet_code, target.storage_unit_byte_width,
-        [length]<class Instance>() {
-            (void) bound_flat_size<Instance>(length);
+        [length]<class p_instance>() {
+            (void) bound_flat_size<p_instance>(length);
         });
     bioseq::pg_types::seq* result = nullptr;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         target.alphabet_code,
-        [&result, target, length, ascii]<class Alphabet>() {
+        [&result, target, length, ascii]<class p_alphabet>() {
             result = ::bioseq::simd::active_target::
-                stdc_convert_from_cstr<bioseq::pg_types::seq, Alphabet>(
+                stdc_convert_from_cstr<bioseq::pg_types::seq, p_alphabet>(
                     target.storage_unit_byte_width,
                     static_cast<bioseq::pg_types::seq::bp_size_t>(length),
                     ascii,
@@ -227,14 +227,14 @@ namespace {
 }
 
 [[nodiscard]] inline constexpr auto pg_recv_byte_reader =
-    []<class Alphabet, class Out>(
+    []<class p_alphabet, class p_output>(
         StringInfoData& buffer,
-        std::uint8_t width) -> Out {
+        std::uint8_t width) -> p_output {
         switch (width) {
-            case 1u: return static_cast<Out>(pq_getmsgint(&buffer, 1));
-            case 2u: return static_cast<Out>(pq_getmsgint(&buffer, 2));
-            case 4u: return static_cast<Out>(pq_getmsgint(&buffer, 4));
-            case 8u: return static_cast<Out>(pq_getmsgint64(&buffer));
+            case 1u: return static_cast<p_output>(pq_getmsgint(&buffer, 1));
+            case 2u: return static_cast<p_output>(pq_getmsgint(&buffer, 2));
+            case 4u: return static_cast<p_output>(pq_getmsgint(&buffer, 4));
+            case 8u: return static_cast<p_output>(pq_getmsgint64(&buffer));
         }
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
@@ -243,7 +243,7 @@ namespace {
     };
 
 [[nodiscard]] inline constexpr auto pg_send_byte_writer =
-    []<class In>(StringInfoData& buffer,
+    []<class p_input>(StringInfoData& buffer,
                  std::uint64_t unit,
                  std::uint8_t width) {
         switch (width) {
@@ -275,9 +275,9 @@ struct sequence_trace_provenance {
     };
 }
 
-template<class Unit>
+template<class p_unit>
 struct pg_wire_rank_unit_sink {
-    using storage_unit = Unit;
+    using storage_unit = p_unit;
     static constexpr auto capacity_policy =
         bioseq::sequences::pack_capacity_policy::fixed_span;
 
@@ -285,14 +285,14 @@ struct pg_wire_rank_unit_sink {
     std::uint64_t maximum_units;
     std::uint64_t written{};
 
-    [[nodiscard]] bool try_write(Unit value)
+    [[nodiscard]] bool try_write(p_unit value)
     {
         if (written >= maximum_units) {
             return false;
         }
-        pg_send_byte_writer.template operator()<Unit>(
+        pg_send_byte_writer.template operator()<p_unit>(
             *buffer, static_cast<std::uint64_t>(value),
-            static_cast<std::uint8_t>(sizeof(Unit)));
+            static_cast<std::uint8_t>(sizeof(p_unit)));
         ++written;
         return true;
     }
@@ -316,18 +316,18 @@ struct pg_wire_rank_unit_sink {
     __builtin_unreachable();
 }
 
-template<class Instance, class View>
+template<class p_instance, class p_view>
 void stream_view_to_wire(
-    View view,
+    p_view view,
     StringInfoData& buffer,
     std::uint64_t length,
     std::uint64_t expected_units)
 {
-    using traits = typename compact_sequence_range<Instance>::traits;
+    using traits = typename compact_sequence_range<p_instance>::traits;
     using unit = typename traits::storage_unit;
     using sink = pg_wire_rank_unit_sink<unit>;
     using writer_type = bioseq::sequences::checked_rank_pack_sink<
-        Instance,
+        p_instance,
         bioseq::sequences::invalid_rank_policy::reject,
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
@@ -341,9 +341,9 @@ void stream_view_to_wire(
     }
 }
 
-template<class Alphabet>
+template<class p_alphabet>
 void view_to_ascii(
-    bioseq::storage::lazy_sequence_view<Alphabet> view,
+    bioseq::storage::lazy_sequence_view<p_alphabet> view,
     char* output)
 {
     std::array<std::uint8_t, 256> scratch{};
@@ -358,7 +358,7 @@ void view_to_ascii(
         for (std::size_t index = 0; index < count; ++index) {
             char symbol = '\0';
             if (!pgseq_symbol_for_rank(
-                    pgseq_supported_alphabets::template index_of<Alphabet>(),
+                    pgseq_supported_alphabets::template index_of<p_alphabet>(),
                     scratch[index], symbol)) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
@@ -751,9 +751,9 @@ text* seq_send(
             bioseq::pg_types::seq::dispatch_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
-                [descriptor, &unit_count, &padding]<class Instance>() {
+                [descriptor, &unit_count, &padding]<class p_instance>() {
                     using traits =
-                        typename compact_sequence_range<Instance>::traits;
+                        typename compact_sequence_range<p_instance>::traits;
                     unit_count = checked_ceil_div(
                         descriptor.bp_length, traits::letters_per_unit);
                     padding = unit_count == 0u ? 0u
@@ -822,8 +822,8 @@ text* seq_send(
                         descriptor.alphabet_code,
                         descriptor.storage_unit_byte_width,
                         [&view, &buffer, descriptor,
-                         unit_count]<class Instance>() {
-                            stream_view_to_wire<Instance>(
+                         unit_count]<class p_instance>() {
+                            stream_view_to_wire<p_instance>(
                                 view, buffer, descriptor.bp_length,
                                 unit_count);
                         });
@@ -977,8 +977,8 @@ bioseq::pg_types::seq* seq_recv(
     bool metadata_ok = false;
     bioseq::pg_types::seq::dispatch_instance(
         alphabet, width,
-        [&metadata_ok, unit_count, padding, bp_size]<class Instance>() {
-        using traits = typename compact_sequence_range<Instance>::traits;
+        [&metadata_ok, unit_count, padding, bp_size]<class p_instance>() {
+        using traits = typename compact_sequence_range<p_instance>::traits;
         const std::uint64_t derived = unit_count == 0u ? 0u
             : static_cast<std::uint64_t>(unit_count)
                     * traits::letters_per_unit
@@ -996,8 +996,8 @@ bioseq::pg_types::seq* seq_recv(
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet,
         [&result, width, padding, bp_size, unit_count,
-         buffer]<class Alphabet>() {
-            result = bioseq::pg_types::seq::convert_from<Alphabet>(
+         buffer]<class p_alphabet>() {
+            result = bioseq::pg_types::seq::convert_from<p_alphabet>(
                 width, padding, bp_size, unit_count,
                 *buffer, pg_recv_byte_reader, pg_alloc);
         });
@@ -1060,8 +1060,8 @@ std::int64_t unit_len(
         bioseq::pg_types::seq::dispatch_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
-            [&units, descriptor]<class Instance>() {
-                using traits = typename compact_sequence_range<Instance>::traits;
+            [&units, descriptor]<class p_instance>() {
+                using traits = typename compact_sequence_range<p_instance>::traits;
                 units = checked_ceil_div(
                     descriptor.bp_length, traits::letters_per_unit);
             });

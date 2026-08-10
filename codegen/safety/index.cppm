@@ -14,13 +14,13 @@ export import :validation;
 export import :analyzer;
 export import :serialization;
 export import :fact_producer;
-export import :fact_producer_contract_tests;
+export import :tests.contract.fact_producer;
 export import :runtime_matrix;
 export import :dso;
-export import :analyzer_contract_tests;
-export import :contract_tests;
+export import :tests.contract.analyzer;
+export import :tests.contract;
 export import :runtime_inventory;
-export import :runtime_inventory_contract_tests;
+export import :tests.contract.runtime_inventory;
 export import :cli;
 
 export namespace bioseq::codegen::safety {

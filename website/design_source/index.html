@@ -294,7 +294,7 @@
   seq           <span style="color:#74c8a8">bioseq.seq</span>(<span style="color:#d8a15f">'dna4'</span>, 64)
 ) <span style="color:#4fb0d6">USING</span> bioseq
 
-<span style="color:#4fb0d6">SET</span> bioseq.update_index_on_insert = <span style="color:#4fb0d6">on</span>
+<span style="color:#4fb0d6">SET</span> bioseq.index.insert_maintenance.enabled = <span style="color:#4fb0d6">on</span>
 
 <span style="color:#4fb0d6">SELECT</span> <span style="color:#74c8a8">bioseq.load</span>(
   <span style="color:#d8a15f">'run_reads'</span>::<span style="color:#8aa0b5">regclass</span>,

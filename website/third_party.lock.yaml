@@ -12,7 +12,8 @@
 #
 # All hashes below were resolved online from the PyPI JSON API and independently
 # cross-checked for html5lib/six/webencodings via `pip download` + `pip hash`.
-schema: bioseq.website.python_toolchain.lock/v1
+schema: bioseq.website.python_toolchain.lock
+schema_revision: 1
 
 python:
   interpreter: CPython 3.12 (project-selected Python3_EXECUTABLE)
@@ -23,14 +24,14 @@ python:
   top_level:
     - name: html5lib
       version: "1.1"
-      role: independent strict-HTML5 site validator (validate_site.py)
+      role: independent strict-HTML5 site validator (tests/contract/test_generated_site_validation.py)
       upstream: https://pypi.org/project/html5lib/1.1/
       homepage: https://github.com/html5lib/html5lib-python
       license: MIT
       sdist_sha256: b2e5b40261e20f354d198eae92afc10d750afb487ed5e50f9c4eaf07c184146f
     - name: playwright
       version: "1.52.0"
-      role: headless-Chromium browser acceptance tests (browser_test.py)
+      role: headless-Chromium browser acceptance tests (tests/integration/test_browser.py)
       upstream: https://pypi.org/project/playwright/1.52.0/
       homepage: https://github.com/microsoft/playwright-python
       license: Apache-2.0

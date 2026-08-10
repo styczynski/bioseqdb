@@ -1,4 +1,4 @@
-/* Primary compatibility surface for the split bioseq.seq PostgreSQL type. */
+/* Primary module surface for the split bioseq.seq PostgreSQL type. */
 export module bioseq.postgres.types.compact_sequence;
 
 export import :flat_abi;

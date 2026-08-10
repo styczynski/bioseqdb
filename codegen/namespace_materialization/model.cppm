@@ -16,14 +16,14 @@ import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::namespace_materialization {
 
-/// Revisions of the stable JSON formats emitted by this generator.
-inline constexpr std::uint32_t topology_format_revision = 1;
-inline constexpr std::uint32_t artifact_format_revision = 3;
-inline constexpr std::uint32_t publication_format_revision = 1;
+/// Revisions of the stable JSON schemas emitted by this generator.
+inline constexpr std::uint32_t topology_schema_revision = 1;
+inline constexpr std::uint32_t artifact_schema_revision = 3;
+inline constexpr std::uint32_t publication_schema_revision = 1;
 
 /// Stable identity written into generated source and metadata.
 inline constexpr std::string_view materialization_generator_identity =
-    "bioseq-namespace-materialization-v1";
+    "bioseq-namespace-materialization";
 
 /// Role played by one independent materialization axis.
 enum class axis_role : std::uint8_t {

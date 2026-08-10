@@ -46,6 +46,7 @@ module;
 #include <cstring>
 #include <limits>
 #include <span>
+#include <tuple>
 #include <utility>
 
 #if defined(__GNUC__) || defined(__clang__)

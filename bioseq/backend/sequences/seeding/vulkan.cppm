@@ -519,12 +519,13 @@ validated_mapped_sorted_dense_prefix_view(
         || resident->positions.mapped == nullptr
         || resident->slots.owner != &vulkan_runtime
         || resident->positions.owner != &vulkan_runtime
-        || !resident->slots.host_visible_coherent()
-        || !resident->positions.host_visible_coherent()
-        || resident->representation != gpu_index_representation::sorted_dense
+        || !resident->slots.is_host_visible_coherent()
+        || !resident->positions.is_host_visible_coherent()
+        || resident->representation
+            != gpu_index_representation::source_direct_sorted_dense
         || !resident->key.source_direct_sorted_dense
         || resident->key.representation
-            != gpu_index_representation::sorted_dense
+            != gpu_index_representation::source_direct_sorted_dense
         || resident->key.sorted_dense_abi_revision
             != bioseq::indexing::k_minimizer_sorted_dense_gpu_abi_revision
         || resident->bucket_count == 0u
@@ -617,9 +618,9 @@ validated_mapped_sorted_dense_prefix_view(
     return view.controls[lo].pos_count;
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     mapped_sorted_dense_prefix_view view,
     std::int32_t max_occ)
 {
@@ -632,7 +633,7 @@ template <class minimizer_type>
     }
     const auto max_occ_u = static_cast<std::uint32_t>(max_occ);
     std::uint64_t total = 0u;
-    for (const minimizer_type& minimizer : query_minimizers) {
+    for (const p_minimizer_type& minimizer : query_minimizers) {
         const std::uint32_t count = mapped_sorted_dense_position_count(
             view, minimizer.kmer());
         const std::uint32_t add = count <= max_occ_u ? count : 0u;
@@ -646,9 +647,9 @@ template <class minimizer_type>
     };
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     const bioseq::gpu::vulkan::runtime& vulkan_runtime,
     const std::shared_ptr<const bioseq::indexing::
         gpu_resident_minimizer_index>& resident,
@@ -660,10 +661,10 @@ template <class minimizer_type>
         query_minimizers, std::move(view), max_occ);
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
 build_seed_prefix_counts_after_admission(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     mapped_sorted_dense_prefix_view view,
     std::int32_t max_occ,
     seed_prefix_plan plan)
@@ -689,10 +690,10 @@ build_seed_prefix_counts_after_admission(
     return result;
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
 build_seed_prefix_counts_after_admission(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     const bioseq::gpu::vulkan::runtime& vulkan_runtime,
     const std::shared_ptr<const bioseq::indexing::
         gpu_resident_minimizer_index>& resident,
@@ -705,9 +706,9 @@ build_seed_prefix_counts_after_admission(
         query_minimizers, std::move(view), max_occ, plan);
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     const bioseq::indexing::minimizer_hashmap_fragment_index& target_index,
     std::int32_t max_occ)
 {
@@ -718,7 +719,7 @@ template <class minimizer_type>
     }
     const auto max_occ_u = static_cast<std::uint32_t>(max_occ);
     std::uint64_t total = 0;
-    for (const minimizer_type& minimizer : query_minimizers) {
+    for (const p_minimizer_type& minimizer : query_minimizers) {
         std::uint32_t add = 0;
         const auto hits = target_index.lookup(minimizer.kmer());
         if (!hits.empty()) {
@@ -730,9 +731,9 @@ template <class minimizer_type>
     return seed_prefix_plan{.prefix_len = prefix_len64, .exact_anchor_count = total};
 }
 
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] std::vector<std::uint32_t> build_seed_prefix_counts_after_admission(
-    std::span<const minimizer_type> query_minimizers,
+    std::span<const p_minimizer_type> query_minimizers,
     const bioseq::indexing::minimizer_hashmap_fragment_index& target_index,
     std::int32_t max_occ,
     seed_prefix_plan plan)
@@ -839,8 +840,9 @@ inline constexpr VkBufferUsageFlags k_vulkan_seed_buffer_usage =
     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-/// Plan a prefix-driven Vulkan seed lookup for @p minimizer_type.
-template <class minimizer_type>
+/// Plan a prefix-driven Vulkan seed lookup.
+/// @tparam p_minimizer_type Minimizer record type.
+template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_reservation_plan plan_vulkan_seed_lookup_reservation(
     bioseq::gpu::vulkan::runtime& vulkan_runtime,
     std::uint64_t minimizer_count,
@@ -852,7 +854,7 @@ template <class minimizer_type>
     const std::uint64_t min_buffer_bytes = has_device_minimizers
         ? 0u
         : std::max<std::uint64_t>(
-            bioseq::gpu::vulkan::minimizer_wire_traits<minimizer_type>::device_bytes_for_count(
+            bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer_type>::device_bytes_for_count(
                 minimizer_count),
             4u);
     const std::uint64_t prefix_count =
@@ -893,7 +895,7 @@ template <class minimizer_type>
 }
 
 /// Return the saturated transient reservation for fused GPU seed counting.
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] std::uint64_t vulkan_fused_seed_lookup_reservation_bytes(
     std::uint64_t minimizer_count,
     bool has_device_minimizers) noexcept
@@ -901,7 +903,7 @@ template <class minimizer_type>
     using bioseq::common::saturating_mul;
     const std::uint64_t min_bytes = has_device_minimizers
         ? 0u
-        : bioseq::gpu::vulkan::minimizer_wire_traits<minimizer_type>::device_bytes_for_count(minimizer_count);
+        : bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer_type>::device_bytes_for_count(minimizer_count);
     constexpr std::uint64_t k_scan_block = 256u;
     constexpr std::uint64_t k_arena_alignment_slack = 6u * 256u;
     const std::uint64_t num_blocks = minimizer_count == 0u
@@ -951,10 +953,10 @@ struct vulkan_seed_lookup_completion {
  * completion only for a structured, caller-visible decline and propagates
  * runtime failures once GPU execution begins.
  */
-template <class minimizer_type>
+template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_lookup_completion collect_seed_hits_vulkan(
-    std::span<const minimizer_type> query_minimizers,
-    std::optional<bioseq::simd::vulkan_device_minimizer_span<minimizer_type>>
+    std::span<const p_minimizer_type> query_minimizers,
+    std::optional<bioseq::simd::vulkan_device_minimizer_span<p_minimizer_type>>
         device_minimizers,
     const bioseq::indexing::minimizer_hashmap_fragment_index& target_index,
     std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> resident_index,
@@ -1042,7 +1044,7 @@ template <class minimizer_type>
     // hard error; the prefix-driven path is used only when it is not selected.
     if (fused_frontend && max_occ >= 0) {
         const std::uint64_t reserve =
-            vulkan_fused_seed_lookup_reservation_bytes<minimizer_type>(
+            vulkan_fused_seed_lookup_reservation_bytes<p_minimizer_type>(
                 query_minimizers.size(), fused_device_words != nullptr);
         auto& admission =
             bioseq::parallelism::memory_admission_controller::instance();
@@ -1084,14 +1086,14 @@ template <class minimizer_type>
             .minimizer_count = static_cast<std::uint32_t>(query_minimizers.size()),
             .minimizer_word_kind =
                 static_cast<std::uint32_t>(bioseq::gpu::vulkan::
-                    minimizer_wire_traits<minimizer_type>::k_word_kind),
+                    minimizer_wire_traits<p_minimizer_type>::k_word_kind),
             .minimizer_words32_per_record =
-                bioseq::gpu::vulkan::minimizer_wire_traits<minimizer_type>::
+                bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer_type>::
                     k_words32_per_minimizer,
             .hash_shift = bioseq::gpu::vulkan::
-                minimizer_wire_traits<minimizer_type>::k_hash_shift,
+                minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
             .pos_bits = bioseq::gpu::vulkan::
-                minimizer_wire_traits<minimizer_type>::k_position_bits,
+                minimizer_wire_traits<p_minimizer_type>::k_position_bits,
             .bucket_count = resident_index->bucket_count,
             .target_position_offset = resident_index->target_position_offset,
         };
@@ -1263,7 +1265,7 @@ template <class minimizer_type>
             : nullptr;
     const bool has_device_minimizers = device_minimizer_words != nullptr;
 
-    const auto reservation = plan_vulkan_seed_lookup_reservation<minimizer_type>(
+    const auto reservation = plan_vulkan_seed_lookup_reservation<p_minimizer_type>(
         vulkan_runtime,
         query_minimizers.size(), sort_plan, has_device_minimizers,
         anchors_out.capacity());
@@ -1332,15 +1334,15 @@ template <class minimizer_type>
                 .position_count = resident_index->position_count,
                 .minimizer_word_kind = static_cast<std::uint32_t>(
                     bioseq::gpu::vulkan::minimizer_wire_traits<
-                        minimizer_type>::k_word_kind),
+                        p_minimizer_type>::k_word_kind),
                 .minimizer_words32_per_record =
-                    bioseq::gpu::vulkan::minimizer_wire_traits<minimizer_type>::
+                    bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer_type>::
                         k_words32_per_minimizer,
                 .hash_shift =
                     bioseq::gpu::vulkan::minimizer_wire_traits<
-                        minimizer_type>::k_hash_shift,
+                        p_minimizer_type>::k_hash_shift,
                 .pos_bits = bioseq::gpu::vulkan::minimizer_wire_traits<
-                    minimizer_type>::k_position_bits,
+                    p_minimizer_type>::k_position_bits,
                 .target_len = resident_index->target_len,
                 .target_position_offset =
                     resident_index->target_position_offset,

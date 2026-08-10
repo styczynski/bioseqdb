@@ -109,9 +109,9 @@ class option_reader {
     std::size_t offset_{};
 };
 
-template <typename destination_type>
+template <typename p_destination_type>
 inline void assign_once(
-    destination_type& destination,
+    p_destination_type& destination,
     std::string_view value,
     std::string_view option) {
     if (!destination.empty()) {
@@ -119,7 +119,7 @@ inline void assign_once(
             "duplicate safety option "
             + std::string{option});
     }
-    destination = destination_type{value};
+    destination = p_destination_type{value};
 }
 
 [[nodiscard]] inline analyze_facts_options parse_analyze_facts(
@@ -389,8 +389,8 @@ struct profile_pair_ledger {
     const json_value::object& root =
         json_object(document, context);
     if (serialization_detail::size_value(
-            json_field(root, "schema_version", context),
-            std::string{context} + ".schema_version")
+            json_field(root, "schema_revision", context),
+            std::string{context} + ".schema_revision")
             != 2
         || serialization_detail::size_value(
                json_field(root, "postgresql_major", context),
@@ -398,7 +398,8 @@ struct profile_pair_ledger {
             != 17) {
         throw std::runtime_error(
             std::string{context}
-            + " is not a schema-v2 PostgreSQL-17 safety ledger");
+            + " does not satisfy the current PostgreSQL-17 "
+              "safety-ledger contract");
     }
     profile_pair_ledger result{
         .profile = serialization_detail::string_field(
@@ -540,7 +541,7 @@ inline int run_emit_facts(
     if (render_compiler_analysis_facts_json(round_trip)
         != rendered) {
         throw std::runtime_error(
-            "schema-v2 compiler facts are not canonical");
+            "current compiler-facts contract is not canonical");
     }
     bioseq::codegen::publish_artifact_if_changed(
         options.output, rendered);
@@ -656,7 +657,7 @@ inline int run_emit_inventory(
     if (render_runtime_probe_inventory_json(round_trip)
         != rendered) {
         throw std::runtime_error(
-            "schema-v1 runtime inventory is not canonical");
+            "schema revision 1 runtime inventory is not canonical");
     }
     bioseq::codegen::publish_artifact_if_changed(
         options.output, rendered);
@@ -741,7 +742,8 @@ inline int run_validate_pair(
         {"production_ledger_sha256",
          bioseq::common::sha256_hex(production_text)},
         {"provenance_bundle_sha256", provenance_sha256},
-        {"schema", "bioseq_safety_profile_pair/v1"},
+        {"schema", "bioseq_safety_profile_pair"},
+        {"schema_revision", json_value{std::size_t{1}}},
         {"test_indexes_ledger_sha256",
          bioseq::common::sha256_hex(test_indexes_text)},
     });

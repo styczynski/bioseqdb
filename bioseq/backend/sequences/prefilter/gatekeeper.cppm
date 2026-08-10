@@ -296,17 +296,17 @@ export namespace bioseq::prefilter {
  * delegate to the scalar rank core. Numeric ranks are compared only after the
  * alphabet types are proven identical.
  */
-template <supports_compact_sequence_range query_range_type,
-          supports_compact_sequence_range target_range_type>
+template <supports_compact_sequence_range p_query_range_type,
+          supports_compact_sequence_range p_target_range_type>
 [[nodiscard]] inline prefilter_result gatekeeper_scalar_compact(
-    const compact_sequence_range<query_range_type>& query,
-    const compact_sequence_range<target_range_type>& target,
+    const compact_sequence_range<p_query_range_type>& query,
+    const compact_sequence_range<p_target_range_type>& target,
     std::uint32_t max_edits)
 {
     using query_alphabet =
-        typename compact_sequence_range<query_range_type>::traits::alphabet_type;
+        typename compact_sequence_range<p_query_range_type>::traits::alphabet_type;
     using target_alphabet =
-        typename compact_sequence_range<target_range_type>::traits::alphabet_type;
+        typename compact_sequence_range<p_target_range_type>::traits::alphabet_type;
     static_assert(
         std::same_as<query_alphabet, target_alphabet>,
         "GateKeeper compact operands must have identical alphabets");

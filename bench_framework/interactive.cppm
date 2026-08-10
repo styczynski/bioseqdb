@@ -2720,9 +2720,8 @@ struct benchmark_snapshot {
     std::map<std::string,
         std::map<std::string,
             std::map<std::string, aggregated_samples>>>  samples;
-    /// aggregated_samples. The `region` key includes the legacy
-    /// `k_all_regions_key` PLUS every per-region entry the report
-    /// carried.
+    /// Aggregated samples keyed by the synthetic `k_all_regions_key` plus
+    /// every per-region entry carried by the report.
     std::map<std::string,
         std::map<std::string,
             std::map<std::string,

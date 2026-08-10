@@ -146,7 +146,7 @@ inline constexpr std::string_view entry_attribute =
 }
 
 inline constexpr std::string_view scheduler_output_module =
-    "bioseq.scheduler.dispatch_processor";
+    "bioseq.postgres.scheduler.dispatch_processor";
 
 [[nodiscard]] inline bool forbidden_scheduler_highway_provider(
     std::string_view module,
@@ -470,7 +470,8 @@ attributes_named(
     const std::vector<axis_group>& groups,
     const std::vector<materialization_coordinate>& coordinates) {
     std::ostringstream output;
-    output << "bioseq-template-flatten-topology-v1\n";
+    output << "bioseq-template-flatten-topology\n"
+              "revision=1\n";
     output << "output-module\t" << output_module << '\n';
     for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
         const axis_group& group = groups[group_index];
@@ -820,17 +821,31 @@ void validate_coordinate_axis_domain(
     return plan;
 }
 
-/// Returns whether an optimization profile includes a coordinate.
+/// Closed semantic template-flatten profile vocabulary.
+inline constexpr std::array<std::string_view, 6u>
+    template_flatten_profiles{
+        "dna4_uint64",
+        "all_alphabets_uint64",
+        "all_coordinates",
+        "all_coordinates_adaptive_lengths",
+        "extended_kmer_coordinates",
+        "full_specialization",
+    };
+
+/// Returns whether a semantic template-flatten profile is supported.
+[[nodiscard]] inline bool template_flatten_profile_supported(
+    const std::string_view profile) noexcept {
+    return std::ranges::find(template_flatten_profiles, profile)
+        != template_flatten_profiles.end();
+}
+
+/// Returns whether a semantic profile includes a coordinate.
 [[nodiscard]] inline bool coordinate_enabled_for_profile(
     const materialization_coordinate& coordinate,
     std::string_view profile) {
-    unsigned level{};
-    const std::from_chars_result parsed = std::from_chars(
-        profile.data(), profile.data() + profile.size(), level);
-    if (profile.empty() || parsed.ec != std::errc{}
-        || parsed.ptr != profile.data() + profile.size() || level > 5u) {
+    if (!template_flatten_profile_supported(profile)) {
         throw std::runtime_error(
-            "template_flatten profile must be an integer from 0 through 5");
+            "template_flatten profile is not in the closed semantic vocabulary");
     }
     const std::vector<axis_case_assignment>::const_iterator alphabet =
         std::ranges::find(
@@ -844,10 +859,10 @@ void validate_coordinate_axis_domain(
         || width == coordinate.assignments.end()) {
         return true;
     }
-    if (level == 0u) {
+    if (profile == "dna4_uint64") {
         return alphabet->case_label == "dna4" && width->case_label == "w8";
     }
-    if (level == 1u) {
+    if (profile == "all_alphabets_uint64") {
         return (alphabet->case_label == "dna4"
                 || alphabet->case_label == "dna5")
             && width->case_label == "w8";
@@ -859,10 +874,9 @@ void validate_coordinate_axis_domain(
 [[nodiscard]] inline std::vector<std::string> enabled_profiles_for(
     const materialization_coordinate& coordinate) {
     std::vector<std::string> result;
-    for (unsigned level = 0; level <= 5u; ++level) {
-        const std::string profile = std::to_string(level);
+    for (const std::string_view profile : template_flatten_profiles) {
         if (coordinate_enabled_for_profile(coordinate, profile)) {
-            result.push_back(profile);
+            result.emplace_back(profile);
         }
     }
     return result;
@@ -934,7 +948,7 @@ inline void validate_entry_ownership(const topology_plan& topology) {
             "template_flatten region declares no generated API entries");
     }
     if (topology.region.configured_output_module_name
-        == "bioseq.scheduler.dispatch_processor") {
+        == detail::scheduler_output_module) {
         const std::set<std::string, std::less<>> required{
             "root",
             "scanner_pg",
@@ -1292,7 +1306,7 @@ inline void validate_materialization_region(
         if (imported.contains(':')) {
             throw std::runtime_error(
                 path.string()
-                + ": module-partition imports are forbidden in template_flatten v1");
+                + ": module-partition imports are forbidden in template_flatten");
         }
         if (!detail::module_name(imported)) {
             throw std::runtime_error(
@@ -1646,7 +1660,7 @@ inline void validate_scheduler_highway_prepared_closure(
         || boundary_names.begin()->empty()) {
         throw std::runtime_error(
             unit.source_path.string()
-            + ": template_flatten v1 requires exactly one materialization namespace");
+            + ": template_flatten requires exactly one materialization namespace");
     }
     std::vector<const structural_analysis::namespace_record*> boundaries;
     for (const structural_analysis::namespace_record& candidate : unit.namespaces) {
@@ -1681,7 +1695,7 @@ inline void validate_scheduler_highway_prepared_closure(
             detail::reject(
                 unit.source_path,
                 candidate.declaration_range,
-                "template_flatten v1 permits exactly one direct anonymous support namespace and no named nested namespace");
+                "template_flatten permits exactly one direct anonymous support namespace and no named nested namespace");
         }
         region.support_island = candidate;
     }
@@ -1689,10 +1703,10 @@ inline void validate_scheduler_highway_prepared_closure(
     for (const structural_analysis::preprocessor_directive_record& directive
          : unit.preprocessor_directives) {
         if (detail::intersects(
-                region.boundary.body_range, directive.removal_range)) {
+                region.boundary.body_range, directive.complete_range)) {
             detail::reject(
                 unit.source_path,
-                directive.removal_range,
+                directive.complete_range,
                 "preprocessor directives are forbidden inside a template_flatten region");
         }
     }

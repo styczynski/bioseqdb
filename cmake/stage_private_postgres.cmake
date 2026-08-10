@@ -1,16 +1,12 @@
-# Relocatable private PostgreSQL extension stage (§13.2).
+# Relocatable private PostgreSQL extension stage.
 #
-# Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DSTAGE_PARENT=... \
-#                 -DCONTROL_FILE=... \
-#                 -DINSTALL_SQL=... -DLIBRARY_FILE=... -DEXTENSION_VERSION=... \
-#                 -DMANIFEST_OUT=... -DHASH_OUT=... -P stage_private_postgres.cmake
-#
-# Or pass one generated vector specification:
+# Run with one generated artifact specification:
 #
 #   -DARTIFACT_SPEC=/absolute/path/extension-artifacts.json
 #
 # {
-#   "schema": "bioseq_private_postgres_artifacts/v1",
+#   "schema": "bioseq.private_postgres.artifacts",
+#   "schema_revision": 1,
 #   "artifacts": [{
 #     "name": "bioseq_cache",
 #     "control": "/absolute/path/bioseq_cache.control",
@@ -24,44 +20,34 @@
 # package-owned bindir/sharedir/pkglibdir under STAGE_ROOT. The pg_config
 # coordinates remain stable, but no source symbolic link survives in the
 # stage. It excludes façade-only global extensions, adds ONLY the current build
-# targets' exact control/install-SQL/DSO vectors, and writes stage-manifest.json.
+# targets' exact control/install-SQL/DSO sets, and writes stage-manifest.json.
 # There is no fallback that installs globally or bootstraps a fixed schema. The
-# legacy single-artifact CLI and v1 manifest are retained for website consumers.
+# artifact specification is the sole extension-artifact input.
 
 cmake_minimum_required(VERSION 3.24)
 
-foreach(_required PG_CONFIG STAGE_ROOT STAGE_PARENT MANIFEST_OUT HASH_OUT)
+foreach(_unsupported_single_artifact_arg IN ITEMS
+    CONTROL_FILE INSTALL_SQL LIBRARY_FILE EXTENSION_VERSION)
+  if(DEFINED ${_unsupported_single_artifact_arg})
+    message(FATAL_ERROR
+      "stage_private_postgres: unsupported single-artifact input "
+      "-D${_unsupported_single_artifact_arg}; use -DARTIFACT_SPEC")
+  endif()
+endforeach()
+
+foreach(_required
+    PG_CONFIG STAGE_ROOT STAGE_PARENT ARTIFACT_SPEC MANIFEST_OUT HASH_OUT)
   if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
     message(FATAL_ERROR "stage_private_postgres: -D${_required} is required")
   endif()
 endforeach()
 
-set(_vector_mode FALSE)
-if(DEFINED ARTIFACT_SPEC AND NOT "${ARTIFACT_SPEC}" STREQUAL "")
-  set(_vector_mode TRUE)
-  foreach(_legacy_arg IN ITEMS
-      CONTROL_FILE INSTALL_SQL LIBRARY_FILE EXTENSION_VERSION)
-    if(DEFINED ${_legacy_arg} AND NOT "${${_legacy_arg}}" STREQUAL "")
-      message(FATAL_ERROR
-        "stage_private_postgres: ARTIFACT_SPEC cannot be combined with "
-        "-D${_legacy_arg}")
-    endif()
-  endforeach()
-  if(NOT EXISTS "${ARTIFACT_SPEC}"
-     OR IS_DIRECTORY "${ARTIFACT_SPEC}"
-     OR IS_SYMLINK "${ARTIFACT_SPEC}")
-    message(FATAL_ERROR
-      "stage_private_postgres: ARTIFACT_SPEC must be a real file: "
-      "${ARTIFACT_SPEC}")
-  endif()
-else()
-  foreach(_required CONTROL_FILE INSTALL_SQL LIBRARY_FILE EXTENSION_VERSION)
-    if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
-      message(FATAL_ERROR
-        "stage_private_postgres: -D${_required} is required without "
-        "ARTIFACT_SPEC")
-    endif()
-  endforeach()
+if(NOT EXISTS "${ARTIFACT_SPEC}"
+   OR IS_DIRECTORY "${ARTIFACT_SPEC}"
+   OR IS_SYMLINK "${ARTIFACT_SPEC}")
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC must be a real file: "
+    "${ARTIFACT_SPEC}")
 endif()
 
 set(_artifact_names)
@@ -70,153 +56,176 @@ set(_artifact_install_sqls)
 set(_artifact_libraries)
 set(_artifact_module_pathname_overrides)
 
-if(_vector_mode)
-  file(READ "${ARTIFACT_SPEC}" _artifact_spec_json)
-  string(JSON _artifact_spec_schema
-    ERROR_VARIABLE _artifact_spec_schema_error
-    GET "${_artifact_spec_json}" schema)
-  if(_artifact_spec_schema_error
-     OR NOT _artifact_spec_schema STREQUAL
-       "bioseq_private_postgres_artifacts/v1")
-    message(FATAL_ERROR
-      "stage_private_postgres: ARTIFACT_SPEC must use schema "
-      "bioseq_private_postgres_artifacts/v1")
-  endif()
-  string(JSON _artifact_spec_type
-    ERROR_VARIABLE _artifact_spec_type_error
-    TYPE "${_artifact_spec_json}" artifacts)
-  if(_artifact_spec_type_error OR NOT _artifact_spec_type STREQUAL "ARRAY")
-    message(FATAL_ERROR
-      "stage_private_postgres: ARTIFACT_SPEC artifacts must be an array")
-  endif()
-  string(JSON _artifact_count LENGTH "${_artifact_spec_json}" artifacts)
-  if(_artifact_count LESS 1)
-    message(FATAL_ERROR
-      "stage_private_postgres: ARTIFACT_SPEC artifacts must not be empty")
-  endif()
+file(READ "${ARTIFACT_SPEC}" _artifact_spec_json)
+string(JSON _artifact_spec_root_type
+  ERROR_VARIABLE _artifact_spec_root_error
+  TYPE "${_artifact_spec_json}")
+if(_artifact_spec_root_error
+   OR NOT _artifact_spec_root_type STREQUAL "OBJECT")
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC root must be an object")
+endif()
 
-  string(JSON _top_level_member_count LENGTH "${_artifact_spec_json}")
-  math(EXPR _top_level_last "${_top_level_member_count} - 1")
-  foreach(_member_index RANGE 0 ${_top_level_last})
+string(JSON _top_level_member_count LENGTH "${_artifact_spec_json}")
+if(NOT _top_level_member_count EQUAL 3)
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC must contain exactly schema, "
+    "schema_revision, and artifacts")
+endif()
+math(EXPR _top_level_last "${_top_level_member_count} - 1")
+foreach(_member_index RANGE 0 ${_top_level_last})
+  string(JSON _member_name
+    MEMBER "${_artifact_spec_json}" ${_member_index})
+  if(NOT _member_name STREQUAL "schema"
+     AND NOT _member_name STREQUAL "schema_revision"
+     AND NOT _member_name STREQUAL "artifacts")
+    message(FATAL_ERROR
+      "stage_private_postgres: unknown ARTIFACT_SPEC member "
+      "'${_member_name}'")
+  endif()
+endforeach()
+
+string(JSON _artifact_spec_schema_type
+  ERROR_VARIABLE _artifact_spec_schema_type_error
+  TYPE "${_artifact_spec_json}" schema)
+string(JSON _artifact_spec_schema
+  ERROR_VARIABLE _artifact_spec_schema_error
+  GET "${_artifact_spec_json}" schema)
+if(_artifact_spec_schema_type_error
+   OR _artifact_spec_schema_error
+   OR NOT _artifact_spec_schema_type STREQUAL "STRING"
+   OR NOT _artifact_spec_schema STREQUAL
+     "bioseq.private_postgres.artifacts")
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC schema must be "
+    "bioseq.private_postgres.artifacts")
+endif()
+
+string(JSON _artifact_spec_revision_type
+  ERROR_VARIABLE _artifact_spec_revision_type_error
+  TYPE "${_artifact_spec_json}" schema_revision)
+string(JSON _artifact_spec_revision
+  ERROR_VARIABLE _artifact_spec_revision_error
+  GET "${_artifact_spec_json}" schema_revision)
+if(_artifact_spec_revision_type_error
+   OR _artifact_spec_revision_error
+   OR NOT _artifact_spec_revision_type STREQUAL "NUMBER"
+   OR NOT _artifact_spec_revision STREQUAL "1")
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC schema_revision must be the "
+    "numeric current revision 1")
+endif()
+
+string(JSON _artifact_spec_type
+  ERROR_VARIABLE _artifact_spec_type_error
+  TYPE "${_artifact_spec_json}" artifacts)
+if(_artifact_spec_type_error OR NOT _artifact_spec_type STREQUAL "ARRAY")
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC artifacts must be an array")
+endif()
+string(JSON _artifact_count LENGTH "${_artifact_spec_json}" artifacts)
+if(_artifact_count LESS 1)
+  message(FATAL_ERROR
+    "stage_private_postgres: ARTIFACT_SPEC artifacts must not be empty")
+endif()
+
+math(EXPR _last_artifact_index "${_artifact_count} - 1")
+foreach(_artifact_index RANGE 0 ${_last_artifact_index})
+  string(JSON _artifact_type
+    TYPE "${_artifact_spec_json}" artifacts ${_artifact_index})
+  if(NOT _artifact_type STREQUAL "OBJECT")
+    message(FATAL_ERROR
+      "stage_private_postgres: artifact ${_artifact_index} must be an "
+      "object")
+  endif()
+  string(JSON _artifact_member_count
+    LENGTH "${_artifact_spec_json}" artifacts ${_artifact_index})
+  if(_artifact_member_count LESS 4 OR _artifact_member_count GREATER 5)
+    message(FATAL_ERROR
+      "stage_private_postgres: artifact ${_artifact_index} must contain "
+      "exactly name, control, install_sql, library, and optional "
+      "module_pathname_override")
+  endif()
+  math(EXPR _artifact_member_last "${_artifact_member_count} - 1")
+  foreach(_member_index RANGE 0 ${_artifact_member_last})
     string(JSON _member_name
-      MEMBER "${_artifact_spec_json}" ${_member_index})
-    if(NOT _member_name STREQUAL "schema"
-       AND NOT _member_name STREQUAL "artifacts")
+      MEMBER
+      "${_artifact_spec_json}"
+      artifacts
+      ${_artifact_index}
+      ${_member_index})
+    if(NOT _member_name STREQUAL "name"
+       AND NOT _member_name STREQUAL "control"
+       AND NOT _member_name STREQUAL "install_sql"
+       AND NOT _member_name STREQUAL "library"
+       AND NOT _member_name STREQUAL "module_pathname_override")
       message(FATAL_ERROR
-        "stage_private_postgres: unknown ARTIFACT_SPEC member "
-        "'${_member_name}'")
+        "stage_private_postgres: unknown member '${_member_name}' in "
+        "artifact ${_artifact_index}")
     endif()
   endforeach()
 
-  math(EXPR _last_artifact_index "${_artifact_count} - 1")
-  foreach(_artifact_index RANGE 0 ${_last_artifact_index})
-    string(JSON _artifact_type
-      TYPE "${_artifact_spec_json}" artifacts ${_artifact_index})
-    if(NOT _artifact_type STREQUAL "OBJECT")
+  foreach(_required_member IN ITEMS name control install_sql library)
+    string(JSON _member_value
+      ERROR_VARIABLE _member_error
+      GET
+      "${_artifact_spec_json}"
+      artifacts
+      ${_artifact_index}
+      ${_required_member})
+    if(_member_error OR "${_member_value}" STREQUAL "")
       message(FATAL_ERROR
-        "stage_private_postgres: artifact ${_artifact_index} must be an "
-        "object")
+        "stage_private_postgres: artifact ${_artifact_index} requires "
+        "nonempty string member '${_required_member}'")
     endif()
-    string(JSON _artifact_member_count
-      LENGTH "${_artifact_spec_json}" artifacts ${_artifact_index})
-    math(EXPR _artifact_member_last "${_artifact_member_count} - 1")
-    foreach(_member_index RANGE 0 ${_artifact_member_last})
-      string(JSON _member_name
-        MEMBER
-        "${_artifact_spec_json}"
-        artifacts
-        ${_artifact_index}
-        ${_member_index})
-      if(NOT _member_name STREQUAL "name"
-         AND NOT _member_name STREQUAL "control"
-         AND NOT _member_name STREQUAL "install_sql"
-         AND NOT _member_name STREQUAL "library"
-         AND NOT _member_name STREQUAL "module_pathname_override")
-        message(FATAL_ERROR
-          "stage_private_postgres: unknown member '${_member_name}' in "
-          "artifact ${_artifact_index}")
-      endif()
-    endforeach()
-
-    foreach(_required_member IN ITEMS name control install_sql library)
-      string(JSON _member_value
-        ERROR_VARIABLE _member_error
-        GET
-        "${_artifact_spec_json}"
-        artifacts
-        ${_artifact_index}
-        ${_required_member})
-      if(_member_error OR "${_member_value}" STREQUAL "")
-        message(FATAL_ERROR
-          "stage_private_postgres: artifact ${_artifact_index} requires "
-          "nonempty string member '${_required_member}'")
-      endif()
-      string(JSON _member_type
-        TYPE
-        "${_artifact_spec_json}"
-        artifacts
-        ${_artifact_index}
-        ${_required_member})
-      if(NOT _member_type STREQUAL "STRING")
-        message(FATAL_ERROR
-          "stage_private_postgres: artifact ${_artifact_index} member "
-          "'${_required_member}' must be a string")
-      endif()
-      set("_artifact_${_artifact_index}_${_required_member}"
-        "${_member_value}")
-    endforeach()
-
-    string(JSON _override_type
-      ERROR_VARIABLE _override_error
+    string(JSON _member_type
       TYPE
       "${_artifact_spec_json}"
       artifacts
       ${_artifact_index}
-      module_pathname_override)
-    if(_override_error)
-      set(_module_pathname_override "-")
-    elseif(NOT _override_type STREQUAL "STRING")
+      ${_required_member})
+    if(NOT _member_type STREQUAL "STRING")
       message(FATAL_ERROR
-        "stage_private_postgres: artifact ${_artifact_index} "
-        "module_pathname_override must be a string when present")
-    else()
-      string(JSON _module_pathname_override
-        GET
-        "${_artifact_spec_json}"
-        artifacts
-        ${_artifact_index}
-        module_pathname_override)
+        "stage_private_postgres: artifact ${_artifact_index} member "
+        "'${_required_member}' must be a string")
     endif()
-
-    list(APPEND _artifact_names
-      "${_artifact_${_artifact_index}_name}")
-    list(APPEND _artifact_controls
-      "${_artifact_${_artifact_index}_control}")
-    list(APPEND _artifact_install_sqls
-      "${_artifact_${_artifact_index}_install_sql}")
-    list(APPEND _artifact_libraries
-      "${_artifact_${_artifact_index}_library}")
-    list(APPEND _artifact_module_pathname_overrides
-      "${_module_pathname_override}")
+    set("_artifact_${_artifact_index}_${_required_member}"
+      "${_member_value}")
   endforeach()
-else()
-  get_filename_component(_legacy_control_file "${CONTROL_FILE}" ABSOLUTE)
-  get_filename_component(_legacy_install_sql "${INSTALL_SQL}" ABSOLUTE)
-  get_filename_component(_legacy_library_file "${LIBRARY_FILE}" ABSOLUTE)
-  get_filename_component(
-    _legacy_control_filename "${_legacy_control_file}" NAME)
-  if(NOT _legacy_control_filename MATCHES "^(.+)\\.control$")
+
+  string(JSON _override_type
+    ERROR_VARIABLE _override_error
+    TYPE
+    "${_artifact_spec_json}"
+    artifacts
+    ${_artifact_index}
+    module_pathname_override)
+  if(_override_error)
+    set(_module_pathname_override "-")
+  elseif(NOT _override_type STREQUAL "STRING")
     message(FATAL_ERROR
-      "stage_private_postgres: CONTROL_FILE must have a .control basename")
+      "stage_private_postgres: artifact ${_artifact_index} "
+      "module_pathname_override must be a string when present")
+  else()
+    string(JSON _module_pathname_override
+      GET
+      "${_artifact_spec_json}"
+      artifacts
+      ${_artifact_index}
+      module_pathname_override)
   endif()
-  set(_legacy_extension_name "${CMAKE_MATCH_1}")
-  list(APPEND _artifact_names "${_legacy_extension_name}")
-  list(APPEND _artifact_controls "${_legacy_control_file}")
-  list(APPEND _artifact_install_sqls "${_legacy_install_sql}")
-  list(APPEND _artifact_libraries "${_legacy_library_file}")
-  list(APPEND _artifact_module_pathname_overrides "-")
-  set(_artifact_count 1)
-endif()
+
+  list(APPEND _artifact_names
+    "${_artifact_${_artifact_index}_name}")
+  list(APPEND _artifact_controls
+    "${_artifact_${_artifact_index}_control}")
+  list(APPEND _artifact_install_sqls
+    "${_artifact_${_artifact_index}_install_sql}")
+  list(APPEND _artifact_libraries
+    "${_artifact_${_artifact_index}_library}")
+  list(APPEND _artifact_module_pathname_overrides
+    "${_module_pathname_override}")
+endforeach()
 
 set(_seen_extension_names)
 set(_seen_library_filenames)
@@ -257,9 +266,9 @@ foreach(_artifact_index RANGE 0 ${_last_artifact_index})
         "stage_private_postgres: ${_extension_name} artifact is not a file: "
         "${${_artifact_path}}")
     endif()
-    if(_vector_mode AND IS_SYMLINK "${${_artifact_path}}")
+    if(IS_SYMLINK "${${_artifact_path}}")
       message(FATAL_ERROR
-        "stage_private_postgres: ${_extension_name} vector artifact must "
+        "stage_private_postgres: ${_extension_name} artifact must "
         "not be a symbolic link: ${${_artifact_path}}")
     endif()
   endforeach()
@@ -295,7 +304,7 @@ foreach(_artifact_index RANGE 0 ${_last_artifact_index})
   endif()
 endforeach()
 
-# Query the selected pg_config for the layout and provenance (§13.2 step 1).
+# Query the selected pg_config for the layout and provenance.
 function(_pg_config_value _flag _out)
   execute_process(
     COMMAND "${PG_CONFIG}" "${_flag}"
@@ -336,7 +345,7 @@ endforeach()
 
 string(REGEX REPLACE "^/+" "" _bindir_rel "${PG_BINDIR}")
 
-# Reproduce an absolute source path under STAGE_ROOT (§13.2 step 2).
+# Reproduce an absolute source path under STAGE_ROOT.
 function(_staged_path _absolute _out)
   string(REGEX REPLACE "^/+" "" _relative "${_absolute}")
   if(DEFINED _stage_root_normal)
@@ -571,7 +580,7 @@ function(_append_runtime_entry
     "\"resolved_source_path\": \"${_resolved_source_path_json}\", "
     "\"size\": ${_size_json}, \"sha256\": ${_sha256_json}}")
   string(CONCAT _entry_record
-    # Canonical v3 aggregate framing: concatenate these UTF-8 newline records
+    # Canonical aggregate framing: concatenate these UTF-8 newline records
     # in bindir/sharedir/pkglibdir enum order and then normalized path order.
     # There is deliberately no header, separator, or trailer beyond each
     # entry's terminal newline.
@@ -1020,7 +1029,7 @@ _staged_path("${PG_PKGLIBDIR}" STAGED_PKGLIBDIR)
 
 # Materialize only the package-owned roots into pg_config's reported
 # coordinates. Every link is resolved and copied as a real directory or
-# regular file, while exact extension-vector destinations are reserved for the
+# regular file, while exact extension-artifact destinations are reserved for the
 # overlay below and therefore omitted from this closed runtime attestation.
 set_property(GLOBAL PROPERTY BIOSEQ_RUNTIME_ENTRY_KEYS "")
 set_property(GLOBAL PROPERTY BIOSEQ_RUNTIME_ENTRY_COUNT "0")
@@ -1349,8 +1358,8 @@ endforeach()
 list(LENGTH _loader_dependency_sort_keys _loader_entry_count)
 string(SHA256 _loader_aggregate_sha "${_loader_records}")
 
-# Add ONLY the current build targets' complete artifact vector, never a
-# globally installed Bioseq (§13.2 step 4). An override changes only the
+# Add ONLY the current build targets' complete artifact set, never a globally
+# installed Bioseq. An override changes only the
 # staged control file; source controls and every other staged byte remain
 # untouched.
 file(MAKE_DIRECTORY "${STAGED_SHAREDIR}/extension")
@@ -1549,41 +1558,33 @@ foreach(_sentinel_spec IN LISTS _required_sentinel_specs)
     "\"sha256\": ${_sentinel_sha_json}}")
 endforeach()
 
-# Seal the exact staged vector (§13.2 step 5). Preserve the historical
-# single-artifact hash record byte-for-byte in legacy mode.
-if(_vector_mode)
-  set(_artifact_hash_record "")
-  set(_sorted_extension_names ${_artifact_names})
-  list(SORT _sorted_extension_names)
-  foreach(_extension_name IN LISTS _sorted_extension_names)
-    list(FIND _artifact_names "${_extension_name}" _artifact_index)
-    list(GET
-      _artifact_module_pathname_overrides
-      ${_artifact_index}
-      _module_pathname_override)
-    if(_module_pathname_override STREQUAL "-")
-      set(_module_pathname_override "")
-    endif()
-    string(APPEND _artifact_hash_record
-      "artifact:${_extension_name}\n"
-      "module_pathname_override:${_module_pathname_override}\n"
-      "control:${_artifact_${_artifact_index}_control_filename}:"
-      "${_artifact_${_artifact_index}_control_sha}\n"
-      "install_sql:${_artifact_${_artifact_index}_install_sql_name}:"
-      "${_artifact_${_artifact_index}_sql_sha}\n"
-      "library:${_artifact_${_artifact_index}_library_filename}:"
-      "${_artifact_${_artifact_index}_library_sha}\n")
-  endforeach()
-else()
-  string(CONCAT _artifact_hash_record
-    "control:${_artifact_0_control_filename}:${_artifact_0_control_sha}\n"
-    "install_sql:${_artifact_0_install_sql_name}:${_artifact_0_sql_sha}\n"
-    "library:${_artifact_0_library_filename}:${_artifact_0_library_sha}\n")
-endif()
+# Seal the exact staged artifact set.
+set(_artifact_hash_record "")
+set(_sorted_extension_names ${_artifact_names})
+list(SORT _sorted_extension_names)
+foreach(_extension_name IN LISTS _sorted_extension_names)
+  list(FIND _artifact_names "${_extension_name}" _artifact_index)
+  list(GET
+    _artifact_module_pathname_overrides
+    ${_artifact_index}
+    _module_pathname_override)
+  if(_module_pathname_override STREQUAL "-")
+    set(_module_pathname_override "")
+  endif()
+  string(APPEND _artifact_hash_record
+    "artifact:${_extension_name}\n"
+    "module_pathname_override:${_module_pathname_override}\n"
+    "control:${_artifact_${_artifact_index}_control_filename}:"
+    "${_artifact_${_artifact_index}_control_sha}\n"
+    "install_sql:${_artifact_${_artifact_index}_install_sql_name}:"
+    "${_artifact_${_artifact_index}_sql_sha}\n"
+    "library:${_artifact_${_artifact_index}_library_filename}:"
+    "${_artifact_${_artifact_index}_library_sha}\n")
+endforeach()
 string(SHA256 _aggregate_sha "${_artifact_hash_record}")
 
-# Validate the copied server/tool suite is present (§13.2 step 6). The runtime
-# staged-vs-global resolution proof is the integration probe that starts the
+# Validate the copied server/tool suite is present. The runtime staged-vs-global
+# resolution check is the integration probe that starts the
 # copied server and runs CREATE EXTENSION; here we assert the tools exist and
 # report their versions so a partial/mismatched copy fails the stage.
 set(_tool_signatures "")
@@ -1632,141 +1633,123 @@ _json_escape("${_bindir_rel}" _staged_bindir_json)
 _json_escape("${_sharedir_rel}" _staged_sharedir_json)
 _json_escape("${_pkglibdir_rel}" _staged_pkglibdir_json)
 
-if(_vector_mode)
-  set(_artifact_manifest_entries "")
-  foreach(_artifact_index RANGE 0 ${_last_artifact_index})
-    list(GET _artifact_names ${_artifact_index} _extension_name)
-    list(GET _artifact_controls ${_artifact_index} _control_file)
-    list(GET _artifact_install_sqls ${_artifact_index} _install_sql)
-    list(GET _artifact_libraries ${_artifact_index} _library_file)
-    list(GET
-      _artifact_module_pathname_overrides
-      ${_artifact_index}
-      _module_pathname_override)
-    if(_artifact_index GREATER 0)
-      string(APPEND _artifact_manifest_entries ",\n")
-    endif()
-    if(_module_pathname_override STREQUAL "-")
-      set(_module_pathname_json "null")
-      get_filename_component(
-        _effective_module_name
-        "${_artifact_${_artifact_index}_library_filename}"
-        NAME_WE)
-    else()
-      _json_escape("${_module_pathname_override}" _override_json)
-      set(_module_pathname_json "\"${_override_json}\"")
-      set(_effective_module_name "${_module_pathname_override}")
-    endif()
-    _json_escape("${_effective_module_name}" _effective_module_name_json)
-    _json_escape("${_control_file}" _control_source_json)
-    _json_escape("${_install_sql}" _install_sql_source_json)
-    _json_escape("${_library_file}" _library_source_json)
-    _json_escape(
-      "${_artifact_${_artifact_index}_control_filename}"
-      _control_filename_json)
-    _json_escape(
-      "${_artifact_${_artifact_index}_install_sql_name}"
-      _install_sql_name_json)
-    _json_escape(
+set(_artifact_manifest_entries "")
+foreach(_artifact_index RANGE 0 ${_last_artifact_index})
+  list(GET _artifact_names ${_artifact_index} _extension_name)
+  list(GET _artifact_controls ${_artifact_index} _control_file)
+  list(GET _artifact_install_sqls ${_artifact_index} _install_sql)
+  list(GET _artifact_libraries ${_artifact_index} _library_file)
+  list(GET
+    _artifact_module_pathname_overrides
+    ${_artifact_index}
+    _module_pathname_override)
+  if(_artifact_index GREATER 0)
+    string(APPEND _artifact_manifest_entries ",\n")
+  endif()
+  if(_module_pathname_override STREQUAL "-")
+    set(_module_pathname_json "null")
+    get_filename_component(
+      _effective_module_name
       "${_artifact_${_artifact_index}_library_filename}"
-      _library_filename_json)
-    _json_escape(
-      "${_artifact_${_artifact_index}_extension_version}"
-      _extension_version_json)
-    string(APPEND _artifact_manifest_entries
-      "    {\n"
-      "      \"name\": \"${_extension_name}\",\n"
-      "      \"module_pathname_override\": ${_module_pathname_json},\n"
-      "      \"effective_module_name\": "
-      "\"${_effective_module_name_json}\",\n"
-      "      \"control\": {"
-      "\"source\": \"${_control_source_json}\", "
-      "\"filename\": \"${_control_filename_json}\", "
-      "\"staged\": \"${_staged_sharedir_json}/extension/"
-      "${_control_filename_json}\", "
-      "\"source_sha256\": "
-      "\"${_artifact_${_artifact_index}_source_control_sha}\", "
-      "\"sha256\": \"${_artifact_${_artifact_index}_control_sha}\"},\n"
-      "      \"install_sql\": {"
-      "\"source\": \"${_install_sql_source_json}\", "
-      "\"filename\": \"${_install_sql_name_json}\", "
-      "\"staged\": \"${_staged_sharedir_json}/extension/"
-      "${_install_sql_name_json}\", "
-      "\"version\": \"${_extension_version_json}\", "
-      "\"sha256\": \"${_artifact_${_artifact_index}_sql_sha}\"},\n"
-      "      \"library\": {"
-      "\"source\": \"${_library_source_json}\", "
-      "\"filename\": \"${_library_filename_json}\", "
-      "\"staged\": \"${_staged_pkglibdir_json}/"
-      "${_library_filename_json}\", "
-      "\"sha256\": \"${_artifact_${_artifact_index}_library_sha}\"}\n"
-      "    }")
-  endforeach()
-  string(CONCAT _artifact_manifest_block
-    "  \"extension_artifacts\": {\n"
-    "    \"aggregate_sha256\": \"${_aggregate_sha}\",\n"
-    "    \"artifacts\": [\n"
-    "${_artifact_manifest_entries}\n"
-    "    ]\n"
-    "  }")
-  string(CONCAT _runtime_manifest_block
-    "  \"runtime_closure\": {\n"
-    "    \"algorithm\": \"postgresql-materialized-package/v1\",\n"
-    "    \"entry_count\": ${_runtime_entry_count},\n"
-    "    \"aggregate_sha256\": \"${_runtime_aggregate_sha}\",\n"
-    "    \"roots\": {\n"
-    "      \"bindir\": {\"reported_source\": "
-    "\"${_postgres_bindir_json}\", \"canonical_source\": "
-    "\"${_canonical_bindir_json}\", \"staged\": "
-    "\"${_staged_bindir_json}\"},\n"
-    "      \"sharedir\": {\"reported_source\": "
-    "\"${_postgres_sharedir_json}\", \"canonical_source\": "
-    "\"${_canonical_sharedir_json}\", \"staged\": "
-    "\"${_staged_sharedir_json}\"},\n"
-    "      \"pkglibdir\": {\"reported_source\": "
-    "\"${_postgres_pkglibdir_json}\", \"canonical_source\": "
-    "\"${_canonical_pkglibdir_json}\", \"staged\": "
-    "\"${_staged_pkglibdir_json}\"}\n"
-    "    },\n"
-    "    \"required_sentinels\": {\n"
-    "${_required_sentinels_json}\n"
-    "    },\n"
-    "    \"loader_dependencies\": {\n"
-    "      \"entry_count\": ${_loader_entry_count},\n"
-    "      \"aggregate_sha256\": \"${_loader_aggregate_sha}\",\n"
-    "      \"entries\": [\n"
-    "${_loader_entries_json}\n"
-    "      ]\n"
-    "    },\n"
-    "    \"entries\": [\n"
-    "${_runtime_entries_json}\n"
-    "    ]\n"
-    "  },\n")
-  set(_manifest_schema "stage_manifest/v3")
-else()
-  set(_runtime_manifest_block "")
-  set(_manifest_schema "stage_manifest/v1")
-  string(CONCAT _artifact_manifest_block
-    "  \"bioseq_artifacts\": {\n"
-    "    \"aggregate_sha256\": \"${_aggregate_sha}\",\n"
-    "    \"control\": {\"staged\": "
-    "\"${_staged_sharedir_json}/extension/"
-    "${_artifact_0_control_filename}\", "
-    "\"sha256\": \"${_artifact_0_control_sha}\"},\n"
-    "    \"install_sql\": {\"version\": "
-    "\"${_artifact_0_extension_version}\", "
-    "\"sha256\": \"${_artifact_0_sql_sha}\"},\n"
-    "    \"library\": {\"filename\": "
-    "\"${_artifact_0_library_filename}\", "
+      NAME_WE)
+  else()
+    _json_escape("${_module_pathname_override}" _override_json)
+    set(_module_pathname_json "\"${_override_json}\"")
+    set(_effective_module_name "${_module_pathname_override}")
+  endif()
+  _json_escape("${_effective_module_name}" _effective_module_name_json)
+  _json_escape("${_control_file}" _control_source_json)
+  _json_escape("${_install_sql}" _install_sql_source_json)
+  _json_escape("${_library_file}" _library_source_json)
+  _json_escape(
+    "${_artifact_${_artifact_index}_control_filename}"
+    _control_filename_json)
+  _json_escape(
+    "${_artifact_${_artifact_index}_install_sql_name}"
+    _install_sql_name_json)
+  _json_escape(
+    "${_artifact_${_artifact_index}_library_filename}"
+    _library_filename_json)
+  _json_escape(
+    "${_artifact_${_artifact_index}_extension_version}"
+    _extension_version_json)
+  string(APPEND _artifact_manifest_entries
+    "    {\n"
+    "      \"name\": \"${_extension_name}\",\n"
+    "      \"module_pathname_override\": ${_module_pathname_json},\n"
+    "      \"effective_module_name\": "
+    "\"${_effective_module_name_json}\",\n"
+    "      \"control\": {"
+    "\"source\": \"${_control_source_json}\", "
+    "\"filename\": \"${_control_filename_json}\", "
+    "\"staged\": \"${_staged_sharedir_json}/extension/"
+    "${_control_filename_json}\", "
+    "\"source_sha256\": "
+    "\"${_artifact_${_artifact_index}_source_control_sha}\", "
+    "\"sha256\": \"${_artifact_${_artifact_index}_control_sha}\"},\n"
+    "      \"install_sql\": {"
+    "\"source\": \"${_install_sql_source_json}\", "
+    "\"filename\": \"${_install_sql_name_json}\", "
+    "\"staged\": \"${_staged_sharedir_json}/extension/"
+    "${_install_sql_name_json}\", "
+    "\"version\": \"${_extension_version_json}\", "
+    "\"sha256\": \"${_artifact_${_artifact_index}_sql_sha}\"},\n"
+    "      \"library\": {"
+    "\"source\": \"${_library_source_json}\", "
+    "\"filename\": \"${_library_filename_json}\", "
     "\"staged\": \"${_staged_pkglibdir_json}/"
-    "${_artifact_0_library_filename}\", "
-    "\"sha256\": \"${_artifact_0_library_sha}\"}\n"
-    "  }")
-endif()
+    "${_library_filename_json}\", "
+    "\"sha256\": \"${_artifact_${_artifact_index}_library_sha}\"}\n"
+    "    }")
+endforeach()
+string(CONCAT _artifact_manifest_block
+  "  \"extension_artifacts\": {\n"
+  "    \"aggregate_sha256\": \"${_aggregate_sha}\",\n"
+  "    \"artifacts\": [\n"
+  "${_artifact_manifest_entries}\n"
+  "    ]\n"
+  "  }")
+string(CONCAT _runtime_manifest_block
+  "  \"runtime_closure\": {\n"
+  "    \"algorithm\": \"postgresql.materialized_package\",\n"
+  "    \"schema_revision\": 1,\n"
+  "    \"entry_count\": ${_runtime_entry_count},\n"
+  "    \"aggregate_sha256\": \"${_runtime_aggregate_sha}\",\n"
+  "    \"roots\": {\n"
+  "      \"bindir\": {\"reported_source\": "
+  "\"${_postgres_bindir_json}\", \"canonical_source\": "
+  "\"${_canonical_bindir_json}\", \"staged\": "
+  "\"${_staged_bindir_json}\"},\n"
+  "      \"sharedir\": {\"reported_source\": "
+  "\"${_postgres_sharedir_json}\", \"canonical_source\": "
+  "\"${_canonical_sharedir_json}\", \"staged\": "
+  "\"${_staged_sharedir_json}\"},\n"
+  "      \"pkglibdir\": {\"reported_source\": "
+  "\"${_postgres_pkglibdir_json}\", \"canonical_source\": "
+  "\"${_canonical_pkglibdir_json}\", \"staged\": "
+  "\"${_staged_pkglibdir_json}\"}\n"
+  "    },\n"
+  "    \"required_sentinels\": {\n"
+  "${_required_sentinels_json}\n"
+  "    },\n"
+  "    \"loader_dependencies\": {\n"
+  "      \"entry_count\": ${_loader_entry_count},\n"
+  "      \"aggregate_sha256\": \"${_loader_aggregate_sha}\",\n"
+  "      \"entries\": [\n"
+  "${_loader_entries_json}\n"
+  "      ]\n"
+  "    },\n"
+  "    \"entries\": [\n"
+  "${_runtime_entries_json}\n"
+  "    ]\n"
+  "  },\n")
+set(_manifest_schema "bioseq.private_postgres.stage_manifest")
+set(_manifest_schema_revision 3)
 
 string(CONCAT _manifest
 "{
   \"schema\": \"${_manifest_schema}\",
+  \"schema_revision\": ${_manifest_schema_revision},
   \"postgresql_version\": \"${_postgres_version_json}\",
   \"postgresql_configure\": \"${_postgres_configure_json}\",
   \"source\": {

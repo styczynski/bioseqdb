@@ -22,8 +22,8 @@ die() {
   exit 1
 }
 
-[[ "${BIOSEQ_OPTTIMIZATION_LEVEL:-}" == "0" ]] \
-  || die "BIOSEQ_OPTTIMIZATION_LEVEL must be explicitly set to 0"
+[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "dna4_uint64" ]] \
+  || die "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be dna4_uint64"
 [[ "${BIOSEQ_POSTGRES_MAJOR:-}" =~ ^[0-9]+$ ]] \
   || die "BIOSEQ_POSTGRES_MAJOR must be a decimal major version"
 (( BIOSEQ_POSTGRES_MAJOR >= 17 )) \

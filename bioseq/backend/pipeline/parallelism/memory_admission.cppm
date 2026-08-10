@@ -384,7 +384,7 @@ public:
                 (std::numeric_limits<std::uint64_t>::max)();
             bool is_under_pressure = false;
         };
-        const budget_snapshot budget_snapshot = [&]() noexcept {
+        const budget_snapshot captured_budget = [&]() noexcept {
             budget_snapshot snapshot{
                 .process_footprint_bytes = live_budget.footprint_bytes(),
                 .system_available_bytes = live_budget.available_bytes(),
@@ -426,12 +426,12 @@ public:
                     : std::min(allocatable, cap);
             return snapshot;
         }();
-        const auto refuse = [failure, bytes, &budget_snapshot](
+        const auto refuse = [failure, bytes, &captured_budget](
                 memory_admission_failure_reason reason,
                 std::uint64_t reserved) noexcept
-                -> std::optional<memory_permit> {
+            -> std::optional<memory_permit> {
             if (failure != nullptr) {
-                const std::uint64_t ceiling = budget_snapshot.ceiling_bytes;
+                const std::uint64_t ceiling = captured_budget.ceiling_bytes;
                 const std::uint64_t after_reservations =
                     ceiling == (std::numeric_limits<std::uint64_t>::max)()
                         ? ceiling
@@ -443,18 +443,18 @@ public:
                     .budget_ceiling_bytes = ceiling,
                     .allocatable_after_reservations_bytes = after_reservations,
                     .process_footprint_bytes =
-                        budget_snapshot.process_footprint_bytes,
+                        captured_budget.process_footprint_bytes,
                     .system_available_bytes =
-                        budget_snapshot.system_available_bytes,
-                    .system_total_bytes = budget_snapshot.system_total_bytes,
+                        captured_budget.system_available_bytes,
+                    .system_total_bytes = captured_budget.system_total_bytes,
                     .process_soft_cap_bytes =
-                        budget_snapshot.process_soft_cap_bytes,
+                        captured_budget.process_soft_cap_bytes,
                 };
             }
             return std::nullopt;
         };
 
-        if (budget_snapshot.is_under_pressure) {
+        if (captured_budget.is_under_pressure) {
             const std::uint64_t current =
                 reserved_.load(std::memory_order_relaxed);
             return refuse(
@@ -469,7 +469,7 @@ public:
                     memory_admission_failure_reason::reservation_counter_overflow,
                     current);
             }
-            const std::uint64_t budget = budget_snapshot.ceiling_bytes;
+            const std::uint64_t budget = captured_budget.ceiling_bytes;
             if (budget != (std::numeric_limits<std::uint64_t>::max)()) {
                 if (current > budget || bytes > budget - current) {
                     return refuse(

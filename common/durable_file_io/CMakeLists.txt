@@ -29,7 +29,7 @@ target_sources(bioseq_durable_file_io
       "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
 target_link_libraries(
   bioseq_durable_file_io
-  PRIVATE bioseq_checked_arithmetic_core)
+  PUBLIC bioseq_checked_arithmetic_core)
 add_library(
   bioseq::durable_file_io
   ALIAS bioseq_durable_file_io)
@@ -39,7 +39,7 @@ if(BUILD_TESTING)
   find_package(Threads REQUIRED)
   add_executable(
     bioseq_durable_file_io_contract_tests
-    "${CMAKE_CURRENT_LIST_DIR}/contract_tests.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/tests/contract/durable_io_test.cpp")
   set_target_properties(
     bioseq_durable_file_io_contract_tests
     PROPERTIES
@@ -56,8 +56,10 @@ if(BUILD_TESTING)
       Threads::Threads)
   add_test(
     NAME bioseq_durable_file_io_contract_tests
-    COMMAND bioseq_durable_file_io_contract_tests)
+    COMMAND "$<TARGET_FILE:bioseq_durable_file_io_contract_tests>"
+      "[component:common][layer:contract][feature:durable_io]")
   set_tests_properties(
     bioseq_durable_file_io_contract_tests
-    PROPERTIES LABELS "common;unit;durable-file-io")
+    PROPERTIES LABELS
+      "component:common;layer:contract;feature:durable_io;resource:filesystem")
 endif()

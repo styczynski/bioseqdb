@@ -65,11 +65,12 @@ inline constexpr std::uint32_t k_async_minimizer_sequence_worker_injected_failur
 
 #ifdef BIOSEQ_TEST_INDEXES
 inline thread_local async_minimizer_sequence_worker_pg_failure
-    g_async_mps_worker_injected_failure = async_minimizer_sequence_worker_pg_failure::none;
+    g_async_minimizer_sequence_worker_injected_failure =
+        async_minimizer_sequence_worker_pg_failure::none;
 #endif
 
 void publish_async_minimizer_sequence_build_stats(
-        const bioseq::storage::indexing::last_mps_build_stats& stats,
+        const bioseq::storage::indexing::last_minimizer_sequence_build_stats& stats,
         std::uint64_t worker_build_ns,
         std::uint64_t pipeline_mode,
         std::uint64_t max_concurrency,
@@ -236,7 +237,7 @@ void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
     return "invalid";
 }
 
-void record_async_mps_worker_pg_leaf_call(
+void record_async_minimizer_sequence_worker_pg_leaf_call(
         async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
         return;
@@ -269,7 +270,7 @@ void record_async_mps_worker_pg_leaf_call(
     }
 }
 
-void record_async_mps_worker_pg_leaf_failure(
+void record_async_minimizer_sequence_worker_pg_leaf_failure(
         async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
         return;
@@ -278,9 +279,9 @@ void record_async_mps_worker_pg_leaf_failure(
         g_shared->async_minimizer_sequence_worker_boundary_stats;
     bool injected = false;
 #ifdef BIOSEQ_TEST_INDEXES
-    if (g_async_mps_worker_injected_failure == point) {
+    if (g_async_minimizer_sequence_worker_injected_failure == point) {
         injected = true;
-        g_async_mps_worker_injected_failure =
+        g_async_minimizer_sequence_worker_injected_failure =
             async_minimizer_sequence_worker_pg_failure::none;
     }
 #endif
@@ -293,7 +294,7 @@ void record_async_mps_worker_pg_leaf_failure(
 }
 
 /* Must be called from one invoke_pg_as_cpp callback, never from C++ scope. */
-void inject_async_mps_worker_pg_failure_leaf(
+void inject_async_minimizer_sequence_worker_pg_failure_leaf(
         async_minimizer_sequence_worker_pg_failure point) {
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
@@ -309,7 +310,7 @@ void inject_async_mps_worker_pg_failure_leaf(
         return;
     }
     pg_atomic_fetch_add_u64(&stats.injected_pg_leaf_failures, 1);
-    g_async_mps_worker_injected_failure = point;
+    g_async_minimizer_sequence_worker_injected_failure = point;
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous minimizer-sequence worker PostgreSQL leaf failure"),
@@ -321,7 +322,7 @@ void inject_async_mps_worker_pg_failure_leaf(
 }
 
 
-void record_async_mps_materialize_admission() noexcept {
+void record_async_minimizer_sequence_materialize_admission() noexcept {
     if (g_shared != nullptr) {
         pg_atomic_fetch_add_u64(
             &g_shared->async_minimizer_sequence_worker_boundary_stats.materialize_admissions,
@@ -329,7 +330,7 @@ void record_async_mps_materialize_admission() noexcept {
     }
 }
 
-void record_async_mps_materialize_failure_unwind(
+void record_async_minimizer_sequence_materialize_failure_unwind(
         bool admission_restored) noexcept {
     if (g_shared == nullptr) {
         return;

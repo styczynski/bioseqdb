@@ -247,7 +247,7 @@ def rpm_publish_tree(root: Path, cell: model.CellContext) -> RepositoryBuild:
 
 
 class CatalogAndProvenanceTests(unittest.TestCase):
-    def test_catalog_is_the_exact_native_doc0390_matrix(self) -> None:
+    def test_catalog_is_the_exact_native_package_matrix(self) -> None:
         expected = {
             model.DistroId.OPENSUSE_16_0: (
                 model.PackageFormat.RPM,
@@ -476,7 +476,10 @@ class FormatPlanTests(unittest.TestCase):
                 ["postgresql-17", "libvulkan1"],
             )
             deb_environment = deb.build_environment(debian)
-            self.assertEqual(deb_environment["BIOSEQ_OPTTIMIZATION_LEVEL"], "0")
+            self.assertEqual(
+                deb_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+                "dna4_uint64",
+            )
             self.assertEqual(
                 tuple(config.SOURCE_PROJECTION_EXCLUDES),
                 tuple(
@@ -505,7 +508,10 @@ class FormatPlanTests(unittest.TestCase):
                 ["postgresql17-server", "vulkan-loader"],
             )
             rpm_environment = rpm.build_environment(fedora)
-            self.assertEqual(rpm_environment["BIOSEQ_OPTTIMIZATION_LEVEL"], "0")
+            self.assertEqual(
+                rpm_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+                "dna4_uint64",
+            )
             rpm_plan = rpm.build_plan(fedora)
             self.assertIn("rpmbuild --clean -bb", rpm_plan.argv[-1])
             self.assertEqual(
@@ -528,9 +534,14 @@ class FormatPlanTests(unittest.TestCase):
                     )
                     variables = pacman.template_variables(cell)
                     self.assertEqual(variables["architecture"], package_architecture)
-                    self.assertEqual(variables["optimization_level"], 0)
+                    self.assertEqual(
+                        variables["template_flatten_profile"], "dna4_uint64"
+                    )
                     environment = pacman.build_environment(cell)
-                    self.assertEqual(environment["BIOSEQ_OPTTIMIZATION_LEVEL"], "0")
+                    self.assertEqual(
+                        environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+                        "dna4_uint64",
+                    )
                     self.assertEqual(environment["BIOSEQ_PACKAGE_PARALLELISM"], "4")
                     self.assertEqual(
                         pacman.expected_artifact_name(cell),
@@ -1569,7 +1580,7 @@ class BuildAndStageContractTests(unittest.TestCase):
     def test_test_support_dso_uses_shared_manifest_closure_validator(
             self) -> None:
         helper = (
-            REPOSITORY_ROOT / "cmake" / "AddPostgreSQLExtension.cmake"
+            REPOSITORY_ROOT / "cmake" / "add_postgresql_extension.cmake"
         ).read_text(encoding="utf-8")
         cache_cmake = (
             REPOSITORY_ROOT / "bioseq_caching" / "CMakeLists.txt"
@@ -1597,7 +1608,7 @@ class BuildAndStageContractTests(unittest.TestCase):
         self.assertRegex(
             cache_cmake,
             (
-                r"AddCommonTargetX\(\s*postgresql_bioseq_cache"
+                r"bioseq_add_postgresql_extension\(\s*postgresql_bioseq_cache"
                 r"[\s\S]*?DSO_CLOSURE_CONTRACT manifest"
                 r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN"
             ),
@@ -1615,7 +1626,10 @@ class BuildAndStageContractTests(unittest.TestCase):
 
     def test_manifest_dso_contract_has_non_bioseq_self_test(self) -> None:
         validator = (
-            REPOSITORY_ROOT / "codegen" / "safety" / "validate_evidence.py"
+            REPOSITORY_ROOT
+            / "codegen"
+            / "safety"
+            / "validate_postgres_error_safety.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
@@ -1721,6 +1735,8 @@ class ManifestAndLegacyTests(unittest.TestCase):
                 clock=lambda: "2026-07-29T00:00:00Z",
             )
             self.assertTrue(path.is_file())
+            self.assertEqual(store.payload["schema_revision"], 1)
+            self.assertNotIn("schema_version", store.payload)
             self.assertEqual(store.payload["status"], "failed")
             self.assertEqual(store.payload["source_revision"], "a" * 40)
             self.assertEqual(store.payload["poetry_lock_sha256"], "b" * 64)
@@ -1728,6 +1744,18 @@ class ManifestAndLegacyTests(unittest.TestCase):
                 store.payload["python_environment"],
                 {"python": "3.12.3", "poetry": "2.1.3"},
             )
+
+            for mutation in ("legacy", "wrong-revision", "unknown-key"):
+                with self.subTest(mutation=mutation):
+                    invalid = dict(store.payload)
+                    if mutation == "legacy":
+                        invalid["schema_version"] = invalid.pop("schema_revision")
+                    elif mutation == "wrong-revision":
+                        invalid["schema_revision"] = 2
+                    else:
+                        invalid["unexpected"] = True
+                    with self.assertRaises(manifest.ManifestError):
+                        manifest.write_manifest(path, invalid)
 
     def test_active_packaging_runtime_has_no_legacy_toolchain(self) -> None:
         legacy_name = "omni" + "package"

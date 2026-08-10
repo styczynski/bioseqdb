@@ -19,11 +19,11 @@ import :wire;
 
 export namespace bioseq::cache {
 
-enum class AdmissionError : std::uint8_t {
-    CounterOverflow,
-    BudgetExhausted,
-    SystemPressure,
-    InvalidReservation,
+enum class admission_error : std::uint8_t {
+    counter_overflow,
+    budget_exhausted,
+    system_pressure,
+    invalid_reservation,
 };
 
 /**
@@ -32,29 +32,25 @@ enum class AdmissionError : std::uint8_t {
  * allocation to a page and reserves one additional metadata page.  This is a
  * conservative accounting contract, not an estimate of returned payload.
  */
-inline constexpr std::uint64_t kDsaAccountingPageBytesV1 = 4ULL << 10U;
+inline constexpr std::uint64_t k_dsa_accounting_page_bytes = 4ULL << 10U;
 
 /** Return a checked conservative reservation for one or more DSA allocations. */
-[[nodiscard]] inline std::expected<std::uint64_t, AdmissionError>
-conservative_dsa_reservation_bytes(
-        std::uint64_t payload_bytes,
-        std::uint64_t allocation_count = 1) noexcept {
+[[nodiscard]] inline std::expected<std::uint64_t, admission_error>
+conservative_dsa_reservation_bytes(std::uint64_t payload_bytes,
+                                   std::uint64_t allocation_count = 1) noexcept {
     if (payload_bytes == 0 || allocation_count == 0) {
-        return std::unexpected(AdmissionError::InvalidReservation);
+        return std::unexpected(admission_error::invalid_reservation);
     }
-    const auto payload_with_rounding = checked_add(
-        payload_bytes, kDsaAccountingPageBytesV1 - 1U);
-    const auto metadata_bytes = checked_mul(
-        allocation_count, kDsaAccountingPageBytesV1);
+    const auto payload_with_rounding = checked_add(payload_bytes, k_dsa_accounting_page_bytes - 1U);
+    const auto metadata_bytes = checked_mul(allocation_count, k_dsa_accounting_page_bytes);
     if (!payload_with_rounding.has_value() || !metadata_bytes.has_value()) {
-        return std::unexpected(AdmissionError::CounterOverflow);
+        return std::unexpected(admission_error::counter_overflow);
     }
     const std::uint64_t rounded_payload =
-        (*payload_with_rounding / kDsaAccountingPageBytesV1) *
-        kDsaAccountingPageBytesV1;
+        (*payload_with_rounding / k_dsa_accounting_page_bytes) * k_dsa_accounting_page_bytes;
     const auto reservation = checked_add(rounded_payload, *metadata_bytes);
     if (!reservation.has_value()) {
-        return std::unexpected(AdmissionError::CounterOverflow);
+        return std::unexpected(admission_error::counter_overflow);
     }
     return *reservation;
 }
@@ -65,64 +61,59 @@ conservative_dsa_reservation_bytes(
  * the larger of the arena reservation and the sum of conservative allocation
  * reservations, never their sum.
  */
-[[nodiscard]] inline std::expected<std::uint64_t, AdmissionError>
+[[nodiscard]] inline std::expected<std::uint64_t, admission_error>
 conservative_fixed_dsa_reservation_bytes(
-        std::uint64_t allocator_arena_bytes,
-        std::span<const std::uint64_t> allocation_payload_bytes) noexcept {
+    std::uint64_t allocator_arena_bytes,
+    std::span<const std::uint64_t> allocation_payload_bytes) noexcept {
     if (allocator_arena_bytes == 0 || allocation_payload_bytes.empty()) {
-        return std::unexpected(AdmissionError::InvalidReservation);
+        return std::unexpected(admission_error::invalid_reservation);
     }
     std::uint64_t allocation_bytes = 0;
     for (const std::uint64_t payload_bytes : allocation_payload_bytes) {
-        const auto reservation = conservative_dsa_reservation_bytes(
-            payload_bytes);
+        const auto reservation = conservative_dsa_reservation_bytes(payload_bytes);
         if (!reservation.has_value()) {
             return std::unexpected(reservation.error());
         }
         const auto next = checked_add(allocation_bytes, *reservation);
         if (!next.has_value()) {
-            return std::unexpected(AdmissionError::CounterOverflow);
+            return std::unexpected(admission_error::counter_overflow);
         }
         allocation_bytes = *next;
     }
     return std::max(allocator_arena_bytes, allocation_bytes);
 }
 
-template <class Counter>
+template <class p_counter_type>
 concept cache_reservation_counter = requires(
-    Counter counter,
-    std::uint64_t expected,
-    std::uint64_t desired,
-    std::uint64_t bytes) {
+    p_counter_type counter, std::uint64_t expected, std::uint64_t desired, std::uint64_t bytes) {
     { counter.load() } -> std::same_as<std::uint64_t>;
     { counter.compare_exchange(expected, desired) } -> std::same_as<bool>;
     { counter.subtract(bytes) } -> std::same_as<void>;
 };
 
-template <class Budget>
-concept cache_memory_budget = requires(const Budget budget) {
+template <class p_budget_type>
+concept cache_memory_budget = requires(const p_budget_type budget) {
     { budget.allocatable_bytes() } -> std::same_as<std::uint64_t>;
     { budget.under_pressure() } -> std::same_as<bool>;
 };
 
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-class BasicCacheAdmission;
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+class basic_cache_admission;
 
 /** Move-only ownership of bytes held against a shared reservation counter. */
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-class CachePermit {
-public:
-    CachePermit() = default;
-    CachePermit(
-        BasicCacheAdmission<Counter, Budget>* admission,
-        std::uint64_t bytes) noexcept
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+class cache_permit {
+  public:
+    cache_permit() = default;
+    cache_permit(basic_cache_admission<p_counter_type, p_budget_type>* admission,
+                 std::uint64_t bytes) noexcept
         : admission_(admission), bytes_(bytes) {}
 
-    CachePermit(CachePermit&& other) noexcept {
+    cache_permit(cache_permit&& other) noexcept {
         move_from(other);
     }
 
-    CachePermit& operator=(CachePermit&& other) noexcept {
+    cache_permit& operator=(cache_permit&& other) noexcept {
         if (this != &other) {
             release();
             move_from(other);
@@ -130,10 +121,10 @@ public:
         return *this;
     }
 
-    CachePermit(const CachePermit&) = delete;
-    CachePermit& operator=(const CachePermit&) = delete;
+    cache_permit(const cache_permit&) = delete;
+    cache_permit& operator=(const cache_permit&) = delete;
 
-    ~CachePermit() noexcept {
+    ~cache_permit() noexcept {
         release();
     }
 
@@ -147,9 +138,6 @@ public:
         return admission_ != nullptr;
     }
 
-    /* DOC0321 unavoidable type-cycle exception: these bodies require the
-     * complete BasicCacheAdmission type, whose inline try_reserve body in
-     * turn requires the complete CachePermit type. */
     /** Return excess bytes to the counter while retaining the smaller permit. */
     void shrink_to(std::uint64_t bytes) noexcept;
 
@@ -165,48 +153,47 @@ public:
         return std::exchange(bytes_, 0);
     }
 
-private:
+  private:
     /** Transfer ownership and clear the source permit. */
-    void move_from(CachePermit& other) noexcept {
+    void move_from(cache_permit& other) noexcept {
         admission_ = std::exchange(other.admission_, nullptr);
         bytes_ = std::exchange(other.bytes_, 0);
     }
 
-    BasicCacheAdmission<Counter, Budget>* admission_ = nullptr;
+    basic_cache_admission<p_counter_type, p_budget_type>* admission_ = nullptr;
     std::uint64_t bytes_ = 0;
 };
 
 /** Admission controller sharing one atomic-like counter across all producers. */
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-class BasicCacheAdmission {
-public:
-    using Permit = CachePermit<Counter, Budget>;
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+class basic_cache_admission {
+  public:
+    using permit_type = cache_permit<p_counter_type, p_budget_type>;
 
-    BasicCacheAdmission(Counter& counter, const Budget& budget) noexcept
+    basic_cache_admission(p_counter_type& counter, const p_budget_type& budget) noexcept
         : counter_(counter), budget_(budget) {}
 
     /** Reserve bytes without overcommitting the current shared ceiling. */
-    [[nodiscard]] std::expected<Permit, AdmissionError> try_reserve(
-        std::uint64_t bytes) noexcept {
+    [[nodiscard]] std::expected<permit_type, admission_error>
+    try_reserve(std::uint64_t bytes) noexcept {
         if (budget_.under_pressure()) {
-            return std::unexpected(AdmissionError::SystemPressure);
+            return std::unexpected(admission_error::system_pressure);
         }
         if (bytes == 0) {
-            return Permit{this, 0};
+            return permit_type{this, 0};
         }
         const std::uint64_t ceiling = budget_ceiling();
         std::uint64_t observed = counter_.load();
         for (;;) {
             const auto desired = checked_add(observed, bytes);
             if (!desired.has_value()) {
-                return std::unexpected(AdmissionError::CounterOverflow);
+                return std::unexpected(admission_error::counter_overflow);
             }
-            if (ceiling != (std::numeric_limits<std::uint64_t>::max)()
-                && *desired > ceiling) {
-                return std::unexpected(AdmissionError::BudgetExhausted);
+            if (ceiling != (std::numeric_limits<std::uint64_t>::max)() && *desired > ceiling) {
+                return std::unexpected(admission_error::budget_exhausted);
             }
             if (counter_.compare_exchange(observed, *desired)) {
-                return Permit{this, bytes};
+                return permit_type{this, bytes};
             }
         }
     }
@@ -221,8 +208,8 @@ public:
         return budget_.under_pressure();
     }
 
-private:
-    friend class CachePermit<Counter, Budget>;
+  private:
+    friend class cache_permit<p_counter_type, p_budget_type>;
 
     /** Apply the cache's 25-percent physical-memory ceiling when available. */
     [[nodiscard]] std::uint64_t budget_ceiling() const noexcept {
@@ -232,13 +219,11 @@ private:
             if (total == 0) {
                 return allocatable;
             }
-            const std::uint64_t cache_share = total
-                / kCacheMemoryFractionDenominator
-                * kCacheMemoryFractionNumerator;
-            return allocatable
-                    == (std::numeric_limits<std::uint64_t>::max)()
-                ? cache_share
-                : std::min(allocatable, cache_share);
+            const std::uint64_t cache_share =
+                total / k_cache_memory_fraction_denominator * k_cache_memory_fraction_numerator;
+            return allocatable == (std::numeric_limits<std::uint64_t>::max)()
+                       ? cache_share
+                       : std::min(allocatable, cache_share);
         }
         return allocatable;
     }
@@ -250,12 +235,12 @@ private:
         }
     }
 
-    Counter& counter_;
-    const Budget& budget_;
+    p_counter_type& counter_;
+    const p_budget_type& budget_;
 };
 
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-void CachePermit<Counter, Budget>::shrink_to(std::uint64_t bytes) noexcept {
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+void cache_permit<p_counter_type, p_budget_type>::shrink_to(std::uint64_t bytes) noexcept {
     if (admission_ == nullptr || bytes >= bytes_) {
         return;
     }
@@ -263,8 +248,8 @@ void CachePermit<Counter, Budget>::shrink_to(std::uint64_t bytes) noexcept {
     bytes_ = bytes;
 }
 
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-bool CachePermit<Counter, Budget>::grow_to(std::uint64_t bytes) noexcept {
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+bool cache_permit<p_counter_type, p_budget_type>::grow_to(std::uint64_t bytes) noexcept {
     if (admission_ == nullptr) {
         return false;
     }
@@ -282,8 +267,8 @@ bool CachePermit<Counter, Budget>::grow_to(std::uint64_t bytes) noexcept {
     return true;
 }
 
-template <cache_reservation_counter Counter, cache_memory_budget Budget>
-void CachePermit<Counter, Budget>::release() noexcept {
+template <cache_reservation_counter p_counter_type, cache_memory_budget p_budget_type>
+void cache_permit<p_counter_type, p_budget_type>::release() noexcept {
     if (admission_ == nullptr) {
         return;
     }
@@ -292,22 +277,18 @@ void CachePermit<Counter, Budget>::release() noexcept {
     bytes_ = 0;
 }
 
-/** Internal v1 file-capacity/free-space policy. */
-struct FileAdmissionPolicy {
+/** File-capacity/free-space admission policy. */
+struct file_admission_policy {
     /** Return the smaller of 128 GiB and ten percent of filesystem capacity. */
-    [[nodiscard]] static constexpr std::uint64_t ceiling_bytes(
-        std::uint64_t filesystem_capacity) noexcept {
-        return std::min(
-            kMaxFileCacheBytes,
-            filesystem_capacity / 10u);
+    [[nodiscard]] static constexpr std::uint64_t
+    ceiling_bytes(std::uint64_t filesystem_capacity) noexcept {
+        return std::min(k_maximum_file_cache_bytes, filesystem_capacity / 10u);
     }
 
     /** Preserve the larger of 10 GiB and ten percent free space. */
-    [[nodiscard]] static constexpr std::uint64_t free_floor_bytes(
-        std::uint64_t filesystem_capacity) noexcept {
-        return std::max(
-            kMinFileFreeBytes,
-            filesystem_capacity / 10u);
+    [[nodiscard]] static constexpr std::uint64_t
+    free_floor_bytes(std::uint64_t filesystem_capacity) noexcept {
+        return std::max(k_minimum_file_free_bytes, filesystem_capacity / 10u);
     }
 
     /**
@@ -315,31 +296,28 @@ struct FileAdmissionPolicy {
      * floor.  Callers may lower the floor only for isolated test policy; actual
      * availability and the ten-percent capacity ceiling always remain active.
      */
-    [[nodiscard]] static constexpr bool can_reserve_with_free_floor(
-        std::uint64_t reserved_file_bytes,
-        std::uint64_t requested_bytes,
-        std::uint64_t filesystem_capacity,
-        std::uint64_t filesystem_available,
-        std::uint64_t free_floor) noexcept {
+    [[nodiscard]] static constexpr bool
+    can_reserve_with_free_floor(std::uint64_t reserved_file_bytes,
+                                std::uint64_t requested_bytes,
+                                std::uint64_t filesystem_capacity,
+                                std::uint64_t filesystem_available,
+                                std::uint64_t free_floor) noexcept {
         const auto desired = checked_add(reserved_file_bytes, requested_bytes);
-        return desired.has_value()
-            && *desired <= ceiling_bytes(filesystem_capacity)
-            && filesystem_available >= requested_bytes
-            && filesystem_available - requested_bytes >= free_floor;
+        return desired.has_value() && *desired <= ceiling_bytes(filesystem_capacity) &&
+               filesystem_available >= requested_bytes &&
+               filesystem_available - requested_bytes >= free_floor;
     }
 
     /** Validate one production file reservation with checked arithmetic. */
-    [[nodiscard]] static constexpr bool can_reserve(
-        std::uint64_t reserved_file_bytes,
-        std::uint64_t requested_bytes,
-        std::uint64_t filesystem_capacity,
-        std::uint64_t filesystem_available) noexcept {
-        return can_reserve_with_free_floor(
-            reserved_file_bytes,
-            requested_bytes,
-            filesystem_capacity,
-            filesystem_available,
-            free_floor_bytes(filesystem_capacity));
+    [[nodiscard]] static constexpr bool can_reserve(std::uint64_t reserved_file_bytes,
+                                                    std::uint64_t requested_bytes,
+                                                    std::uint64_t filesystem_capacity,
+                                                    std::uint64_t filesystem_available) noexcept {
+        return can_reserve_with_free_floor(reserved_file_bytes,
+                                           requested_bytes,
+                                           filesystem_capacity,
+                                           filesystem_available,
+                                           free_floor_bytes(filesystem_capacity));
     }
 };
 

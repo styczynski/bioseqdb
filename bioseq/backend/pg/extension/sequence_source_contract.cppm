@@ -66,7 +66,7 @@ import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif
-import bioseq.postgres.support.runtime_test_counters;
+import bioseq.postgres.support.runtime_diagnostics;
 import bioseq.postgres.support.sql_catalog_entities;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
@@ -142,32 +142,32 @@ namespace manager_handles =
 	return value;
 }
 
-template<class handle_type>
+template<class p_handle_type>
 inline void require_oid(
 		bioseq::postgres::support::catalog_missing_policy policy,
 		Oid expected) {
-	const Oid actual = handle_type::resolve_oid(policy);
+	const Oid actual = p_handle_type::resolve_oid(policy);
 	if (actual != expected) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{.message = fmt::format(
 				"catalog handle '{}' resolved OID {}, expected {}",
-				handle_type::leaf_name(),
+				p_handle_type::leaf_name(),
 				actual,
 				expected)});
 	}
 }
 
-template<class handle_type>
+template<class p_handle_type>
 inline void require_identity(
 		std::string_view leaf,
 		std::string_view stable_schema,
 		std::string_view installed_schema) {
 	const auto installed =
-		handle_type::installed_schema_name(
+		p_handle_type::installed_schema_name(
 			bioseq::postgres::support::catalog_missing_policy::error);
-	if (handle_type::leaf_name() != leaf
-		|| handle_type::stable_schema_name() != stable_schema
+	if (p_handle_type::leaf_name() != leaf
+		|| p_handle_type::stable_schema_name() != stable_schema
 		|| !installed.has_value()
 		|| *installed != installed_schema) {
 		bioseq::postgres::support::raise_sql_error(
@@ -178,10 +178,10 @@ inline void require_identity(
 	}
 }
 
-template<class callback_type>
+template<class p_callback_type>
 inline bool dispatch_handle(
 		std::string_view handle,
-		callback_type&& callback) {
+		p_callback_type&& callback) {
 	if (handle == "row_mask_seq") {
 		callback.template operator()<
 			std::remove_cvref_t<
@@ -241,8 +241,8 @@ inline void resolve_expected(std::string_view payload) {
 	}
 	const bool found = dispatch_handle(
 		handle,
-		[policy, expected]<class handle_type> {
-			require_oid<handle_type>(policy, expected);
+		[policy, expected]<class p_handle_type> {
+			require_oid<p_handle_type>(policy, expected);
 		});
 	if (!found) {
 		bioseq::postgres::support::raise_sql_error(
@@ -331,9 +331,9 @@ inline void validate_bpchar_vector_resolver() {
 }
 
 [[nodiscard]] inline
-bioseq::postgres::support::runtime_test_counters::bpchar_source_form
+bioseq::postgres::support::runtime_diagnostics::bpchar_source_form
 classify_bpchar_source(Datum source) noexcept {
-	using enum bioseq::postgres::support::runtime_test_counters::
+	using enum bioseq::postgres::support::runtime_diagnostics::
 		bpchar_source_form;
 	const Pointer raw = DatumGetPointer(source);
 	if (raw == nullptr) return unknown;
@@ -534,8 +534,8 @@ inline void exercise_bpchar_comparison_matrix(
 
 inline void validate_bpchar_physical_lifetime() {
 	const auto value =
-		bioseq::postgres::support::runtime_test_counters::
-			bpchar_lifetime();
+		bioseq::postgres::support::runtime_diagnostics::
+			snapshot_bpchar_lifetime_statistics();
 	const std::uint64_t payload_frees =
 		value.vector_payload_overwrite_frees
 		+ value.vector_payload_cleanup_frees;
@@ -621,13 +621,13 @@ inline void validate_bpchar_physical_lifetime() {
 }
 
 inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
-	using bioseq::postgres::support::runtime_test_counters::
+	using bioseq::postgres::support::runtime_diagnostics::
 		bpchar_source_form;
-	namespace counters =
-		bioseq::postgres::support::runtime_test_counters;
+	namespace diagnostics =
+		bioseq::postgres::support::runtime_diagnostics;
 
-	counters::reset_bpchar_lifetime();
-	counters::begin_bpchar_source_observation();
+	diagnostics::reset_bpchar_lifetime_statistics();
+	diagnostics::begin_bpchar_source_observation_session();
 
 	MemoryContext const parent_context = CurrentMemoryContext;
 	MemoryContext probe_context = nullptr;
@@ -841,10 +841,10 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 			[probe_context] {
 				MemoryContextReset(probe_context);
 			});
-		counters::note_bpchar_context_reset();
+		diagnostics::record_bpchar_context_reset();
 		MemoryContextSwitchTo(probe_context);
 		in_probe_context = true;
-		counters::note_bpchar_context_reuse();
+		diagnostics::record_bpchar_context_reuse();
 
 		scan = bioseq::postgres::support::invoke_pg_as_cpp(
 			[relation] {
@@ -908,7 +908,7 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 
 		switch_to_parent();
 		close_relation();
-		counters::end_bpchar_source_observation();
+		diagnostics::end_bpchar_source_observation_session();
 		bioseq::postgres::support::invoke_pg_as_cpp(
 			[probe_context] {
 				MemoryContextDelete(probe_context);
@@ -920,7 +920,7 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 		drop_vector_slot();
 		end_scan();
 		close_relation();
-		counters::end_bpchar_source_observation();
+		diagnostics::end_bpchar_source_observation_session();
 		if (probe_context != nullptr) {
 			bioseq::postgres::support::invoke_pg_as_cpp(
 				[probe_context] {
@@ -931,10 +931,10 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 	}
 }
 
-inline void validate_bpchar_lifetime() {
+inline void validate_bpchar_lifetime_statistics() {
 	const auto value =
-		bioseq::postgres::support::runtime_test_counters::
-			bpchar_lifetime();
+		bioseq::postgres::support::runtime_diagnostics::
+			snapshot_bpchar_lifetime_statistics();
 	const std::uint64_t payload_frees =
 		value.vector_payload_overwrite_frees
 		+ value.vector_payload_cleanup_frees;
@@ -1032,12 +1032,12 @@ void arm_sequence_source_failure(std::string failure_point) {
 		return;
 	}
 	if (failure_point == "bpchar_lifetime_reset") {
-		bioseq::postgres::support::runtime_test_counters::
-			reset_bpchar_lifetime();
+		bioseq::postgres::support::runtime_diagnostics::
+			reset_bpchar_lifetime_statistics();
 		return;
 	}
 	if (failure_point == "bpchar_lifetime_validate") {
-		catalog_runtime_contract::validate_bpchar_lifetime();
+		catalog_runtime_contract::validate_bpchar_lifetime_statistics();
 		return;
 	}
 	if (failure_point == "aggregate_owner_visits_reset") {
@@ -1178,7 +1178,7 @@ void disarm_sequence_source_failure() {
 void reset_sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
-	bioseq::storage::reset_pg_sequence_source_debug_counters();
+	bioseq::storage::reset_pg_sequence_source_stats();
 #else
 	raise_sequence_source_diagnostics_unavailable(
 		"bioseq sequence source-domain diagnostics");
@@ -1189,7 +1189,7 @@ void reset_sequence_source_counters() {
 bioseq::postgres::support::jsonb_value sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	const auto counters =
-		bioseq::storage::pg_sequence_source_debug_counters();
+		bioseq::storage::pg_sequence_source_stats();
 	return bioseq::postgres::support::jsonb_value{fmt::format(
 		"{{\"registries_created\":{},\"registries_destroyed\":{},"
 		"\"providers_created\":{},\"providers_destroyed\":{},"
@@ -1277,7 +1277,8 @@ bioseq::postgres::support::jsonb_value sequence_source_counters() {
 
 
 /**
- * @brief Arms one SliceProject DSM payload as incomplete, malformed, or absent for worker-state validation.
+ * @brief Arms one SliceProject DSM payload as incomplete, malformed, or
+ * absent for worker-state validation.
  */
 void arm_slice_dsm_fixture(std::string mode) {
 	bioseq_arm_slice_dsm_fixture_for_test(mode);
@@ -1286,7 +1287,7 @@ void arm_slice_dsm_fixture(std::string mode) {
 
 bool sequence_source_wrong_thread_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
-	return bioseq::storage::pg_sequence_source_wrong_thread_probe();
+	return bioseq::storage::validate_pg_sequence_source_wrong_thread();
 #else
 	raise_sequence_source_diagnostics_unavailable(
 		"bioseq sequence source-domain diagnostics");
@@ -1296,7 +1297,7 @@ bool sequence_source_wrong_thread_probe() {
 
 bool sequence_source_fault_contract_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
-	return bioseq::storage::pg_sequence_source_fault_contract_probe();
+	return bioseq::storage::validate_pg_sequence_source_fault_contract();
 #else
 	raise_sequence_source_diagnostics_unavailable(
 		"bioseq sequence source-domain diagnostics");
@@ -1306,7 +1307,7 @@ bool sequence_source_fault_contract_probe() {
 
 bool sequence_source_route_alias_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
-	return bioseq::storage::pg_sequence_source_route_alias_probe();
+	return bioseq::storage::validate_pg_sequence_source_route_aliases();
 #else
 	raise_sequence_source_diagnostics_unavailable(
 		"bioseq sequence source-domain diagnostics");
@@ -1331,7 +1332,7 @@ std::optional<bool> sequence_facade_orientation_probe(
 
 void sequence_source_pre_prepare_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
-	bioseq::storage::pg_sequence_source_pre_prepare_probe();
+	bioseq::storage::validate_pg_sequence_source_pre_prepare();
 #else
 	raise_sequence_source_diagnostics_unavailable(
 		"bioseq sequence source-domain diagnostics");

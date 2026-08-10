@@ -2,15 +2,9 @@
  * @file crc32.cppm
  * @brief CRC-32/ISO-HDLC (gzip) wrapper + Highway entry-point declaration.
  *
- * Forwards `crc32_update` to zlib's `crc32_z` (hardware-accelerated on
- * Apple Silicon via PMULL and on x86 via PCLMULQDQ). The Highway path
- * `crc32_iso_hdlc_simd` is exposed but not wired in this PR — the
- * orchestrator keeps calling `crc32_update`. A separate A/B PR flips
- * the switch.
- *
- * Coefficients (`iso_hdlc_reflected_keys`) and constants (`iso_hdlc_initial_value`,
- * `iso_hdlc_final_xor`) are sourced from
- * `crc-fast-rust-main/src/crc32/consts.rs:489-513`.
+ * `crc32_update` delegates to zlib's `crc32_z`. The Highway
+ * `crc32_iso_hdlc_simd` entry point implements the same reflected polynomial
+ * contract for vectorized consumers.
  */
 module;
 
@@ -26,10 +20,8 @@ export module bioseq.io.compression.crc32;
 
 export namespace bioseq::io::compression {
 
-/// CRC-32/ISO-HDLC (gzip) fold coefficients — reflected mode. Values
-/// from `crc-fast-rust-main/src/crc32/consts.rs:489-513`. Index 0 is
-/// unused (1-based to match the Rust port's comments). Indices 7-8 are
-/// Barrett's `mu` and `P(x)`.
+/// CRC-32/ISO-HDLC (gzip) fold coefficients in reflected mode. Index 0 is
+/// unused; indices 7-8 are Barrett's `mu` and `P(x)`.
 inline constexpr std::array<std::uint64_t, 23> iso_hdlc_reflected_keys = {
     0x0000000000000000ULL,
     0x00000000ccaa009eULL, 0x00000001751997d0ULL, 0x000000014a7fe880ULL,

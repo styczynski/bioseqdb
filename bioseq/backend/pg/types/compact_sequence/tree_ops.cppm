@@ -26,7 +26,7 @@ import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 
 /* Exported inline tree factories may be emitted from any importing TU at
- * optimization level zero.  Keep the fault-injection seam in one out-of-line
+ * dna4_uint64 profile. Keep the fault-injection seam in one out-of-line
  * module-owned object so the self-test and the selected factory body cannot
  * arm and observe different anonymous-namespace copies. */
 export [[nodiscard, gnu::noinline]] std::array<std::uint8_t, 2u>&
@@ -1210,12 +1210,12 @@ namespace {
     pg_unreachable();
 }
 
-template<class Instance>
+template<class p_instance>
 [[nodiscard]] inline std::uint8_t packed_literal_rank_at(
     literal_piece const& literal,
     std::uint64_t physical_position) noexcept
 {
-    using traits = typename compact_sequence_range<Instance>::traits;
+    using traits = typename compact_sequence_range<p_instance>::traits;
     using unit = typename traits::storage_unit;
     unit packed{};
     std::memcpy(
@@ -1287,8 +1287,8 @@ template<class Instance>
         left.stored_type_params.alphabet_code,
         left.stored_type_params.storage_unit_byte_width,
         [&destination, &physical_first, &physical_second, &left,
-         &merged, combined_length, transform]<class Instance>() {
-            using traits = typename compact_sequence_range<Instance>::traits;
+         &merged, combined_length, transform]<class p_instance>() {
+            using traits = typename compact_sequence_range<p_instance>::traits;
             using unit = typename traits::storage_unit;
             const std::uint64_t unit_count = combined_length == 0u ? 0u
                 : combined_length / traits::letters_per_unit
@@ -1304,7 +1304,7 @@ template<class Instance>
                 destination, payload_bytes);
             using sink = bioseq::sequences::fixed_rank_pack_unit_sink<unit>;
             using writer_type = bioseq::sequences::checked_rank_pack_sink<
-                Instance,
+                p_instance,
                 bioseq::sequences::invalid_rank_policy::reject,
                 bioseq::sequences::pack_capacity_policy::fixed_span,
                 sink>;
@@ -1315,7 +1315,7 @@ template<class Instance>
             for (std::uint64_t position = physical_first.symbol_from;
                  position < physical_first.symbol_to; ++position) {
                 const auto status = writer.append_rank(
-                    packed_literal_rank_at<Instance>(
+                    packed_literal_rank_at<p_instance>(
                         physical_first, position));
                 if (status != bioseq::sequences::rank_pack_status::ok) {
                     literal_pack_failure(status);
@@ -1324,7 +1324,7 @@ template<class Instance>
             for (std::uint64_t position = physical_second.symbol_from;
                  position < physical_second.symbol_to; ++position) {
                 const auto status = writer.append_rank(
-                    packed_literal_rank_at<Instance>(
+                    packed_literal_rank_at<p_instance>(
                         physical_second, position));
                 if (status != bioseq::sequences::rank_pack_status::ok) {
                     literal_pack_failure(status);
@@ -1977,8 +1977,8 @@ namespace {
         result_type.alphabet_code,
         result_type.storage_unit_byte_width,
         [&destination, &bound_edge, result_type,
-         length, ascii, edge, ledger]<class Instance>() {
-            using traits = typename compact_sequence_range<Instance>::traits;
+         length, ascii, edge, ledger]<class p_instance>() {
+            using traits = typename compact_sequence_range<p_instance>::traits;
             using unit = typename traits::storage_unit;
             const std::uint64_t unit_count = length == 0u ? 0u
                 : length / traits::letters_per_unit
@@ -1998,7 +1998,7 @@ namespace {
             using sink = bioseq::sequences::
                 fixed_rank_pack_unit_sink<unit>;
             using writer_type = bioseq::sequences::checked_rank_pack_sink<
-                Instance,
+                p_instance,
                 bioseq::sequences::invalid_rank_policy::reject,
                 bioseq::sequences::pack_capacity_policy::fixed_span,
                 sink>;
@@ -2815,7 +2815,7 @@ validate_trusted_join_and_limits(
     /* A rotation may discard a destination-local branch after reusing its
      * children in the final tree.  Walk those explicitly recorded roots as a
      * second allocation closure.  Final-tree nodes may be shared by that
-     * historical closure; cached height descent proves that the bounded
+     * recorded closure; cached height descent proves that the bounded
      * immutable allocation graph is acyclic even when old roots overlap. */
     for (std::uint32_t retired_index = 0u;
          retired_index < destination.retired_join_root_count;
@@ -4049,7 +4049,7 @@ struct binding_output_audit {
   bool exact;
 };
 
-template<class Instance>
+template<class p_instance>
 [[nodiscard]] inline binding_output_audit
 audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
   if (!edge) return {.exact = true};
@@ -4058,9 +4058,9 @@ audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
     return {.exact = false};
   }
   if (edge.node->node_kind == piece_node::kind::branch) {
-    const auto left = audit_binding_output<Instance>(
+    const auto left = audit_binding_output<p_instance>(
         edge.node->payload.branch.left, expected_rank);
-    const auto right = audit_binding_output<Instance>(
+    const auto right = audit_binding_output<p_instance>(
         edge.node->payload.branch.right, expected_rank);
     return {
         .length = left.length + right.length,
@@ -4076,7 +4076,7 @@ audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
       && literal.validation == literal_validation::alphabet_validated;
   for (std::uint64_t position = literal.symbol_from;
        exact && position < literal.symbol_to; ++position) {
-    exact = packed_literal_rank_at<Instance>(literal, position)
+    exact = packed_literal_rank_at<p_instance>(literal, position)
         == expected_rank;
   }
   return {
@@ -4109,8 +4109,8 @@ audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
   binding_output_audit output{};
   bioseq::pg_types::seq::dispatch_instance(
       bound_type.alphabet_code, bound_type.storage_unit_byte_width,
-      [&output, tracked, expected_rank]<class Instance>() {
-        output = audit_binding_output<Instance>(tracked.edge, expected_rank);
+      [&output, tracked, expected_rank]<class p_instance>() {
+        output = audit_binding_output<p_instance>(tracked.edge, expected_rank);
       });
   const std::uint32_t inline_capacity = static_cast<std::uint32_t>(
       destination->retired_join_roots.size());
@@ -4857,7 +4857,7 @@ emit_rotation_regression_edge(piece_edge edge) {
       && live_piece_tree_arenas == arena_baseline;
 }
 
-/** Reproduce the transformed inward-heavy join that formerly recursed forever. */
+/** Exercise an inward-heavy transformed join without unbounded recursion. */
 [[nodiscard]] inline bool run_inward_transformed_join_regression() {
   const std::uint64_t arena_baseline = live_piece_tree_arenas;
   factory_failure_source_state source_state{};

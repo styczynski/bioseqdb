@@ -37,7 +37,8 @@ class SourceArchiveContractTests(unittest.TestCase):
         revision = "a" * 40
         expected_remote_source = (
             "/opt/bioseq-package-builder/workspace/"
-            f"source-{package_builder.SOURCE_ARCHIVE_REVISION}-{revision}"
+            f"source-{package_builder.SOURCE_ARCHIVE_IDENTITY}-revision-"
+            f"{package_builder.SOURCE_ARCHIVE_REVISION}-{revision}"
         )
         token = "1" * 32
         staging = expected_remote_source + f".tmp-{token}"
@@ -88,8 +89,11 @@ class SourceArchiveContractTests(unittest.TestCase):
         self.assertIn(f"staging={staging}", commands[2])
         self.assertIn(f"destination={expected_remote_source}", commands[2])
         expected_marker = hashlib.sha256(
-            f"{package_builder.SOURCE_ARCHIVE_REVISION}\0{revision}".encode(
-                "ascii")
+            (
+                f"{package_builder.SOURCE_ARCHIVE_IDENTITY}\n"
+                f"revision={package_builder.SOURCE_ARCHIVE_REVISION}\n"
+                f"source_revision={revision}\n"
+            ).encode("ascii")
         ).hexdigest()
         self.assertIn(f"marker={expected_marker}", commands[2])
         self.assertIn('mv -T -- "$staging" "$destination"', commands[2])
@@ -108,9 +112,10 @@ class SourceArchiveContractTests(unittest.TestCase):
         self.assertEqual(commands[4], f"rm -rf -- {staging}")
         self.assertTrue(all("main/papers" not in command for command in commands))
         self.assertEqual(
-            package_builder.SOURCE_ARCHIVE_REVISION,
-            "repository-root-sealed-papers-excluded-v3",
+            package_builder.SOURCE_ARCHIVE_IDENTITY,
+            "repository-root-sealed-papers-excluded",
         )
+        self.assertEqual(package_builder.SOURCE_ARCHIVE_REVISION, 3)
         self.assertEqual(
             package_builder._remote_committed_source_path(revision),
             expected_remote_source,
@@ -130,7 +135,9 @@ class SourceArchiveContractTests(unittest.TestCase):
             remote_source = package_builder.sync_committed_source(
                 builder, Path("/tmp/key"), "b" * 40)
 
-        self.assertIn(package_builder.SOURCE_ARCHIVE_REVISION, remote_source)
+        self.assertIn(package_builder.SOURCE_ARCHIVE_IDENTITY, remote_source)
+        self.assertIn(
+            f"revision-{package_builder.SOURCE_ARCHIVE_REVISION}", remote_source)
         self.assertEqual(ssh_run.call_count, 1)
         self.assertIn(".bioseq-source-marker", ssh_run.call_args.args[2])
         self.assertIn("flock -x 9", ssh_run.call_args.args[2])
@@ -238,7 +245,7 @@ class SourceArchiveContractTests(unittest.TestCase):
 
 
 class MatrixTests(unittest.TestCase):
-    def test_default_matrix_is_the_complete_doc0390_matrix(self) -> None:
+    def test_default_matrix_is_the_complete_current_matrix(self) -> None:
         matrix = package_builder.load_matrix()
         self.assertEqual(set(matrix.architectures), {"arm64", "x64"})
         self.assertEqual(
@@ -256,6 +263,73 @@ class MatrixTests(unittest.TestCase):
             },
         )
         self.assertEqual(matrix.postgresql_majors, (17,))
+
+    def test_matrix_rejects_legacy_wrong_revision_and_unknown_keys(self) -> None:
+        current = json.loads(package_builder.MATRIX_FILE.read_text(encoding="utf-8"))
+        mutations = {
+            "legacy-key": lambda value: value.update(
+                schema_version=value.pop("schema_revision")),
+            "wrong-revision": lambda value: value.update(schema_revision=2),
+            "boolean-revision": lambda value: value.update(schema_revision=True),
+            "unknown-root": lambda value: value.update(unexpected=True),
+            "unknown-row": lambda value: value["architectures"]["arm64"].update(
+                unexpected=True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                candidate = json.loads(json.dumps(current))
+                mutate(candidate)
+                path = Path(raw) / "matrix.json"
+                path.write_text(json.dumps(candidate), encoding="utf-8")
+                with self.assertRaises(package_builder.PackageBuilderError):
+                    package_builder.load_matrix(path)
+
+    def test_package_run_result_rejects_legacy_wrong_and_unknown_identity(self) -> None:
+        current = {
+            "schema_revision": 1,
+            "status": "success",
+            "run_id": "20260810T000000Z-aaaaaaaaaaaa",
+            "revision": "a" * 40,
+            "source_revision": "a" * 40,
+            "poetry_lock_sha256": "b" * 64,
+            "worker_generation": "python-poetry",
+            "worker_generation_revision": 1,
+            "completed_at": "2026-08-10T00:00:00+00:00",
+            "selection": {},
+            "bucket": "bucket",
+            "s3_prefix": "bioseq/packages",
+            "artifact_count": 0,
+            "python_environments": {},
+            "worker_units": {},
+            "worker_launch_acknowledged": {},
+            "manifests": {},
+            "builders_left_running": {},
+        }
+        self.assertEqual(
+            package_builder.require_current_package_run_result(
+                current, label="test package run result"),
+            current,
+        )
+        mutations = {
+            "legacy-key": lambda value: value.update(
+                schema_version=value.pop("schema_revision")),
+            "wrong-revision": lambda value: value.update(schema_revision=2),
+            "boolean-revision": lambda value: value.update(schema_revision=True),
+            "legacy-worker": lambda value: value.update(
+                worker_generation="python-poetry-v1"),
+            "wrong-worker-revision": lambda value: value.update(
+                worker_generation_revision=2),
+            "boolean-worker-revision": lambda value: value.update(
+                worker_generation_revision=True),
+            "unknown-root": lambda value: value.update(unexpected=True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(current))
+                mutate(candidate)
+                with self.assertRaises(package_builder.PackageBuilderError):
+                    package_builder.require_current_package_run_result(
+                        candidate, label="test package run result")
 
     def test_selection_rejects_unknown_or_duplicate_values(self) -> None:
         matrix = package_builder.load_matrix()
@@ -342,9 +416,14 @@ class InstalledRuntimeContractTests(unittest.TestCase):
             package_builder.REPOSITORY_ROOT
             / "bioseq_caching"
             / "pg"
-            / "index.cppm"
+            / "guc.cppm"
         ).read_text(encoding="utf-8")
-        self.assertIn('"bioseq.query_cache_optimisation_mode"', cache_source)
+        self.assertIn('"bioseq_cache.query_cache.mode"', cache_source)
+        self.assertIn(
+            '"bioseq_cache.query_cache.completed_result_ttl_ms"', cache_source
+        )
+        self.assertIn('"exact_query"', cache_source)
+        self.assertIn('"reusable_fragments"', cache_source)
         self.assertNotIn('MarkGUCPrefixReserved("bioseq")', cache_source)
 
 
@@ -727,7 +806,7 @@ class ConcurrencyTests(unittest.TestCase):
             with launch_lock:
                 self.assertEqual(set(launched), {"arm64", "x64"})
                 waited.append(handle.builder.architecture)
-            return {"schema_version": 1, "status": "success"}
+            return {"schema_revision": 1, "status": "success"}
 
         outputs = {
             "package_bucket_name": "bucket",
@@ -767,6 +846,9 @@ class ConcurrencyTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
+        self.assertEqual(result["schema_revision"], 1)
+        self.assertEqual(result["worker_generation"], "python-poetry")
+        self.assertEqual(result["worker_generation_revision"], 1)
         self.assertEqual(set(launched), {"arm64", "x64"})
         self.assertEqual(set(waited), {"arm64", "x64"})
 
@@ -784,8 +866,7 @@ class RemoteUnitCompletionTests(unittest.TestCase):
         )
         self.worker_argv = (
             f"{package_builder.REMOTE_POETRY_VENV_ROOT}/{'b' * 64}/bin/python",
-            "/opt/bioseq-package-builder/workspace/source-"
-            + "a" * 40
+            package_builder._remote_committed_source_path("a" * 40)
             + "/infra/packaging/build_packages.py",
             "--architecture",
             "arm64",
@@ -828,13 +909,32 @@ class RemoteUnitCompletionTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, json.dumps(manifest), ""),
         ]
 
-    def test_wait_accepts_observed_transient_unit_after_clean_unload(self) -> None:
-        manifest = {
-            "schema_version": 1,
-            "status": "success",
-            "architecture": "arm64",
-            "errors": [],
+    def manifest(
+        self, *, status: str = "success", errors: list[str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "schema_revision": 1,
+            "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
+            "architecture": self.builder.architecture,
+            "status": status,
+            "started_at": "2026-08-10T00:00:00Z",
+            "completed_at": "2026-08-10T00:01:00Z",
+            "requested": {"postgres": [17], "distros": ["debian_13"]},
+            "s3": {
+                "bucket": "bucket",
+                "region": "us-east-1",
+                "base_prefix": "bioseq/packages",
+            },
+            "signing": {"fingerprint": package_builder.EXPECTED_SIGNING_FINGERPRINT},
+            "source_revision": "a" * 40,
+            "poetry_lock_sha256": "b" * 64,
+            "python_environment": {"python": "3.12.3", "poetry": "1.8.5"},
+            "cells": [],
+            "errors": list(errors or []),
         }
+
+    def test_wait_accepts_observed_transient_unit_after_clean_unload(self) -> None:
+        manifest = self.manifest()
         statuses = [
             self.status(load="loaded", active="active", sub="running"),
             self.status(load="not-found", active="inactive", sub="dead"),
@@ -855,13 +955,25 @@ class RemoteUnitCompletionTests(unittest.TestCase):
         self.assertEqual(result, manifest)
         absent.assert_called_once_with(self.builder, Path("/tmp/key"), self.worker_argv)
 
-    def test_wait_rejects_not_found_before_any_authoritative_observation(self) -> None:
-        manifest = {
-            "schema_version": 1,
-            "status": "success",
-            "architecture": "arm64",
-            "errors": [],
+    def test_manifest_root_rejects_legacy_revision_and_unknown_keys(self) -> None:
+        current = self.manifest()
+        mutations = {
+            "legacy": lambda value: value.update(
+                schema_version=value.pop("schema_revision")),
+            "wrong": lambda value: value.update(schema_revision=2),
+            "boolean": lambda value: value.update(schema_revision=True),
+            "unknown": lambda value: value.update(unexpected=True),
         }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(current))
+                mutate(candidate)
+                with self.assertRaises(package_builder.PackageBuilderError):
+                    package_builder.require_current_package_manifest(
+                        candidate, label="test package manifest")
+
+    def test_wait_rejects_not_found_before_any_authoritative_observation(self) -> None:
+        manifest = self.manifest()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
             package_builder,
             "remote_unit_status",
@@ -882,12 +994,7 @@ class RemoteUnitCompletionTests(unittest.TestCase):
         absent.assert_not_called()
 
     def test_wait_rejects_vanished_unit_without_success_manifest(self) -> None:
-        manifest = {
-            "schema_version": 1,
-            "status": "failed",
-            "architecture": "arm64",
-            "errors": ["failed"],
-        }
+        manifest = self.manifest(status="failed", errors=["failed"])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
             package_builder,
             "remote_unit_status",
@@ -910,12 +1017,7 @@ class RemoteUnitCompletionTests(unittest.TestCase):
         absent.assert_not_called()
 
     def test_wait_rejects_vanished_unit_while_exact_worker_remains(self) -> None:
-        manifest = {
-            "schema_version": 1,
-            "status": "success",
-            "architecture": "arm64",
-            "errors": [],
-        }
+        manifest = self.manifest()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
             package_builder,
             "remote_unit_status",
@@ -1298,13 +1400,27 @@ class FinalizeRunTests(unittest.TestCase):
         }
         self.manifests = {
             name: {
-                "schema_version": 1,
+                "schema_revision": 1,
+                "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
                 "status": "success",
                 "architecture": name,
+                "started_at": "2026-08-10T00:00:00Z",
+                "completed_at": "2026-08-10T00:01:00Z",
+                "requested": {
+                    "postgres": list(self.matrix.postgresql_majors),
+                    "distros": list(self.matrix.distributions),
+                },
+                "s3": {
+                    "bucket": "bucket", "region": "us-east-1",
+                    "base_prefix": "bioseq/packages",
+                },
+                "signing": {
+                    "fingerprint": package_builder.EXPECTED_SIGNING_FINGERPRINT},
                 "errors": [],
                 "source_revision": self.revision,
                 "poetry_lock_sha256": self.lock_sha256,
                 "python_environment": {"python": "3.12.3", "poetry": "1.8.5"},
+                "cells": [],
             }
             for name in self.matrix.architectures
         }
@@ -1376,6 +1492,9 @@ class FinalizeRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
+        self.assertEqual(result["schema_revision"], 1)
+        self.assertEqual(result["worker_generation"], "python-poetry")
+        self.assertEqual(result["worker_generation_revision"], 1)
         self.assertEqual(result["finalizer_revision"], self.finalizer_revision)
         equivalent.assert_called_once_with(self.revision, self.finalizer_revision)
         self.assertTrue(result["finalized_from_completed_manifests"])
@@ -1576,7 +1695,8 @@ class AmiCacheTests(unittest.TestCase):
             **package_builder.CACHE_TAGS,
             "BuildArchitecture": architecture.name,
             "Architecture": architecture.aws_architecture,
-            "BootstrapSchema": package_builder.BOOTSTRAP_SCHEMA,
+            "BootstrapSchemaRevision": str(
+                package_builder.BOOTSTRAP_SCHEMA_REVISION),
             "PoetryLockSha256": self.lock_sha256,
             "CompleteMatrixFingerprint": fingerprint,
         }
@@ -1777,8 +1897,7 @@ class AmiCacheTests(unittest.TestCase):
 
         worker_argv = (
             f"{package_builder.REMOTE_POETRY_VENV_ROOT}/{self.lock_sha256}/bin/python",
-            "/opt/bioseq-package-builder/workspace/source-"
-            + "a" * 40
+            package_builder._remote_committed_source_path("a" * 40)
             + "/infra/packaging/build_packages.py",
         )
         events: list[str] = []
@@ -1945,9 +2064,11 @@ class ManifestTests(unittest.TestCase):
             f"bioseq-postgresql17_{package_builder.EXPECTED_PACKAGE_VERSION}_amd64.deb"
         )
         manifest = {
-            "schema_version": 1,
+            "schema_revision": 1,
             "status": "success",
             "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
+            "started_at": "2026-08-10T00:00:00Z",
+            "completed_at": "2026-08-10T00:01:00Z",
             "source_revision": revision,
             "poetry_lock_sha256": lock_sha256,
             "python_environment": python_environment.manifest_value(),
@@ -1979,7 +2100,7 @@ class ManifestTests(unittest.TestCase):
                         "six_artifacts": True,
                         "rpath_absent": True,
                         "compiler_runtime_safe": True,
-                        "optimization_level": 0,
+                        "template_flatten_profile": "dna4_uint64",
                         "binaries": [
                             {
                                 "path": "/tmp/bioseq.so",
@@ -2026,7 +2147,7 @@ class ManifestTests(unittest.TestCase):
                             "six_artifacts": True,
                             "rpath_absent": True,
                             "compiler_runtime_safe": True,
-                            "optimization_level": 0,
+                            "template_flatten_profile": "dna4_uint64",
                         },
                         "download_smoke": {
                             "passed": True,
@@ -2140,7 +2261,9 @@ class ManifestTests(unittest.TestCase):
             python_environment=python_environment,
         )
         self.assertEqual(len(uploads), 1)
-        manifest["cells"][0]["validation"]["optimization_level"] = 1
+        manifest["cells"][0]["validation"]["template_flatten_profile"] = (
+            "all_alphabets_uint64"
+        )
         with self.assertRaisesRegex(package_builder.PackageBuilderError, "failed validation"):
             package_builder.validate_manifest(
                 manifest,
@@ -2154,7 +2277,9 @@ class ManifestTests(unittest.TestCase):
                 poetry_lock_sha256=lock_sha256,
                 python_environment=python_environment,
             )
-        manifest["cells"][0]["validation"]["optimization_level"] = 0
+        manifest["cells"][0]["validation"]["template_flatten_profile"] = (
+            "dna4_uint64"
+        )
         manifest["cells"][0]["upload"]["download_smoke"]["fresh_container"] = False
         with self.assertRaisesRegex(package_builder.PackageBuilderError, "S3-download smoke"):
             package_builder.validate_manifest(

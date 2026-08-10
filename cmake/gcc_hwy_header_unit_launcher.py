@@ -188,7 +188,8 @@ def module_inventory_identity(
             "libstdc++ module inventory lacks std or std.compat"
         )
     material = (
-        "bioseq_gcc_module_source_closure/v1\n"
+        "bioseq_gcc_module_source_closure\n"
+        "revision=1\n"
         f"{metadata_sha256}\n"
         + "".join(f"{row}\n" for row in sorted(rows))
     )
@@ -544,9 +545,8 @@ def is_catch_test_translation_unit(args: list[str], cwd: Path) -> bool:
         source_name = source.name
         if (
             source_name.endswith("_test.cpp")
-            or "/integration_tests/test_" in source_text
-            or source_text.endswith("/integration_tests/common.cppm")
-            or source_text.endswith("/backend/common/testing.cppm")
+            or source_text.endswith("/tests/integration/support/index.cppm")
+            or source_text.endswith("/tests/support/test_event_listener.cpp")
         ):
             return True
     return False

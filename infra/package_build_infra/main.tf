@@ -348,7 +348,7 @@ locals {
       disk_swap_priority     = 10
       disk_swap_size_gb      = var.disk_swap_size_gb
       region                 = var.region
-      schema_version         = var.ami_schema_version
+      schema_revision        = var.ami_schema_revision
       signing_key_secret_arn = aws_secretsmanager_secret.omnipackage_signing_key.arn
       ssh_rt_priority        = 2
       target_user            = var.target_user
@@ -397,7 +397,7 @@ resource "aws_instance" "builder" {
     Component           = "package-build-machine"
     BuildArchitecture   = each.key
     Architecture        = each.value.aws_architecture
-    AmiSchemaVersion    = var.ami_schema_version
+    AmiSchemaRevision   = var.ami_schema_revision
     ProtectedFromDelete = "true"
   }
 
@@ -406,7 +406,7 @@ resource "aws_instance" "builder" {
     Component           = "package-build-machine"
     BuildArchitecture   = each.key
     Architecture        = each.value.aws_architecture
-    AmiSchemaVersion    = var.ami_schema_version
+    AmiSchemaRevision   = var.ami_schema_revision
     ProtectedFromDelete = "true"
     Lifecycle           = "persistent-build-cache"
   }

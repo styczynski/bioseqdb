@@ -15,16 +15,16 @@ export module bioseq.instrumentation.configuration;
 export namespace bioseq::instrumentation {
 
 /** @brief Required static interface for a profiling feature configuration. */
-template<typename configuration_type>
+template<typename p_configuration>
 concept profiling_configuration = requires {
-    { configuration_type::enable_profiling }      -> std::convertible_to<bool>;
-    { configuration_type::enable_counters }       -> std::convertible_to<bool>;
-    { configuration_type::enable_tracing }        -> std::convertible_to<bool>;
-    { configuration_type::enable_sampling }       -> std::convertible_to<bool>;
-    { configuration_type::enable_arena_tracking } -> std::convertible_to<bool>;
-    { configuration_type::trace_capacity }        -> std::convertible_to<unsigned>;
-    { configuration_type::aggregate_block_size }  -> std::convertible_to<unsigned>;
-} && std::is_trivially_default_constructible_v<configuration_type>;
+    { p_configuration::enable_profiling }      -> std::convertible_to<bool>;
+    { p_configuration::enable_counters }       -> std::convertible_to<bool>;
+    { p_configuration::enable_tracing }        -> std::convertible_to<bool>;
+    { p_configuration::enable_sampling }       -> std::convertible_to<bool>;
+    { p_configuration::enable_arena_tracking } -> std::convertible_to<bool>;
+    { p_configuration::trace_capacity }        -> std::convertible_to<unsigned>;
+    { p_configuration::aggregate_block_size }  -> std::convertible_to<unsigned>;
+} && std::is_trivially_default_constructible_v<p_configuration>;
 
 /** @brief Configuration whose hot-path instrumentation compiles away. */
 struct profiling_disabled_configuration {

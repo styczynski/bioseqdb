@@ -94,7 +94,7 @@ TF_DIR = HERE / "testing_infra"
 APPLY_STATE_FILE = TF_DIR / ".last-apply.json"
 
 CACHE_COMPONENT = "benchmark-machine-cache"
-CACHE_NAME_PREFIX = "bioseq-bench-aws-cache"
+CACHE_NAME_PREFIX = "bioseq-benchmark-aws-cache"
 CACHE_TAGS = {
     "Project": "bioseq",
     "Component": CACHE_COMPONENT,

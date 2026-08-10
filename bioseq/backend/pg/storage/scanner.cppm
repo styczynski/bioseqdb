@@ -2,20 +2,19 @@
  *
  * storage/scanner.cppm
  *
- * DOC0264 §7 — `postgres_sequence_scanner<StdcInstance>`: the production
- * Postgres-backed scanner satisfying Phase B's `fragmented_sequence_scanner`
- * concept.
+ * `postgres_sequence_scanner<p_sequence_instance>` is the production PostgreSQL-
+ * backed implementation of the `fragmented_sequence_scanner` concept.
  *
- * The scanner reads ONE fragment per sub-table row via Phase A's
- * `seq_caches` + `read_column_row_by_number`, memcpys exactly
+ * The scanner reads one fragment per sub-table row through `seq_caches` and
+ * `read_column_row_by_number`, copies
  * `fragment_storage_units * sizeof(storage_unit)` bytes into a slot in a
- * per-scanner `MemoryContext`, and exposes the bytes through Phase B's
- * `load_fragment(n)` API. Eviction (`release_fragment`) recycles one of the
+ * per-scanner `MemoryContext`, and exposes the bytes through `load_fragment`.
+ * Eviction (`release_fragment`) recycles one of the
  * fixed slot buffers; checked success finalization deletes the whole context.
  *
  * RSS per scanner is bounded at `fragments_buffer_capacity *
  * fragment_storage_units * sizeof(storage_unit)` (~16 × 8 KiB = 128 KiB on
- * dna4/uint64) irrespective of sequence length (DOC0264 R10/R11).
+ * dna4/uint64) irrespective of sequence length.
  *
  *-------------------------------------------------------------------------
  */
@@ -51,9 +50,9 @@ import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.common.seqan_adapter;              // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager;             // DOC0264 §7.9 — seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;     // DOC0263 §3.4 — is_valid/active_sequence_scanner concept
-import bioseq.storage.lazy_sequence;        // DOC0264 §9.1 — lazy_sequence + with_postgres_lazy_sequence
+import bioseq.postgres.storage.manager;     // seq_caches + open_sub_table_for_locator
+import bioseq.storage.scanner;              // scanner concepts
+import bioseq.storage.lazy_sequence;        // lazy_sequence + with_postgres_lazy_sequence
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
@@ -64,7 +63,7 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io;            // begin_column_read/read_column_row_by_number
 import bioseq.parallelism.pool;
 
-static_assert(__cplusplus >= 202302L, "DOC0264 requires C++23-or-later");
+static_assert(__cplusplus >= 202302L, "bioseq requires C++23-or-later");
 
 export namespace bioseq::storage {
 
@@ -111,7 +110,7 @@ inline void inject_scanner_pg_leaf_failure(scanner_leaf_failure point) {
 #endif
 
 /**
- * Compatibility trampoline retained for the generic packed-range caller.
+ * Adapter for the generic packed-range caller.
  * Every PostgreSQL leaf used by load_fragment is now converted locally with
  * bioseq::postgres::support::invoke_pg_as_cpp, so this function must not place a broad setjmp
  * boundary around a callback that refers to caller-owned vectors.
@@ -131,27 +130,26 @@ void scanner_pg_run_fragment_reads_with_error_cleanup(
     }
 }
 
-// DOC0264 §7 — `postgres_sequence_scanner<S>`.
-//
 // Production fragment-streaming scanner. Two construction modes:
 //
 //   1. PG-backed (production target path): constructed from a locator + seq_caches.
-//      Reads one fragment per sub-table row via Phase A's `seq_caches` +
+//      Reads one fragment per sub-table row via `seq_caches` +
 //      `read_column_row_by_number`, memcpys the bytes into a slot in a per-scanner
-//      MemoryContext, exposes them through Phase B's `load_fragment(n)` API.
+//      MemoryContext, and exposes them through `load_fragment(n)`.
 //      `release_fragment` pfrees the slot.
 //
 //   2. In-memory (query / inline target path): constructed from a span over an
-//      existing `compact_sequence_range<R>`'s packed storage units. `load_fragment(n)`
+//      existing `compact_sequence_range<p_sequence_config>`'s packed storage
+//      units. `load_fragment(n)`
 //      returns a subspan with NO allocation, NO MemoryContext. `release_fragment`
 //      is a no-op (caller owns the bytes). This lets a query literal (always inline)
 //      share the same scanner type as a PG-backed target without doubling the
-//      dispatch_buffer template tree (DOC0274).
-template <class StdcInstance>
+//      dispatch_buffer template tree.
+template <class p_sequence_instance>
 struct postgres_sequence_scanner final {
-    using storage_unit   = typename StdcInstance::storage_unit;
+    using storage_unit   = typename p_sequence_instance::storage_unit;
     using base_container = std::span<const storage_unit>;
-    using traits         = typename compact_sequence_range<StdcInstance>::traits;
+    using traits         = typename compact_sequence_range<p_sequence_instance>::traits;
 
     static constexpr std::size_t fragment_storage_units =
         SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
@@ -214,8 +212,8 @@ struct postgres_sequence_scanner final {
     /**
      * Execute a fragment read behind a PostgreSQL error boundary.
      *
-     * The cleanup callback is retained only for source compatibility and is
-     * no longer called. PostgreSQL leaves inside load_fragment are converted
+     * The cleanup callback remains part of the caller signature but is no
+     * longer called. PostgreSQL leaves inside load_fragment are converted
      * to C++ exceptions before they can cross the caller, so ordinary C++
      * unwinding owns destruction of caller materialization state.
      */
@@ -355,10 +353,9 @@ struct postgres_sequence_scanner final {
     [[nodiscard]] [[gnu::always_inline]]
     bool is_in_memory_mode() const noexcept { return mctx_ == nullptr; }
 
-    /// Prove that this non-forgeable scanner instance was constructed for one
-    /// exact PostgreSQL source binding.  No raw identity field is exposed: an
-    /// administrative writer may only ask whether all relation, snapshot and
-    /// locator axes agree with its independently derived source proof.
+    /// Validate that this scanner was constructed for the supplied PostgreSQL
+    /// source binding. No raw identity field is exposed: an administrative
+    /// writer can only compare the relation, snapshot, and locator axes.
     [[nodiscard]] [[gnu::always_inline]]
     bool matches_pg_binding(
             Oid db_oid,
@@ -415,7 +412,7 @@ private:
     Snapshot                                             snapshot_;
     seq_caches*                                          caches_;
     mutable MemoryContext                                mctx_;
-    // DOC0274 — in-memory mode backing span. Empty in PG-backed mode.
+    // In-memory backing span. Empty in PostgreSQL-backed mode.
     base_container                                       in_memory_data_;
     // A PostgreSQL ERROR may leave a cached column reader or fragment slot
     // partially mutated. Never reuse this scanner in the failed statement;
@@ -423,7 +420,7 @@ private:
     mutable bool                                         poisoned_ = false;
     // Fixed-size slot ring matching the wrapper's
     // fragments_buffer_capacity (16). LRU-ish eviction in
-    // allocate_slot_for_; the Phase-B wrapper typically drives
+    // allocate_slot_for_; the fragmented-sequence wrapper typically drives
     // release_fragment so the ring is rarely full. Used only in PG-backed mode.
     mutable std::array<slot_t, 16>                       slots_{};
 
@@ -467,16 +464,18 @@ private:
     }
 };
 
-template <class StdcInstance>
+template <class p_sequence_instance>
 [[gnu::always_inline]]
-inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t fragment_no) const
+inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
+    std::size_t fragment_no) const
     -> base_container
 {
     if (poisoned_) {
         bioseq::postgres::support::invoke_pg_as_cpp([] {
             ereport(ERROR,
                 (errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
-                 errmsg("postgres_sequence_scanner cannot be reused after a PostgreSQL read error")));
+                 errmsg("postgres_sequence_scanner cannot be reused after a "
+                        "PostgreSQL read error")));
         });
     }
     // Each PG leaf below throws through the ordinary C++ ABI.  Mark the
@@ -491,7 +490,7 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
         });
     }
 
-    // DOC0274 — in-memory mode: subspan the caller-owned span, no allocation.
+    // In-memory mode: subspan the caller-owned span without allocation.
     if (is_in_memory_mode()) {
         const std::size_t start = fragment_no * fragment_storage_units;
         if (start >= in_memory_data_.size()) {
@@ -513,7 +512,7 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
         return base_container(s->bytes, fragment_storage_units);
     }
 
-    // DOC0276 — COLD fragment read: a cache miss that hits the columnar storage.
+    // Cold fragment read: a cache miss that reaches columnar storage.
     // This is the per-fragment work that dominates a large scanner_pg target
     // scan (the native aligner driving it is NO_POSTGRES and cannot itself poll
     // for interrupts). Honour cancellation here so a long scan responds to
@@ -544,7 +543,7 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
         : mctx_;
     const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
-    // Resolve the sub-table relation + read state via Phase A's cache.  The
+    // Resolve the sub-table relation and reader through the source cache. The
     // system-catalog scan allocates its SysScanDesc in CurrentMemoryContext,
     // so keep the complete lookup in the same stable ownership domain as the
     // cached column reader.  invoke_pg_as_cpp restores the caller's context
@@ -566,10 +565,10 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
     seq_caches::entry& entry = caches_->entries[cache_key];
     entry.rel = shard;
 
-    // Compatibility is keyed by the caller-owned source snapshot. The
+    // Reader reuse is keyed by the caller-owned source snapshot. The
     // column reader may replace its own snapshot pointer with a refreshed
     // registered copy after flushing, so comparing read_state->snapshot would
-    // incorrectly discard a compatible cached reader.
+    // incorrectly discard a reader bound to the same source snapshot.
     if (entry.read_state != nullptr
         && entry.read_snapshot_source != snapshot_) {
         bioseq::postgres::support::invoke_pg_as_cpp([read_resource_owner, &entry] {
@@ -694,7 +693,7 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
         * traits::letters_per_unit;
     constexpr std::uint8_t expected_alphabet =
         pgseq_supported_alphabets::template index_of<
-            typename StdcInstance::alphabet_type>();
+            typename p_sequence_instance::alphabet_type>();
     const bool is_last_fragment = fragment_no + 1u == fragment_count_;
     const std::size_t raw_payload_bytes =
         static_cast<std::size_t>(VARSIZE(raw)) - bioseq::pg_types::seq::header_bytes();
@@ -727,7 +726,8 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("postgres_sequence_scanner fragment metadata is corrupt"),
                      errdetail(
-                        "row=%llu payload_bytes=%zu last_fragment=%s expected_padding=%zu expected_fragment_bp=%llu",
+                        "row=%llu payload_bytes=%zu last_fragment=%s "
+                        "expected_padding=%zu expected_fragment_bp=%llu",
                         static_cast<unsigned long long>(row_no),
                         raw_payload_bytes,
                         is_last_fragment ? "true" : "false",
@@ -739,8 +739,8 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
     slot_t* slot = allocate_slot_for_(fragment_no);
     storage_unit* dst = slot->bytes;
     if (dst == nullptr) {
-        // palloc0 so the trailing-bytes-of-last-fragment region the wrapper
-        // sees is uniformly zero (DOC0264 §7.3 / consolidated-review N20).
+        // palloc0 so the wrapper observes zeroes in the trailing region of the
+        // last fragment.
         dst = bioseq::postgres::support::invoke_pg_as_cpp([&] {
             MemoryContext previous = MemoryContextSwitchTo(mctx_);
 #ifdef BIOSEQ_TEST_INDEXES
@@ -768,8 +768,8 @@ inline auto postgres_sequence_scanner<StdcInstance>::load_fragment(std::size_t f
     return base_container(dst, fragment_storage_units);
 }
 
-template <class StdcInstance>
-inline void postgres_sequence_scanner<StdcInstance>::copy_packed_to(
+template <class p_sequence_instance>
+inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
     std::span<storage_unit> destination) const
 {
     const std::size_t required_units = static_cast<std::size_t>(storage_unit_count());
@@ -803,7 +803,8 @@ inline void postgres_sequence_scanner<StdcInstance>::copy_packed_to(
         bioseq::postgres::support::invoke_pg_as_cpp([] {
             ereport(ERROR,
                 (errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
-                 errmsg("postgres_sequence_scanner cannot be reused after a PostgreSQL read error")));
+                 errmsg("postgres_sequence_scanner cannot be reused after a "
+                        "PostgreSQL read error")));
         });
     }
 
@@ -991,12 +992,12 @@ inline void postgres_sequence_scanner<StdcInstance>::copy_packed_to(
     poisoned_ = false;
 }
 
-template <class StdcInstance>
+template <class p_sequence_instance>
 [[gnu::always_inline]]
-inline void postgres_sequence_scanner<StdcInstance>::release_fragment(
+inline void postgres_sequence_scanner<p_sequence_instance>::release_fragment(
     std::size_t fragment_no) const noexcept
 {
-    // DOC0274 — in-memory mode: no slot ownership, no-op release.
+    // In-memory mode has no slot ownership.
     if (is_in_memory_mode()) {
         return;
     }
@@ -1011,8 +1012,8 @@ inline void postgres_sequence_scanner<StdcInstance>::release_fragment(
     }
 }
 
-template <class StdcInstance>
-inline void postgres_sequence_scanner<StdcInstance>::finish_pg_resources_as_cpp() const {
+template <class p_sequence_instance>
+inline void postgres_sequence_scanner<p_sequence_instance>::finish_pg_resources_as_cpp() const {
     MemoryContext context = std::exchange(mctx_, nullptr);
     if (context == nullptr) {
         return;
@@ -1040,8 +1041,9 @@ inline void postgres_sequence_scanner<StdcInstance>::finish_pg_resources_as_cpp(
     });
 }
 
-template <class StdcInstance>
-inline void postgres_sequence_scanner<StdcInstance>::abandon_pg_resources_noexcept() const noexcept {
+template <class p_sequence_instance>
+inline void postgres_sequence_scanner<
+    p_sequence_instance>::abandon_pg_resources_noexcept() const noexcept {
     // No PG calls here.  Memory contexts are children of the caller-provided
     // statement/transaction context and PostgreSQL will reclaim them.
     mctx_ = nullptr;
@@ -1052,28 +1054,26 @@ inline void postgres_sequence_scanner<StdcInstance>::abandon_pg_resources_noexce
     poisoned_ = true;
 }
 
-// Concept conformance checks — fail at module load if Phase B's concept
-// changes without us catching it.
+// Fail at module load if scanner concept conformance changes.
 static_assert(sequence_scanner<postgres_sequence_scanner<
     compact_sequence_stdc_instance<bioseq::pg_types::seq, seq::dna4, std::size_t{8}>>>);
 static_assert(fragmented_sequence_scanner<postgres_sequence_scanner<
     compact_sequence_stdc_instance<bioseq::pg_types::seq, seq::dna4, std::size_t{8}>>>);
 
 /**
- * Immutable proof of the exact PostgreSQL relation, locator and lifetime
- * resources from which one callback-scoped lazy facade may be constructed.
+ * Immutable PostgreSQL relation, locator, and lifetime resources from which
+ * one callback-scoped lazy facade may be constructed.
  *
  * Keeping this value separate from the facade lets administrative writers
- * prove publication identity without reaching through the facade to its
- * concrete scanner.  Construction and validation remain in this module; a
- * callback receives this value only when it independently needs source proof.
+ * validate publication inputs without reaching through the facade to its
+ * concrete scanner. Construction and validation remain in this module.
  */
-template <class R>
+template <class p_sequence_config>
 class postgres_lazy_sequence_binding final {
 public:
-    using sequence_config = R;
+    using sequence_config = p_sequence_config;
     using alphabet_type =
-        typename compact_sequence_range<R>::traits::alphabet_type;
+        typename compact_sequence_range<p_sequence_config>::traits::alphabet_type;
 
     postgres_lazy_sequence_binding(
         Oid db_oid,
@@ -1131,26 +1131,26 @@ public:
     [[nodiscard]] static constexpr std::uint8_t
     storage_unit_byte_width() noexcept {
         return static_cast<std::uint8_t>(
-            sizeof(typename compact_sequence_range<R>::traits::storage_unit));
+            sizeof(typename compact_sequence_range<p_sequence_config>::traits::storage_unit));
     }
     [[nodiscard]] static constexpr std::uint64_t
     fragment_bp_capacity() noexcept {
         return static_cast<std::uint64_t>(
-            postgres_sequence_scanner<R>::fragment_storage_units)
+            postgres_sequence_scanner<p_sequence_config>::fragment_storage_units)
             * static_cast<std::uint64_t>(
-                compact_sequence_range<R>::traits::letters_per_unit);
+                compact_sequence_range<p_sequence_config>::traits::letters_per_unit);
     }
     [[nodiscard]] static constexpr std::size_t
     expected_last_fragment_padding(const sequence_locator& locator) noexcept {
         constexpr std::uint64_t letters_per_unit =
-            compact_sequence_range<R>::traits::letters_per_unit;
+            compact_sequence_range<p_sequence_config>::traits::letters_per_unit;
         const std::uint64_t remainder =
             locator.logical_length % letters_per_unit;
         return static_cast<std::size_t>(
             remainder == 0u ? 0u : letters_per_unit - remainder);
     }
 
-    [[nodiscard]] bool exact_source_match(
+    [[nodiscard]] bool matches_same_source(
             const postgres_lazy_sequence_binding& other) const noexcept {
         return db_oid_ == other.db_oid_
             && tablespace_oid_ == other.tablespace_oid_
@@ -1177,22 +1177,22 @@ private:
 
 namespace lazy_postgres_detail {
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] constexpr compact_sequence_stdc_type_params
 binding_type_params() noexcept {
     return {
-        .alphabet_code = postgres_lazy_sequence_binding<R>::alphabet_code(),
+        .alphabet_code = postgres_lazy_sequence_binding<p_sequence_config>::alphabet_code(),
         .storage_unit_byte_width =
-            postgres_lazy_sequence_binding<R>::storage_unit_byte_width(),
+            postgres_lazy_sequence_binding<p_sequence_config>::storage_unit_byte_width(),
     };
 }
 
-template <class R>
-void validate_binding(const postgres_lazy_sequence_binding<R>& binding) {
-    using traits = typename compact_sequence_range<R>::traits;
+template <class p_sequence_config>
+void validate_binding(const postgres_lazy_sequence_binding<p_sequence_config>& binding) {
+    using traits = typename compact_sequence_range<p_sequence_config>::traits;
     constexpr std::uint64_t letters_per_unit = traits::letters_per_unit;
     constexpr std::uint64_t fragment_units =
-        postgres_sequence_scanner<R>::fragment_storage_units;
+        postgres_sequence_scanner<p_sequence_config>::fragment_storage_units;
     const auto& locator = binding.locator();
     const std::uint64_t packed_units =
         locator.logical_length / letters_per_unit
@@ -1227,13 +1227,13 @@ void validate_binding(const postgres_lazy_sequence_binding<R>& binding) {
     }
 }
 
-template <class R>
+template <class p_sequence_config>
 struct call_state final {
-    using scanner_type = postgres_sequence_scanner<R>;
-    using sequence_type = lazy_sequence<R, scanner_type>;
+    using scanner_type = postgres_sequence_scanner<p_sequence_config>;
+    using sequence_type = lazy_sequence<p_sequence_config, scanner_type>;
 
     explicit call_state(
-            const postgres_lazy_sequence_binding<R>& binding,
+            const postgres_lazy_sequence_binding<p_sequence_config>& binding,
             MemoryContext session_context)
         : sequence(scanner_type{
               binding.db_oid(), binding.tablespace_oid(),
@@ -1258,53 +1258,52 @@ struct call_state final {
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* The direct PostgreSQL binding is itself a source-backed facade.  Its
- * existing lazy adapter predates the PG facade diagnostics, so proxy only the
- * test build's backend table to attest the same read/resident/bulk-stream
+/* The direct PostgreSQL binding is itself a source-backed facade. Proxy the
+ * test build's backend table to record the same read/resident/bulk-stream
  * operations without changing the scanner or algorithm surface. */
-template <bool IsReversed, bool WriteReversed, class R>
+template <bool p_is_reversed, bool p_write_reversed, class p_sequence_config>
 [[nodiscard]] const std::uint8_t* observed_call_state_read_at(
         void const* opaque,
         sequence_size_t from,
         std::size_t count,
         std::span<std::uint8_t> output) {
-    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     note_pg_sequence_facade_source_stream_callback();
     const auto view = make_lazy_sequence_view(state.sequence);
     const auto cursor = view.template rank_reader<
-        IsReversed, WriteReversed, std::uint8_t, 2>();
+        p_is_reversed, p_write_reversed, std::uint8_t, 2>();
     return cursor.read_at(from, count, output);
 }
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] sequence_size_t observed_call_state_bp_size(
         void const* opaque) noexcept {
-    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     return state.sequence.bp_size();
 }
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] auto observed_call_state_resident_probe(
         void const* opaque,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width) noexcept
     -> typename lazy_sequence_view<
-        typename postgres_lazy_sequence_binding<R>::alphabet_type>::
+        typename postgres_lazy_sequence_binding<p_sequence_config>::alphabet_type>::
         resident_packed_result {
-    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     note_pg_sequence_facade_source_resident_probe();
     return make_lazy_sequence_view(state.sequence).try_resident_packed(
         from, to, requested_width);
 }
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_copy_packed_sequence(
         void const* opaque,
         void* destination,
         std::size_t unit_count,
         std::uint8_t requested_width) {
-    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     const std::size_t destination_bytes =
         requested_width == 0u
             || unit_count > (std::numeric_limits<std::size_t>::max)()
@@ -1319,53 +1318,53 @@ template <class R>
         unit_count, requested_width);
 }
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_worker_shareable(
         void const* opaque) noexcept {
-    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     return make_lazy_sequence_view(state.sequence).worker_shareable();
 }
 
-template <class R>
+template <class p_sequence_config>
 struct observed_call_state_adapter final {
     using alphabet_type =
-        typename postgres_lazy_sequence_binding<R>::alphabet_type;
+        typename postgres_lazy_sequence_binding<p_sequence_config>::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
     static inline const typename view_type::backend_ops ops{
-        .bp_size = &observed_call_state_bp_size<R>,
+        .bp_size = &observed_call_state_bp_size<p_sequence_config>,
         .read_at = {
-            &observed_call_state_read_at<false, false, R>,
-            &observed_call_state_read_at<false, true, R>,
-            &observed_call_state_read_at<true, false, R>,
-            &observed_call_state_read_at<true, true, R>,
+            &observed_call_state_read_at<false, false, p_sequence_config>,
+            &observed_call_state_read_at<false, true, p_sequence_config>,
+            &observed_call_state_read_at<true, false, p_sequence_config>,
+            &observed_call_state_read_at<true, true, p_sequence_config>,
         },
-        .try_resident_packed = &observed_call_state_resident_probe<R>,
-        .copy_packed_sequence = &observed_call_state_copy_packed_sequence<R>,
-        .worker_shareable = &observed_call_state_worker_shareable<R>,
+        .try_resident_packed = &observed_call_state_resident_probe<p_sequence_config>,
+        .copy_packed_sequence = &observed_call_state_copy_packed_sequence<p_sequence_config>,
+        .worker_shareable = &observed_call_state_worker_shareable<p_sequence_config>,
     };
 };
 
-template <class R>
-[[nodiscard]] auto observed_call_state_view(call_state<R> const& state) {
-    using adapter = observed_call_state_adapter<R>;
+template <class p_sequence_config>
+[[nodiscard]] auto observed_call_state_view(call_state<p_sequence_config> const& state) {
+    using adapter = observed_call_state_adapter<p_sequence_config>;
     return typename adapter::view_type{
         std::addressof(state), std::addressof(adapter::ops)};
 }
 #endif
 
-template <class R>
+template <class p_sequence_config>
 struct call_state_factory_argument final {
-    const postgres_lazy_sequence_binding<R>* binding;
+    const postgres_lazy_sequence_binding<p_sequence_config>* binding;
 };
 
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] void* create_call_state(
         void* opaque,
         MemoryContext payload_context) {
     const auto& factory =
-        *static_cast<const call_state_factory_argument<R>*>(opaque);
-    call_state<R>* state = nullptr;
-    ErrorData* exact_error = nullptr;
+        *static_cast<const call_state_factory_argument<p_sequence_config>*>(opaque);
+    call_state<p_sequence_config>* state = nullptr;
+    ErrorData* pg_error_data = nullptr;
     bool cpp_error = false;
     bool unknown_cpp_error = false;
     char detail[512] = "std::exception without detail";
@@ -1373,12 +1372,12 @@ template <class R>
         validate_binding(*factory.binding);
         void* storage = bioseq::postgres::support::invoke_pg_as_cpp([payload_context] {
             return MemoryContextAllocZero(
-                payload_context, sizeof(call_state<R>));
+                payload_context, sizeof(call_state<p_sequence_config>));
         });
-        state = ::new (storage) call_state<R>(
+        state = ::new (storage) call_state<p_sequence_config>(
             *factory.binding, payload_context);
     } catch (bioseq::postgres::support::postgres_error& error) {
-        exact_error = error.release_error_data();
+        pg_error_data = error.release_error_data();
     } catch (const std::exception& error) {
         strlcpy(
             detail,
@@ -1389,8 +1388,8 @@ template <class R>
     } catch (...) {
         unknown_cpp_error = true;
     }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
+    if (pg_error_data != nullptr) {
+        ReThrowError(pg_error_data);
     }
     if (cpp_error) {
         ereport(ERROR,
@@ -1407,40 +1406,41 @@ template <class R>
     return state;
 }
 
-template <class R>
+template <class p_sequence_config>
 void finish_call_state(void* opaque, bool) {
-    auto* state = static_cast<call_state<R>*>(opaque);
+    auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
     state->sequence.scanner().finish_pg_resources_as_cpp();
     state->~call_state();
 }
 
-template <class R>
+template <class p_sequence_config>
 void abort_call_state_noexcept(void* opaque) noexcept {
-    auto* state = static_cast<call_state<R>*>(opaque);
+    auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
     state->sequence.scanner().abandon_pg_resources_noexcept();
     state->~call_state();
 }
 
-template <class R>
-[[nodiscard]] call_state<R>* register_call_state(
+template <class p_sequence_config>
+[[nodiscard]] call_state<p_sequence_config>* register_call_state(
         pg_sequence_read_session& session,
-        const postgres_lazy_sequence_binding<R>& binding) {
+        const postgres_lazy_sequence_binding<p_sequence_config>& binding) {
     const pg_sequence_read_entry_key key{
         .source = {
             .control_address = reinterpret_cast<std::uintptr_t>(&binding),
             .generation = 0u,
         },
         .locator = binding.locator(),
-        .stored_type_params = binding_type_params<R>(),
+        .stored_type_params = binding_type_params<p_sequence_config>(),
     };
-    call_state_factory_argument<R> factory{.binding = &binding};
-    return static_cast<call_state<R>*>(find_or_create_pg_sequence_read_entry(
-        session, key, &factory, &create_call_state<R>, &finish_call_state<R>,
-        &abort_call_state_noexcept<R>));
+    call_state_factory_argument<p_sequence_config> factory{.binding = &binding};
+    return static_cast<call_state<p_sequence_config>*>(find_or_create_pg_sequence_read_entry(
+        session, key, &factory, &create_call_state<p_sequence_config>,
+        &finish_call_state<p_sequence_config>,
+        &abort_call_state_noexcept<p_sequence_config>));
 }
 
-template <class Fn>
-void with_session(MemoryContext parent_mctx, Fn&& fn) {
+template <class p_function>
+void with_session(MemoryContext parent_mctx, p_function&& fn) {
     std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
@@ -1448,7 +1448,7 @@ void with_session(MemoryContext parent_mctx, Fn&& fn) {
         auto* local_session = begin_pg_sequence_read_session(parent_mctx);
         session = local_session;
         try {
-            std::forward<Fn>(fn)(*local_session);
+            std::forward<p_function>(fn)(*local_session);
             finish_pg_sequence_read_session(local_session, true);
         } catch (...) {
             callback_failure = std::current_exception();
@@ -1472,10 +1472,10 @@ void with_session(MemoryContext parent_mctx, Fn&& fn) {
 } // namespace lazy_postgres_detail
 
 /** Invoke one callback with only the canonical alphabet-specialized facade. */
-template <class R, class Fn>
+template <class p_sequence_config, class p_function>
 inline void with_postgres_lazy_sequence(
-        postgres_lazy_sequence_binding<R> binding,
-        Fn&& fn) {
+        postgres_lazy_sequence_binding<p_sequence_config> binding,
+        p_function&& fn) {
     lazy_postgres_detail::with_session(
         binding.parent_mctx(),
         [&binding, &fn](pg_sequence_read_session& session) {
@@ -1489,26 +1489,26 @@ inline void with_postgres_lazy_sequence(
                 });
             }
 #ifdef BIOSEQ_TEST_INDEXES
-            std::forward<Fn>(fn)(observed_call_state_view(*state));
+            std::forward<p_function>(fn)(observed_call_state_view(*state));
 #else
-            std::forward<Fn>(fn)(make_lazy_sequence_view(state->sequence));
+            std::forward<p_function>(fn)(make_lazy_sequence_view(state->sequence));
 #endif
         });
 }
 
 /**
- * Invoke a two-input callback under one read session.  Exact repeated bindings
+ * Invoke a two-input callback under one read session. Identical bindings
  * reuse one concrete call state, so both facades share fragment-cache state.
  */
-template <class LeftR, class RightR, class Fn>
+template <class p_left_sequence_config, class p_right_sequence_config, class p_function>
 inline void with_postgres_lazy_sequence(
-        postgres_lazy_sequence_binding<LeftR> left_binding,
-        postgres_lazy_sequence_binding<RightR> right_binding,
-        Fn&& fn) {
+        postgres_lazy_sequence_binding<p_left_sequence_config> left_binding,
+        postgres_lazy_sequence_binding<p_right_sequence_config> right_binding,
+        p_function&& fn) {
     using left_alphabet =
-        typename postgres_lazy_sequence_binding<LeftR>::alphabet_type;
+        typename postgres_lazy_sequence_binding<p_left_sequence_config>::alphabet_type;
     using right_alphabet =
-        typename postgres_lazy_sequence_binding<RightR>::alphabet_type;
+        typename postgres_lazy_sequence_binding<p_right_sequence_config>::alphabet_type;
     static_assert(std::is_same_v<left_alphabet, right_alphabet>,
                   "two lazy PostgreSQL inputs must share one alphabet");
     if (left_binding.parent_mctx() != right_binding.parent_mctx()) {
@@ -1532,10 +1532,10 @@ inline void with_postgres_lazy_sequence(
                 });
             }
 
-            if constexpr (std::is_same_v<LeftR, RightR>) {
-                if (left_binding.exact_source_match(right_binding)) {
+            if constexpr (std::is_same_v<p_left_sequence_config, p_right_sequence_config>) {
+                if (left_binding.matches_same_source(right_binding)) {
                     const auto shared = make_lazy_sequence_view(left->sequence);
-                    std::forward<Fn>(fn)(shared, shared);
+                    std::forward<p_function>(fn)(shared, shared);
                     return;
                 }
             }
@@ -1549,26 +1549,27 @@ inline void with_postgres_lazy_sequence(
                          errmsg("lazy PostgreSQL read session rejected its right binding")));
                 });
             }
-            std::forward<Fn>(fn)(make_lazy_sequence_view(left->sequence),
+            std::forward<p_function>(fn)(make_lazy_sequence_view(left->sequence),
                                  make_lazy_sequence_view(right->sequence));
         });
 }
 
-// DOC0274 — construct a postgres_sequence_scanner in IN-MEMORY mode from an existing
-// compact_sequence_range. Used to wrap query literals or already-hydrated
-// inline targets so they share the production `postgres_sequence_scanner<R>` template
+// Construct an in-memory postgres_sequence_scanner from an existing
+// compact_sequence_range. This wraps query literals or already-hydrated
+// inline targets so they share the production
+// `postgres_sequence_scanner<p_sequence_config>` template
 // type with stub-backed (PG-backed) targets — eliminating the need for a
 // separate in-memory scanner template in the dispatch_buffer pipeline tree.
 //
 // `range` must outlive the returned scanner: its `read_cptr(cbegin())` pointer
 // is captured into the scanner's backing span, and the scanner just slices it
 // per fragment with no copy.
-template <class R>
+template <class p_sequence_config>
 [[nodiscard]] [[gnu::always_inline]]
-inline postgres_sequence_scanner<R> make_in_memory_postgres_sequence_scanner(
-    const compact_sequence_range<R>& range) noexcept
+inline postgres_sequence_scanner<p_sequence_config> make_in_memory_postgres_sequence_scanner(
+    const compact_sequence_range<p_sequence_config>& range) noexcept
 {
-    using storage_unit = typename compact_sequence_range<R>::traits::storage_unit;
+    using storage_unit = typename compact_sequence_range<p_sequence_config>::traits::storage_unit;
     const std::size_t units = static_cast<std::size_t>(range.size());
     std::span<const storage_unit> backing =
         units == 0
@@ -1576,7 +1577,7 @@ inline postgres_sequence_scanner<R> make_in_memory_postgres_sequence_scanner(
             : std::span<const storage_unit>(range.read_cptr(range.cbegin()), units);
     const sequence_size_t total_bp = static_cast<sequence_size_t>(range.bp_size());
     const std::size_t padding = static_cast<std::size_t>(range.padding());
-    return postgres_sequence_scanner<R>{backing, total_bp, padding};
+    return postgres_sequence_scanner<p_sequence_config>{backing, total_bp, padding};
 }
 
 // ---------------------------------------------------------------------------
@@ -1644,7 +1645,7 @@ struct pg_sequence_source_provider {
     bool open = false;
 };
 
-/** One exact source-provider route retained by an upper executor owner. */
+/** One source-provider route retained by an upper executor owner. */
 struct pg_sequence_source_route {
     Oid relation_oid = InvalidOid;
     pg_sequence_source_registry_lease lease{};
@@ -1655,8 +1656,8 @@ static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
 /** Query-lifetime routing for joins, appends and nested upper wrappers.
  *
  * A PostgreSQL self join has independent registries even when every binding
- * names the same physical relation.  The provider generation is therefore the
- * exact route key and relation_oid is provenance only.  Two routes stay inline
+ * names the same physical relation. The provider generation is therefore the
+ * route key; relation_oid supplies the physical-relation axis. Two routes stay inline
  * for the common binary-join case; larger legal plans grow in the executor's
  * query MemoryContext, before any new lease is retained.
  */
@@ -1687,7 +1688,7 @@ enum class sequence_source_failure : std::uint8_t {
   mmsearch_output_after_promotion,
 };
 
-struct sequence_source_debug_counters {
+struct sequence_source_stats {
   std::uint64_t registries_created = 0u;
   std::uint64_t registries_destroyed = 0u;
   std::uint64_t providers_created = 0u;
@@ -1741,8 +1742,8 @@ struct sequence_source_debug_counters {
 
 inline thread_local sequence_source_failure g_pg_sequence_source_failure =
     sequence_source_failure::none;
-inline thread_local sequence_source_debug_counters
-    g_pg_sequence_source_debug_counters{};
+inline thread_local sequence_source_stats
+    g_pg_sequence_source_stats{};
 
 inline void
 arm_pg_sequence_source_failure(sequence_source_failure point) noexcept {
@@ -1754,11 +1755,11 @@ inline void disarm_pg_sequence_source_failure() noexcept {
   disarm_pg_sequence_facade_test_poison();
 }
 
-[[nodiscard]] inline sequence_source_debug_counters
-pg_sequence_source_debug_counters() noexcept;
+[[nodiscard]] inline sequence_source_stats
+pg_sequence_source_stats() noexcept;
 
-inline void reset_pg_sequence_source_debug_counters() noexcept {
-  g_pg_sequence_source_debug_counters = {};
+inline void reset_pg_sequence_source_stats() noexcept {
+  g_pg_sequence_source_stats = {};
   reset_pg_sequence_facade_test_counters();
 }
 #endif
@@ -1774,16 +1775,16 @@ enum class domain_lifecycle : std::uint8_t {
   released,
 };
 
-enum class owner_release_phase_bits : std::uint8_t {
+enum class owner_release_stage_bits : std::uint8_t {
     none = 0u,
     before_locks = 1u,
     locks = 2u,
     after_locks = 4u,
 };
 
-[[nodiscard]] constexpr std::uint8_t phase_bit(
-        owner_release_phase_bits phase) noexcept {
-    return static_cast<std::uint8_t>(phase);
+[[nodiscard]] constexpr std::uint8_t stage_bit(
+        owner_release_stage_bits stage) noexcept {
+    return static_cast<std::uint8_t>(stage);
 }
 
 struct pg_sequence_source_domain {
@@ -1801,7 +1802,7 @@ struct pg_sequence_source_domain {
     std::uint64_t generation = 0u;
     std::uint32_t refcount = 0u;
     domain_lifecycle lifecycle = domain_lifecycle::constructing;
-    std::uint8_t released_owner_phases = 0u;
+    std::uint8_t released_owner_stages = 0u;
     bool registry_token_owned = false;
     bool reclaimable_hint = false;
     bool refcount_fault = false;
@@ -1830,9 +1831,9 @@ inline std::uint64_t next_generation = 1u;
 inline bool callbacks_registered = false;
 
 #ifdef BIOSEQ_TEST_INDEXES
-[[nodiscard]] inline sequence_source_debug_counters
-collect_pg_sequence_source_debug_counters() noexcept {
-  sequence_source_debug_counters result = g_pg_sequence_source_debug_counters;
+[[nodiscard]] inline sequence_source_stats
+collect_pg_sequence_source_stats() noexcept {
+  sequence_source_stats result = g_pg_sequence_source_stats;
   const sequence_facade_test_counters facade =
       pg_sequence_facade_test_counters();
   result.facade_source_stream_callbacks = facade.source_stream_callbacks;
@@ -1875,9 +1876,9 @@ inline void inject_pg_sequence_source_failure(sequence_source_failure point) {
         return;
     }
     g_pg_sequence_source_failure = sequence_source_failure::none;
-    ++g_pg_sequence_source_debug_counters.fault_injections;
+    ++g_pg_sequence_source_stats.fault_injections;
     if (point == sequence_source_failure::read_before_scanner) {
-        ++g_pg_sequence_source_debug_counters.read_fault_injections;
+        ++g_pg_sequence_source_stats.read_fault_injections;
     }
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
@@ -1921,7 +1922,7 @@ inline void retain_domain(void* opaque) noexcept {
         domain->refcount_fault = true;
         domain->lifecycle = domain_lifecycle::faulted;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.refcount_faults;
+        ++g_pg_sequence_source_stats.refcount_faults;
 #endif
         return;
     }
@@ -1937,7 +1938,7 @@ inline void release_domain(void* opaque) noexcept {
         domain->refcount_fault = true;
         domain->lifecycle = domain_lifecycle::faulted;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.refcount_faults;
+        ++g_pg_sequence_source_stats.refcount_faults;
 #endif
         return;
     }
@@ -1955,13 +1956,13 @@ inline void release_domain(void* opaque) noexcept {
         domain->refcount_fault = true;
         domain->lifecycle = domain_lifecycle::faulted;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.refcount_faults;
+        ++g_pg_sequence_source_stats.refcount_faults;
 #endif
         return;
     }
     domain->lifecycle = domain_lifecycle::released;
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.domains_destroyed;
+    ++g_pg_sequence_source_stats.domains_destroyed;
 #endif
     domain->backend_thread.~pg_sequence_backend_thread_token();
     pfree(domain);
@@ -2006,18 +2007,17 @@ inline void release_domain(void* opaque) noexcept {
 } // namespace sequence_source_detail
 
 #ifdef BIOSEQ_TEST_INDEXES
-[[nodiscard]] inline sequence_source_debug_counters
-pg_sequence_source_debug_counters() noexcept {
-    return sequence_source_detail::collect_pg_sequence_source_debug_counters();
+[[nodiscard]] inline sequence_source_stats
+pg_sequence_source_stats() noexcept {
+    return sequence_source_detail::collect_pg_sequence_source_stats();
 }
 #endif
 
-/* DOC0377 output-lifetime diagnostics stay behind the same test-build-only
- * counter surface as the source domain they exercise.  Production callers
- * retain one unconditional, inlinable no-op at each proof point. */
+/* Output-lifetime diagnostics share the source-domain test counter surface.
+ * Production callers retain an unconditional, inlinable no-op. */
 inline void note_mmsearch_output_context_reset_for_test() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters
+    ++g_pg_sequence_source_stats
         .mmsearch_output_context_resets;
 #endif
 }
@@ -2026,7 +2026,7 @@ inline void note_mmsearch_output_locator_promotion_for_test(
         const bool promoted_locator) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     if (promoted_locator) {
-        ++g_pg_sequence_source_debug_counters
+        ++g_pg_sequence_source_stats
             .mmsearch_output_locator_promotions;
     }
 #else
@@ -2035,16 +2035,16 @@ inline void note_mmsearch_output_locator_promotion_for_test(
 }
 
 inline void note_mmsearch_output_pg_error_restore_for_test(
-        const bool exact_restore) noexcept {
+        const bool state_restored) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters
+    ++g_pg_sequence_source_stats
         .mmsearch_output_pg_error_restores;
-    if (!exact_restore) {
-        ++g_pg_sequence_source_debug_counters
+    if (!state_restored) {
+        ++g_pg_sequence_source_stats
             .mmsearch_output_restore_mismatches;
     }
 #else
-    (void)exact_restore;
+    (void)state_restored;
 #endif
 }
 
@@ -2066,7 +2066,7 @@ inline void abort_close_caches_noerror(seq_caches*& caches) noexcept {
         close_and_destroy_seq_caches(caches, false);
         caches = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.cache_sets_destroyed;
+        ++g_pg_sequence_source_stats.cache_sets_destroyed;
 #endif
     }
     PG_CATCH();
@@ -2076,7 +2076,7 @@ inline void abort_close_caches_noerror(seq_caches*& caches) noexcept {
             destroy_seq_caches(caches);
             caches = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.cache_sets_destroyed;
+            ++g_pg_sequence_source_stats.cache_sets_destroyed;
 #endif
         }
     }
@@ -2098,7 +2098,7 @@ inline void abort_unregister_snapshot_noerror(
             domain.registered_snapshot, domain.resource_owner);
         domain.registered_snapshot = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.snapshots_unregistered;
+        ++g_pg_sequence_source_stats.snapshots_unregistered;
 #endif
         CurrentResourceOwner = saved_owner;
     }
@@ -2112,26 +2112,26 @@ inline void abort_unregister_snapshot_noerror(
     PG_END_TRY();
 }
 
-inline void abort_release_owner_phase_noerror(
+inline void abort_release_owner_stage_noerror(
         pg_sequence_source_domain& domain,
-        ResourceReleasePhase phase,
-        owner_release_phase_bits phase_flag) noexcept {
+        ResourceReleasePhase postgres_stage,
+        owner_release_stage_bits stage_flag) noexcept {
     if (domain.resource_owner == nullptr
-        || (domain.released_owner_phases & phase_bit(phase_flag)) != 0u) {
+        || (domain.released_owner_stages & stage_bit(stage_flag)) != 0u) {
         return;
     }
 #ifdef BIOSEQ_TEST_INDEXES
-    switch (phase_flag) {
-        case owner_release_phase_bits::before_locks:
-            ++g_pg_sequence_source_debug_counters.release_before_locks;
+    switch (stage_flag) {
+        case owner_release_stage_bits::before_locks:
+            ++g_pg_sequence_source_stats.release_before_locks;
             break;
-        case owner_release_phase_bits::locks:
-            ++g_pg_sequence_source_debug_counters.release_locks;
+        case owner_release_stage_bits::locks:
+            ++g_pg_sequence_source_stats.release_locks;
             break;
-        case owner_release_phase_bits::after_locks:
-            ++g_pg_sequence_source_debug_counters.release_after_locks;
+        case owner_release_stage_bits::after_locks:
+            ++g_pg_sequence_source_stats.release_after_locks;
             break;
-        case owner_release_phase_bits::none:
+        case owner_release_stage_bits::none:
             Assert(false);
             break;
     }
@@ -2139,15 +2139,15 @@ inline void abort_release_owner_phase_noerror(
     PG_TRY();
     {
         ResourceOwnerRelease(
-            domain.resource_owner, phase, false, false);
-        domain.released_owner_phases |= phase_bit(phase_flag);
+            domain.resource_owner, postgres_stage, false, false);
+        domain.released_owner_stages |= stage_bit(stage_flag);
     }
     PG_CATCH();
     {
         FlushErrorState();
-        /* Mark the attempted abort phase. PostgreSQL's parent abort cleanup is
+        /* Mark the attempted cleanup stage. PostgreSQL's parent abort cleanup is
          * the final owner of a resource whose release callback itself failed. */
-        domain.released_owner_phases |= phase_bit(phase_flag);
+        domain.released_owner_stages |= stage_bit(stage_flag);
     }
     PG_END_TRY();
 }
@@ -2196,19 +2196,19 @@ inline void abort_cleanup_domain_noerror(
     }
     domain.lifecycle = domain_lifecycle::cleaning;
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.cleanup_abort;
+    ++g_pg_sequence_source_stats.cleanup_abort;
 #endif
     abort_close_caches_noerror(domain.read_caches);
     abort_unregister_snapshot_noerror(domain);
-    abort_release_owner_phase_noerror(
+    abort_release_owner_stage_noerror(
         domain, RESOURCE_RELEASE_BEFORE_LOCKS,
-        owner_release_phase_bits::before_locks);
-    abort_release_owner_phase_noerror(
+        owner_release_stage_bits::before_locks);
+    abort_release_owner_stage_noerror(
         domain, RESOURCE_RELEASE_LOCKS,
-        owner_release_phase_bits::locks);
-    abort_release_owner_phase_noerror(
+        owner_release_stage_bits::locks);
+    abort_release_owner_stage_noerror(
         domain, RESOURCE_RELEASE_AFTER_LOCKS,
-        owner_release_phase_bits::after_locks);
+        owner_release_stage_bits::after_locks);
     abort_delete_owner_noerror(domain);
     abort_delete_payload_noerror(domain);
     domain.lifecycle = domain_lifecycle::invalid;
@@ -2223,9 +2223,9 @@ inline void cleanup_domain(
     domain.lifecycle = domain_lifecycle::cleaning;
 #ifdef BIOSEQ_TEST_INDEXES
     if (is_commit) {
-        ++g_pg_sequence_source_debug_counters.cleanup_commit;
+        ++g_pg_sequence_source_stats.cleanup_commit;
     } else {
-        ++g_pg_sequence_source_debug_counters.cleanup_abort;
+        ++g_pg_sequence_source_stats.cleanup_abort;
     }
 #endif
     ResourceOwner owner = domain.resource_owner;
@@ -2241,7 +2241,7 @@ inline void cleanup_domain(
             close_and_destroy_seq_caches(domain.read_caches, is_commit);
             domain.read_caches = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.cache_sets_destroyed;
+            ++g_pg_sequence_source_stats.cache_sets_destroyed;
 #endif
         }
         if (domain.registered_snapshot != nullptr) {
@@ -2253,7 +2253,7 @@ inline void cleanup_domain(
                 domain.registered_snapshot, owner);
             domain.registered_snapshot = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.snapshots_unregistered;
+            ++g_pg_sequence_source_stats.snapshots_unregistered;
 #endif
         }
         CurrentResourceOwner = saved_owner;
@@ -2265,46 +2265,46 @@ inline void cleanup_domain(
     }
     PG_END_TRY();
 
-    if ((domain.released_owner_phases
-            & phase_bit(owner_release_phase_bits::before_locks)) == 0u) {
+    if ((domain.released_owner_stages
+            & stage_bit(owner_release_stage_bits::before_locks)) == 0u) {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_pg_sequence_source_failure(
             sequence_source_failure::close_before_before_locks);
 #endif
         ResourceOwnerRelease(
             owner, RESOURCE_RELEASE_BEFORE_LOCKS, is_commit, false);
-        domain.released_owner_phases |=
-            phase_bit(owner_release_phase_bits::before_locks);
+        domain.released_owner_stages |=
+            stage_bit(owner_release_stage_bits::before_locks);
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.release_before_locks;
+        ++g_pg_sequence_source_stats.release_before_locks;
 #endif
     }
-    if ((domain.released_owner_phases
-            & phase_bit(owner_release_phase_bits::locks)) == 0u) {
+    if ((domain.released_owner_stages
+            & stage_bit(owner_release_stage_bits::locks)) == 0u) {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_pg_sequence_source_failure(
             sequence_source_failure::close_before_locks);
 #endif
         ResourceOwnerRelease(
             owner, RESOURCE_RELEASE_LOCKS, is_commit, false);
-        domain.released_owner_phases |=
-            phase_bit(owner_release_phase_bits::locks);
+        domain.released_owner_stages |=
+            stage_bit(owner_release_stage_bits::locks);
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.release_locks;
+        ++g_pg_sequence_source_stats.release_locks;
 #endif
     }
-    if ((domain.released_owner_phases
-            & phase_bit(owner_release_phase_bits::after_locks)) == 0u) {
+    if ((domain.released_owner_stages
+            & stage_bit(owner_release_stage_bits::after_locks)) == 0u) {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_pg_sequence_source_failure(
             sequence_source_failure::close_before_after_locks);
 #endif
         ResourceOwnerRelease(
             owner, RESOURCE_RELEASE_AFTER_LOCKS, is_commit, false);
-        domain.released_owner_phases |=
-            phase_bit(owner_release_phase_bits::after_locks);
+        domain.released_owner_stages |=
+            stage_bit(owner_release_stage_bits::after_locks);
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.release_after_locks;
+        ++g_pg_sequence_source_stats.release_after_locks;
 #endif
     }
     ResourceOwnerDelete(owner);
@@ -2334,7 +2334,7 @@ inline void drop_registry_token_noexcept(
         domain.refcount_fault = true;
         domain.lifecycle = domain_lifecycle::faulted;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.refcount_faults;
+        ++g_pg_sequence_source_stats.refcount_faults;
 #endif
         return;
     }
@@ -2349,7 +2349,7 @@ inline void sweep_registry(
         pg_sequence_source_sweep_boundary boundary,
         bool is_commit) {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.sweeps;
+    ++g_pg_sequence_source_stats.sweeps;
 #endif
     auto* domain = registry.domains;
     while (domain != nullptr) {
@@ -2361,7 +2361,7 @@ inline void sweep_registry(
         /* A parameterized rescan starts a fresh callback/read session but may
          * retain the registry's current verified binding.  Keeping that one
          * bounded domain preserves its snapshot/cache and lets the next row
-         * hit the exact (attribute,type,binding-generation) key.  A stale
+         * hit the matching (attribute,type,binding-generation) key. A stale
          * generation and every terminal/provider boundary still reclaim in
          * the ordinary owner-first order below. */
         const bool reusable_after_rescan =
@@ -2374,7 +2374,7 @@ inline void sweep_registry(
             unlink_domain(registry, *domain);
             drop_registry_token_noexcept(*domain);
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.swept_domains;
+            ++g_pg_sequence_source_stats.swept_domains;
 #endif
         }
         domain = next;
@@ -2385,7 +2385,7 @@ inline void abort_sweep_registry_noerror(
         pg_sequence_source_registry& registry,
         bool all_domains) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.sweeps;
+    ++g_pg_sequence_source_stats.sweeps;
 #endif
     auto* domain = registry.domains;
     while (domain != nullptr) {
@@ -2396,7 +2396,7 @@ inline void abort_sweep_registry_noerror(
             unlink_domain(registry, *domain);
             drop_registry_token_noexcept(*domain);
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.swept_domains;
+            ++g_pg_sequence_source_stats.swept_domains;
 #endif
         }
         domain = next;
@@ -2424,7 +2424,7 @@ inline void destroy_registry_control(
     }
     remove_registry_from_global(*registry);
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.registries_destroyed;
+    ++g_pg_sequence_source_stats.registries_destroyed;
 #endif
     registry->backend_thread.~pg_sequence_backend_thread_token();
     pfree(registry);
@@ -2459,7 +2459,7 @@ inline void destroy_provider_control(
     }
     remove_provider_from_global(*provider);
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.providers_destroyed;
+    ++g_pg_sequence_source_stats.providers_destroyed;
 #endif
     pfree(provider);
 }
@@ -2476,14 +2476,14 @@ inline bool release_lease_token_noexcept(
         || !registry->backend_thread.is_current()) {
         registry->lease_fault = true;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.lease_faults;
+        ++g_pg_sequence_source_stats.lease_faults;
 #endif
         lease = {};
         return false;
     }
     --registry->active_leases;
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.leases_released;
+    ++g_pg_sequence_source_stats.leases_released;
 #endif
     lease = {};
     return true;
@@ -2496,7 +2496,7 @@ inline void close_provider_abort_noerror(
     if (registry != nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
         if (registry->active_leases > 1u) {
-            ++g_pg_sequence_source_debug_counters
+            ++g_pg_sequence_source_stats
                 .provider_closed_with_upper_leases;
         }
 #endif
@@ -2523,7 +2523,7 @@ inline void close_provider_checked(
     provider.open = false;
 #ifdef BIOSEQ_TEST_INDEXES
     if (registry->active_leases > 1u) {
-        ++g_pg_sequence_source_debug_counters
+        ++g_pg_sequence_source_stats
             .provider_closed_with_upper_leases;
     }
 #endif
@@ -2597,12 +2597,13 @@ inline void xact_callback(XactEvent event, void*) {
                 registry = registry->next) {
                 if (registry->domains != nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
-                    ++g_pg_sequence_source_debug_counters.pre_prepare_rejections;
+                    ++g_pg_sequence_source_stats.pre_prepare_rejections;
 #endif
                     ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("cannot PREPARE TRANSACTION with live bioseq source domains"),
-                         errhint("materialize locator-backed bioseq values before PREPARE TRANSACTION")));
+                         errhint("materialize locator-backed bioseq values "
+                                 "before PREPARE TRANSACTION")));
                 }
             }
             while (registries != nullptr) {
@@ -2633,7 +2634,7 @@ inline void subxact_callback(
                 if (registry->creating_subid == my_subid) {
                     registry->creating_subid = parent_subid;
 #ifdef BIOSEQ_TEST_INDEXES
-                    ++g_pg_sequence_source_debug_counters.subxact_promotions;
+                    ++g_pg_sequence_source_stats.subxact_promotions;
 #endif
                 }
                 for (auto* domain = registry->domains; domain != nullptr;
@@ -2641,7 +2642,7 @@ inline void subxact_callback(
                     if (domain->creating_subid == my_subid) {
                         domain->creating_subid = parent_subid;
 #ifdef BIOSEQ_TEST_INDEXES
-                        ++g_pg_sequence_source_debug_counters.subxact_promotions;
+                        ++g_pg_sequence_source_stats.subxact_promotions;
 #endif
                     }
                 }
@@ -2649,7 +2650,7 @@ inline void subxact_callback(
             break;
         case SUBXACT_EVENT_ABORT_SUB: {
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.subxact_aborts;
+            ++g_pg_sequence_source_stats.subxact_aborts;
 #endif
             auto* registry = registries;
             while (registry != nullptr) {
@@ -2694,7 +2695,7 @@ inline void ensure_callbacks_registered() {
         compact_sequence_stdc_type_params stored_type,
         std::uint16_t last_padding_letters,
         const sequence_source_version_row& row) noexcept {
-    return row.state == kSequenceSourceStateReady
+    return row.state == k_sequence_source_state_ready
         && row.source_epoch == locator.source_epoch
         && row.user_relid == registry.user_relid
         && row.database_oid == registry.database_oid
@@ -2756,7 +2757,7 @@ inline void ensure_callbacks_registered() {
         domain->registered_snapshot = RegisterSnapshotOnOwner(
             registry.authoritative_snapshot, domain->resource_owner);
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.snapshots_registered;
+        ++g_pg_sequence_source_stats.snapshots_registered;
         inject_pg_sequence_source_failure(
             sequence_source_failure::domain_after_snapshot);
 #endif
@@ -2769,7 +2770,7 @@ inline void ensure_callbacks_registered() {
         domain->read_caches->main_tablespace_oid = registry.tablespace_oid;
         domain->read_caches->main_relfilenode = registry.main_relfilenode;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.cache_sets_created;
+        ++g_pg_sequence_source_stats.cache_sets_created;
         inject_pg_sequence_source_failure(
             sequence_source_failure::domain_after_caches);
 #endif
@@ -2781,7 +2782,7 @@ inline void ensure_callbacks_registered() {
         result = domain;
         pending = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.domains_created;
+        ++g_pg_sequence_source_stats.domains_created;
 #endif
     }
     PG_CATCH();
@@ -2812,7 +2813,7 @@ inline void ensure_callbacks_registered() {
          domain = domain->next) {
         if (domain_key_matches(*domain, column_attno, stored_type)) {
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.domains_reused;
+            ++g_pg_sequence_source_stats.domains_reused;
 #endif
             return domain;
         }
@@ -2830,7 +2831,8 @@ inline void ensure_callbacks_registered() {
         || authoritative_registered_snapshot->regd_count == 0) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq source registry requires an owning relation and registered MVCC snapshot")));
+             errmsg("bioseq source registry requires an owning relation and "
+                    "registered MVCC snapshot")));
     }
     ensure_callbacks_registered();
     const std::uint64_t storage_id =
@@ -2898,15 +2900,15 @@ inline void ensure_callbacks_registered() {
         pending_registry = nullptr;
         pending_provider = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.registries_created;
-        ++g_pg_sequence_source_debug_counters.providers_created;
+        ++g_pg_sequence_source_stats.registries_created;
+        ++g_pg_sequence_source_stats.providers_created;
         if (kind == pg_sequence_source_provider_kind::scan) {
-            ++g_pg_sequence_source_debug_counters.scan_providers_created;
+            ++g_pg_sequence_source_stats.scan_providers_created;
         } else {
-            ++g_pg_sequence_source_debug_counters
+            ++g_pg_sequence_source_stats
                 .standalone_providers_created;
         }
-        ++g_pg_sequence_source_debug_counters.leases_acquired;
+        ++g_pg_sequence_source_stats.leases_acquired;
 #endif
     }
     PG_CATCH();
@@ -2928,10 +2930,10 @@ inline void ensure_callbacks_registered() {
     return const_cast<pg_sequence_source_provider*>(result);
 }
 
-template <class Instance>
+template <class p_sequence_instance>
 [[nodiscard]] constexpr std::uint16_t locator_padding_letters(
         const sequence_locator& locator) noexcept {
-    using range = compact_sequence_range<Instance>;
+    using range = compact_sequence_range<p_sequence_instance>;
     constexpr std::uint64_t letters_per_unit =
         range::traits::letters_per_unit;
     const std::uint64_t remainder =
@@ -2951,11 +2953,11 @@ template <class Instance>
         stored_type.alphabet_code,
         stored_type.storage_unit_byte_width,
         [&dispatched, &valid, locator,
-         last_padding_letters, validate_padding]<class Instance>() {
-            using range = compact_sequence_range<Instance>;
+         last_padding_letters, validate_padding]<class p_sequence_instance>() {
+            using range = compact_sequence_range<p_sequence_instance>;
             constexpr std::uint64_t letters_per_fragment =
                 static_cast<std::uint64_t>(
-                    postgres_sequence_scanner<Instance>::fragment_storage_units)
+                    postgres_sequence_scanner<p_sequence_instance>::fragment_storage_units)
                 * range::traits::letters_per_unit;
             const std::uint64_t complete =
                 locator.logical_length / letters_per_fragment;
@@ -2970,19 +2972,19 @@ template <class Instance>
                 && locator.fragment_count == expected_fragments
                 && (!validate_padding
                     || last_padding_letters
-                        == locator_padding_letters<Instance>(locator));
+                        == locator_padding_letters<p_sequence_instance>(locator));
         });
     return dispatched && valid;
 }
 
-template <class Instance>
+template <class p_sequence_instance>
 inline void typed_scanner_read_ranks(
         source_scanner_entry& entry,
         sequence_transform transform,
         std::uint64_t source_from,
         std::span<std::uint8_t> output) {
-    using scanner_type = postgres_sequence_scanner<Instance>;
-    using range = compact_sequence_range<Instance>;
+    using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
+    using range = compact_sequence_range<p_sequence_instance>;
     using traits = typename range::traits;
     using unit = typename traits::storage_unit;
     auto& scanner = *static_cast<scanner_type*>(entry.concrete_scanner);
@@ -3022,7 +3024,7 @@ inline void typed_scanner_read_ranks(
         std::uint8_t rank = static_cast<std::uint8_t>(
             (word >> shift) & traits::char_mask);
         if (rank >= seqan3::alphabet_size<
-                        typename Instance::alphabet_type>) {
+                        typename p_sequence_instance::alphabet_type>) {
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [fragment_no, local_symbol, rank] {
                     ereport(ERROR,
@@ -3053,9 +3055,9 @@ inline void typed_scanner_read_ranks(
     }
 }
 
-template <class Instance>
+template <class p_sequence_instance>
 inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
-    using scanner_type = postgres_sequence_scanner<Instance>;
+    using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
     auto* scanner = static_cast<scanner_type*>(entry.concrete_scanner);
     if (scanner == nullptr || !entry.constructed) {
         return;
@@ -3066,10 +3068,10 @@ inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
     entry.constructed = false;
 }
 
-template <class Instance>
+template <class p_sequence_instance>
 inline void abort_typed_scanner_entry_noexcept(
         source_scanner_entry& entry) noexcept {
-    using scanner_type = postgres_sequence_scanner<Instance>;
+    using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
     auto* scanner = static_cast<scanner_type*>(entry.concrete_scanner);
     if (scanner == nullptr || !entry.constructed) {
         return;
@@ -3100,7 +3102,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
     if (entry == nullptr) {
         return;
     }
-    ErrorData* exact_error = nullptr;
+    ErrorData* pg_error_data = nullptr;
     bool cpp_error = false;
     bool unknown_cpp_error = false;
     char detail[512] = "std::exception without detail";
@@ -3108,7 +3110,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
         try {
             entry->finish(*entry);
         } catch (bioseq::postgres::support::postgres_error& error) {
-            exact_error = error.release_error_data();
+            pg_error_data = error.release_error_data();
         } catch (const std::exception& error) {
             strlcpy(
                 detail,
@@ -3120,8 +3122,8 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
             unknown_cpp_error = true;
         }
     }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
+    if (pg_error_data != nullptr) {
+        ReThrowError(pg_error_data);
     }
     if (cpp_error) {
         ereport(ERROR,
@@ -3152,7 +3154,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
             payload_context, sizeof(source_scanner_entry)));
     entry->domain = factory.domain;
     bool dispatched = false;
-    ErrorData* exact_error = nullptr;
+    ErrorData* pg_error_data = nullptr;
     bool cpp_error = false;
     bool unknown_cpp_error = false;
     char detail[512] = "std::exception without detail";
@@ -3161,25 +3163,26 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
             factory.stored_type.alphabet_code,
             factory.stored_type.storage_unit_byte_width,
             [entry, payload_context, locator = factory.locator,
-             &dispatched]<class Instance>() {
-                using scanner_type = postgres_sequence_scanner<Instance>;
+             &dispatched]<class p_sequence_instance>() {
+                using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
                 void* storage = bioseq::postgres::support::invoke_pg_as_cpp(
                     [payload_context] {
                         return MemoryContextAllocZero(
                             payload_context, sizeof(scanner_type));
                     });
                 entry->concrete_scanner = storage;
-                entry->read_ranks = &typed_scanner_read_ranks<Instance>;
-                entry->finish = &finish_typed_scanner_entry<Instance>;
+                entry->read_ranks = &typed_scanner_read_ranks<p_sequence_instance>;
+                entry->finish = &finish_typed_scanner_entry<p_sequence_instance>;
                 entry->abort_noexcept =
-                    &abort_typed_scanner_entry_noexcept<Instance>;
+                    &abort_typed_scanner_entry_noexcept<p_sequence_instance>;
                 retain_domain(entry->domain);
                 entry->domain_retained = true;
                 if (!domain_is_readable(*entry->domain)) {
                     bioseq::postgres::support::invoke_pg_as_cpp([] {
                         ereport(ERROR,
                             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                             errmsg("bioseq source domain became invalid while creating a scanner")));
+                             errmsg("bioseq source domain became invalid while "
+                                    "creating a scanner")));
                     });
                 }
                 auto* registry = entry->domain->registry;
@@ -3189,7 +3192,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
                     registry->main_relfilenode,
                     entry->domain->column_attno,
                     locator,
-                    locator_padding_letters<Instance>(locator),
+                    locator_padding_letters<p_sequence_instance>(locator),
                     entry->domain->registered_snapshot,
                     entry->domain->read_caches,
                     payload_context);
@@ -3204,7 +3207,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
             });
         }
     } catch (bioseq::postgres::support::postgres_error& error) {
-        exact_error = error.release_error_data();
+        pg_error_data = error.release_error_data();
     } catch (const std::exception& error) {
         strlcpy(
             detail,
@@ -3215,11 +3218,11 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
     } catch (...) {
         unknown_cpp_error = true;
     }
-    if (exact_error != nullptr || cpp_error || unknown_cpp_error) {
+    if (pg_error_data != nullptr || cpp_error || unknown_cpp_error) {
         abort_source_scanner_entry_noexcept(entry);
     }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
+    if (pg_error_data != nullptr) {
+        ReThrowError(pg_error_data);
     }
     if (cpp_error) {
         ereport(ERROR,
@@ -3234,7 +3237,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
              errdetail_internal("unknown C++ exception")));
     }
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.scanner_entries_created;
+    ++g_pg_sequence_source_stats.scanner_entries_created;
 #endif
     return entry;
 }
@@ -3281,7 +3284,7 @@ read_domain_ranks_on_backend(
             && same_locator(candidate->key.locator, key.locator)
             && candidate->key.stored_type_params
                 == key.stored_type_params) {
-            ++g_pg_sequence_source_debug_counters.scanner_entry_hits;
+            ++g_pg_sequence_source_stats.scanner_entry_hits;
             break;
         }
     }
@@ -3305,13 +3308,13 @@ read_domain_ranks_on_backend(
 #ifdef BIOSEQ_TEST_INDEXES
     /* The session entry and its abort callback are installed before this raw
      * PostgreSQL ERROR.  The outer source-ABI boundary must convert it to C++ so
-     * every view shell can abort the session before rethrowing the exact error. */
+     * every view shell can abort the session before rethrowing the PostgreSQL error. */
     inject_pg_sequence_source_failure(
         sequence_source_failure::read_before_scanner);
 #endif
 
     const ResourceOwner saved_owner = CurrentResourceOwner;
-    ErrorData* exact_error = nullptr;
+    ErrorData* pg_error_data = nullptr;
     bool cpp_error = false;
     bool unknown_cpp_error = false;
     char detail[512] = "std::exception without detail";
@@ -3321,7 +3324,7 @@ read_domain_ranks_on_backend(
         CurrentResourceOwner = saved_owner;
     } catch (bioseq::postgres::support::postgres_error& error) {
         CurrentResourceOwner = saved_owner;
-        exact_error = error.release_error_data();
+        pg_error_data = error.release_error_data();
     } catch (const std::exception& error) {
         CurrentResourceOwner = saved_owner;
         strlcpy(
@@ -3334,8 +3337,8 @@ read_domain_ranks_on_backend(
         CurrentResourceOwner = saved_owner;
         unknown_cpp_error = true;
     }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
+    if (pg_error_data != nullptr) {
+        ReThrowError(pg_error_data);
     }
     if (cpp_error) {
         ereport(ERROR,
@@ -3368,7 +3371,7 @@ read_domain_ranks_on_backend(
         || !session.backend_thread.is_current()
         || domain->backend_thread.owner != session.backend_thread.owner) {
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
+        ++g_pg_sequence_source_stats.wrong_thread_rejections;
 #endif
         return pg_sequence_source_read_status::wrong_thread;
     }
@@ -3419,7 +3422,7 @@ create_standalone_pg_sequence_source_provider(
         });
 }
 
-/** Rebind a scan provider to the exact registered snapshot restored from its
+/** Rebind a scan provider to the registered snapshot restored from its
  * parallel DSM coordinate.  Upper owners may already retain leases on this
  * registry, so the registry is updated in place rather than replaced.  No
  * source domain may have observed the preceding snapshot. */
@@ -3459,7 +3462,7 @@ acquire_pg_sequence_source_registry_lease(
         if (parent.registry != nullptr
             && !parent.registry->backend_thread.is_current()) {
 #ifdef BIOSEQ_TEST_INDEXES
-            ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
+            ++g_pg_sequence_source_stats.wrong_thread_rejections;
 #endif
             return {};
         }
@@ -3473,7 +3476,7 @@ acquire_pg_sequence_source_registry_lease(
         registry.lease_fault = true;
         registry.accepting_lookups = false;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.lease_faults;
+        ++g_pg_sequence_source_stats.lease_faults;
 #endif
         ereport(ERROR,
             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -3481,7 +3484,7 @@ acquire_pg_sequence_source_registry_lease(
     }
     ++registry.active_leases;
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_debug_counters.leases_acquired;
+    ++g_pg_sequence_source_stats.leases_acquired;
 #endif
     return {
         .registry = &registry,
@@ -3513,7 +3516,7 @@ acquire_pg_sequence_source_registry_lease(
     }
     if (!registry->backend_thread.is_current()) {
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
+        ++g_pg_sequence_source_stats.wrong_thread_rejections;
 #endif
         return false;
     }
@@ -3523,7 +3526,7 @@ acquire_pg_sequence_source_registry_lease(
     }
     if (registry->provider_closed && registry->active_leases == 0u) {
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters
+        ++g_pg_sequence_source_stats
             .last_upper_lease_after_provider_end;
 #endif
         registry->accepting_lookups = false;
@@ -3548,7 +3551,7 @@ inline void release_pg_sequence_source_registry_lease_noexcept(
     }
     if (!registry->backend_thread.is_current()) {
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
+        ++g_pg_sequence_source_stats.wrong_thread_rejections;
 #endif
         lease = {};
         return;
@@ -3556,7 +3559,7 @@ inline void release_pg_sequence_source_registry_lease_noexcept(
     (void)release_lease_token_noexcept(lease);
     if (registry->provider_closed && registry->active_leases == 0u) {
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters
+        ++g_pg_sequence_source_stats
             .last_upper_lease_after_provider_end;
 #endif
         registry->accepting_lookups = false;
@@ -3848,7 +3851,7 @@ find_pg_sequence_source_route(
     return match;
 }
 
-/** Relation-only lookup is retained for proven single-source upper nodes.
+/** Relation-only lookup for validated single-source upper nodes.
  * It deliberately fails closed when self-join aliases contribute multiple
  * live registries for the same physical relation. */
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
@@ -3981,7 +3984,8 @@ inline void release_pg_sequence_source_routes_noexcept(
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
              errmsg("bioseq locator no longer matches its immutable source"),
-             errdetail("relation, column, snapshot, storage identity, source epoch, locator, or type metadata changed")));
+             errdetail("relation, column, snapshot, storage identity, source "
+                       "epoch, locator, or type metadata changed")));
     }
 
     auto* domain = find_or_create_domain(
@@ -4054,8 +4058,9 @@ inline void release_pg_sequence_source_routes_noexcept(
             if (lease == nullptr) {
                 ereport(ERROR,
                     (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                     errmsg("bioseq locator has no exact source-provider route"),
-                     errdetail("relation %u and provider generation %llu do not identify one live registry",
+                     errmsg("bioseq locator has no matching source-provider route"),
+                     errdetail("relation %u and provider generation %llu do "
+                               "not identify one live registry",
                                relation_oid,
                                static_cast<unsigned long long>(
                                    provider_generation))));
@@ -4083,7 +4088,8 @@ inline void release_pg_sequence_source_routes_noexcept(
                 ereport(ERROR,
                     (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                      errmsg("bioseq locator has no unique source-provider route"),
-                     errdetail("relation %u has no live route or is represented by multiple scan bindings",
+                     errdetail("relation %u has no live route or is represented "
+                               "by multiple scan bindings",
                                relation_oid)));
             }
             return promote_pg_sequence_locator(
@@ -4094,40 +4100,40 @@ inline void release_pg_sequence_source_routes_noexcept(
 
 #ifdef BIOSEQ_TEST_INDEXES
 /**
- * Prove on a real TBB arena worker that the concrete source callback rejects
+ * Validate on a real TBB arena worker that the source callback rejects
  * before any PostgreSQL API, cache, snapshot, or logging side effect.
  */
-[[nodiscard]] inline bool pg_sequence_source_wrong_thread_probe() {
+[[nodiscard]] inline bool validate_pg_sequence_source_wrong_thread() {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.backend_thread = pg_sequence_backend_thread_token::capture();
     pg_sequence_read_session session{};
     session.backend_thread = pg_sequence_backend_thread_token::capture();
-    struct probe_argument {
+    struct validation_argument {
         sequence_source_detail::pg_sequence_source_domain* domain;
         pg_sequence_read_session* session;
     } argument{&domain, &session};
     const bool rejected =
         bioseq::parallelism::global_pool::instance().invoke_worker_probe_noexcept(
         &argument, +[](void* opaque) noexcept {
-            auto* probe = static_cast<probe_argument*>(opaque);
+            auto* validation = static_cast<validation_argument*>(opaque);
             const sequence_locator locator{};
             const compact_sequence_stdc_type_params stored_type{};
             return sequence_source_detail::read_domain_ranks(
-                probe->domain, *probe->session, locator, stored_type,
+                validation->domain, *validation->session, locator, stored_type,
                 sequence_transform::identity, 0u,
                 std::span<std::uint8_t>{})
                 == pg_sequence_source_read_status::wrong_thread;
         });
     if (rejected) {
-        /* Worker diagnostics are thread-local; mirror the attested rejection
+        /* Worker diagnostics are thread-local; mirror the observed rejection
          * once on the backend so SQL can assert it without reading worker TLS. */
-        ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
+        ++g_pg_sequence_source_stats.wrong_thread_rejections;
     }
     return rejected;
 }
 
 /** Exercise fail-closed retain accounting and merge rollback. */
-[[nodiscard]] inline bool pg_sequence_source_fault_contract_probe() noexcept {
+[[nodiscard]] inline bool validate_pg_sequence_source_fault_contract() noexcept {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.lifecycle = sequence_source_detail::domain_lifecycle::live;
     domain.refcount = std::numeric_limits<std::uint32_t>::max();
@@ -4214,13 +4220,13 @@ inline void release_pg_sequence_source_routes_noexcept(
         return false;
     }
 
-    /* Build one real, readable source control, retain it exactly as a piece
+    /* Build one real, readable source control, retain it as a piece
      * tree leaf does, and drive the production transaction cleanup callback.
      * The registry token is dropped by cleanup while the retained control
-     * survives with refcount one, so the subsequent read reaches the exact
+     * survives with refcount one, so the subsequent read reaches the expected
      * transaction-ended guard rather than a test-only approximation. */
-    const auto counters_before_xact_end =
-        sequence_source_detail::collect_pg_sequence_source_debug_counters();
+    const auto stats_before_xact_end =
+        sequence_source_detail::collect_pg_sequence_source_stats();
     MemoryContext saved_context = CurrentMemoryContext;
     pg_sequence_source_registry* volatile pending_registry = nullptr;
     pg_sequence_source_registry* volatile live_registry = nullptr;
@@ -4251,7 +4257,7 @@ inline void release_pg_sequence_source_routes_noexcept(
         sequence_source_detail::registries = registry;
         live_registry = registry;
         pending_registry = nullptr;
-        ++g_pg_sequence_source_debug_counters.registries_created;
+        ++g_pg_sequence_source_stats.registries_created;
 
         auto* source_domain = sequence_source_detail::create_domain(
             *registry, static_cast<AttrNumber>(1),
@@ -4295,7 +4301,7 @@ inline void release_pg_sequence_source_routes_noexcept(
     PG_END_TRY();
     MemoryContextSwitchTo(saved_context);
 
-    volatile bool exact_transaction_end_error = false;
+    volatile bool transaction_end_error_observed = false;
     if (!setup_or_cleanup_failed && cleanup_completed
         && readable_before_cleanup) {
         pg_sequence_read_session session{};
@@ -4316,7 +4322,7 @@ inline void release_pg_sequence_source_routes_noexcept(
         {
             MemoryContextSwitchTo(saved_context);
             ErrorData* error = CopyErrorData();
-            exact_transaction_end_error = error != nullptr
+            transaction_end_error_observed = error != nullptr
                 && error->sqlerrcode
                     == ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
                 && error->message != nullptr
@@ -4338,59 +4344,59 @@ inline void release_pg_sequence_source_routes_noexcept(
         retained_reference_owned = false;
         retained_domain = nullptr;
     }
-    const auto counters_after_xact_end =
-        sequence_source_detail::collect_pg_sequence_source_debug_counters();
+    const auto stats_after_xact_end =
+        sequence_source_detail::collect_pg_sequence_source_stats();
     return !setup_or_cleanup_failed && readable_before_cleanup
-        && cleanup_completed && exact_transaction_end_error
-        && counters_after_xact_end.registries_created
-            == counters_before_xact_end.registries_created + 1u
-        && counters_after_xact_end.registries_destroyed
-            == counters_before_xact_end.registries_destroyed + 1u
-        && counters_after_xact_end.domains_created
-            == counters_before_xact_end.domains_created + 1u
-        && counters_after_xact_end.domains_destroyed
-            == counters_before_xact_end.domains_destroyed + 1u
-        && counters_after_xact_end.cache_sets_created
-            == counters_before_xact_end.cache_sets_created + 1u
-        && counters_after_xact_end.cache_sets_destroyed
-            == counters_before_xact_end.cache_sets_destroyed + 1u
-        && counters_after_xact_end.snapshots_registered
-            == counters_before_xact_end.snapshots_registered + 1u
-        && counters_after_xact_end.snapshots_unregistered
-            == counters_before_xact_end.snapshots_unregistered + 1u
-        && counters_after_xact_end.cleanup_commit
-            == counters_before_xact_end.cleanup_commit + 1u
-        && counters_after_xact_end.release_before_locks
-            == counters_before_xact_end.release_before_locks + 1u
-        && counters_after_xact_end.release_locks
-            == counters_before_xact_end.release_locks + 1u
-        && counters_after_xact_end.release_after_locks
-            == counters_before_xact_end.release_after_locks + 1u
-        && counters_after_xact_end.refcount_faults
-            == counters_before_xact_end.refcount_faults
-        && counters_after_xact_end.lease_faults
-            == counters_before_xact_end.lease_faults
-        && counters_after_xact_end.leases_acquired
-            == counters_before_xact_end.leases_acquired
-        && counters_after_xact_end.leases_released
-            == counters_before_xact_end.leases_released
-        && counters_after_xact_end.live_registries
-            == counters_before_xact_end.live_registries
-        && counters_after_xact_end.live_providers
-            == counters_before_xact_end.live_providers
-        && counters_after_xact_end.live_domains
-            == counters_before_xact_end.live_domains
-        && counters_after_xact_end.live_leases
-            == counters_before_xact_end.live_leases
-        && counters_after_xact_end.live_cache_sets
-            == counters_before_xact_end.live_cache_sets
-        && counters_after_xact_end.live_snapshots
-            == counters_before_xact_end.live_snapshots;
+        && cleanup_completed && transaction_end_error_observed
+        && stats_after_xact_end.registries_created
+            == stats_before_xact_end.registries_created + 1u
+        && stats_after_xact_end.registries_destroyed
+            == stats_before_xact_end.registries_destroyed + 1u
+        && stats_after_xact_end.domains_created
+            == stats_before_xact_end.domains_created + 1u
+        && stats_after_xact_end.domains_destroyed
+            == stats_before_xact_end.domains_destroyed + 1u
+        && stats_after_xact_end.cache_sets_created
+            == stats_before_xact_end.cache_sets_created + 1u
+        && stats_after_xact_end.cache_sets_destroyed
+            == stats_before_xact_end.cache_sets_destroyed + 1u
+        && stats_after_xact_end.snapshots_registered
+            == stats_before_xact_end.snapshots_registered + 1u
+        && stats_after_xact_end.snapshots_unregistered
+            == stats_before_xact_end.snapshots_unregistered + 1u
+        && stats_after_xact_end.cleanup_commit
+            == stats_before_xact_end.cleanup_commit + 1u
+        && stats_after_xact_end.release_before_locks
+            == stats_before_xact_end.release_before_locks + 1u
+        && stats_after_xact_end.release_locks
+            == stats_before_xact_end.release_locks + 1u
+        && stats_after_xact_end.release_after_locks
+            == stats_before_xact_end.release_after_locks + 1u
+        && stats_after_xact_end.refcount_faults
+            == stats_before_xact_end.refcount_faults
+        && stats_after_xact_end.lease_faults
+            == stats_before_xact_end.lease_faults
+        && stats_after_xact_end.leases_acquired
+            == stats_before_xact_end.leases_acquired
+        && stats_after_xact_end.leases_released
+            == stats_before_xact_end.leases_released
+        && stats_after_xact_end.live_registries
+            == stats_before_xact_end.live_registries
+        && stats_after_xact_end.live_providers
+            == stats_before_xact_end.live_providers
+        && stats_after_xact_end.live_domains
+            == stats_before_xact_end.live_domains
+        && stats_after_xact_end.live_leases
+            == stats_before_xact_end.live_leases
+        && stats_after_xact_end.live_cache_sets
+            == stats_before_xact_end.live_cache_sets
+        && stats_after_xact_end.live_snapshots
+            == stats_before_xact_end.live_snapshots;
 }
 
-/** Prove that self-join aliases retain independent exact routes while the
- * legacy relation-only seam refuses to guess between them. */
-[[nodiscard]] inline bool pg_sequence_source_route_alias_probe() noexcept {
+/** Validate that self-join aliases retain independent routes while the
+ * relation-only lookup refuses to guess between them. */
+[[nodiscard]] inline bool validate_pg_sequence_source_route_aliases() noexcept {
     constexpr Oid relation_oid = static_cast<Oid>(1u);
     pg_sequence_source_registry first{};
     first.backend_thread = pg_sequence_backend_thread_token::capture();
@@ -4436,7 +4442,7 @@ inline void release_pg_sequence_source_routes_noexcept(
 }
 
 /** Install one inert-but-live token and drive the real PRE_PREPARE switch. */
-inline void pg_sequence_source_pre_prepare_probe() {
+inline void validate_pg_sequence_source_pre_prepare() {
     using namespace sequence_source_detail;
     ensure_callbacks_registered();
     auto* registry = static_cast<pg_sequence_source_registry*>(
@@ -4470,8 +4476,8 @@ inline void pg_sequence_source_pre_prepare_probe() {
         registries = registry;
         pending_domain = nullptr;
 #ifdef BIOSEQ_TEST_INDEXES
-        ++g_pg_sequence_source_debug_counters.registries_created;
-        ++g_pg_sequence_source_debug_counters.domains_created;
+        ++g_pg_sequence_source_stats.registries_created;
+        ++g_pg_sequence_source_stats.domains_created;
 #endif
     }
     PG_CATCH();
@@ -4489,7 +4495,7 @@ inline void pg_sequence_source_pre_prepare_probe() {
     xact_callback(XACT_EVENT_PRE_PREPARE, nullptr);
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
-         errmsg("bioseq PRE_PREPARE source-domain probe did not reject")));
+         errmsg("bioseq PRE_PREPARE source-domain validation did not reject")));
 }
 #endif
 

@@ -51,12 +51,13 @@ public:
     [[nodiscard]] std::uint64_t total_count() const noexcept;
     void for_each_batch_erased(position_batch_sink sink) const;
 
-    template <class F>
-    void for_each_batch(F&& f) const {
+    template <class p_function>
+    void for_each_batch(p_function&& f) const {
         position_batch_sink sink{
             .ctx = std::addressof(f),
             .call = [](void* ctx, std::span<const std::uint64_t> batch) {
-                (*static_cast<std::remove_reference_t<F>*>(ctx))(batch);
+                (*static_cast<std::remove_reference_t<p_function>*>(ctx))(
+                    batch);
             },
         };
         for_each_batch_erased(sink);
@@ -357,21 +358,21 @@ struct buffer_file_run {
     std::uint64_t byte_count = 0;
 };
 
-template <class T>
+template <class p_value>
 struct admitted_owned_vector {
     // Reverse destruction drops vector capacity before its reservation.
     bioseq::parallelism::memory_permit permit;
-    std::vector<T> values;
+    std::vector<p_value> values;
 };
 
-template <class T>
+template <class p_value>
 [[nodiscard]] bool try_ensure_admitted_vector_capacity(
-        std::vector<T>& values,
+        std::vector<p_value>& values,
         bioseq::parallelism::memory_permit& permit,
         std::size_t required_capacity) {
     const std::uint64_t existing_bytes = bioseq::parallelism::saturating_mul(
         static_cast<std::uint64_t>(values.capacity()),
-        static_cast<std::uint64_t>(sizeof(T)));
+        static_cast<std::uint64_t>(sizeof(p_value)));
     if (existing_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
         return false;
     }
@@ -381,7 +382,7 @@ template <class T>
     }
     const std::uint64_t logical_bytes = bioseq::parallelism::saturating_mul(
         static_cast<std::uint64_t>(required_capacity),
-        static_cast<std::uint64_t>(sizeof(T)));
+        static_cast<std::uint64_t>(sizeof(p_value)));
     const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
         logical_bytes,
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
@@ -411,7 +412,7 @@ template <class T>
     values.reserve(required_capacity);
     const std::uint64_t exact_bytes = bioseq::parallelism::saturating_mul(
         static_cast<std::uint64_t>(values.capacity()),
-        static_cast<std::uint64_t>(sizeof(T)));
+        static_cast<std::uint64_t>(sizeof(p_value)));
     if (exact_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || exact_bytes > permit.bytes()) {
         report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
@@ -420,9 +421,9 @@ template <class T>
     return true;
 }
 
-template <class T>
+template <class p_value>
 [[nodiscard]] bool try_ensure_admitted_vector_capacity(
-        admitted_owned_vector<T>& owned,
+        admitted_owned_vector<p_value>& owned,
         std::size_t required_capacity) {
     return try_ensure_admitted_vector_capacity(
         owned.values, owned.permit, required_capacity);
@@ -813,14 +814,15 @@ public:
 	        bioseq::parallelism::memory_permit permit);
 	    void demote_resident_runs_until_available(std::uint64_t bytes_needed);
 
-	    template <class F>
-	    void merge_runs(F&& on_kmer) {
+    template <class p_function>
+    void merge_runs(p_function&& on_kmer) {
         sorted_pair_kmer_sink sink{
             .ctx = std::addressof(on_kmer),
             .call = [](void* ctx,
                        std::uint64_t kmer,
                        const sorted_pair_position_cursor& cursor) {
-                (*static_cast<std::remove_reference_t<F>*>(ctx))(kmer, cursor);
+                (*static_cast<std::remove_reference_t<p_function>*>(ctx))(
+                    kmer, cursor);
             },
         };
         merge_runs_erased(sink);
@@ -849,11 +851,11 @@ public:
 	    void compact_file_runs_until_bounded_();
 	    void compact_file_runs_to_output_count_(std::size_t target_output_runs);
     [[nodiscard]] buffer_file_run merge_file_run_group_to_new_buffile_(std::size_t lo, std::size_t hi);
-    template <class Writer>
+    template <class p_writer>
     void merge_sorted_file_runs_to_writer_(
         std::span<buffer_file_run> runs,
         merge_resources& resources,
-        Writer&& writer);
+        p_writer&& writer);
     [[nodiscard]] bool try_open_file_readers_(merge_resources& resources);
     void open_file_readers_(merge_resources& resources);
 
@@ -1276,11 +1278,11 @@ void sorted_pair_run_store::open_file_readers_(merge_resources& resources) {
     }
 }
 
-template <class Writer>
+template <class p_writer>
 void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(
         std::span<buffer_file_run> runs,
         merge_resources& resources,
-        Writer&& writer) {
+        p_writer&& writer) {
     resources.finish_success();
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
     const std::uint64_t per_reader_bytes = std::clamp<std::uint64_t>(
@@ -1457,10 +1459,11 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
     if (file_runs_.empty()) {
         return;
     }
-    constexpr std::uint64_t kMinReaderBytes = std::uint64_t{32} << 10;
+    constexpr std::uint64_t k_minimum_reader_bytes =
+        std::uint64_t{32} << 10;
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
     const std::size_t max_output_runs =
-        std::max<std::size_t>(1, reader_budget / kMinReaderBytes);
+        std::max<std::size_t>(1, reader_budget / k_minimum_reader_bytes);
     compact_file_runs_to_output_count_(max_output_runs);
 }
 
@@ -1555,7 +1558,7 @@ void sorted_pair_run_store::merge_runs_erased(sorted_pair_kmer_sink sink) {
     try {
         merge_runs_erased_impl_(sink, *resources);
         resources->finish_success();
-        // MPS qualification and generation encoding deliberately replay the
+        // Minimizer-sequence qualification and generation encoding replay the
         // same immutable runs. Keep successful handles rewindable until the
         // owning storage calls the checked `release_runs()` boundary.
         poisoned_ = false;

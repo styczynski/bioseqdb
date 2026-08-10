@@ -43,12 +43,12 @@ namespace vector_stream_target = ::bioseq::simd::HWY_NAMESPACE;
 }
 
 /** Returns whether `left` precedes `right` in the requested order. */
-template <bool ascending>
+template <bool p_ascending>
 [[nodiscard]] inline bool unsigned_128_precedes(
     const hwy::uint128_t& left,
     const hwy::uint128_t& right) noexcept
 {
-    if constexpr (ascending) {
+    if constexpr (p_ascending) {
         return unsigned_128_less(left, right);
     } else {
         return unsigned_128_less(right, left);
@@ -56,17 +56,17 @@ template <bool ascending>
 }
 
 /** Loads one 128-bit key as two adjacent unsigned 64-bit lanes. */
-template <class descriptor_type>
+template <class p_descriptor_type>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128(
-    descriptor_type descriptor,
+    p_descriptor_type descriptor,
     const hwy::uint128_t& key) noexcept
 {
     return highway_target::LoadU(descriptor, &key.lo);
 }
 
 /** Sorts 128-bit keys with the standard library in the requested order. */
-template <bool ascending>
+template <bool p_ascending>
 inline void sort_unsigned_128_with_standard_library(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -75,12 +75,12 @@ inline void sort_unsigned_128_with_standard_library(
         keys,
         keys + key_count,
         [](const hwy::uint128_t& left, const hwy::uint128_t& right) {
-            return unsigned_128_precedes<ascending>(left, right);
+            return unsigned_128_precedes<p_ascending>(left, right);
         });
 }
 
 /** Insertion-sorts a small 128-bit key array in the requested order. */
-template <bool ascending>
+template <bool p_ascending>
 inline void insertion_sort_unsigned_128(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count) noexcept
@@ -92,7 +92,7 @@ inline void insertion_sort_unsigned_128(
         std::size_t destination_index = insertion_index;
         while (
             destination_index > 0u
-            && unsigned_128_precedes<ascending>(
+            && unsigned_128_precedes<p_ascending>(
                 value,
                 keys[destination_index - 1u])) {
             keys[destination_index] = keys[destination_index - 1u];
@@ -105,74 +105,79 @@ inline void insertion_sort_unsigned_128(
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
 /** Vector-stream representation of independent 128-bit keys. */
-template <class descriptor_type, std::size_t stream_width>
+template <class p_descriptor_type, std::size_t p_stream_width>
 using unsigned_128_vector_stream = vector_stream_target::vector_stream<
-    descriptor_type,
+    p_descriptor_type,
     std::uint64_t,
-    stream_width>;
+    p_stream_width>;
 
 /** Compares each pair of 128-bit vector-stream keys in the requested order. */
-template <bool ascending,
-          class descriptor_type,
-          std::size_t stream_width>
+template <bool p_ascending,
+          class p_descriptor_type,
+          std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto unsigned_128_stream_precedes(
-    descriptor_type descriptor,
-    unsigned_128_vector_stream<descriptor_type, stream_width> left,
-    unsigned_128_vector_stream<descriptor_type, stream_width> right) noexcept
+    p_descriptor_type descriptor,
+    unsigned_128_vector_stream<p_descriptor_type, p_stream_width> left,
+    unsigned_128_vector_stream<p_descriptor_type, p_stream_width> right) noexcept
 {
-    return [&]<std::size_t... stream_indices>(
-        std::index_sequence<stream_indices...>) [[gnu::always_inline]] {
-        if constexpr (ascending) {
+    return [&]<std::size_t... p_stream_indices>(
+        std::index_sequence<p_stream_indices...> p_stream_index_sequence)
+        [[gnu::always_inline]] {
+        (void)p_stream_index_sequence;
+        if constexpr (p_ascending) {
             return vector_stream_target::mask_stream<
-                descriptor_type,
-                stream_width>::pack(
+                p_descriptor_type,
+                p_stream_width>::pack(
                     highway_target::Lt128(
                         descriptor,
-                        left[stream_indices],
-                        right[stream_indices])...);
+                        left[p_stream_indices],
+                        right[p_stream_indices])...);
         } else {
             return vector_stream_target::mask_stream<
-                descriptor_type,
-                stream_width>::pack(
+                p_descriptor_type,
+                p_stream_width>::pack(
                     highway_target::Lt128(
                         descriptor,
-                        right[stream_indices],
-                        left[stream_indices])...);
+                        right[p_stream_indices],
+                        left[p_stream_indices])...);
         }
-    }(std::make_index_sequence<stream_width>{});
+    }(std::make_index_sequence<p_stream_width>{});
 }
 
 /** Broadcasts one 128-bit key across every slot in a vector stream. */
-template <class descriptor_type, std::size_t stream_width>
+template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto broadcast_unsigned_128_stream(
-    descriptor_type descriptor,
+    p_descriptor_type descriptor,
     const hwy::uint128_t& key) noexcept
 {
     const auto vector = load_unsigned_128(descriptor, key);
     return vector_stream_target::make_vector_stream<
-        descriptor_type,
+        p_descriptor_type,
         std::uint64_t,
-        stream_width>(
-            [&](auto) [[gnu::always_inline]] { return vector; });
+        p_stream_width>(
+            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
+                (void)p_stream_index_constant;
+                return vector;
+            });
 }
 
 /** Loads consecutive 128-bit keys into a forward vector stream. */
-template <class descriptor_type, std::size_t stream_width>
+template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128_forward_stream(
-    descriptor_type descriptor,
+    p_descriptor_type descriptor,
     const hwy::uint128_t* HWY_RESTRICT keys,
     std::ptrdiff_t base_index) noexcept
 {
     return vector_stream_target::make_vector_stream<
-        descriptor_type,
+        p_descriptor_type,
         std::uint64_t,
-        stream_width>(
-            [&](auto stream_index_constant) [[gnu::always_inline]] {
+        p_stream_width>(
+            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
                 constexpr std::size_t stream_index =
-                    decltype(stream_index_constant)::value;
+                    decltype(p_stream_index_constant)::value;
                 return load_unsigned_128(
                     descriptor,
                     keys[static_cast<std::size_t>(base_index) + stream_index]);
@@ -180,20 +185,20 @@ auto load_unsigned_128_forward_stream(
 }
 
 /** Loads consecutive 128-bit keys in reverse into a vector stream. */
-template <class descriptor_type, std::size_t stream_width>
+template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128_reverse_stream(
-    descriptor_type descriptor,
+    p_descriptor_type descriptor,
     const hwy::uint128_t* HWY_RESTRICT keys,
     std::ptrdiff_t base_index) noexcept
 {
     return vector_stream_target::make_vector_stream<
-        descriptor_type,
+        p_descriptor_type,
         std::uint64_t,
-        stream_width>(
-            [&](auto stream_index_constant) [[gnu::always_inline]] {
+        p_stream_width>(
+            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
                 constexpr std::size_t stream_index =
-                    decltype(stream_index_constant)::value;
+                    decltype(p_stream_index_constant)::value;
                 const auto offset =
                     static_cast<std::ptrdiff_t>(stream_index);
                 return load_unsigned_128(
@@ -203,21 +208,21 @@ auto load_unsigned_128_reverse_stream(
 }
 
 /** Returns the first stream slot whose mask has no set lanes. */
-template <class descriptor_type,
-          std::size_t stream_width,
-          class mask_stream_type>
+template <class p_descriptor_type,
+          std::size_t p_stream_width,
+          class p_mask_stream_type>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 std::size_t first_all_false_mask_slot(
-    descriptor_type descriptor,
-    const mask_stream_type& masks) noexcept
+    p_descriptor_type descriptor,
+    const p_mask_stream_type& masks) noexcept
 {
-    std::size_t first_false_slot = stream_width;
-    vector_stream_target::for_each_stream<stream_width>(
-        [&](auto stream_index_constant) [[gnu::always_inline]] {
+    std::size_t first_false_slot = p_stream_width;
+    vector_stream_target::for_each_stream<p_stream_width>(
+        [&](auto p_stream_index_constant) [[gnu::always_inline]] {
             constexpr std::size_t stream_index =
-                decltype(stream_index_constant)::value;
+                decltype(p_stream_index_constant)::value;
             if (
-                first_false_slot == stream_width
+                first_false_slot == p_stream_width
                 && highway_target::AllFalse(
                     descriptor,
                     masks[stream_index])) {
@@ -228,7 +233,7 @@ std::size_t first_all_false_mask_slot(
 }
 
 /** Chooses the median of the first, middle, and final 128-bit keys. */
-template <bool ascending>
+template <bool p_ascending>
 [[nodiscard]] inline hwy::uint128_t choose_unsigned_128_pivot(
     const hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count) noexcept
@@ -236,17 +241,17 @@ template <bool ascending>
     hwy::uint128_t first_candidate = keys[0];
     hwy::uint128_t middle_candidate = keys[key_count / 2u];
     hwy::uint128_t final_candidate = keys[key_count - 1u];
-    if (unsigned_128_precedes<ascending>(
+    if (unsigned_128_precedes<p_ascending>(
             middle_candidate,
             first_candidate)) {
         std::swap(first_candidate, middle_candidate);
     }
-    if (unsigned_128_precedes<ascending>(
+    if (unsigned_128_precedes<p_ascending>(
             final_candidate,
             middle_candidate)) {
         std::swap(middle_candidate, final_candidate);
     }
-    if (unsigned_128_precedes<ascending>(
+    if (unsigned_128_precedes<p_ascending>(
             middle_candidate,
             first_candidate)) {
         std::swap(first_candidate, middle_candidate);
@@ -255,11 +260,11 @@ template <bool ascending>
 }
 
 /** Partitions 128-bit keys around a pivot with streamed comparison scans. */
-template <std::size_t stream_width,
-          bool ascending,
-          class descriptor_type>
+template <std::size_t p_stream_width,
+          bool p_ascending,
+          class p_descriptor_type>
 [[nodiscard]] HWY_INLINE std::size_t partition_unsigned_128_stream(
-    descriptor_type descriptor,
+    p_descriptor_type descriptor,
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count,
     hwy::uint128_t pivot) noexcept
@@ -268,7 +273,7 @@ template <std::size_t stream_width,
     std::ptrdiff_t right_index =
         static_cast<std::ptrdiff_t>(key_count) - 1;
     const auto pivot_stream =
-        broadcast_unsigned_128_stream<descriptor_type, stream_width>(
+        broadcast_unsigned_128_stream<p_descriptor_type, p_stream_width>(
             descriptor,
             pivot);
 
@@ -276,31 +281,31 @@ template <std::size_t stream_width,
         while (left_index <= right_index) {
             while (
                 right_index - left_index + 1
-                >= static_cast<std::ptrdiff_t>(stream_width)) {
+                >= static_cast<std::ptrdiff_t>(p_stream_width)) {
                 const auto block =
                     load_unsigned_128_forward_stream<
-                        descriptor_type,
-                        stream_width>(
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             keys,
                             left_index);
                 const auto precedes_pivot =
                     unsigned_128_stream_precedes<
-                        ascending,
-                        descriptor_type,
-                        stream_width>(
+                        p_ascending,
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             block,
                             pivot_stream);
                 const std::size_t first_nonmatching_slot =
                     first_all_false_mask_slot<
-                        descriptor_type,
-                        stream_width>(
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             precedes_pivot);
-                if (first_nonmatching_slot == stream_width) {
+                if (first_nonmatching_slot == p_stream_width) {
                     left_index +=
-                        static_cast<std::ptrdiff_t>(stream_width);
+                        static_cast<std::ptrdiff_t>(p_stream_width);
                     continue;
                 }
                 left_index +=
@@ -309,7 +314,7 @@ template <std::size_t stream_width,
             }
             while (
                 left_index <= right_index
-                && unsigned_128_precedes<ascending>(
+                && unsigned_128_precedes<p_ascending>(
                     keys[static_cast<std::size_t>(left_index)],
                     pivot)) {
                 ++left_index;
@@ -320,31 +325,31 @@ template <std::size_t stream_width,
         while (left_index <= right_index) {
             while (
                 right_index - left_index + 1
-                >= static_cast<std::ptrdiff_t>(stream_width)) {
+                >= static_cast<std::ptrdiff_t>(p_stream_width)) {
                 const auto block =
                     load_unsigned_128_reverse_stream<
-                        descriptor_type,
-                        stream_width>(
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             keys,
                             right_index);
                 const auto pivot_precedes =
                     unsigned_128_stream_precedes<
-                        ascending,
-                        descriptor_type,
-                        stream_width>(
+                        p_ascending,
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             pivot_stream,
                             block);
                 const std::size_t first_nonmatching_slot =
                     first_all_false_mask_slot<
-                        descriptor_type,
-                        stream_width>(
+                        p_descriptor_type,
+                        p_stream_width>(
                             descriptor,
                             pivot_precedes);
-                if (first_nonmatching_slot == stream_width) {
+                if (first_nonmatching_slot == p_stream_width) {
                     right_index -=
-                        static_cast<std::ptrdiff_t>(stream_width);
+                        static_cast<std::ptrdiff_t>(p_stream_width);
                     continue;
                 }
                 right_index -=
@@ -353,7 +358,7 @@ template <std::size_t stream_width,
             }
             while (
                 left_index <= right_index
-                && unsigned_128_precedes<ascending>(
+                && unsigned_128_precedes<p_ascending>(
                     pivot,
                     keys[static_cast<std::size_t>(right_index)])) {
                 --right_index;
@@ -388,7 +393,7 @@ template <std::size_t stream_width,
 }
 
 /** Implements streamed 128-bit introsort for a non-scalar Highway target. */
-template <std::size_t stream_width, bool ascending>
+template <std::size_t p_stream_width, bool p_ascending>
 void sort_unsigned_128_vector_stream_impl(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count,
@@ -398,7 +403,7 @@ void sort_unsigned_128_vector_stream_impl(
 
     while (key_count > unsigned_128_scalar_key_limit) {
         if (depth_limit == 0u) [[unlikely]] {
-            sort_unsigned_128_with_standard_library<ascending>(
+            sort_unsigned_128_with_standard_library<p_ascending>(
                 keys,
                 key_count);
             return;
@@ -406,9 +411,9 @@ void sort_unsigned_128_vector_stream_impl(
         --depth_limit;
 
         const hwy::uint128_t pivot =
-            choose_unsigned_128_pivot<ascending>(keys, key_count);
+            choose_unsigned_128_pivot<p_ascending>(keys, key_count);
         const std::size_t partition_index =
-            partition_unsigned_128_stream<stream_width, ascending>(
+            partition_unsigned_128_stream<p_stream_width, p_ascending>(
                 descriptor,
                 keys,
                 key_count,
@@ -416,7 +421,7 @@ void sort_unsigned_128_vector_stream_impl(
         if (
             partition_index == 0u
             || partition_index == key_count) [[unlikely]] {
-            sort_unsigned_128_with_standard_library<ascending>(
+            sort_unsigned_128_with_standard_library<p_ascending>(
                 keys,
                 key_count);
             return;
@@ -424,14 +429,14 @@ void sort_unsigned_128_vector_stream_impl(
 
         const std::size_t right_count = key_count - partition_index;
         if (partition_index < right_count) {
-            sort_unsigned_128_vector_stream_impl<stream_width, ascending>(
+            sort_unsigned_128_vector_stream_impl<p_stream_width, p_ascending>(
                 keys,
                 partition_index,
                 depth_limit);
             keys += partition_index;
             key_count = right_count;
         } else {
-            sort_unsigned_128_vector_stream_impl<stream_width, ascending>(
+            sort_unsigned_128_vector_stream_impl<p_stream_width, p_ascending>(
                 keys + partition_index,
                 right_count,
                 depth_limit);
@@ -439,25 +444,25 @@ void sort_unsigned_128_vector_stream_impl(
         }
     }
 
-    insertion_sort_unsigned_128<ascending>(keys, key_count);
+    insertion_sort_unsigned_128<p_ascending>(keys, key_count);
 }
 
 #else
 
 /** Uses standard sorting when the active Highway target is scalar. */
-template <std::size_t stream_width, bool ascending>
+template <std::size_t p_stream_width, bool p_ascending>
 void sort_unsigned_128_vector_stream_impl(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count,
     std::size_t)
 {
-    sort_unsigned_128_with_standard_library<ascending>(keys, key_count);
+    sort_unsigned_128_with_standard_library<p_ascending>(keys, key_count);
 }
 
 #endif // HWY_TARGET != HWY_SCALAR || HWY_IDE
 
 /** Selects the scalar or streamed 128-bit sorting path by input size. */
-template <std::size_t stream_width, bool ascending>
+template <std::size_t p_stream_width, bool p_ascending>
 inline void sort_unsigned_128_vector_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -466,10 +471,10 @@ inline void sort_unsigned_128_vector_stream(
         return;
     }
     if (key_count <= unsigned_128_scalar_key_limit) {
-        insertion_sort_unsigned_128<ascending>(keys, key_count);
+        insertion_sort_unsigned_128<p_ascending>(keys, key_count);
         return;
     }
-    sort_unsigned_128_vector_stream_impl<stream_width, ascending>(
+    sort_unsigned_128_vector_stream_impl<p_stream_width, p_ascending>(
         keys,
         key_count,
         introsort_depth_limit(key_count));

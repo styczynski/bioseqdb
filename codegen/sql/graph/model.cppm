@@ -30,7 +30,7 @@ struct handwritten_fmgr_export_owner {
 struct sql_graph {
     std::string extension_name{"bioseq"};
     std::string extension_schema{"public"};
-    std::string generated_module_prefix{"bioseq.sql.generated"};
+    std::string generated_module_prefix{"bioseq.postgres.sql.generated"};
     std::string fmgr_boundary_module{
         "bioseq.postgres.support.sql_boundary"};
     std::string fmgr_prelude{"bioseq_common"};

@@ -107,7 +107,7 @@ struct vulkan_sketch_query_gate {
             && words.size() == identity.canonical_words->size();
         if (identity_valid && identity.enabled
             && identity.word_count == words.size() && identity.mask == mask
-            && identity.well_formed()
+            && identity.is_well_formed()
             // The pointer fast path is valid only for the immutable owner
             // carried in the identity; raw/mutable spans still exact-compare.
             && (same_frozen_storage
@@ -311,29 +311,29 @@ vulkan_sketch_decline_allows_segment_split(
 /// shared strict accelerator decline vocabulary consumed by pipeline callers.
 [[nodiscard]] inline constexpr vulkan_sketch_decline_reason
 vulkan_target_index_failure_decline_reason(
-    gpu_index_build_failure_reason reason) noexcept
+    gpu_index_build_failure reason) noexcept
 {
     switch (reason) {
-        case gpu_index_build_failure_reason::none:
+        case gpu_index_build_failure::none:
             return vulkan_sketch_decline_reason::
                 target_index_build_invariant_failed;
-        case gpu_index_build_failure_reason::invalid_shape:
+        case gpu_index_build_failure::invalid_shape:
             return vulkan_sketch_decline_reason::target_index_invalid_shape;
-        case gpu_index_build_failure_reason::minimizer_capacity_exceeds_u32:
+        case gpu_index_build_failure::minimizer_capacity_exceeds_u32:
             return vulkan_sketch_decline_reason::minimizer_capacity_exceeds_u32;
-        case gpu_index_build_failure_reason::memory_plan_invalid:
+        case gpu_index_build_failure::memory_plan_invalid:
             return vulkan_sketch_decline_reason::memory_plan_invalid;
-        case gpu_index_build_failure_reason::device_arena_allocation_failed:
-        case gpu_index_build_failure_reason::device_buffer_allocation_failed:
+        case gpu_index_build_failure::device_arena_allocation_failed:
+        case gpu_index_build_failure::device_buffer_allocation_failed:
             return vulkan_sketch_decline_reason::device_allocation_failed;
-        case gpu_index_build_failure_reason::count_peak_memory_admission_denied:
-        case gpu_index_build_failure_reason::main_peak_memory_admission_denied:
+        case gpu_index_build_failure::count_peak_memory_admission_denied:
+        case gpu_index_build_failure::execution_peak_memory_admission_denied:
             return vulkan_sketch_decline_reason::memory_admission_denied;
-        case gpu_index_build_failure_reason::peak_allocation_exceeds_admission:
+        case gpu_index_build_failure::peak_allocation_exceeds_admission:
             return vulkan_sketch_decline_reason::memory_plan_invalid;
-        case gpu_index_build_failure_reason::output_capacity_overflow:
+        case gpu_index_build_failure::output_capacity_overflow:
             return vulkan_sketch_decline_reason::output_capacity_overflow;
-        case gpu_index_build_failure_reason::index_invariant_failed:
+        case gpu_index_build_failure::index_invariant_failed:
             return vulkan_sketch_decline_reason::
                 target_index_build_invariant_failed;
     }
@@ -389,7 +389,7 @@ struct minimizer_wire_traits<p_record_type> {
         std::uint64_t n) noexcept
     {
         return k_storage_bits == 16u
-            ? (bioseq::gpu::vulkan::sat_add(n, 1u) / 2u)
+            ? (bioseq::common::saturating_add(n, 1u) / 2u)
             : bioseq::common::saturating_mul(
                 n, k_words32_per_minimizer);
     }
@@ -644,11 +644,11 @@ template <sequence_alphabet p_alphabet> struct borrowed_u32_instance {
 /// u32 object array (native resident storage or admitted u32 materialization).
 /// Reinterpreted byte descriptors are routed through byte_upload_range below
 /// and must never reach this function.
-template <sequence_alphabet p_alphabet, class Fn>
+template <sequence_alphabet p_alphabet, class p_function>
 decltype(auto) with_typed_u32_range(
     const typename bioseq::storage::lazy_sequence_view<
         p_alphabet>::resident_packed_sequence &descriptor,
-    Fn &&fn) {
+    p_function &&fn) {
   using instance = borrowed_u32_instance<p_alphabet>;
   using range_type = compact_sequence_range<instance>;
   borrowed_packed_header header{
@@ -658,7 +658,7 @@ decltype(auto) with_typed_u32_range(
       .padding_letters = descriptor.trailing_padding,
   };
     range_type range{header};
-  return std::forward<Fn>(fn)(range);
+  return std::forward<p_function>(fn)(range);
 }
 
 /// Unit iterator for a packed upload whose backing allocation has a different
@@ -796,14 +796,14 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
 /// established compact range.  A u64-backed byte-layout borrow instead gets a
 /// non-dereferenceable byte_upload_range whose unit stepping is std::byte
 /// arithmetic.
-template <sequence_alphabet p_alphabet, class Fn>
+template <sequence_alphabet p_alphabet, class p_function>
 decltype(auto) with_canonical_u32_upload_source(
-    const canonical_u32_window<p_alphabet> &window, Fn &&fn) {
+    const canonical_u32_window<p_alphabet> &window, p_function &&fn) {
   if (window.borrow_kind
       == bioseq::storage::sequence_resident_borrow_kind::
           reinterpreted_bytes) {
     byte_upload_range<p_alphabet> bytes{window.descriptor};
-    return std::forward<Fn>(fn)(bytes);
+    return std::forward<p_function>(fn)(bytes);
   }
   DEBUG_ASSERT(
       window.owner.has_value()
@@ -812,7 +812,7 @@ decltype(auto) with_canonical_u32_upload_source(
                   native_typed_storage,
       "typed Vulkan range requires native or admitted u32 storage");
   return with_typed_u32_range<p_alphabet>(
-      window.descriptor, std::forward<Fn>(fn));
+      window.descriptor, std::forward<p_function>(fn));
 }
 
 template <sequence_alphabet p_alphabet>
@@ -967,6 +967,7 @@ template <class p_traits>
         + 1u;
 }
 
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN sketch_segment_context_units
 template <class p_traits>
 [[nodiscard]] constexpr std::size_t sketch_segment_context_units(
     std::size_t window_size,
@@ -980,6 +981,7 @@ template <class p_traits>
         1u,
         static_cast<std::size_t>(bioseq::common::ceil_div(context_bp, lpu)));
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END sketch_segment_context_units
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN compute_segment_descriptor
 template <class p_sequence>
@@ -1078,6 +1080,7 @@ template <class p_sequence>
         && right.core_lo_unit < right.core_hi_unit;
 }
 
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN admitted_sketch_collection_limit_bp
 template <class p_minimizer_type, class p_traits>
 [[nodiscard]] std::uint64_t admitted_sketch_collection_limit_bp(
     std::size_t window_size,
@@ -1128,6 +1131,7 @@ template <class p_minimizer_type, class p_traits>
     }
     return collected_floor_bp;
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END admitted_sketch_collection_limit_bp
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN sketch_segment_windows
 template <class p_minimizer_type, class p_sequence>
@@ -1329,7 +1333,7 @@ struct vulkan_device_minimizer_storage {
     // before either admission owner can release its reservation.
     std::shared_ptr<vulkan_batch_sketch_memory_retention> batch_memory_retention;
     bioseq::parallelism::memory_permit permit;
-    Buffer words;
+    buffer words;
     std::uint64_t count = 0;
     std::uint64_t capacity = 0;
     std::uint32_t words32_per_minimizer =
@@ -1342,7 +1346,7 @@ template <class p_minimizer_type>
 struct vulkan_device_minimizer_span {
     std::shared_ptr<const vulkan_device_minimizer_storage<p_minimizer_type>> owner{};
 
-    [[nodiscard]] const Buffer* words() const noexcept {
+    [[nodiscard]] const buffer* words() const noexcept {
         return owner ? &owner->words : nullptr;
     }
     [[nodiscard]] std::uint64_t count() const noexcept {
@@ -1531,7 +1535,7 @@ struct vulkan_batch_sketch_result {
     std::vector<gpu_seed_query_record_wire> query_records;
     std::shared_ptr<vulkan_device_minimizer_storage<p_minimizer_type>> device;
     runtime_sketch_dispatch_stats dispatch_stats{};
-    device_query_sketch_authority query_authority{};
+    device_query_sketch_authorization query_authority{};
     vulkan_sketch_host_materialization materialization =
         vulkan_sketch_host_materialization::host_and_device;
     std::uint64_t device_minimizer_count = 0;
@@ -1573,7 +1577,7 @@ template <class p_minimizer_type>
     // different: it first obtains exact T without an output allocation, records
     // whether this estimate was low, then sizes and admits the deterministic
     // emit from T rather than treating this heuristic as a semantic cap.
-    if (bp_size <= k_sketch_tile_bp) {
+    if (bp_size <= k_default_sketch_tile_bp) {
         return std::max<std::uint64_t>(64u, bp_size);
     }
     const std::uint64_t base = window_size == 0 ? bp_size : (bp_size / window_size + 64u);
@@ -1609,7 +1613,7 @@ template <class p_minimizer_type>
     if (!plan.is_valid) {
         return (std::numeric_limits<std::uint64_t>::max)();
     }
-    return sat_add(
+    return bioseq::common::saturating_add(
         plan.arena_scaffold_bytes,
         plan.count_submit_host_transient_bytes);
 }
@@ -1755,7 +1759,7 @@ sketch_uploaded_window_result(
         decline(vulkan_sketch_decline_reason::padded_sequence_size_overflow);
         return std::nullopt;
     }
-    auto& runtime = vulkan_runtime::instance();
+    auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     if (!hardware_device_available(runtime)) {
         decline(vulkan_sketch_decline_reason::hardware_device_unavailable);
         return std::nullopt;
@@ -1804,7 +1808,7 @@ sketch_uploaded_window_result(
         return std::nullopt;
     }
     const gpu_sketch_batch_allocation_requirements allocation_requirements =
-        runtime.make_gpu_sketch_batch_allocation_requirements(
+        runtime.sketch_batch_allocation_requirements(
             upload.padded_byte_size,
             dispatch_plan.tiles.tile_count,
             static_cast<std::uint32_t>(
@@ -1817,10 +1821,10 @@ sketch_uploaded_window_result(
     }
     const std::uint64_t query_gate_arena_bytes = query_gate_bytes == 0u
         ? 0u
-        : sat_add(
+        : bioseq::common::saturating_add(
             query_gate_bytes,
-            std::uint64_t{k_sketch_slot_offset_alignment});
-    const std::uint64_t arena_request_bytes = sat_add(
+            std::uint64_t{k_gpu_buffer_offset_alignment});
+    const std::uint64_t arena_request_bytes = bioseq::common::saturating_add(
         dispatch_plan.arena_scaffold_bytes,
         query_gate_arena_bytes);
     if (query_gate_arena_bytes
@@ -1831,15 +1835,15 @@ sketch_uploaded_window_result(
         return std::nullopt;
     }
     const std::uint64_t physical_arena_bytes =
-        runtime.sketch_arena_allocation_requirement(arena_request_bytes);
+        runtime.gpu_arena_allocation_requirement(arena_request_bytes);
     const std::uint64_t host_transient_headroom_bytes =
         vulkan_exact_host_allocation_admission_bytes(
             dispatch_plan.count_submit_host_transient_bytes);
     const std::uint64_t resident_allocation_bytes =
         allocation_requirements.pessimistic_output_allocation_bytes;
-    const std::uint64_t transient_bytes = sat_add(
+    const std::uint64_t transient_bytes = bioseq::common::saturating_add(
         physical_arena_bytes,
-        sat_add(host_transient_headroom_bytes, query_gate_bytes));
+        bioseq::common::saturating_add(host_transient_headroom_bytes, query_gate_bytes));
 
     if (host_transient_headroom_bytes
             == (std::numeric_limits<std::uint64_t>::max)()
@@ -1905,9 +1909,9 @@ sketch_uploaded_window_result(
             .bp_size = static_cast<std::uint32_t>(upload.bp_size),
             .window_size = static_cast<std::uint32_t>(window_size),
             .kmer_size = static_cast<std::uint32_t>(kmer_size),
-            .k_hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
-            .k_hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
-            .k_position_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
+            .hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
+            .hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
+            .pos_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
             .minimizer_word_kind = static_cast<std::uint32_t>(
                 minimizer_wire_traits<p_minimizer_type>::k_word_kind),
             .minimizer_words32 =
@@ -2074,8 +2078,8 @@ sketch_uploaded_window_result(
                 "materialization permit"};
         }
 
-        // Reserve once, download once: the former byte-vector staging copy is
-        // gone.  p_permit_type declaration precedes vector declaration so reverse
+        // Reserve once and download once. p_permit_type declaration precedes
+        // vector declaration so reverse
         // destruction always frees vector capacity before returning admission.
         std::vector<p_minimizer_type> host_minimizers;
         std::uint64_t exact_host_capacity_bytes = 0u;
@@ -2123,22 +2127,22 @@ sketch_uploaded_window_result(
                     *owned_host_permit,
                     [&allocate_and_download,
                      &exact_host_capacity_bytes]() -> bioseq::parallelism::
-                            memory_materialization_stats {
+                            memory_materialization_snapshot {
                         allocate_and_download();
                         return {
                             .actual_allocation_bytes =
                                 exact_host_capacity_bytes,
                             .fully_touched_bytes = exact_host_capacity_bytes,
-                            .host_visible = true,
-                            .host_coherent = true,
-                            .process_footprint_reflected = true,
+                            .is_host_visible = true,
+                            .is_host_coherent = true,
+                            .is_process_footprint_reflected = true,
                         };
                     });
             host_permit_released_to_process_footprint =
-                materialization.permit_released;
+                materialization.is_permit_released;
             host_footprint_reflected_delta_bytes =
                 materialization.reflected_delta_bytes;
-            if (!materialization.permit_released) {
+            if (!materialization.is_permit_released) {
                 // A large target does not imply a large emitted vector.  An
                 // ambiguity-heavy dna5 target can produce a small non-empty
                 // allocation whose allocator pages were already resident, so
@@ -2151,8 +2155,8 @@ sketch_uploaded_window_result(
                     "[vulkan sketch] fixed host footprint reconciliation "
                     "retained exact permit: actual={} touched={} before={} "
                     "after={} delta={} permit={}",
-                    materialization.evidence.actual_allocation_bytes,
-                    materialization.evidence.fully_touched_bytes,
+                    materialization.allocation_snapshot.actual_allocation_bytes,
+                    materialization.allocation_snapshot.fully_touched_bytes,
                     materialization.footprint_before_bytes,
                     materialization.footprint_after_bytes,
                     materialization.reflected_delta_bytes,
@@ -2254,7 +2258,7 @@ build_gpu_index_from_upload_on_device(
         decline(vulkan_sketch_decline_reason::query_gate_exceeds_u32);
         return std::nullopt;
     }
-    auto& runtime = vulkan_runtime::instance();
+    auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     if (!hardware_device_available(runtime)) {
         decline(vulkan_sketch_decline_reason::hardware_device_unavailable);
         return std::nullopt;
@@ -2300,15 +2304,15 @@ build_gpu_index_from_upload_on_device(
         bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(query_gate.words.size()),
             sizeof(std::uint32_t));
-    const std::uint64_t count_arena_request = sat_add(
+    const std::uint64_t count_arena_request = bioseq::common::saturating_add(
         memory_plan.arena_scaffold_bytes,
         query_gate_bytes == 0u
             ? 0u
-            : sat_add(query_gate_bytes,
-                      std::uint64_t{k_sketch_slot_offset_alignment}));
+            : bioseq::common::saturating_add(query_gate_bytes,
+                      std::uint64_t{k_gpu_buffer_offset_alignment}));
     const std::uint64_t count_arena_bytes =
-        runtime.sketch_arena_allocation_requirement(count_arena_request);
-    const std::uint64_t admission_bytes = sat_add(
+        runtime.gpu_arena_allocation_requirement(count_arena_request);
+    const std::uint64_t admission_bytes = bioseq::common::saturating_add(
         count_arena_bytes, host_scratch_plan.count_submit_bytes);
     if (query_gate_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || admission_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -2321,9 +2325,9 @@ build_gpu_index_from_upload_on_device(
         .bp_size = static_cast<std::uint32_t>(upload.bp_size),
         .window_size = static_cast<std::uint32_t>(window_size),
         .kmer_size = static_cast<std::uint32_t>(kmer_size),
-        .k_hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
-        .k_hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
-        .k_position_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
+        .hash_bits = minimizer_wire_traits<p_minimizer_type>::k_hash_bits,
+        .hash_shift = minimizer_wire_traits<p_minimizer_type>::k_hash_shift,
+        .pos_bits = minimizer_wire_traits<p_minimizer_type>::k_position_bits,
         .minimizer_word_kind = static_cast<std::uint32_t>(
             minimizer_wire_traits<p_minimizer_type>::k_word_kind),
         .minimizer_words32 =
@@ -2378,7 +2382,7 @@ build_gpu_index_from_upload_on_device(
         gpu_built_index built{};
         const auto materialization = admission.materialize(
             *permit,
-            [&]() -> bioseq::parallelism::memory_materialization_stats {
+            [&]() -> bioseq::parallelism::memory_materialization_snapshot {
                 built = runtime.build_target_index(
                     std::span<const std::byte>{
                         static_cast<const std::byte*>(upload.bytes),
@@ -2397,13 +2401,13 @@ build_gpu_index_from_upload_on_device(
                 if (!built.valid) {
                     return {};
                 }
-                // vulkan_runtime publishes this bit only after rewinding and
+                // runtime publishes this bit only after rewinding and
                 // destroying all sketch-arena backing buffers while its mutex
                 // is still held. Do not inspect the shared arena here: another
-                // Vulkan request may already own it after vulkan_runtime returned.
+                // Vulkan request may already own it after runtime returned.
                 if (built.ownership.arena_trimmed_before_permit_shrink != 1u) {
                     built.valid = false;
-                    built.failure_reason = gpu_index_build_failure_reason::
+                    built.failure_reason = gpu_index_build_failure::
                         index_invariant_failed;
                     built.positions.reset();
                     built.slots.reset();
@@ -2411,18 +2415,18 @@ build_gpu_index_from_upload_on_device(
                 }
                 if (built.ownership.peak_observed_bytes > permit->bytes()) {
                     built.valid = false;
-                    built.failure_reason = gpu_index_build_failure_reason::
+                    built.failure_reason = gpu_index_build_failure::
                         peak_allocation_exceeds_admission;
                     built.positions.reset();
                     built.slots.reset();
                     return {};
                 }
-                const std::uint64_t resident_bytes = sat_add(
+                const std::uint64_t resident_bytes = bioseq::common::saturating_add(
                     built.slots.allocation_bytes,
                     built.positions.allocation_bytes);
                 if (resident_bytes > permit->bytes()) {
                     built.valid = false;
-                    built.failure_reason = gpu_index_build_failure_reason::
+                    built.failure_reason = gpu_index_build_failure::
                         peak_allocation_exceeds_admission;
                     built.positions.reset();
                     built.slots.reset();
@@ -2431,22 +2435,22 @@ build_gpu_index_from_upload_on_device(
                 permit->shrink_to(resident_bytes);
                 built.ownership.resident_bytes = resident_bytes;
                 const bool host_visible_coherent =
-                    built.slots.host_visible_coherent()
-                    && built.positions.host_visible_coherent();
-                return bioseq::parallelism::memory_materialization_stats{
+                    built.slots.is_host_visible_coherent()
+                    && built.positions.is_host_visible_coherent();
+                return bioseq::parallelism::memory_materialization_snapshot{
                     .actual_allocation_bytes = resident_bytes,
                     .fully_touched_bytes = resident_bytes,
-                    .host_visible = host_visible_coherent,
-                    .host_coherent = host_visible_coherent,
-                    .process_footprint_reflected =
+                    .is_host_visible = host_visible_coherent,
+                    .is_host_coherent = host_visible_coherent,
+                    .is_process_footprint_reflected =
                         built.slots.process_footprint_reflected
                         && built.positions.process_footprint_reflected,
                 };
             });
         if (!built.valid) {
             if (decline_out != nullptr
-                && built.main_peak_admission_failure.failed()) {
-                decline_out->admission = built.main_peak_admission_failure;
+                && built.execution_peak_admission_failure.failed()) {
+                decline_out->admission = built.execution_peak_admission_failure;
             }
             decline(
                 vulkan_target_index_failure_decline_reason(
@@ -2458,19 +2462,19 @@ build_gpu_index_from_upload_on_device(
         built.ownership.materialization_admitted_bytes =
             materialization.admitted_bytes;
         built.ownership.materialization_actual_allocation_bytes =
-            materialization.evidence.actual_allocation_bytes;
+            materialization.allocation_snapshot.actual_allocation_bytes;
         built.ownership.materialization_fully_touched_bytes =
-            materialization.evidence.fully_touched_bytes;
+            materialization.allocation_snapshot.fully_touched_bytes;
         built.ownership.materialization_reflected_delta_bytes =
             materialization.reflected_delta_bytes;
         built.ownership.materialization_permit_released =
-            materialization.permit_released ? 1u : 0u;
+            materialization.is_permit_released ? 1u : 0u;
         built.ownership.materialization_host_visible =
-            materialization.evidence.host_visible ? 1u : 0u;
+            materialization.allocation_snapshot.is_host_visible ? 1u : 0u;
         built.ownership.materialization_host_coherent =
-            materialization.evidence.host_coherent ? 1u : 0u;
+            materialization.allocation_snapshot.is_host_coherent ? 1u : 0u;
         built.ownership.materialization_process_footprint_reflected =
-            materialization.evidence.process_footprint_reflected ? 1u : 0u;
+            materialization.allocation_snapshot.is_process_footprint_reflected ? 1u : 0u;
         built.permit = std::move(*permit);
         return built;
     } catch (const vulkan_runtime_error&) {
@@ -2587,7 +2591,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         return std::nullopt;
     }
 
-    auto& runtime = vulkan_runtime::instance();
+    auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     if (!hardware_device_available(runtime) || runtime.features().max_workgroup_count_x == 0u) {
         return std::nullopt;
     }
@@ -2595,7 +2599,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     using query_tile_range = gpu_sketch_query_layout_wire;
 
     // Pass 1 is scalar-only: validate every upload and compute exact vector
-    // sizes without constructing any owned vector or Vulkan Buffer.
+    // sizes without constructing any owned vector or Vulkan buffer.
     std::uint64_t packed_sequence_bytes = 0u;
     std::uint64_t total_tile_count = 0u;
     std::uint64_t max_minimizers = 0u;
@@ -2627,7 +2631,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             return std::nullopt;
         }
         max_bp = std::max(max_bp, upload.bp_size);
-        max_minimizers = sat_add(
+        max_minimizers = bioseq::common::saturating_add(
             max_minimizers,
             estimate_vulkan_minimizer_capacity(upload.bp_size, window_size));
         if (max_minimizers
@@ -2648,7 +2652,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
                     (std::numeric_limits<std::uint32_t>::max)())) {
             return std::nullopt;
         }
-        packed_sequence_bytes = sat_add(
+        packed_sequence_bytes = bioseq::common::saturating_add(
             aligned_begin,
             upload.padded_byte_size);
         if (packed_sequence_bytes
@@ -2669,7 +2673,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             if (!tile_plan.is_dispatchable || tile_plan.tile_count == 0u) {
                 return std::nullopt;
             }
-            total_tile_count = sat_add(
+            total_tile_count = bioseq::common::saturating_add(
                 total_tile_count,
                 tile_plan.tile_count);
             if (total_tile_count
@@ -2688,7 +2692,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     }
 
     const gpu_sketch_batch_allocation_requirements initial_requirements =
-        runtime.make_gpu_sketch_batch_allocation_requirements(
+        runtime.sketch_batch_allocation_requirements(
             packed_sequence_bytes,
             total_tile_count,
             static_cast<std::uint32_t>(
@@ -2721,14 +2725,14 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         std::vector<p_value_type>& values) noexcept {
         std::vector<p_value_type>{}.swap(values);
     };
-    const std::uint64_t exact_scaffold_bytes = sat_add(
-        sat_add(
+    const std::uint64_t exact_scaffold_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             packed_sequence_bytes,
             saturating_mul(
                 total_tile_count,
                 sizeof(gpu_sketch_tile_wire))),
-        sat_add(
-            sat_add(
+        bioseq::common::saturating_add(
+            bioseq::common::saturating_add(
                 saturating_mul(uploads.size(), sizeof(query_tile_range)),
                 saturating_mul(
                     uploads.size(),
@@ -2737,11 +2741,11 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             saturating_mul(
                 total_tile_count,
                 2u * sizeof(std::uint32_t))));
-    const std::uint64_t initial_peak_bytes = sat_add(
-        sat_add(
+    const std::uint64_t initial_peak_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             initial_requirements.arena_allocation_bytes,
             initial_requirements.pessimistic_output_allocation_bytes),
-        sat_add(peak_host_minimizer_bytes, exact_scaffold_bytes));
+        bioseq::common::saturating_add(peak_host_minimizer_bytes, exact_scaffold_bytes));
     if (initial_peak_bytes
         == (std::numeric_limits<std::uint64_t>::max)()) {
         return std::nullopt;
@@ -2842,7 +2846,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     }
 
     const gpu_sketch_batch_allocation_requirements pre_dispatch_requirements =
-        runtime.make_gpu_sketch_batch_allocation_requirements(
+        runtime.sketch_batch_allocation_requirements(
             packed_sequence_bytes,
             total_tile_count,
             static_cast<std::uint32_t>(
@@ -2850,13 +2854,13 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             minimizer_wire_traits<minimizer_type>::k_words32_per_minimizer,
             max_minimizers);
     if (!pre_dispatch_requirements.valid) return std::nullopt;
-    const std::uint64_t actual_scaffold_capacity_bytes = sat_add(
-        sat_add(
+    const std::uint64_t actual_scaffold_capacity_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(packed_sequence),
             vector_capacity_bytes(tiles)),
-        sat_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(tile_ranges),
-            sat_add(
+            bioseq::common::saturating_add(
                 vector_capacity_bytes(result.query_records),
                 vector_capacity_bytes(result.host_minimizers))));
     const std::uint64_t anticipated_raw_count_bytes = saturating_mul(
@@ -2867,15 +2871,15 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             uploads.size(),
             sizeof(gpu_seed_query_record_wire) + sizeof(std::uint32_t)),
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    const std::uint64_t pre_dispatch_peak_bytes = sat_add(
-        sat_add(
+    const std::uint64_t pre_dispatch_peak_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             pre_dispatch_requirements.arena_allocation_bytes,
             pre_dispatch_requirements.pessimistic_output_allocation_bytes),
-        sat_add(
+        bioseq::common::saturating_add(
             peak_host_minimizer_bytes,
-            sat_add(
+            bioseq::common::saturating_add(
                 actual_scaffold_capacity_bytes,
-                sat_add(
+                bioseq::common::saturating_add(
                     anticipated_raw_count_bytes,
                     authority_query_record_headroom))));
     bioseq::parallelism::memory_admission_failure growth_failure{};
@@ -2895,9 +2899,9 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
                     (std::numeric_limits<std::uint32_t>::max)()))),
         .window_size = static_cast<std::uint32_t>(window_size),
         .kmer_size = static_cast<std::uint32_t>(kmer_size),
-        .k_hash_bits = minimizer_wire_traits<minimizer_type>::k_hash_bits,
-        .k_hash_shift = minimizer_wire_traits<minimizer_type>::k_hash_shift,
-        .k_position_bits = minimizer_wire_traits<minimizer_type>::k_position_bits,
+        .hash_bits = minimizer_wire_traits<minimizer_type>::k_hash_bits,
+        .hash_shift = minimizer_wire_traits<minimizer_type>::k_hash_shift,
+        .pos_bits = minimizer_wire_traits<minimizer_type>::k_position_bits,
         .minimizer_word_kind = static_cast<std::uint32_t>(
             minimizer_wire_traits<minimizer_type>::k_word_kind),
         .minimizer_words32 =
@@ -2913,7 +2917,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     };
 
     // Declared after every other owner: any later failure destroys this raw
-    // Buffer/vector aggregate first, then scaffolds/result, then the permit.
+    // buffer/vector aggregate first, then scaffolds/result, then the permit.
     runtime_sketch_batch_result raw =
         runtime.run_sketch_tile_batch_roundtrip(
             std::span<const std::byte>{
@@ -2927,7 +2931,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             max_minimizers,
             materialization);
     const gpu_sketch_batch_allocation_requirements post_dispatch_requirements =
-        runtime.make_gpu_sketch_batch_allocation_requirements(
+        runtime.sketch_batch_allocation_requirements(
             packed_sequence_bytes,
             total_tile_count,
             static_cast<std::uint32_t>(
@@ -2935,26 +2939,26 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             minimizer_wire_traits<minimizer_type>::k_words32_per_minimizer,
             max_minimizers);
     if (!post_dispatch_requirements.valid) return std::nullopt;
-    const std::uint64_t post_dispatch_live_vector_bytes = sat_add(
-        sat_add(
+    const std::uint64_t post_dispatch_live_vector_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(packed_sequence),
             vector_capacity_bytes(tiles)),
-        sat_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(tile_ranges),
-            sat_add(
-                sat_add(
+            bioseq::common::saturating_add(
+                bioseq::common::saturating_add(
                     vector_capacity_bytes(result.query_records),
                     vector_capacity_bytes(result.host_minimizers)),
-                sat_add(
+                bioseq::common::saturating_add(
                     vector_capacity_bytes(raw.host_minimizer_bytes),
-                    sat_add(
+                    bioseq::common::saturating_add(
                         vector_capacity_bytes(raw.tile_counts),
-                        sat_add(
+                        bioseq::common::saturating_add(
                             vector_capacity_bytes(raw.tile_offsets),
                             raw.query_authority.owned_capacity_bytes()))))));
-    const std::uint64_t post_dispatch_live_bytes = sat_add(
+    const std::uint64_t post_dispatch_live_bytes = bioseq::common::saturating_add(
         raw.minimizer_words.allocation_bytes,
-        sat_add(
+        bioseq::common::saturating_add(
             post_dispatch_requirements.arena_allocation_bytes,
             post_dispatch_live_vector_bytes));
     if (post_dispatch_live_bytes
@@ -2974,7 +2978,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             "count/scan/emit stats"};
     }
     if (materialization == vulkan_sketch_host_materialization::device_only
-        && !raw.query_authority.covers_device_output()) {
+        && !raw.query_authority.does_cover_device_output()) {
         throw vulkan_runtime_error{
             "device-only Vulkan batch sketch returned without runtime-issued "
             "device-output coverage authority"};
@@ -3021,7 +3025,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
             .query_len = static_cast<std::uint32_t>(uploads[query_index].bp_size),
             .flags = 0u,
         };
-        query_minimizer_cursor = sat_add(
+        query_minimizer_cursor = bioseq::common::saturating_add(
             query_minimizer_cursor,
             minimizer_count);
     }
@@ -3034,27 +3038,27 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         vector_capacity_bytes(result.host_minimizers);
     const std::uint64_t retained_query_record_capacity_bytes =
         vector_capacity_bytes(result.query_records);
-    const std::uint64_t retained_bytes = sat_add(
+    const std::uint64_t retained_bytes = bioseq::common::saturating_add(
         raw.minimizer_words.allocation_bytes,
-        sat_add(
+        bioseq::common::saturating_add(
             retained_host_capacity_bytes,
-            sat_add(
+            bioseq::common::saturating_add(
                 retained_query_record_capacity_bytes,
                 raw.query_authority.owned_capacity_bytes())));
-    const std::uint64_t transient_vector_bytes = sat_add(
-        sat_add(
+    const std::uint64_t transient_vector_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(raw.host_minimizer_bytes),
             vector_capacity_bytes(raw.tile_counts)),
-        sat_add(
+        bioseq::common::saturating_add(
             vector_capacity_bytes(raw.tile_offsets),
-            sat_add(
+            bioseq::common::saturating_add(
                 vector_capacity_bytes(packed_sequence),
-                sat_add(
+                bioseq::common::saturating_add(
                     vector_capacity_bytes(tiles),
                     vector_capacity_bytes(tile_ranges)))));
-    const std::uint64_t final_live_peak_bytes = sat_add(
+    const std::uint64_t final_live_peak_bytes = bioseq::common::saturating_add(
         post_dispatch_requirements.arena_allocation_bytes,
-        sat_add(retained_bytes, transient_vector_bytes));
+        bioseq::common::saturating_add(retained_bytes, transient_vector_bytes));
     if (final_live_peak_bytes
             == (std::numeric_limits<std::uint64_t>::max)()
         || !memory_retention->permit.grow_to(
@@ -3250,7 +3254,7 @@ template <class p_minimizer_type, class p_sequence>
 
 /// p_collector_type-compatible wrapper for existing minimizer call sites. Feeds the
 /// GPU sketch into `collector`; returns false only for pre-dispatch ineligible
-/// shapes. vulkan_runtime failures propagate.
+/// shapes. runtime failures propagate.
 template <class p_minimizer_type, class p_collector_type, class p_sequence>
 [[nodiscard]] std::optional<vulkan_sketch_dispatch_token>
 collect_minimizers_vulkan_resident_impl(
@@ -3389,7 +3393,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 return {};
             }
 
-            auto& runtime = vulkan_runtime::instance();
+            auto& runtime = bioseq::gpu::vulkan::runtime::instance();
             if (!hardware_device_available(runtime)) {
                 path_decline.reason =
                     vulkan_sketch_decline_reason::hardware_device_unavailable;
@@ -3470,7 +3474,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
             }
             const gpu_sketch_batch_allocation_requirements
                 maximum_allocation_requirements =
-                    runtime.make_gpu_sketch_batch_allocation_requirements(
+                    runtime.sketch_batch_allocation_requirements(
                         maximum_sequence_bytes,
                         maximum_dispatch_plan.tiles.tile_count,
                             static_cast<std::uint32_t>(
@@ -3485,7 +3489,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     "Vulkan segment minimizer pair path", path_decline);
             }
             const std::uint64_t maximum_physical_arena_bytes =
-                runtime.sketch_arena_allocation_requirement(
+                runtime.gpu_arena_allocation_requirement(
                     maximum_dispatch_plan.arena_scaffold_bytes);
             const std::uint64_t maximum_host_transient_headroom_bytes =
                 vulkan_exact_host_allocation_admission_bytes(
@@ -3504,27 +3508,27 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     maximum_host_bytes);
             // The borrowed slice covers the larger of the mutually exclusive
             // dispatch and exact-host materialization. It must use the same physical
-            // arena/output requirements as `sketch_uploaded_window_result`;
-            // the former requested-byte estimate became stale as soon as a
-            // reusable arena established a larger high-water allocation.
+            // arena/output requirements as `sketch_uploaded_window_result`,
+            // including a reusable arena's high-water allocation.
             const std::uint64_t dispatch_budget = std::max(
                 maximum_dispatch_bytes,
                 maximum_host_materialization_bytes);
             const std::uint64_t initial_filtered_count =
                 estimate_vulkan_minimizer_capacity(
                     descriptor.window_bp, window_size);
-            const auto headroom_bytes = []<class T>(std::uint64_t count) {
+            const auto headroom_bytes =
+                []<class p_value>(std::uint64_t count) {
                 return bioseq::common::saturating_mul(
                     bioseq::common::saturating_mul(
-                        count, static_cast<std::uint64_t>(sizeof(T))),
+                        count, static_cast<std::uint64_t>(sizeof(p_value))),
                     bioseq::parallelism::k_vector_preallocation_headroom_factor);
             };
-            const std::uint64_t initial_owner_bytes = sat_add(
+            const std::uint64_t initial_owner_bytes = bioseq::common::saturating_add(
                 dispatch_budget,
-                sat_add(
+                bioseq::common::saturating_add(
                     headroom_bytes.template operator()<gpu_sketch_segment_window>(
                         initial_window_count),
-                    sat_add(
+                    bioseq::common::saturating_add(
                         headroom_bytes.template operator()<storage_unit>(
                             maximum_sub_units),
                         headroom_bytes.template operator()<
@@ -3574,17 +3578,17 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 std::uint64_t bytes = bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(owner.windows.capacity()),
                     static_cast<std::uint64_t>(sizeof(gpu_sketch_segment_window)));
-                bytes = sat_add(bytes, bioseq::common::saturating_mul(
+                bytes = bioseq::common::saturating_add(bytes, bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(owner.scratch.capacity()),
                     static_cast<std::uint64_t>(sizeof(storage_unit))));
-                return sat_add(bytes, bioseq::common::saturating_mul(
+                return bioseq::common::saturating_add(bytes, bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(owner.filtered.capacity()),
                     static_cast<std::uint64_t>(
                         sizeof(std::pair<std::uint64_t, std::uint64_t>))));
             };
             const auto reconcile_owner = [&]() {
                 const std::uint64_t exact = retained_owner_bytes();
-                const std::uint64_t live = sat_add(exact, dispatch_budget);
+                const std::uint64_t live = bioseq::common::saturating_add(exact, dispatch_budget);
                 if (exact == (std::numeric_limits<std::uint64_t>::max)()
                     || live == (std::numeric_limits<std::uint64_t>::max)()
                     || live > owner.permit.bytes()) {
@@ -3593,15 +3597,15 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 }
                 owner.permit.shrink_to(live);
             };
-            const auto ensure_owner_capacity = [&]<class T>(
-                    std::vector<T>& values,
+            const auto ensure_owner_capacity = [&]<class p_value>(
+                    std::vector<p_value>& values,
                     std::size_t required) {
                 if (values.capacity() >= required) {
                     return;
                 }
-                const std::uint64_t peak = sat_add(
-                    sat_add(retained_owner_bytes(), dispatch_budget),
-                    headroom_bytes.template operator()<T>(required));
+                const std::uint64_t peak = bioseq::common::saturating_add(
+                    bioseq::common::saturating_add(retained_owner_bytes(), dispatch_budget),
+                    headroom_bytes.template operator()<p_value>(required));
                 if (peak == (std::numeric_limits<std::uint64_t>::max)()
                     || !owner.permit.grow_to(peak)) {
                     throw vulkan_runtime_error{
@@ -3742,7 +3746,8 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 result->device.reset();
             }
             // std::pair's default ordering sorts by (kmer, encoded_pos), exactly
-            // the order the mps/mpf builders expect from a "sorted pair run".
+            // the order the minimizer-sequence and minimizer-fragment builders
+            // expect from a "sorted pair run".
             std::sort(owner.filtered.begin(), owner.filtered.end());
             owner.filtered.erase(
                 std::unique(owner.filtered.begin(), owner.filtered.end()),
@@ -3843,7 +3848,7 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
             return;
         }
 
-        auto& runtime = vulkan_runtime::instance();
+        auto& runtime = bioseq::gpu::vulkan::runtime::instance();
         if (!hardware_device_available(runtime)) {
             path_decline.reason =
                 vulkan_sketch_decline_reason::hardware_device_unavailable;
@@ -3986,7 +3991,7 @@ collect_minimizers_vulkan_result(
     return admitted_sequence_detail::with_canonical_u32_upload_source<p_alphabet>(
         *window,
         [window_size, kmer_size, decline_out, host_ownership_route]
-        <class Range>(Range& resident) {
+        <class p_range>(p_range& resident) {
             return collect_minimizers_vulkan_result_resident_impl<p_minimizer_type>(
                 resident,
                 window_size,
@@ -4040,7 +4045,7 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
     return admitted_sequence_detail::with_canonical_u32_upload_source<p_alphabet>(
         *window,
         [window_size, kmer_size, query_gate, decline_out]
-        <class Range>(Range& resident) {
+        <class p_range>(p_range& resident) {
             return build_gpu_index_on_device_resident_impl<p_minimizer_type>(
                 resident,
                 window_size,
@@ -4079,7 +4084,7 @@ template <class p_minimizer_type, sequence_alphabet p_alphabet>
     return admitted_sequence_detail::with_canonical_u32_upload_source<p_alphabet>(
         *window,
         [window_size, kmer_size, query_gate, decline_out]
-        <class Range>(Range& resident) {
+        <class p_range>(p_range& resident) {
             return build_gpu_segment_index_on_device_resident_impl<p_minimizer_type>(
                 resident,
                 0u,
@@ -4120,7 +4125,7 @@ void collect_minimizers_vulkan_segment_or_throw(
     admitted_sequence_detail::with_canonical_u32_upload_source<p_alphabet>(
         *window,
         [&collector, window_size, kmer_size, query_gate]
-        <class Range>(Range& resident) {
+        <class p_range>(p_range& resident) {
             collect_minimizers_vulkan_segment_resident_impl_or_throw<p_minimizer_type>(
                 collector,
                 resident,
@@ -4165,7 +4170,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         *window,
         [emit_base_bp, core_lo_bp, core_hi_bp, window_size, kmer_size,
          execution_stats_out]
-        <class Range>(Range& resident) {
+        <class p_range>(p_range& resident) {
             return collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 resident,
                 0u,

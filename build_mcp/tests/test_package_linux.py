@@ -22,7 +22,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import package_linux as subject  # noqa: E402
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
+import remote  # noqa: E402
 
 
 class PackageLinuxPureContractTests(unittest.TestCase):
@@ -30,7 +32,7 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         helper = (
             Path(__file__).resolve().parents[2]
             / "cmake"
-            / "BioseqSqlCodegen.cmake"
+            / "bioseq_sql_codegen.cmake"
         ).read_text(encoding="utf-8")
         self.assertIn(
             '''      COMMAND "${CMAKE_COMMAND}" -E env
@@ -51,6 +53,11 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         self.assertEqual(subject.ARCHITECTURE, "arm64")
         self.assertEqual(subject.IMAGE_TAG, "debian:trixie")
         self.assertEqual(subject.POSTGRES_MAJOR, 17)
+        self.assertEqual(
+            subject.PACKAGE_CACHE_VALUES[
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+            "dna4_uint64",
+        )
 
     def test_only_generated_output_and_bytecode_noise_are_ignored(self) -> None:
         status = (
@@ -86,9 +93,11 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         )
         self.assertNotIn("main", subject.SOURCE_SNAPSHOT_PATHS)
         self.assertNotIn("research", subject.SOURCE_SNAPSHOT_PATHS)
-        self.assertIn(
-            "research/postgres_prototype", subject.SOURCE_SNAPSHOT_PATHS)
-        self.assertIn("research/python_aligner", subject.SOURCE_SNAPSHOT_PATHS)
+        self.assertNotIn("build.sh", subject.SOURCE_SNAPSHOT_PATHS)
+        self.assertFalse(any(
+            path.startswith("research/")
+            for path in subject.SOURCE_SNAPSHOT_PATHS
+        ))
 
     def test_native_x86_is_rejected(self) -> None:
         with mock.patch.object(subject.platform, "machine", return_value="x86_64"):
@@ -129,11 +138,46 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         spawn.assert_not_called()
 
     def test_content_seal_detects_tampering(self) -> None:
-        value = subject._sealed({"schema_version": 1, "value": "original"})
+        value = subject._sealed({"schema_revision": 1, "value": "original"})
         subject._validate_seal(value, "test")
         value["value"] = "changed"
         with self.assertRaisesRegex(subject.PackageLinuxError, "seal changed"):
             subject._validate_seal(value, "test")
+
+    def test_document_contract_rejects_legacy_revision_and_unknown_keys(self) -> None:
+        current = {
+            "schema_revision": 2,
+            "artifact_kind": "test-artifact",
+            "value": "current",
+        }
+        subject._require_document_contract(
+            current,
+            label="test artifact",
+            revision=2,
+            artifact_kind="test-artifact",
+            keys={"value"},
+        )
+        mutations = {
+            "legacy": lambda value: value.update(
+                schema_version=value.pop("schema_revision")),
+            "legacy-kind": lambda value: value.update(
+                artifact_kind="test-artifact-v2"),
+            "wrong": lambda value: value.update(schema_revision=1),
+            "boolean": lambda value: value.update(schema_revision=True),
+            "unknown": lambda value: value.update(unexpected=True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                invalid = dict(current)
+                mutate(invalid)
+                with self.assertRaises(subject.PackageLinuxError):
+                    subject._require_document_contract(
+                        invalid,
+                        label="test artifact",
+                        revision=2,
+                        artifact_kind="test-artifact",
+                        keys={"value"},
+                    )
 
     def test_build_identity_changes_with_image_or_source_tree(self) -> None:
         base = {"source_tree": "a" * 40, "image": "sha256:" + "b" * 64}
@@ -151,7 +195,7 @@ class PackageLinuxPureContractTests(unittest.TestCase):
     def test_extension_dso_producer_contract_uses_source_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "repository"
-            helper = source / "cmake/AddPostgreSQLExtension.cmake"
+            helper = source / "cmake/add_postgresql_extension.cmake"
             helper.parent.mkdir(parents=True)
             valid = '''elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # endif()
@@ -198,47 +242,47 @@ class PackageLinuxPureContractTests(unittest.TestCase):
 
 class PackageLinuxServerModeTests(unittest.TestCase):
     def test_mode_is_fixed_local_only_and_remote_rejected(self) -> None:
-        self.assertIn(subject.MODE, server.MODES)
-        self.assertIn(subject.MODE, server.REMOTE_RUN_REJECTED_MODES)
-        self.assertNotIn(subject.MODE, server.REMOTE_RUN_BUILD_MODES)
-        definition = server.MODES[subject.MODE]
+        self.assertIn(subject.MODE, build_presets.MODES)
+        self.assertIn(subject.MODE, build_presets.REMOTE_RUN_REJECTED_MODES)
+        self.assertNotIn(subject.MODE, build_presets.REMOTE_RUN_BUILD_MODES)
+        definition = build_presets.MODES[subject.MODE]
         self.assertEqual(definition.preset_override, subject.MODE)
         self.assertEqual(definition.targets, [])
         self.assertEqual(definition.commands, [])
         self.assertFalse(definition.install_extension)
         self.assertEqual(
             definition.reporting_dir,
-            server.REPORTING_DIR / subject.REPORTING_SUBDIR,
+            build_presets.REPORTING_DIR / subject.REPORTING_SUBDIR,
         )
         self.assertNotEqual(
             definition.reporting_dir,
-            server.build_dir_for(subject.MODE, False),
+            build_presets.build_dir_for(subject.MODE, False),
         )
 
     def test_start_build_rejects_variable_package_inputs_before_spawn(self) -> None:
         with (
-            mock.patch.object(server, "_refuse_root_build_identity", return_value=None),
-            mock.patch.object(server, "_ensure_build_worker_timesharing_policy"),
-            mock.patch.object(server.subprocess, "Popen") as spawn,
+            mock.patch.object(build_worker, "_refuse_root_build_identity", return_value=None),
+            mock.patch.object(build_worker, "_ensure_build_worker_timesharing_policy"),
+            mock.patch.object(build_worker.subprocess, "Popen") as spawn,
         ):
-            result = server.tool_start_build(subject.MODE, build_only=True)
+            result = build_worker.tool_start_build(subject.MODE, build_only=True)
         self.assertIn("accepts no", result)
         spawn.assert_not_called()
 
     def test_detached_worker_routes_directly_to_package_qualifier(self) -> None:
         entry = {"started_at": time.time(), "log_file": "/tmp/package-linux.log"}
         with (
-            mock.patch.object(server, "_refuse_root_build_identity", return_value=None),
-            mock.patch.object(server, "_ensure_build_worker_timesharing_policy"),
-            mock.patch.object(server, "_load_state", return_value={subject.MODE: entry}),
-            mock.patch.object(server, "_run_package_linux_worker", return_value=0) as run,
+            mock.patch.object(build_worker, "_refuse_root_build_identity", return_value=None),
+            mock.patch.object(build_worker, "_ensure_build_worker_timesharing_policy"),
+            mock.patch.object(build_worker, "_load_state", return_value={subject.MODE: entry}),
+            mock.patch.object(build_worker, "_run_package_linux_worker", return_value=0) as run,
         ):
-            self.assertEqual(server._run_build_worker(subject.MODE), 0)
+            self.assertEqual(build_worker._run_build_worker(subject.MODE), 0)
         run.assert_called_once_with(entry)
 
     def test_remote_run_rejects_before_provisioning(self) -> None:
-        with mock.patch.object(server, "_start_or_poll_remote") as remote:
-            result = server.tool_remote_run({
+        with mock.patch.object(remote, "_start_or_poll_remote") as remote:
+            result = remote.tool_remote_run({
                 "operation": "build", "mode": subject.MODE,
                 "branch": "main",
                 "sync": False, "auto_provision": False,
@@ -473,9 +517,9 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                 artifact_root,
                 build_key,
                 {
-                    "schema_version": 2,
+                    "schema_revision": 2,
                     "artifact_kind":
-                        "bioseq-local-linux-package-build-contract-v2",
+                        "bioseq-local-linux-package-build-contract",
                 },
             ))
 
@@ -705,7 +749,7 @@ class ProvenanceAndStorageTests(unittest.TestCase):
     def test_atomic_receipt_is_regular_and_sealed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "receipt.json"
-            value = subject._sealed({"schema_version": 1, "passed": True})
+            value = subject._sealed({"schema_revision": 1, "passed": True})
             subject._write_json_atomic(path, value)
             self.assertFalse(path.is_symlink())
             self.assertEqual(subject._load_json(path, "receipt", sealed=True), value)

@@ -54,7 +54,7 @@ _bioseq_cache_verify_sql_row_profile_guard()
 
 add_subdirectory(core)
 
-include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake")
 
 set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/provider/index.cppm"
@@ -80,7 +80,10 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/diagnostics.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/admin.cppm")
 set(BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES
-  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry_implementation.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry_implementation.cppm")
+set_source_files_properties(
+  ${BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 set(BIOSEQ_CACHE_TEST_SUPPORT_MODULES
   ${BIOSEQ_CACHE_PRODUCTION_MODULES}
   "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm"
@@ -146,7 +149,7 @@ bioseq_add_sql_codegen_context(
   EXTENSION_NAME bioseq_cache
   EXTENSION_SCHEMA bioseq_cache
   GENERATED_MODULE_PREFIX bioseq.cache.sql.generated
-  FMGR_BOUNDARY_MODULE bioseq.pg_sql_boundary
+  FMGR_BOUNDARY_MODULE bioseq.postgres.sql_boundary
   FMGR_PRELUDE postgresql
   OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/sql"
   GENERATED_CPP_DIR
@@ -167,7 +170,7 @@ set_source_files_properties(
   ${BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MODULES}
   PROPERTIES GENERATED TRUE)
 
-AddCommonTargetX(
+bioseq_add_postgresql_extension(
   postgresql_bioseq_cache
   TYPE POSTGRES_EXTENSION
   CXX 26
@@ -312,7 +315,7 @@ endif()
 
 if(BIOSEQ_CACHE_BUILD_TESTS)
   include(
-    "${CMAKE_SOURCE_DIR}/cmake/BioseqPrivatePostgresStage.cmake")
+    "${CMAKE_SOURCE_DIR}/cmake/bioseq_private_postgres_stage.cmake")
   bioseq_add_private_postgres_stage(
     TARGET bioseq_cache_production_postgres_stage
     PG_CONFIG "${PostgreSQL_CONFIG}"
@@ -340,13 +343,13 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
 
   if(NOT TARGET bioseq_postgres_test_support)
     add_subdirectory(
-      "${CMAKE_CURRENT_LIST_DIR}/../common/postgres_test_support"
+      "${CMAKE_CURRENT_LIST_DIR}/../common/postgres/test_support"
       "${CMAKE_CURRENT_BINARY_DIR}/postgres_test_support")
   endif()
-  add_subdirectory(test/unit)
+  add_subdirectory(tests/unit)
   add_subdirectory(bench)
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/integration/CMakeLists.txt")
-    add_subdirectory(test/integration)
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/tests/integration/CMakeLists.txt")
+    add_subdirectory(tests/integration)
   endif()
 
 endif()

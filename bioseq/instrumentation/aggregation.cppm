@@ -94,7 +94,11 @@ struct alignas(64) loop_aggregate : region_aggregate {
     std::uint64_t max_per_iter_ns;
     duration_histogram per_iteration_duration_distribution;
 };
-static_assert(sizeof(loop_aggregate) == 704);
+// duration_histogram's default member initializer makes the base non-POD for
+// layout, so Itanium ABI providers reuse region_aggregate's 56 bytes of tail
+// padding. The loop counters occupy bytes 328-367, the histogram ends at byte
+// 624, and 64-byte alignment rounds the complete object to ten cache lines.
+static_assert(sizeof(loop_aggregate) == 640);
 static_assert(alignof(loop_aggregate) == 64);
 
 [[gnu::always_inline]]
@@ -134,9 +138,9 @@ inline void record_loop_duration(
 
 /// Per-thread aggregate table. Direct id-indexed; 4096 blocks of 256
 /// aggregates. Each block is allocated lazily on first touch.
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct region_aggregate_table {
-    static constexpr std::uint32_t block_size = configuration_type::aggregate_block_size;
+    static constexpr std::uint32_t block_size = p_configuration_type::aggregate_block_size;
     static constexpr std::uint32_t maximum_block_count = 4096;
 
     std::array<region_aggregate*, maximum_block_count> blocks{};
@@ -182,9 +186,9 @@ struct region_aggregate_table {
     }
 };
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct loop_aggregate_table {
-    static constexpr std::uint32_t block_size = configuration_type::aggregate_block_size;
+    static constexpr std::uint32_t block_size = p_configuration_type::aggregate_block_size;
     static constexpr std::uint32_t maximum_block_count = 4096;
 
     std::array<loop_aggregate*, maximum_block_count> blocks{};

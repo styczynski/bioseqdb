@@ -168,7 +168,7 @@ struct prohibited_external_file_producer_counters {
 };
 
 // The external-file producer is compile-disabled in the typed dispatcher.
-// This exported immutable proof is queryable by the integration fixture.
+// These exported immutable counters are queryable by the integration fixture.
 inline constexpr prohibited_external_file_producer_counters
 	g_prohibited_external_file_producer_entry_counters{};
 static_assert(
@@ -178,7 +178,7 @@ static_assert(
 
 // PostgreSQL backends are single-threaded. These counters intentionally show
 // whether a default came from an authoritative empty policy result rather
-// than concealing an SPI failure as the old resolver did.
+// than treating an SPI failure as an empty result.
 inline active_read_policy_resolution_counters
     g_active_read_policy_resolution_counters{};
 inline active_read_policy_dispatch_counters

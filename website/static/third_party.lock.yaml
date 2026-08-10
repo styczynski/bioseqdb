@@ -6,9 +6,11 @@
 # human-auditable record of what those bytes are and where they came from.
 #
 # The separate website/third_party.lock.yaml locks the Python/Playwright
-# VALIDATION toolchain (schema bioseq.website.python_toolchain.lock/v1); this file
+# VALIDATION toolchain (schema bioseq.website.python_toolchain.lock, revision 1);
+# this file
 # locks the assets served to end users.
-schema: bioseq.website.static_assets.lock/v1
+schema: bioseq.website.static_assets.lock
+schema_revision: 1
 
 # Prism syntax highlighter (§12.6): the committed prism.min.js is the minimal core
 # concatenated with exactly the language grammars the site highlights, in

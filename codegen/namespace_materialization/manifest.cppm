@@ -81,7 +81,8 @@ inline void validate_frontend_action_trace_stamp_binding(
     const std::string_view stamp_content,
     const std::string_view action_trace_content) {
     constexpr std::string_view schema{
-        "bioseq_template_flatten_prepare_stamp/v1\n"};
+        "bioseq_template_flatten_prepare_stamp\n"
+        "revision=1\n"};
     constexpr std::string_view prefix{
         "prepare_action_trace_sha256="};
     if (!stamp_content.starts_with(schema)) {
@@ -316,7 +317,7 @@ inline void require_sha256(
     if (identity.begin() != identity.end() && *identity.begin() == "main") {
         throw std::runtime_error(
             std::string{owner}
-            + " must not use the retired main source-root alias");
+            + " must not begin with the non-canonical main/ prefix");
     }
     return identity;
 }
@@ -380,7 +381,7 @@ inline void require_sha256(
 inline void validate_plan_identity(const generation_plan& plan) {
     if (plan.name.empty() || plan.profile.empty()) {
         throw std::runtime_error(
-            "materialization name and optimization profile must be non-empty");
+            "materialization name and template-flatten profile must be non-empty");
     }
     checked_absolute_path(plan.output_root, "materialization output root");
     const std::string source_identity = canonical_source_identity(plan);
@@ -953,10 +954,10 @@ private:
         + "'");
 }
 
-template<std::size_t Size>
+template<std::size_t p_size>
 inline void require_exact_members(
     const json_value& object,
-    const std::array<std::string_view, Size>& expected,
+    const std::array<std::string_view, p_size>& expected,
     std::string_view owner) {
     if (object.kind != json_kind::object
         || object.member_names.size() != expected.size()) {
@@ -1122,7 +1123,7 @@ inline void replace_authenticated_identity(
     require_exact_members(
         root,
         std::array{
-            std::string_view{"publication_schema_version"},
+            std::string_view{"publication_schema_revision"},
             std::string_view{"policy"},
             std::string_view{"name"},
             std::string_view{"output_root"},
@@ -1135,11 +1136,12 @@ inline void replace_authenticated_identity(
         "publication manifest");
 
     if (require_unsigned(
-            require_member(root, "publication_schema_version", owner),
-            "publication_schema_version")
-        != publication_format_revision) {
+            require_member(root, "publication_schema_revision", owner),
+            "publication_schema_revision")
+        != publication_schema_revision) {
         throw std::runtime_error(
-            std::string{owner} + ": unsupported publication manifest schema");
+            std::string{owner}
+            + ": unsupported publication manifest schema revision");
     }
     const std::string policy{require_string(
         require_member(root, "policy", owner), "policy")};
@@ -1274,8 +1276,8 @@ inline void validate_template_flatten_publication_manifest(
     require_exact_members(
         root,
         std::array{
-            std::string_view{"schema_version"},
-            std::string_view{"generator_version"},
+            std::string_view{"schema_revision"},
+            std::string_view{"generator_identity"},
             std::string_view{"profile"},
             std::string_view{"source"},
             std::string_view{"source_module"},
@@ -1288,20 +1290,20 @@ inline void validate_template_flatten_publication_manifest(
         },
         "template_flatten publication evidence");
     if (require_unsigned(
-            require_member(root, "schema_version", owner),
-            "evidence.schema_version")
-        != artifact_format_revision) {
+            require_member(root, "schema_revision", owner),
+            "evidence.schema_revision")
+        != artifact_schema_revision) {
         throw std::runtime_error(
             std::string{owner}
-            + ": unsupported template_flatten evidence schema");
+            + ": unsupported template_flatten evidence schema revision");
     }
     if (require_string(
-            require_member(root, "generator_version", owner),
-            "evidence.generator_version")
+            require_member(root, "generator_identity", owner),
+            "evidence.generator_identity")
         != materialization_generator_identity) {
         throw std::runtime_error(
             std::string{owner}
-            + ": unsupported materialization generator version");
+            + ": unsupported materialization generator identity");
     }
     for (const std::string_view field :
          std::array{
@@ -1774,7 +1776,7 @@ parse_configure_cases(
 
 [[nodiscard]] inline bool configure_coordinate_enabled(
     const configure_coordinate_record& coordinate,
-    unsigned profile) {
+    const std::string_view profile) {
     const configure_assignment_record* alphabet = nullptr;
     const configure_assignment_record* width = nullptr;
     for (const configure_assignment_record& assignment :
@@ -1783,11 +1785,11 @@ parse_configure_cases(
         if (assignment.group == "width") width = &assignment;
     }
     if (alphabet == nullptr || width == nullptr) return true;
-    if (profile == 0U) {
+    if (profile == "dna4_uint64") {
         return alphabet->case_label == "dna4"
             && width->case_label == "w8";
     }
-    if (profile == 1U) {
+    if (profile == "all_alphabets_uint64") {
         return (alphabet->case_label == "dna4"
                 || alphabet->case_label == "dna5")
             && width->case_label == "w8";
@@ -1807,8 +1809,8 @@ parse_configure_topology_provenance(
     require_exact_members(
         root,
         std::array{
-            std::string_view{"schema_version"},
-            std::string_view{"generator_version"},
+            std::string_view{"schema_revision"},
+            std::string_view{"generator_identity"},
             std::string_view{"policy"},
             std::string_view{"name"},
             std::string_view{"source_path"},
@@ -1827,15 +1829,16 @@ parse_configure_topology_provenance(
         },
         "configure topology manifest");
     if (require_unsigned(
-            require_member(root, "schema_version", owner),
-            "schema_version")
-        != topology_format_revision) {
+            require_member(root, "schema_revision", owner),
+            "schema_revision")
+        != topology_schema_revision) {
         throw std::runtime_error(
-            std::string{owner} + ": unsupported configure topology schema");
+            std::string{owner}
+            + ": unsupported configure topology schema revision");
     }
     const std::string parsed_generator_identity{require_string(
-        require_member(root, "generator_version", owner),
-        "generator_version")};
+        require_member(root, "generator_identity", owner),
+        "generator_identity")};
     const std::string policy{require_string(
         require_member(root, "policy", owner), "policy")};
     if (parsed_generator_identity != materialization_generator_identity
@@ -1869,14 +1872,10 @@ parse_configure_topology_provenance(
         "configure topology selector partition");
     const std::string profile{require_string(
         require_member(root, "profile", owner), "profile")};
-    unsigned profile_level{};
-    const std::from_chars_result parsed_profile = std::from_chars(
-        profile.data(), profile.data() + profile.size(), profile_level);
-    if (profile.empty() || parsed_profile.ec != std::errc{}
-        || parsed_profile.ptr != profile.data() + profile.size()
-        || profile_level > 5U) {
+    if (!template_flatten_profile_supported(profile)) {
         throw std::runtime_error(
-            std::string{owner} + ": profile must be an integer from 0 through 5");
+            std::string{owner}
+            + ": profile is not in the closed semantic vocabulary");
     }
     const std::string topology_digest{require_string(
         require_member(root, "topology_digest", owner),
@@ -2182,7 +2181,7 @@ parse_configure_topology_provenance(
                 + ": coordinate source must be an absolute path or null");
         }
         const bool expected_enabled =
-            configure_coordinate_enabled(coordinate, profile_level);
+            configure_coordinate_enabled(coordinate, profile);
         const fs::path expected_source = output_root
             / ("instance_" + std::to_string(index) + ".cppm");
         if (coordinate.enabled != expected_enabled
@@ -2197,7 +2196,8 @@ parse_configure_topology_provenance(
     }
 
     std::ostringstream canonical;
-    canonical << "bioseq-template-flatten-topology-v1\n";
+    canonical << "bioseq-template-flatten-topology\n"
+                 "revision=1\n";
     canonical << "output-module\t" << output_module << '\n';
     for (std::size_t group_index = 0;
          group_index < groups.size();
@@ -2406,9 +2406,9 @@ inline void atomic_replace_regular_file(
 
 /// Writes one protocol-owned staging path. The caller must have authenticated
 /// that the fixed staging name is absent before installing the PREPARING
-/// intent. Closing and rereading before the phase rename makes process-crash
-/// recovery deterministic; sudden host power loss is outside this protocol's
-/// durability claim.
+/// intent. Closing and rereading before advancing the publication state makes
+/// process-crash recovery deterministic; sudden host power loss is outside
+/// this protocol's durability claim.
 inline void write_new_staging_file(
     const fs::path& path,
     std::string_view content,
@@ -2483,8 +2483,8 @@ inline void prune_empty_publication_directories(
         detail::canonical_source_identity(plan);
     const materialization_region& region = plan.topology.region;
     std::ostringstream output;
-    output << "{\n  \"schema_version\": " << topology_format_revision
-           << ",\n  \"generator_version\": ";
+    output << "{\n  \"schema_revision\": " << topology_schema_revision
+           << ",\n  \"generator_identity\": ";
     detail::write_string(output, materialization_generator_identity);
     output << ",\n  \"policy\": ";
     detail::write_string(output, template_flatten_policy);
@@ -2820,8 +2820,8 @@ render_publication_manifest(const publication_manifest_request& request) {
     }
 
     std::ostringstream output;
-    output << "{\n  \"publication_schema_version\": "
-           << publication_format_revision << ",\n  \"policy\": ";
+    output << "{\n  \"publication_schema_revision\": "
+           << publication_schema_revision << ",\n  \"policy\": ";
     detail::write_string(output, request.policy);
     output << ",\n  \"name\": ";
     detail::write_string(output, request.name);
@@ -2961,8 +2961,8 @@ render_publication_manifest(const publication_manifest_request& request) {
     }
 
     std::ostringstream evidence;
-    evidence << "{\n  \"schema_version\": " << artifact_format_revision
-           << ",\n  \"generator_version\": ";
+    evidence << "{\n  \"schema_revision\": " << artifact_schema_revision
+           << ",\n  \"generator_identity\": ";
     detail::write_string(evidence, materialization_generator_identity);
     evidence << ",\n  \"profile\": ";
     detail::write_string(evidence, plan.profile);
@@ -3059,7 +3059,7 @@ render_publication_manifest(const publication_manifest_request& request) {
     return rendered;
 }
 
-/// Reads and authenticates the closed v1 configure-time topology snapshot.
+/// Reads and authenticates the canonical configure-time topology snapshot.
 [[nodiscard]] inline configure_topology_provenance
 read_configure_topology_provenance(
     const std::filesystem::path& path) {
@@ -3086,8 +3086,8 @@ read_configure_topology_provenance(
 }
 
 /// Authenticates a prior artifacts manifest before it can authorize cleanup.
-/// An empty expected topology accepts any valid self-sealed v1 digest so a
-/// reconfigured axis inventory can retire artifacts from its predecessor.
+/// An empty expected topology accepts any valid self-sealed digest so a
+/// reconfigured axis inventory can remove stale predecessor artifacts.
 namespace detail {
 
 struct previous_publication_snapshot {
@@ -3332,13 +3332,13 @@ inline void validate_protocol_ownership_paths(
     return found == publication.artifacts.end() ? nullptr : &*found;
 }
 
-enum class pending_publication_phase : std::uint8_t {
+enum class pending_publication_state : std::uint8_t {
     preparing,
     ready,
 };
 
 struct pending_publication {
-    pending_publication_phase phase{};
+    pending_publication_state state{};
     std::filesystem::path path;
     std::string content;
     previous_publication desired;
@@ -3367,7 +3367,8 @@ read_pending_publication(
         if (symlink_status_or_missing(path, owner).type()
             != std::filesystem::file_type::not_found) {
             throw std::runtime_error(
-                std::string{owner} + " is not owned by a recoverable phase: "
+                std::string{owner}
+                + " is not owned by a recoverable publication state: "
                 + path.string());
         }
     }
@@ -3388,7 +3389,7 @@ read_pending_publication(
         if (preparing_status.type() != std::filesystem::file_type::not_found
             || ready_status.type() != std::filesystem::file_type::not_found) {
             throw std::runtime_error(
-                "publication PREPARING scratch aliases an installed phase");
+                "publication PREPARING scratch aliases an installed state");
         }
         // Staging never begins until this scratch has been atomically renamed
         // to PREPARING, so an isolated regular scratch is always abortable.
@@ -3406,12 +3407,12 @@ read_pending_publication(
         && ready_status.type() == std::filesystem::file_type::not_found) {
         return std::nullopt;
     }
-    const pending_publication_phase phase =
+    const pending_publication_state state =
         preparing_status.type() != std::filesystem::file_type::not_found
-        ? pending_publication_phase::preparing
-        : pending_publication_phase::ready;
+        ? pending_publication_state::preparing
+        : pending_publication_state::ready;
     const std::filesystem::path& path =
-        phase == pending_publication_phase::preparing ? protocol.transaction
+        state == pending_publication_state::preparing ? protocol.transaction
                                                        : protocol.ready;
     require_regular_or_missing(path, "pending publication intent");
     std::string content = read_artifact_bytes(path);
@@ -3426,7 +3427,7 @@ read_pending_publication(
         expected_policy,
         std::string_view{});
     return pending_publication{
-        .phase = phase,
+        .state = state,
         .path = path,
         .content = std::move(content),
         .desired = std::move(desired),
@@ -3620,7 +3621,7 @@ inline void recover_interrupted_publication(
         pending->desired, previous_snapshot.publication);
     detail::validate_protocol_ownership_paths(
         protocol, pending->desired, previous_snapshot.publication);
-    if (pending->phase == detail::pending_publication_phase::preparing) {
+    if (pending->state == detail::pending_publication_state::preparing) {
         detail::abort_preparing_publication(
             protocol, *pending, previous_snapshot);
         return;
@@ -3831,11 +3832,11 @@ inline void publish_artifacts(const publication_request& request) {
     detail::atomic_replace_regular_file(
         protocol.transaction,
         protocol.ready,
-        "publication READY phase transition");
+        "publication READY state installation");
     detail::maybe_inject_publication_fault(
         detail::publication_fault_point::ready_intent_durable);
     const detail::pending_publication ready{
-        .phase = detail::pending_publication_phase::ready,
+        .state = detail::pending_publication_state::ready,
         .path = protocol.ready,
         .content = request.artifact_manifest_json,
         .desired = desired_manifest,

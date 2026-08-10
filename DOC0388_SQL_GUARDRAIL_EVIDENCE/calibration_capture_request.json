@@ -1,7 +1,0 @@
-{
-  "artifact_kind": "doc0388_sql_codegen_guardrail_workflow_request",
-  "capture_bundle_output": "DOC0388_SQL_GUARDRAIL_EVIDENCE/capture_bundle.json",
-  "content_sha256": "5dccf198cd066cfe77f5b116626c11c88e9acd091773eedf6e854867317d6e0f",
-  "phase": "calibration_capture",
-  "schema_version": 1
-}

@@ -41,18 +41,19 @@ static_assert(
 
 [[nodiscard]] group_receipt check_lanes() {
     group_receipt receipt;
-    using d_t = hn::ScalableTag<std::uint64_t>;
-    constexpr std::size_t capacity = hn::MaxLanes(d_t{});
-    const d_t d;
-    const std::size_t lanes = hn::Lanes(d);
-    const auto indices = two_stack_internal::lane_indices(d);
+    using simd_tag_type = hn::ScalableTag<std::uint64_t>;
+    constexpr std::size_t k_capacity = hn::MaxLanes(simd_tag_type{});
+    const simd_tag_type simd_tag;
+    const std::size_t lanes = hn::Lanes(simd_tag);
+    const auto indices = two_stack_internal::lane_indices(simd_tag);
     const auto shifted = hn::Shr(
-        hn::Set(d, std::uint64_t{0xFEDCBA9876543210ull}), indices);
-    HWY_ALIGN std::array<std::uint64_t, capacity> stored_indices{};
-    HWY_ALIGN std::array<std::uint64_t, capacity> stored_shifted{};
-    hn::StoreU(indices, d, stored_indices.data());
-    hn::StoreU(shifted, d, stored_shifted.data());
-    receipt.expect(lanes != 0u && lanes <= capacity && lanes <= 64u);
+        hn::Set(simd_tag, std::uint64_t{0xFEDCBA9876543210ull}),
+        indices);
+    HWY_ALIGN std::array<std::uint64_t, k_capacity> stored_indices{};
+    HWY_ALIGN std::array<std::uint64_t, k_capacity> stored_shifted{};
+    hn::StoreU(indices, simd_tag, stored_indices.data());
+    hn::StoreU(shifted, simd_tag, stored_shifted.data());
+    receipt.expect(lanes != 0u && lanes <= k_capacity && lanes <= 64u);
     for (std::size_t lane = 0u; lane < lanes && lane < 64u; ++lane) {
         receipt.expect(stored_indices[lane] == lane);
         receipt.expect(stored_shifted[lane]
@@ -63,21 +64,27 @@ static_assert(
 
 [[nodiscard]] group_receipt check_masks() {
     group_receipt receipt;
-    const hn::ScalableTag<std::uint32_t> d32;
-    const hn::ScalableTag<std::uint64_t> d64;
-    if (hn::Lanes(d32) != 4u || hn::Lanes(d64) != 2u) {
-        // This fast-kernel helper is intentionally shape-specific. The legacy
-        // property treated other supported targets as not applicable.
+    const hn::ScalableTag<std::uint32_t> uint32_simd_tag;
+    const hn::ScalableTag<std::uint64_t> uint64_simd_tag;
+    if (hn::Lanes(uint32_simd_tag) != 4u
+        || hn::Lanes(uint64_simd_tag) != 2u) {
+        // This fast-kernel helper is intentionally shape-specific. The
+        // reference property treats other supported targets as not applicable.
         receipt.expect(true);
         return receipt;
     }
     for (unsigned bits = 0u; bits < 16u; ++bits) {
-        const auto original = hn::Dup128MaskFromMaskBits(d32, bits);
+        const auto original =
+            hn::Dup128MaskFromMaskBits(uint32_simd_tag, bits);
         const auto halves = two_stack_internal::split_u32_mask(
-            d32, d64, original);
+            uint32_simd_tag, uint64_simd_tag, original);
         const auto joined = two_stack_internal::join_u64_masks(
-            d32, d64, halves.lower, halves.upper);
-        receipt.expect((hn::BitsFromMask(d32, joined) & 0xFu) == bits);
+            uint32_simd_tag,
+            uint64_simd_tag,
+            halves.lower,
+            halves.upper);
+        receipt.expect(
+            (hn::BitsFromMask(uint32_simd_tag, joined) & 0xFu) == bits);
     }
     return receipt;
 }
@@ -94,14 +101,15 @@ static_assert(
             codes.data()) == packed);
     }
 
-    const hn::ScalableTag<std::uint32_t> d32;
-    const hn::ScalableTag<std::uint64_t> d64;
-    if (hn::Lanes(d32) != 4u || hn::Lanes(d64) != 2u) {
+    const hn::ScalableTag<std::uint32_t> uint32_simd_tag;
+    const hn::ScalableTag<std::uint64_t> uint64_simd_tag;
+    if (hn::Lanes(uint32_simd_tag) != 4u
+        || hn::Lanes(uint64_simd_tag) != 2u) {
         receipt.expect(true);
         return receipt;
     }
 
-    constexpr std::uint32_t mask = 0x3fffffffu;
+    constexpr std::uint32_t k_rank_mask = 0x3fffffffu;
     for (std::uint32_t fixture = 0u; fixture < 257u; ++fixture) {
         std::array<std::uint8_t, 24u> codes{};
         std::uint64_t expected_packed = 0u;
@@ -115,30 +123,37 @@ static_assert(
             two_stack_internal::pack_k15_b8_dna4_codes_swar(codes.data());
         receipt.expect(packed22 == expected_packed);
         const auto natural = two_stack_internal::extract_exact_k15_b8_windows(
-            d32, d64, packed22);
+            uint32_simd_tag, uint64_simd_tag, packed22);
         const auto forward_lower =
-            two_stack_internal::reverse_two_bit_groups(d32, natural.lower);
+            two_stack_internal::reverse_two_bit_groups(
+                uint32_simd_tag, natural.lower);
         const auto forward_upper =
-            two_stack_internal::reverse_two_bit_groups(d32, natural.upper);
+            two_stack_internal::reverse_two_bit_groups(
+                uint32_simd_tag, natural.upper);
         HWY_ALIGN std::array<std::uint32_t, 8u> natural_lanes{};
         HWY_ALIGN std::array<std::uint32_t, 8u> forward_lanes{};
-        hn::StoreU(natural.lower, d32, natural_lanes.data());
-        hn::StoreU(natural.upper, d32, natural_lanes.data() + 4u);
-        hn::StoreU(forward_lower, d32, forward_lanes.data());
-        hn::StoreU(forward_upper, d32, forward_lanes.data() + 4u);
+        hn::StoreU(natural.lower, uint32_simd_tag, natural_lanes.data());
+        hn::StoreU(
+            natural.upper, uint32_simd_tag, natural_lanes.data() + 4u);
+        hn::StoreU(
+            forward_lower, uint32_simd_tag, forward_lanes.data());
+        hn::StoreU(
+            forward_upper, uint32_simd_tag, forward_lanes.data() + 4u);
         for (std::size_t start = 0u; start < 8u; ++start) {
             std::uint32_t expected_forward = 0u;
             std::uint32_t expected_reverse = 0u;
             for (std::size_t offset = 0u; offset < 15u; ++offset) {
                 const std::uint32_t code = codes[start + offset];
-                expected_forward = ((expected_forward << 2u) | code) & mask;
+                expected_forward =
+                    ((expected_forward << 2u) | code) & k_rank_mask;
                 expected_reverse |= (code ^ 3u) << (2u * offset);
             }
             receipt.expect(natural_lanes[start]
                 == static_cast<std::uint32_t>(
-                    (packed22 >> (2u * start)) & mask));
+                    (packed22 >> (2u * start)) & k_rank_mask));
             receipt.expect(forward_lanes[start] == expected_forward);
-            receipt.expect((natural_lanes[start] ^ mask) == expected_reverse);
+            receipt.expect(
+                (natural_lanes[start] ^ k_rank_mask) == expected_reverse);
         }
     }
     return receipt;
@@ -154,33 +169,33 @@ static_assert(
     return data;
 }
 
-template<class StorageUnit>
+template<class p_storage_unit>
 void check_decode_storage(
     group_receipt& receipt,
     std::vector<seq::dna4>& data) {
-    using d32_t = hn::ScalableTag<std::uint32_t>;
+    using uint32_simd_tag_type = hn::ScalableTag<std::uint32_t>;
     using sequence_type =
-        sequence_custom_alphabet<seq::dna4, StorageUnit>;
+        sequence_custom_alphabet<seq::dna4, p_storage_unit>;
     using range_type = compact_sequence_range<sequence_type>;
-    const d32_t d32;
-    const hn::Rebind<std::uint8_t, d32_t> d8;
+    const uint32_simd_tag_type uint32_simd_tag;
+    const hn::Rebind<std::uint8_t, uint32_simd_tag_type> uint8_simd_tag;
     range_type source(data);
-    const StorageUnit* packed = source.read_cptr(source.cbegin());
+    const p_storage_unit* packed = source.read_cptr(source.cbegin());
     bool saw_crossed_word = false;
-    constexpr std::array<std::size_t, 10u> starts{
+    constexpr std::array<std::size_t, 10u> k_starts{
         13u, 14u, 15u, 16u, 17u, 29u, 30u, 31u, 32u, 33u};
-    for (const std::size_t start : starts) {
+    for (const std::size_t start : k_starts) {
         for (std::size_t count = 1u; count <= 4u; ++count) {
             const auto decoded =
                 two_stack_internal::decode_packed_dna4_rank_vector<
-                    d32_t, typename range_type::traits>(
-                        d32,
-                        std::span<const StorageUnit>{
+                    uint32_simd_tag_type, typename range_type::traits>(
+                        uint32_simd_tag,
+                        std::span<const p_storage_unit>{
                             packed, static_cast<std::size_t>(source.size())},
                         start,
                         count);
             HWY_ALIGN std::array<std::uint8_t, 4u> ranks{};
-            hn::StoreN(decoded.ranks, d8, ranks.data(), count);
+            hn::StoreN(decoded.ranks, uint8_simd_tag, ranks.data(), count);
             saw_crossed_word = saw_crossed_word || decoded.crossed_word;
             for (std::size_t lane = 0u; lane < count; ++lane) {
                 receipt.expect(ranks[lane]
@@ -193,34 +208,37 @@ void check_decode_storage(
 }
 
 void check_transpose(group_receipt& receipt) {
-    using d_t = hn::ScalableTag<std::uint64_t>;
-    using vec_t = hn::Vec<d_t>;
-    constexpr std::size_t capacity = hn::MaxLanes(d_t{});
-    const d_t d;
-    const std::size_t lanes = hn::Lanes(d);
+    using simd_tag_type = hn::ScalableTag<std::uint64_t>;
+    using vector_type = hn::Vec<simd_tag_type>;
+    constexpr std::size_t k_capacity = hn::MaxLanes(simd_tag_type{});
+    const simd_tag_type simd_tag;
+    const std::size_t lanes = hn::Lanes(simd_tag);
     if constexpr (two_stack_internal::exact_compiled_target_is_scalar) {
         receipt.expect(
-            !two_stack_internal::u64_lane_transpose_shape_supported(d));
+            !two_stack_internal::u64_lane_transpose_shape_supported(
+                simd_tag));
         return;
     }
     receipt.expect(
-        two_stack_internal::u64_lane_transpose_shape_supported(d));
-    if (!two_stack_internal::u64_lane_transpose_shape_supported(d)) return;
+        two_stack_internal::u64_lane_transpose_shape_supported(simd_tag));
+    if (!two_stack_internal::u64_lane_transpose_shape_supported(simd_tag)) {
+        return;
+    }
 
-    HWY_ALIGN std::array<vec_t, capacity> columns{};
-    HWY_ALIGN std::array<std::uint64_t, capacity> column_lanes{};
+    HWY_ALIGN std::array<vector_type, k_capacity> columns{};
+    HWY_ALIGN std::array<std::uint64_t, k_capacity> column_lanes{};
     for (std::size_t column = 0u; column < lanes; ++column) {
         for (std::size_t row = 0u; row < lanes; ++row) {
             column_lanes[row] =
                 static_cast<std::uint64_t>(1000u * column + row);
         }
-        columns[column] = hn::LoadU(d, column_lanes.data());
+        columns[column] = hn::LoadU(simd_tag, column_lanes.data());
     }
     receipt.expect(two_stack_internal::transpose_u64_lane_matrix(
-        d, columns.data()));
-    HWY_ALIGN std::array<std::uint64_t, capacity> row_lanes{};
+        simd_tag, columns.data()));
+    HWY_ALIGN std::array<std::uint64_t, k_capacity> row_lanes{};
     for (std::size_t row = 0u; row < lanes; ++row) {
-        hn::StoreU(columns[row], d, row_lanes.data());
+        hn::StoreU(columns[row], simd_tag, row_lanes.data());
         for (std::size_t column = 0u; column < lanes; ++column) {
             receipt.expect(row_lanes[column]
                 == static_cast<std::uint64_t>(1000u * column + row));
@@ -230,8 +248,8 @@ void check_transpose(group_receipt& receipt) {
 
 [[nodiscard]] group_receipt check_decode_and_transpose() {
     group_receipt receipt;
-    const hn::ScalableTag<std::uint32_t> d32;
-    if (hn::Lanes(d32) == 4u) {
+    const hn::ScalableTag<std::uint32_t> uint32_simd_tag;
+    if (hn::Lanes(uint32_simd_tag) == 4u) {
         auto data = decode_fixture();
         check_decode_storage<std::uint32_t>(receipt, data);
         check_decode_storage<std::uint64_t>(receipt, data);
@@ -245,7 +263,7 @@ void check_transpose(group_receipt& receipt) {
 
 [[nodiscard]] group_receipt check_selector() {
     group_receipt receipt;
-    using fast_minimizer = MinimizerRepr<33u, 15u>;
+    using fast_minimizer = minimizer_representation<33u, 15u>;
     using fast_sequence =
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using fast_traits = compact_sequence_range<fast_sequence>::traits;
@@ -257,38 +275,38 @@ void check_transpose(group_receipt& receipt) {
         && hn::Lanes(hn::ScalableTag<std::uint32_t>{}) == 4u
         && hn::Lanes(hn::ScalableTag<std::uint64_t>{}) == 2u;
     const auto expected = target_supports_fast
-        ? ExactSimdKernelKind::k15_w10_b8_u32_hash
-        : ExactSimdKernelKind::generic_u64;
+        ? exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash
+        : exact_simd_kernel::generic_u64;
     receipt.expect(two_stack_internal::select_exact_simd_kernel_kind<
         fast_minimizer, fast_traits>(4096u) == expected);
     receipt.expect(two_stack_internal::select_exact_simd_kernel_kind<
-        MinimapSketchData, fast_traits>(4096u) == expected);
+        minimap_sketch_data, fast_traits>(4096u) == expected);
     receipt.expect(two_stack_internal::select_exact_simd_kernel_kind<
         fast_minimizer, u64_traits>(4096u)
-        == ExactSimdKernelKind::generic_u64);
+        == exact_simd_kernel::generic_u64);
     receipt.expect(two_stack_internal::select_exact_simd_kernel_kind<
         fast_minimizer, fast_traits>(
             static_cast<std::size_t>(
                 (std::numeric_limits<std::uint32_t>::max)()) + 1u)
-        == ExactSimdKernelKind::generic_u64);
+        == exact_simd_kernel::generic_u64);
     return receipt;
 }
 
-class legacy_output_collector final {
+class reference_output_collector final {
 public:
-    void collect(const MinimapSketchData value) {
+    void collect(const minimap_sketch_data value) {
         records.push_back(value);
     }
 
-    std::vector<MinimapSketchData> records;
+    std::vector<minimap_sketch_data> records;
 };
 
-[[nodiscard]] bool collect_legacy_u8_output(
+[[nodiscard]] bool collect_reference_uint8_output(
     const std::uint8_t* ranks,
     const std::size_t rank_count,
     const std::uint32_t window,
     const std::uint32_t kmer,
-    BioseqHighwayTwoStackLegacyOutputReceipt& receipt)
+    bioseq_highway_two_stack_reference_output_receipt& receipt)
 {
     std::vector<seq::dna4> data(rank_count);
     for (std::size_t index = 0u; index < rank_count; ++index) {
@@ -299,9 +317,9 @@ public:
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint8_t>;
     compact_sequence_range<sequence_type> sequence(data);
-    legacy_output_collector collector;
+    reference_output_collector collector;
     collect_minimizers_two_stack_nthash_simd<
-        minimap_int_hasher, MinimapSketchData, sequence_type>(
+        minimap_int_hasher, minimap_sketch_data, sequence_type>(
             collector,
             sequence,
             sequence.begin(),
@@ -317,7 +335,7 @@ public:
     std::ranges::sort(pairs);
     pairs.erase(std::ranges::unique(pairs).begin(), pairs.end());
     if (pairs.size()
-        > BIOSEQ_HIGHWAY_TWO_STACK_LEGACY_OUTPUT_CAPACITY) {
+        > k_bioseq_highway_two_stack_reference_output_capacity) {
         return false;
     }
 
@@ -328,7 +346,7 @@ public:
     receipt.kmer = kmer;
     for (std::size_t index = 0u; index < pairs.size(); ++index) {
         receipt.pairs[index] = {
-            .last_pos = pairs[index].first,
+            .last_position = pairs[index].first,
             .kmer = pairs[index].second,
         };
     }
@@ -337,13 +355,13 @@ public:
 
 }  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
 
-extern "C" bool bioseq_highway_probe_two_stack_legacy_output(
+extern "C" bool bioseq_highway_collect_two_stack_reference_output(
     const std::uint8_t* ranks,
     const std::uint64_t rank_count,
     const std::uint32_t input_storage_unit_bytes,
     const std::uint32_t window,
     const std::uint32_t kmer,
-    BioseqHighwayTwoStackLegacyOutputReceipt* receipt) noexcept {
+    bioseq_highway_two_stack_reference_output_receipt* receipt) noexcept {
     if (receipt == nullptr
         || ranks == nullptr
         || rank_count != 50u
@@ -356,7 +374,7 @@ extern "C" bool bioseq_highway_probe_two_stack_legacy_output(
     namespace probe =
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
     try {
-        return probe::collect_legacy_u8_output(
+        return probe::collect_reference_uint8_output(
             ranks,
             static_cast<std::size_t>(rank_count),
             window,
@@ -368,8 +386,8 @@ extern "C" bool bioseq_highway_probe_two_stack_legacy_output(
     }
 }
 
-extern "C" bool bioseq_highway_probe_two_stack(
-    BioseqHighwayTwoStackProbeReceipt* receipt) noexcept {
+extern "C" bool bioseq_highway_run_two_stack_probe(
+    bioseq_highway_two_stack_probe_receipt* receipt) noexcept {
     if (receipt == nullptr) return false;
     *receipt = {};
     receipt->target = static_cast<std::int64_t>(HWY_TARGET);

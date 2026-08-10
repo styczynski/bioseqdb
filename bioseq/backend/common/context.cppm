@@ -542,7 +542,7 @@ private:
         const int allocation_status =
             ::posix_memalign(&allocation, effective_alignment, bytes);
         if (allocation_status != 0 || allocation == nullptr) {
-            bioseq_log<DBG>(
+            bioseq_log<logging_level::debug>(
                 "[context] heap fallback FAILED: bytes={} align={} rc={}",
                 bytes,
                 effective_alignment,
@@ -620,7 +620,8 @@ inline thread_local context* tls_current = nullptr;
 [[nodiscard]] inline context& current() noexcept {
     context* installed_context = detail::tls_current;
     if (installed_context == nullptr) {
-        bioseq_log<DBG>("[context] FATAL: no context installed; aborting");
+        bioseq_log<logging_level::debug>(
+            "[context] FATAL: no context installed; aborting");
         std::abort();
     }
     return *installed_context;

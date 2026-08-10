@@ -25,111 +25,15 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-[[nodiscard]] std::string grouped_soa_reader_memory_stats_json(
-		const alignment_exec::alignment_execution_snapshot& snapshot)
+[[nodiscard]] std::string minimizer_fragment_reader_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot)
 {
-	/*
-	 * Keep this post-statement diagnostic separate from both frozen alignment
-	 * stats SRFs and the cold-index object. One immutable backend-
-	 * local snapshot supplies the identity, counters and saturation flags.
-	 */
-	const auto& operational = snapshot.pipeline.operational;
-	std::string result =
-		R"({"schema":"bioseq.grouped_soa_reader_memory_stats","revision":1)";
-	result.reserve(768);
-	const auto append_signed = [&result](
-			const std::string_view key,
-			const std::int64_t value) {
-		result += ",\"";
-		result.append(key);
-		result += "\":";
-		result += std::to_string(value);
-	};
-	const auto append = [&result](
-			const std::string_view key,
-			const std::uint64_t value) {
-		result += ",\"";
-		result.append(key);
-		result += "\":";
-		result += std::to_string(value);
-	};
-	append_signed("execution_id", snapshot.execution_id);
-	append_signed("backend_pid", snapshot.backend_pid);
-	append("database_oid", snapshot.database_oid);
-	append(
-		"grouped_soa_reader_capacity_accounting_passes",
-		operational.grouped_soa_reader_capacity_accounting_passes);
-	append(
-		"grouped_soa_reader_global_position_storage_preparations",
-		operational.grouped_soa_reader_global_position_storage_preparations);
-	append(
-		"grouped_soa_reader_global_position_storage_allocations",
-		operational.grouped_soa_reader_global_position_storage_allocations);
-	append(
-		"grouped_soa_reader_position_append_growth_reservations",
-		operational.grouped_soa_reader_position_append_growth_reservations);
-	append(
-		"grouped_soa_reader_retained_position_count",
-		operational.grouped_soa_reader_retained_position_count);
-	append(
-		"grouped_soa_reader_retained_position_capacity",
-		operational.grouped_soa_reader_retained_position_capacity);
-	result += R"(,"are_grouped_soa_reader_memory_stats_saturated":)";
-	result += operational.are_grouped_soa_reader_memory_stats_saturated
-		? "true" : "false";
-	result += R"(,"are_stats_saturated":)";
-	result += operational.are_stats_saturated ? "true" : "false";
-	result += '}';
-	return result;
-}
-
-enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
-    exact_array_layout = 2u,
-    fragment_native_query = 3u,
-    provider_lifecycle = 4u,
-    bucket_direct_query = 5u,
-    compact_direct_one_decode = 6u,
-};
-
-[[nodiscard]] std::string grouped_soa_reader_memory_stats_json_for_revision(
-        const alignment_exec::alignment_execution_snapshot& snapshot,
-        const grouped_soa_reader_memory_stats_revision revision)
-{
-    bool include_fragment_native_query = false;
-    bool include_provider_lifecycle = false;
-    bool include_bucket_direct_query = false;
-    bool include_compact_direct_one_decode = false;
-    switch (revision) {
-        case grouped_soa_reader_memory_stats_revision::exact_array_layout:
-            break;
-        case grouped_soa_reader_memory_stats_revision::fragment_native_query:
-            include_fragment_native_query = true;
-            break;
-        case grouped_soa_reader_memory_stats_revision::provider_lifecycle:
-            include_fragment_native_query = true;
-            include_provider_lifecycle = true;
-            break;
-        case grouped_soa_reader_memory_stats_revision::bucket_direct_query:
-            include_fragment_native_query = true;
-            include_provider_lifecycle = true;
-            include_bucket_direct_query = true;
-            break;
-        case grouped_soa_reader_memory_stats_revision::compact_direct_one_decode:
-            include_fragment_native_query = true;
-            include_provider_lifecycle = true;
-            include_bucket_direct_query = true;
-            include_compact_direct_one_decode = true;
-            break;
-    }
-    const std::uint32_t revision_number =
-        static_cast<std::uint32_t>(revision);
+    constexpr std::uint32_t revision_number = 6u;
     const auto& operational = snapshot.pipeline.operational;
     std::string result =
         R"({"schema":"bioseq.grouped_soa_reader_memory_stats","revision":)"
         + std::to_string(revision_number);
-    result.reserve(include_provider_lifecycle
-        ? 12'288u
-        : include_fragment_native_query ? 6'144u : 2'048u);
+    result.reserve(12'288u);
 	const auto append_signed = [&result](
 			const std::string_view key,
 			const std::int64_t value) {
@@ -209,7 +113,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
     append(
         "grouped_soa_reader_retained_layout_failures",
         operational.grouped_soa_reader_retained_layout_failures);
-    if (include_fragment_native_query) {
+    {
         const auto& stats = operational.fragment_native_query_stats;
         append("fragment_native_waves", stats.waves);
         append("fragment_native_queries", stats.queries);
@@ -302,7 +206,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 		? "true" : "false";
 	result += R"(,"are_stats_saturated":)";
 	result += operational.are_stats_saturated ? "true" : "false";
-	if (include_provider_lifecycle) {
+	{
 		const auto& stats = operational.grouped_soa_provider;
 		append("provider_configured", stats.provider_configured);
 		append("provider_captured", stats.provider_captured);
@@ -367,7 +271,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 		append("madvise_choice", stats.madvise_choice);
 			append("madvise_result", stats.madvise_result);
 		}
-    if (include_bucket_direct_query) {
+    {
         const auto& stats = operational.fragment_native_query_stats;
         append("fragment_native_peak_query_group_offset_capacity_bytes",
             stats.peak_query_group_offset_capacity_bytes);
@@ -378,7 +282,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
         append("fragment_native_query_membership_filter_allocations",
             stats.query_membership_filter_allocations);
     }
-	if (include_compact_direct_one_decode) {
+	{
 		const auto& stats = operational.fragment_native_query_stats;
 		append("fragment_native_compact_direct_lookup_ns",
 			stats.compact_direct_lookup_ns);
@@ -417,46 +321,11 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
     return result;
 }
 
-[[nodiscard]] std::string grouped_soa_exact_array_layout_reader_memory_stats_json(
-        const alignment_exec::alignment_execution_snapshot& snapshot) {
-    return grouped_soa_reader_memory_stats_json_for_revision(
-        snapshot,
-        grouped_soa_reader_memory_stats_revision::exact_array_layout);
-}
-
-[[nodiscard]] std::string grouped_soa_fragment_native_query_reader_memory_stats_json(
-        const alignment_exec::alignment_execution_snapshot& snapshot) {
-    return grouped_soa_reader_memory_stats_json_for_revision(
-        snapshot,
-        grouped_soa_reader_memory_stats_revision::fragment_native_query);
-}
-
-[[nodiscard]] std::string grouped_soa_provider_lifecycle_reader_memory_stats_json(
-        const alignment_exec::alignment_execution_snapshot& snapshot) {
-    return grouped_soa_reader_memory_stats_json_for_revision(
-        snapshot,
-        grouped_soa_reader_memory_stats_revision::provider_lifecycle);
-}
-
-[[nodiscard]] std::string grouped_soa_bucket_direct_query_reader_memory_stats_json(
-        const alignment_exec::alignment_execution_snapshot& snapshot) {
-    return grouped_soa_reader_memory_stats_json_for_revision(
-        snapshot,
-        grouped_soa_reader_memory_stats_revision::bucket_direct_query);
-}
-
-[[nodiscard]] std::string grouped_soa_compact_direct_one_decode_reader_memory_stats_json(
-        const alignment_exec::alignment_execution_snapshot& snapshot) {
-    return grouped_soa_reader_memory_stats_json_for_revision(
-        snapshot,
-        grouped_soa_reader_memory_stats_revision::compact_direct_one_decode);
-}
-
-[[nodiscard]] std::string hash_major_reader_stats_json(
+[[nodiscard]] std::string hash_major_index_reader_stats_json(
 		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
 	const auto& operational = snapshot.pipeline.operational;
-	const auto& stats = operational.hash_major_reader;
+	const auto& stats = operational.hash_major_index_reader;
 	std::string result =
 		R"({"schema":"bioseq.hash_major_reader_stats","revision":1)";
 	result.reserve(3'072);
@@ -488,7 +357,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 	append_signed("execution_id", snapshot.execution_id);
 	append_signed("backend_pid", snapshot.backend_pid);
 	append("database_oid", snapshot.database_oid);
-	append("format_revision", stats.format_revision);
+	append("format_revision", stats.layout_revision);
 	append("sessions", stats.sessions);
 	append("generation_id", stats.generation_id);
 	append_string(
@@ -499,7 +368,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 		fixed_hex_u64(stats.source_content_crc64));
 	append_string(
 		"compatibility_digest",
-		fixed_hex_bytes(stats.compatibility_digest));
+		fixed_hex_bytes(stats.storage_contract_digest));
 	append("directory_rows", stats.directory_rows);
 	append("directory_bytes", stats.directory_bytes);
 	append("control_rows", stats.control_rows);
@@ -583,8 +452,7 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 }
 
 [[nodiscard]] std::string persisted_gpu_operation_stats_json(
-		const alignment_exec::alignment_execution_snapshot& snapshot,
-		const bool include_cache_validation)
+		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
 	const auto& ledger = snapshot.persisted_gpu_operations;
 	const auto& stats = snapshot.pipeline;
@@ -616,12 +484,10 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 	const bool is_consistent = requires_persisted_stats && snapshot.is_completed
 		&& !snapshot.is_partial && snapshot.is_fully_drained && is_complete
 		&& !is_saturated && ledger.dropped_operation_count() == 0u
-		&& (!include_cache_validation
-			|| is_cache_validation_complete);
+		&& is_cache_validation_complete;
 
 	std::string result =
-		R"({"schema":"bioseq.persisted_gpu_operation_stats","revision":)";
-	result += include_cache_validation ? "2" : "1";
+		R"({"schema":"bioseq.persisted_gpu_operation_stats","revision":2)";
 	result.reserve(2048u + static_cast<std::size_t>(ledger.job_count()) * 1400u);
 	const auto append_unsigned = [&result](
 			const std::string_view key,
@@ -700,78 +566,76 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 	append_unsigned(
 		"accepted_job_count",
 		ledger.is_internally_consistent() ? ledger.job_count() : 0u);
-	if (include_cache_validation) {
-		result += R"(,"cache_validation":)";
-		if (cache_validation == nullptr) {
-			result += "null";
-		} else {
-			const auto& validation = *cache_validation;
-			result += R"({"revision":)";
-			result += std::to_string(
-				validation.qualification_wire_revision);
-			append_hex("identity", validation.identity);
-			append_bool(
-				"is_consistent", validation.is_internally_consistent());
-			append_bool("is_saturated", validation.is_saturated);
-			append_unsigned("archive_count", validation.archive_count);
-			append_unsigned("archive_bytes", validation.archive_bytes);
-			append_hex("archive_checksum", validation.archive_checksum);
-			append_unsigned("receipt_count", validation.receipt_count);
-			append_unsigned("hash_passes", validation.hash_passes);
-			append_unsigned("hashed_bytes", validation.hashed_bytes);
-			append_unsigned(
-				"private_files_created",
-				validation.private_files_created);
-			append_unsigned(
-				"private_files_unlinked",
-				validation.private_files_unlinked);
-			append_unsigned(
-				"live_private_paths", validation.live_private_paths);
-			append_unsigned(
-				"pipeline_filesystem_hash_passes",
-				validation.pipeline_filesystem_hash_passes);
-			append_unsigned(
-				"pipeline_filesystem_hashed_bytes",
-				validation.pipeline_filesystem_hashed_bytes);
-			append_unsigned(
-				"helper_protocol_revision",
-				validation.helper_wire_revision);
-			append_text(
-				"helper_build_identity",
-				validation.helper_build_identity_text());
-			append_text(
-				"helper_source", validation.helper_source_text());
-			append_unsigned(
-				"helper_executable_size",
-				validation.helper_executable_size);
-			result += R"(,"helper_executable_sha256":")";
-			result += fixed_hex_bytes(
-				validation.helper_executable_sha256);
-			result += '"';
-			append_hex(
-				"helper_metal_registry_id",
-				validation.helper_metal_registry_id);
-			result += R"(,"device_uuid":")";
-			result += fixed_hex_bytes(validation.device_uuid);
-			result += '"';
-			append_unsigned("api_version", validation.api_version);
-			append_unsigned("driver_version", validation.driver_version);
-			append_unsigned("vendor_id", validation.vendor_id);
-			append_unsigned("device_id", validation.device_id);
-			result += R"(,"pipeline_cache_uuid":")";
-			result += fixed_hex_bytes(validation.pipeline_cache_uuid);
-			result += '"';
-			append_hex(
-				"seed_receipt_identity",
-				validation.seed_receipt_identity);
-			result += R"(,"seed_sha256":")";
-			result += fixed_hex_bytes(validation.seed_sha256);
-			result += '"';
-			append_unsigned("seed_size", validation.seed_size);
-			append_hex(
-				"manifest_checksum", validation.manifest_checksum);
-			result += '}';
-		}
+	result += R"(,"cache_validation":)";
+	if (cache_validation == nullptr) {
+		result += "null";
+	} else {
+		const auto& validation = *cache_validation;
+		result += R"({"revision":)";
+		result += std::to_string(
+			validation.qualification_wire_revision);
+		append_hex("identity", validation.identity);
+		append_bool(
+			"is_consistent", validation.is_internally_consistent());
+		append_bool("is_saturated", validation.is_saturated);
+		append_unsigned("archive_count", validation.archive_count);
+		append_unsigned("archive_bytes", validation.archive_bytes);
+		append_hex("archive_checksum", validation.archive_checksum);
+		append_unsigned("receipt_count", validation.receipt_count);
+		append_unsigned("hash_passes", validation.hash_passes);
+		append_unsigned("hashed_bytes", validation.hashed_bytes);
+		append_unsigned(
+			"private_files_created",
+			validation.private_files_created);
+		append_unsigned(
+			"private_files_unlinked",
+			validation.private_files_unlinked);
+		append_unsigned(
+			"live_private_paths", validation.live_private_paths);
+		append_unsigned(
+			"pipeline_filesystem_hash_passes",
+			validation.pipeline_filesystem_hash_passes);
+		append_unsigned(
+			"pipeline_filesystem_hashed_bytes",
+			validation.pipeline_filesystem_hashed_bytes);
+		append_unsigned(
+			"helper_protocol_revision",
+			validation.helper_wire_revision);
+		append_text(
+			"helper_build_identity",
+			validation.helper_build_identity_text());
+		append_text(
+			"helper_source", validation.helper_source_text());
+		append_unsigned(
+			"helper_executable_size",
+			validation.helper_executable_size);
+		result += R"(,"helper_executable_sha256":")";
+		result += fixed_hex_bytes(
+			validation.helper_executable_sha256);
+		result += '"';
+		append_hex(
+			"helper_metal_registry_id",
+			validation.helper_metal_registry_id);
+		result += R"(,"device_uuid":")";
+		result += fixed_hex_bytes(validation.device_uuid);
+		result += '"';
+		append_unsigned("api_version", validation.api_version);
+		append_unsigned("driver_version", validation.driver_version);
+		append_unsigned("vendor_id", validation.vendor_id);
+		append_unsigned("device_id", validation.device_id);
+		result += R"(,"pipeline_cache_uuid":")";
+		result += fixed_hex_bytes(validation.pipeline_cache_uuid);
+		result += '"';
+		append_hex(
+			"seed_receipt_identity",
+			validation.seed_receipt_identity);
+		result += R"(,"seed_sha256":")";
+		result += fixed_hex_bytes(validation.seed_sha256);
+		result += '"';
+		append_unsigned("seed_size", validation.seed_size);
+		append_hex(
+			"manifest_checksum", validation.manifest_checksum);
+		result += '}';
 	}
 	result += R"(,"operations":[)";
 	bool first_operation = true;
@@ -816,11 +680,9 @@ enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
 		result += ']';
 		append_hex("seed_receipt_identity", operation.seed_receipt_identity);
 		append_hex("cache_token_identity", cache.token_identity);
-		if (include_cache_validation) {
-			append_hex(
-				"cache_validation_identity",
-				operation.cache_qualification.identity);
-		}
+		append_hex(
+			"cache_validation_identity",
+			operation.cache_qualification.identity);
 		append_unsigned("generation_id", operation.generation_id);
 		append_hex("source_identity", operation.source_identity);
 		append_hex("cold_load_identity", operation.cold_load_identity);
@@ -948,11 +810,11 @@ using bioseq::pg::detail::validate_alignment_snapshot_environment;
 
 namespace {
 
-template<class serializer>
+template<class p_serializer>
 [[nodiscard]] std::optional<bioseq::postgres::support::jsonb_value>
 serialize_alignment_snapshot(
 		const std::optional<alignment_exec::alignment_execution_snapshot>& source,
-		serializer&& encode) {
+		p_serializer&& encode) {
 	if (!source.has_value()) {
 		return std::nullopt;
 	}
@@ -964,52 +826,17 @@ serialize_alignment_snapshot(
 } // namespace
 
 std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_reader_memory_stats() {
+last_alignment_minimizer_fragment_reader_stats() {
 	return serialize_alignment_snapshot(
 		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_reader_memory_stats_json);
+		minimizer_fragment_reader_stats_json);
 }
 
 std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_exact_array_layout_reader_memory_stats() {
+last_alignment_hash_major_index_reader_stats() {
 	return serialize_alignment_snapshot(
 		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_exact_array_layout_reader_memory_stats_json);
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_fragment_native_query_reader_memory_stats() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_fragment_native_query_reader_memory_stats_json);
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_provider_lifecycle_reader_memory_stats() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_provider_lifecycle_reader_memory_stats_json);
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_bucket_direct_query_reader_memory_stats() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_bucket_direct_query_reader_memory_stats_json);
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_grouped_soa_compact_direct_one_decode_reader_memory_stats() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		grouped_soa_compact_direct_one_decode_reader_memory_stats_json);
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_hash_major_reader_stats() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
-		hash_major_reader_stats_json);
+		hash_major_index_reader_stats_json);
 }
 
 std::optional<bioseq::postgres::support::jsonb_value>
@@ -1017,16 +844,7 @@ last_alignment_persisted_gpu_operation_stats() {
 	return serialize_alignment_snapshot(
 		bioseq::pg::detail::last_completed_alignment_snapshot_ref(),
 		[](const alignment_exec::alignment_execution_snapshot& snapshot) {
-			return persisted_gpu_operation_stats_json(snapshot, false);
-		});
-}
-
-std::optional<bioseq::postgres::support::jsonb_value>
-last_alignment_persisted_gpu_operation_stats_with_cache_validation() {
-	return serialize_alignment_snapshot(
-		bioseq::pg::detail::last_completed_alignment_snapshot_ref(),
-		[](const alignment_exec::alignment_execution_snapshot& snapshot) {
-			return persisted_gpu_operation_stats_json(snapshot, true);
+			return persisted_gpu_operation_stats_json(snapshot);
 		});
 }
 

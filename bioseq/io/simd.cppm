@@ -4,7 +4,7 @@
  *
  * Two responsibilities live here:
  *
- *   * **Scan** — `scan_for_first<NeedleN>` and `scan_for_each<NeedleN>`
+ *   * **Scan** — `scan_for_first<p_needle_count>` and `scan_for_each<p_needle_count>`
  *     are the workhorses of every record FSM. The aligned-body loop
  *     is 4×-unrolled on AVX2 / NEON (single mask reduction decides for
  *     128 B per iter) and 2×-unrolled on AVX-512 (a 4× would exhaust
@@ -14,13 +14,8 @@
  *     `narrow_lower_bytes_to_dst`, `huffman_fast_loop*`,
  *     `crc32_iso_hdlc_simd`. Used by the parallel-gzip decoder.
  *
- * The sequence-translation primitives (dna4/dna5 SIMD encoders +
- * decoders, `encode_state`, LUT builders, etc.) used to live here too;
- * they were moved into `bioseq_sequences.simd` so the backend SQL
- * types and the IO FSM share one definitive implementation.
- *
- * Spec sections: §8.1-§8.5 (scan), §17.2-§17.3 (unroll factor),
- * §5.1-§5.4 (gzip pipeline).
+ * Sequence-translation primitives live in `bioseq_sequences.simd`, giving
+ * backend SQL types and the IO FSM one definitive implementation.
  */
 module;
 
@@ -50,31 +45,31 @@ namespace hn = hwy::HWY_NAMESPACE;
 // Scan kernels
 // =====================================================================
 
-/// Build a Highway mask "byte equals any of `needles`". For NeedleN==1
+/// Build a Highway mask "byte equals any of `needles`". For p_needle_count==1
 /// the expression collapses to a single Eq; for N=2,3 the Eq results
 /// are OR'd. Lifted out of the scan loops because the same expression
 /// is reused at each unroll position.
-template <std::size_t NeedleN, class D>
-HWY_INLINE hn::Mask<D> any_needle_match(
-    D d,
-    const std::array<std::uint8_t, NeedleN>& needles,
-    hn::Vec<D> chunk_bytes) noexcept {
-    static_assert(NeedleN >= 1 && NeedleN <= 8,
+template <std::size_t p_needle_count, class p_descriptor>
+HWY_INLINE hn::Mask<p_descriptor> any_needle_match(
+    p_descriptor d,
+    const std::array<std::uint8_t, p_needle_count>& needles,
+    hn::Vec<p_descriptor> chunk_bytes) noexcept {
+    static_assert(p_needle_count >= 1 && p_needle_count <= 8,
                   "scan supports 1..8 needles");
-    if constexpr (NeedleN == 1) {
+    if constexpr (p_needle_count == 1) {
         return hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
-    } else if constexpr (NeedleN == 2) {
+    } else if constexpr (p_needle_count == 2) {
         return hn::Or(hn::Eq(chunk_bytes, hn::Set(d, needles[0])),
                       hn::Eq(chunk_bytes, hn::Set(d, needles[1])));
-    } else if constexpr (NeedleN == 3) {
+    } else if constexpr (p_needle_count == 3) {
         return hn::Or(hn::Or(hn::Eq(chunk_bytes, hn::Set(d, needles[0])),
                              hn::Eq(chunk_bytes, hn::Set(d, needles[1]))),
                       hn::Eq(chunk_bytes, hn::Set(d, needles[2])));
     } else {  // 4..8: new branch only; the 1/2/3 arms above stay codegen-identical
               // so the FASTA/FASTQ record-scan hot path (scan_for_first /
               // scan_for_each callers) cannot regress (spec §5.1).
-        hn::Mask<D> m = hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
-        for (std::size_t i = 1; i < NeedleN; ++i)
+        hn::Mask<p_descriptor> m = hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
+        for (std::size_t i = 1; i < p_needle_count; ++i)
             m = hn::Or(m, hn::Eq(chunk_bytes, hn::Set(d, needles[i])));
         return m;
     }
@@ -84,27 +79,27 @@ HWY_INLINE hn::Mask<D> any_needle_match(
 /// lanes already process 64 B per chunk so a 2× unroll already
 /// achieves the 128 B / iter target; AVX2 + NEON benefit from 4×
 /// because each chunk is shorter (32 B / 16 B). See spec §17.2 / §17.3.
-template <class D>
+template <class p_descriptor>
 constexpr std::size_t scan_unroll_factor() noexcept {
-    if constexpr (hn::MaxLanes(D{}) >= 64) return 2;
+    if constexpr (hn::MaxLanes(p_descriptor{}) >= 64) return 2;
     return 4;
 }
 
 /// Find the first byte in `[data, data+size)` matching ANY of `needles`.
 /// Returns `size` if absent. Spec §8.1, §8.2, §17.3.
-template <std::size_t NeedleN, class D>
+template <std::size_t p_needle_count, class p_descriptor>
 [[nodiscard]] HWY_INLINE std::size_t scan_for_first(
-    D d,
-    const std::array<std::uint8_t, NeedleN>& needles,
+    p_descriptor d,
+    const std::array<std::uint8_t, p_needle_count>& needles,
     const std::uint8_t* HWY_RESTRICT data,
     std::size_t size) noexcept {
     const std::size_t lanes = hn::Lanes(d);
-    constexpr std::size_t unroll = scan_unroll_factor<D>();
+    constexpr std::size_t unroll = scan_unroll_factor<p_descriptor>();
 
     if (size < lanes) {
         for (std::size_t scan_offset = 0; scan_offset < size; ++scan_offset) {
             for (std::size_t needle_index = 0;
-                 needle_index < NeedleN; ++needle_index) {
+                 needle_index < p_needle_count; ++needle_index) {
                 if (data[scan_offset] == needles[needle_index]) {
                     return scan_offset;
                 }
@@ -122,10 +117,10 @@ template <std::size_t NeedleN, class D>
             const auto chunk_1 = hn::LoadU(d, data + scan_cursor + 1 * lanes);
             const auto chunk_2 = hn::LoadU(d, data + scan_cursor + 2 * lanes);
             const auto chunk_3 = hn::LoadU(d, data + scan_cursor + 3 * lanes);
-            const auto match_0 = any_needle_match<NeedleN>(d, needles, chunk_0);
-            const auto match_1 = any_needle_match<NeedleN>(d, needles, chunk_1);
-            const auto match_2 = any_needle_match<NeedleN>(d, needles, chunk_2);
-            const auto match_3 = any_needle_match<NeedleN>(d, needles, chunk_3);
+            const auto match_0 = any_needle_match<p_needle_count>(d, needles, chunk_0);
+            const auto match_1 = any_needle_match<p_needle_count>(d, needles, chunk_1);
+            const auto match_2 = any_needle_match<p_needle_count>(d, needles, chunk_2);
+            const auto match_3 = any_needle_match<p_needle_count>(d, needles, chunk_3);
             const auto match_01 = hn::Or(match_0, match_1);
             const auto match_23 = hn::Or(match_2, match_3);
             const auto match_combined = hn::Or(match_01, match_23);
@@ -148,8 +143,8 @@ template <std::size_t NeedleN, class D>
         } else {
             const auto chunk_0 = hn::LoadU(d, data + scan_cursor + 0 * lanes);
             const auto chunk_1 = hn::LoadU(d, data + scan_cursor + 1 * lanes);
-            const auto match_0 = any_needle_match<NeedleN>(d, needles, chunk_0);
-            const auto match_1 = any_needle_match<NeedleN>(d, needles, chunk_1);
+            const auto match_0 = any_needle_match<p_needle_count>(d, needles, chunk_0);
+            const auto match_1 = any_needle_match<p_needle_count>(d, needles, chunk_1);
             const auto match_combined = hn::Or(match_0, match_1);
             if (!hn::AllFalse(d, match_combined)) {
                 if (!hn::AllFalse(d, match_0)) {
@@ -166,7 +161,7 @@ template <std::size_t NeedleN, class D>
     while (scan_cursor + lanes <= size) {
         const auto chunk_bytes = hn::LoadU(d, data + scan_cursor);
         const auto match_mask =
-            any_needle_match<NeedleN>(d, needles, chunk_bytes);
+            any_needle_match<p_needle_count>(d, needles, chunk_bytes);
         if (!hn::AllFalse(d, match_mask)) {
             return scan_cursor
                  + static_cast<std::size_t>(hn::FindFirstTrue(d, match_mask));
@@ -178,7 +173,7 @@ template <std::size_t NeedleN, class D>
         const std::size_t overlap_start = size - lanes;
         const auto chunk_bytes = hn::LoadU(d, data + overlap_start);
         const auto match_mask =
-            any_needle_match<NeedleN>(d, needles, chunk_bytes);
+            any_needle_match<p_needle_count>(d, needles, chunk_bytes);
         if (!hn::AllFalse(d, match_mask)) {
             const std::size_t already_searched = scan_cursor - overlap_start;
             const auto suppress_first_n = hn::FirstN(d, already_searched);
@@ -195,18 +190,18 @@ template <std::size_t NeedleN, class D>
 /// Iterate every offset in `[data, data+size)` whose byte matches any
 /// needle, calling `visit(offset)` per match in ascending order.
 /// Spec §8.4-§8.5.
-template <std::size_t NeedleN, class D, typename Visit>
+template <std::size_t p_needle_count, class p_descriptor, typename p_visit>
 HWY_INLINE void scan_for_each(
-    D d,
-    const std::array<std::uint8_t, NeedleN>& needles,
+    p_descriptor d,
+    const std::array<std::uint8_t, p_needle_count>& needles,
     const std::uint8_t* HWY_RESTRICT data,
     std::size_t size,
-    Visit&& visit) noexcept {
+    p_visit&& visit) noexcept {
     const std::size_t lanes = hn::Lanes(d);
     if (size < lanes) {
         for (std::size_t scan_offset = 0; scan_offset < size; ++scan_offset) {
             for (std::size_t needle_index = 0;
-                 needle_index < NeedleN; ++needle_index) {
+                 needle_index < p_needle_count; ++needle_index) {
                 if (data[scan_offset] == needles[needle_index]) {
                     visit(scan_offset);
                     break;
@@ -219,7 +214,7 @@ HWY_INLINE void scan_for_each(
     while (scan_cursor + lanes <= size) {
         const auto chunk_bytes = hn::LoadU(d, data + scan_cursor);
         const auto match_mask =
-            any_needle_match<NeedleN>(d, needles, chunk_bytes);
+            any_needle_match<p_needle_count>(d, needles, chunk_bytes);
         if (!hn::AllFalse(d, match_mask)) {
             const std::uint64_t match_bitmask =
                 hn::BitsFromMask(d, match_mask);
@@ -236,7 +231,7 @@ HWY_INLINE void scan_for_each(
     for (std::size_t scan_offset = scan_cursor;
          scan_offset < size; ++scan_offset) {
         for (std::size_t needle_index = 0;
-             needle_index < NeedleN; ++needle_index) {
+             needle_index < p_needle_count; ++needle_index) {
             if (data[scan_offset] == needles[needle_index]) {
                 visit(scan_offset);
                 break;
@@ -255,9 +250,9 @@ HWY_INLINE void scan_for_each(
 /// Marker resolution — for each `uint16_t` value `v` in `buffer`, if
 /// `v < 0x8000` keep low byte; else replace low byte with
 /// `window[v - 0x8000]`. Spec §5.1.
-template <class D_U16>
+template <class p_u16_descriptor>
 HWY_INLINE void replace_markers_inplace_one_chunk(
-    D_U16               d_u16,
+    p_u16_descriptor               d_u16,
     std::uint16_t*      HWY_RESTRICT buffer,
     std::size_t                      buffer_size,
     const std::uint8_t* HWY_RESTRICT window /* exactly 32 KiB */) noexcept {
@@ -297,19 +292,19 @@ HWY_INLINE void replace_markers_inplace_one_chunk(
 /// each `uint16_t`. 4×-unrolled `DemoteTo` per main-loop iteration.
 /// Spec §5.2.
 ///
-/// `Rebind<u8, D_U16>` keeps the same lane count as the u16 tag (so
+/// `Rebind<u8, p_u16_descriptor>` keeps the same lane count as the u16 tag (so
 /// `DemoteTo` produces a vector with the same lane count, just half
 /// the byte width), letting `StoreU` write `lanes_u16` contiguous
 /// bytes in one op. (`Repartition` would double the lane count to
 /// fill the same byte-width register, which doesn't match what
 /// `DemoteTo` produces from a single u16 vector.)
-template <class D_U16>
+template <class p_u16_descriptor>
 HWY_INLINE void narrow_lower_bytes_to_dst_inner(
-    D_U16                              d_u16,
+    p_u16_descriptor                              d_u16,
     const std::uint16_t* HWY_RESTRICT  src,
     std::uint8_t*        HWY_RESTRICT  dst,
     std::size_t                        count) noexcept {
-    const hn::Rebind<std::uint8_t, D_U16> d_u8_half;
+    const hn::Rebind<std::uint8_t, p_u16_descriptor> d_u8_half;
     const std::size_t lanes_u16 = hn::Lanes(d_u16);
 
     std::size_t cursor = 0;
@@ -383,57 +378,53 @@ HWY_INLINE void huffman_fast_loop_store_inner(
 }
 
 // ---------------------------------------------------------------------
-// CRC-32/ISO-HDLC reflected-mode Highway kernel. Spec §5.4.
-//
-// Implementation ported from `crc-fast-rust-main/src/algorithm.rs:200-274`
-// + `src/crc32/width32_ops.rs:48-184`. `cmul_*` helpers map upstream's
-// `cmul_00 / cmul_11 / cmul_10 / cmul_01` to Highway's `CLMulLower /
-// CLMulUpper / CLMulLower(Shuffle01) / CLMulLower(Shuffle01)`.
+// CRC-32/ISO-HDLC reflected-mode Highway kernel. The `cmul_*` helpers map
+// polynomial folds to Highway carry-less multiplication operations.
 // ---------------------------------------------------------------------
 
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_low_low(
-    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_low_low(
+    p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulLower(a, b);
 }
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_high_high(
-    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_high_high(
+    p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulUpper(a, b);
 }
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_low_high(
-    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_low_high(
+    p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulLower(a, hn::Shuffle01(b));
 }
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_high_low(
-    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_high_low(
+    p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulLower(hn::Shuffle01(a), b);
 }
 
 /// Build a coefficient vector. `high_lane` lands in lane 1; `low_lane`
 /// in lane 0.
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> make_clmul_coeff(
-    D d, std::uint64_t high_lane, std::uint64_t low_lane) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> make_clmul_coeff(
+    p_descriptor d, std::uint64_t high_lane, std::uint64_t low_lane) noexcept {
     HWY_ALIGN std::array<std::uint64_t, 2> lanes{low_lane, high_lane};
     return hn::Load(d, lanes.data());
 }
 
 /// Reflected fold-16. Mirrors `width32_ops.rs:48-69`.
-template <class D>
-[[nodiscard]] HWY_INLINE hn::Vec<D> crc32_fold_16_reflected(
-    D d, hn::Vec<D> state, hn::Vec<D> coeff, hn::Vec<D> data_to_xor) noexcept {
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> crc32_fold_16_reflected(
+    p_descriptor d, hn::Vec<p_descriptor> state, hn::Vec<p_descriptor> coeff, hn::Vec<p_descriptor> data_to_xor) noexcept {
     const auto h = cmul_low_high(d, state, coeff);
     const auto l = cmul_high_low(d, state, coeff);
     return hn::Xor(hn::Xor(h, l), data_to_xor);
 }
 
-template <class D>
-[[nodiscard]] HWY_INLINE std::array<hn::Vec<D>, 7>
+template <class p_descriptor>
+[[nodiscard]] HWY_INLINE std::array<hn::Vec<p_descriptor>, 7>
 crc32_collapse_coefficients(
-    D d, const std::array<std::uint64_t, 23>& keys) noexcept {
+    p_descriptor d, const std::array<std::uint64_t, 23>& keys) noexcept {
     return {
         make_clmul_coeff(d, keys[10], keys[9]),
         make_clmul_coeff(d, keys[12], keys[11]),
@@ -445,10 +436,10 @@ crc32_collapse_coefficients(
     };
 }
 
-template <class D>
+template <class p_descriptor>
 [[nodiscard]] HWY_INLINE std::uint32_t crc32_final_reduction_reflected(
-    D                                    d,
-    hn::Vec<D>                           state,
+    p_descriptor                                    d,
+    hn::Vec<p_descriptor>                           state,
     const std::array<std::uint64_t, 23>& keys) noexcept {
     const auto coeff_low  = make_clmul_coeff(d, 0,       keys[5]);
     const auto coeff_high = make_clmul_coeff(d, keys[6], 0);
@@ -474,16 +465,16 @@ template <class D>
 }
 
 /// 128-byte SIMD-aligned chunk processor. Mirrors `algorithm.rs:200-274`.
-template <class D>
+template <class p_descriptor>
 HWY_INLINE void crc32_process_simd_chunks_reflected(
-    D                                    d,
-    hn::Vec<D>&                          running_state,
+    p_descriptor                                    d,
+    hn::Vec<p_descriptor>&                          running_state,
     const std::uint8_t*                  HWY_RESTRICT first_128,
     const std::uint8_t*                  HWY_RESTRICT rest_bytes,
     std::size_t                          rest_chunks_of_128,
     const std::array<std::uint64_t, 23>& keys) noexcept {
-    const hn::Repartition<std::uint8_t, D> d_b;
-    std::array<hn::Vec<D>, 8> x;
+    const hn::Repartition<std::uint8_t, p_descriptor> d_b;
+    std::array<hn::Vec<p_descriptor>, 8> x;
     for (std::size_t i = 0; i < 8; ++i) {
         x[i] = hn::BitCast(d, hn::LoadU(d_b, first_128 + i * 16));
     }
@@ -515,9 +506,9 @@ HWY_INLINE void crc32_process_simd_chunks_reflected(
         static_cast<z_size_t>(size)));
 }
 
-template <class D>
+template <class p_descriptor>
 [[nodiscard]] HWY_INLINE std::uint32_t crc32_iso_hdlc_reflected_impl(
-    D                                    d,
+    p_descriptor                                    d,
     std::uint32_t                        running,
     const std::uint8_t*                  HWY_RESTRICT data,
     std::size_t                          size,
@@ -593,7 +584,7 @@ namespace bioseq::io::simd {
     const std::uint8_t* data,
     std::size_t size) noexcept;
 
-/// Visit every offset in `[data, data+size)` whose byte equals any of the four
+/// p_visit every offset in `[data, data+size)` whose byte equals any of the four
 /// structural header delimiters, in ascending order, via the existing
 /// `scan_for_each<4>` SIMD kernel. The `void* ctx + fn-ptr` shim keeps the
 /// wrapper non-templated (one symbol) so the PostgreSQL-independent header lexer

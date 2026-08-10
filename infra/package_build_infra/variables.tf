@@ -77,7 +77,7 @@ variable "artifact_prefix" {
 }
 
 variable "root_volume_size_gb" {
-  description = "Encrypted gp3 root volume size for each builder. DOC0390 requires at least 500 GiB."
+  description = "Encrypted gp3 root volume size for each builder. Current builders require at least 500 GiB."
   type        = number
   default     = 500
 
@@ -142,14 +142,14 @@ variable "x64_ami_id" {
   }
 }
 
-variable "ami_schema_version" {
+variable "ami_schema_revision" {
   description = "Bootstrap/cache schema tag. Increment when cached package-builder AMIs become incompatible."
-  type        = string
-  default     = "2"
+  type        = number
+  default     = 2
 
   validation {
-    condition     = can(regex("^[0-9]+$", var.ami_schema_version))
-    error_message = "ami_schema_version must contain decimal digits only."
+    condition     = var.ami_schema_revision == 2
+    error_message = "ami_schema_revision must be the current revision 2."
   }
 }
 

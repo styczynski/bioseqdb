@@ -154,7 +154,7 @@ struct identifier_benchmark_measurement {
 
 // PostgreSQL-independent benchmark-local expression backend. The
 // production SQL piece tree owns PostgreSQL MemoryContexts and source domains,
-// so bench-io exercises its representation-erased contract through the shared
+// so benchmark-io exercises its representation-erased contract through the shared
 // canonical facade and the production admitted packed materializer.
 using lazy_expression_range = compact_sequence_range<benchmark_alphabet>;
 using lazy_expression_facade =
@@ -372,7 +372,7 @@ void lazy_expression_copy_forward(
     }
 }
 
-template <bool is_reversed, bool write_reversed>
+template <bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] const std::uint8_t* lazy_expression_node_ptr_at(
         void const* opaque,
         lazy_expression_size from,
@@ -387,17 +387,17 @@ template <bool is_reversed, bool write_reversed>
         throw std::invalid_argument("invalid lazy-expression facade read");
     }
     lazy_expression_size forward_from = from;
-    if constexpr (is_reversed) {
+    if constexpr (p_is_reversed) {
         forward_from = node.logical_size - from - count;
     }
     std::span<std::uint8_t> output = scratch.first(required_length);
     lazy_expression_copy_forward(node, forward_from, output);
-    if constexpr (is_reversed) {
+    if constexpr (p_is_reversed) {
         for (std::uint8_t& rank : output) {
             rank = lazy_expression_facade::traits::letter_complement(rank);
         }
     }
-    if constexpr (is_reversed != write_reversed) {
+    if constexpr (p_is_reversed != p_write_reversed) {
         std::reverse(output.begin(), output.end());
     }
     return scratch.data();
@@ -427,7 +427,7 @@ const lazy_expression_facade::backend_ops lazy_expression_node_operations{
         bool final_boundary,
         lazy_expression_allocation_statistics& stats) {
     auto& admission =
-        bioseq::parallelism::MemoryAdmissionController::instance();
+        bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t admitted_bytes =
         bioseq::storage::packed_region_admission_bytes<seq::dna4>(
             view.bp_size(), lazy_expression_storage_width);
@@ -467,7 +467,7 @@ const lazy_expression_facade::backend_ops lazy_expression_node_operations{
     const lazy_expression_facade final_view = final_value.view();
     return lazy_expression_measurement{
         .output_logical_length = final_view.bp_size(),
-        .logical_hash = bioseq::storage::sequence_logical_hash_v1(
+        .logical_hash = bioseq::storage::hash_logical_sequence(
             final_view, lazy_expression_hash_seed),
     };
 }
@@ -476,7 +476,7 @@ void validate_lazy_expression_run_released(
         lazy_expression_allocation_statistics const& stats,
         std::uint64_t reserved_baseline) {
     const std::uint64_t reserved_after =
-        bioseq::parallelism::MemoryAdmissionController::instance()
+        bioseq::parallelism::memory_admission_controller::instance()
             .reserved_bytes();
     if (stats.live_payload_bytes != 0u
         || stats.live_admitted_bytes != 0u
@@ -604,7 +604,7 @@ void append_lazy_expression_oracle_segment(
     append_lazy_expression_oracle_segment(
         oracle, source_span, n / 4u, n / 2u);
     const std::uint64_t expected_hash =
-        bioseq::storage::sequence_logical_hash_bytes_v1(
+        bioseq::storage::hash_logical_ranks(
             oracle, static_cast<std::uint64_t>(oracle.size()),
             lazy_expression_hash_seed);
 
@@ -645,7 +645,7 @@ void append_lazy_expression_oracle_segment(
         bioseq::storage::make_lazy_sequence_view(source_owner);
     lazy_expression_allocation_statistics stats{};
     const std::uint64_t reserved_baseline =
-        bioseq::parallelism::MemoryAdmissionController::instance()
+        bioseq::parallelism::memory_admission_controller::instance()
             .reserved_bytes();
     lazy_expression_measurement output{};
     {
@@ -701,7 +701,7 @@ void append_lazy_expression_oracle_segment(
         bioseq::storage::make_lazy_sequence_view(source_owner);
     lazy_expression_allocation_statistics stats{};
     const std::uint64_t reserved_baseline =
-        bioseq::parallelism::MemoryAdmissionController::instance()
+        bioseq::parallelism::memory_admission_controller::instance()
             .reserved_bytes();
     lazy_expression_measurement output{};
     {
@@ -1115,12 +1115,12 @@ struct corpus_descriptor {
 // One `dispatch_reader_*` function per reader algorithm. Each returns
 // the io_measurement populated with observed_record_count + observed_body_bytes.
 
-template <bool is_fasta>
+template <bool p_is_fasta>
 [[nodiscard]] io_measurement run_bioseq_io_with_options(const std::string& path,
                                                     const reader_options& options) {
     using alphabet_config = benchmark_alphabet;
     using batch_t = sequence_batch<alphabet_config>;
-    constexpr auto file_type = is_fasta
+    constexpr auto file_type = p_is_fasta
         ? sequence_file_format::fasta
         : sequence_file_format::fastq;
 
@@ -1487,7 +1487,7 @@ void cleanup_identifier_bench(std::string_view data_dir,
 /// Hash collisions on a single record are statistically unlikely
 /// (1/2^64); after XORing N records, the chance of a false-positive
 /// match remains far below 1 in 10^9 for realistic N.
-template <bool is_fastq>
+template <bool p_is_fastq>
 [[nodiscard]] std::uint64_t hash_record_xor(
     std::string_view header,
     const auto& sequence_view,
@@ -1499,7 +1499,7 @@ template <bool is_fastq>
         sequence_view.size() * letters_per_word - sequence_view.padding();
     std::string serialized;
     serialized.reserve(header.size() + total_letters
-                       + (is_fastq ? quality.size() : 0) + 2);
+                       + (p_is_fastq ? quality.size() : 0) + 2);
     serialized.append(header);
     serialized.push_back('\1');
     for (std::size_t letter_index = 0; letter_index < total_letters; ++letter_index) {
@@ -1510,7 +1510,7 @@ template <bool is_fastq>
             & seq_traits::char_mask);
         serialized.push_back(seq_traits::letter_to_char(rank));
     }
-    if constexpr (is_fastq) {
+    if constexpr (p_is_fastq) {
         serialized.push_back('\1');
         const std::size_t qsize = std::min(quality.size(), total_letters);
         serialized.append(reinterpret_cast<const char*>(quality.data()), qsize);
@@ -1523,7 +1523,7 @@ template <bool is_fastq>
 /// fingerprint for the writer's input AND for the re-read output (the
 /// parallel writer may reorder records but cannot change the SET of
 /// records). Returns 0 for an empty batch list.
-template <bool is_fastq>
+template <bool p_is_fastq>
 [[nodiscard]] std::uint64_t hash_batches_xor(
     const std::vector<benchmark_batch>& batches)
 {
@@ -1535,10 +1535,10 @@ template <bool is_fastq>
             const auto seq_view = batch.sequence(record_index);
             const auto header_view = batch.header(record_index);
             std::span<const std::uint8_t> qual_view{};
-            if constexpr (is_fastq) {
+            if constexpr (p_is_fastq) {
                 qual_view = batch.quality(record_index);
             }
-            accumulator ^= hash_record_xor<is_fastq>(
+            accumulator ^= hash_record_xor<p_is_fastq>(
                 header_view, seq_view, qual_view);
         }
     }
@@ -1546,11 +1546,11 @@ template <bool is_fastq>
 }
 
 /// Slurp `path` into an in-memory list of batches via the bioseq reader.
-template <bool is_fasta>
+template <bool p_is_fasta>
 [[nodiscard]] bool slurp_corpus(const std::string& path,
                                   std::vector<benchmark_batch>& out_batches,
                                   std::size_t& out_record_count) {
-    constexpr auto file_type = is_fasta
+    constexpr auto file_type = p_is_fasta
         ? sequence_file_format::fasta
         : sequence_file_format::fastq;
 
@@ -1630,11 +1630,11 @@ template <bool is_fasta>
     return input;
 }
 
-template <bool is_fasta>
+template <bool p_is_fasta>
 [[nodiscard]] io_measurement run_bioseq_writer(const writer_input& input,
                                            std::size_t thread_count,
                                            bool use_mmap_sink = false) {
-    constexpr auto file_type = is_fasta
+    constexpr auto file_type = p_is_fasta
         ? sequence_file_format::fasta
         : sequence_file_format::fastq;
     writer_options options{};
@@ -1706,7 +1706,7 @@ template <bool is_fasta>
     return out;
 }
 
-template <bool is_fasta>
+template <bool p_is_fasta>
 [[nodiscard]] io_measurement run_naive_ofstream(const writer_input& input) {
     std::ofstream out(input.output_scratch_path, std::ios::binary);
     if (!out) {
@@ -1728,7 +1728,7 @@ template <bool is_fasta>
             constexpr std::size_t letters_per_word = seq_traits::letters_per_unit;
             const std::size_t total_letters =
                 seq_view.size() * letters_per_word - seq_view.padding();
-            scratch.push_back(is_fasta ? '>' : '@');
+            scratch.push_back(p_is_fasta ? '>' : '@');
             scratch.append(header_view);
             scratch.push_back('\n');
             std::size_t in_line_count = 0;
@@ -1742,7 +1742,7 @@ template <bool is_fasta>
                 // so we don't bake in the dna4 LUT shape — works for
                 // any alphabet supported by `benchmark_alphabet`.
                 scratch.push_back(seq_traits::letter_to_char(rank));
-                if constexpr (is_fasta) {
+                if constexpr (p_is_fasta) {
                     ++in_line_count;
                     if (in_line_count == fasta_wrap &&
                         letter_index + 1 < total_letters) {
@@ -1751,7 +1751,7 @@ template <bool is_fasta>
                     }
                 }
             }
-            if constexpr (!is_fasta) {
+            if constexpr (!p_is_fasta) {
                 scratch.push_back('\n');
                 scratch.push_back('+');
                 scratch.push_back('\n');
@@ -1821,7 +1821,7 @@ template <bool is_fasta>
 /// roundtrip violation. This catches silent corruption that a
 /// count-only check misses (e.g. truncated quality in the naive
 /// writer, headers split from bodies by mid-record flushes).
-template <bool is_fasta>
+template <bool p_is_fasta>
 [[nodiscard]] double roundtrip_match(const std::string& output_path,
                                        std::size_t expected_record_count,
                                        std::uint64_t expected_content_hash) {
@@ -1830,7 +1830,7 @@ template <bool is_fasta>
     if (!filesystem::exists(output_path, ec) || filesystem::file_size(output_path, ec) == 0) {
         return 0.0;
     }
-    constexpr auto file_type = is_fasta
+    constexpr auto file_type = p_is_fasta
         ? sequence_file_format::fasta
         : sequence_file_format::fastq;
     std::atomic<std::size_t> record_count{0};
@@ -1840,7 +1840,7 @@ template <bool is_fasta>
         // Hash this batch's contribution and XOR into the global
         // accumulator. XOR is associative + commutative, so concurrent
         // batch handlers contribute correctly via fetch_xor.
-        const std::uint64_t batch_hash = hash_batches_xor<!is_fasta>(
+        const std::uint64_t batch_hash = hash_batches_xor<!p_is_fasta>(
             std::vector<benchmark_batch>{std::move(batch)});
         content_hash.fetch_xor(batch_hash, std::memory_order_relaxed);
     };

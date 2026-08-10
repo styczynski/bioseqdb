@@ -58,9 +58,12 @@ namespace {
     Assert(!ReindexIsProcessingIndex(RelationGetRelid(index_relation)));
 }
 
-template <class member>
+template <class p_member>
 [[gnu::always_inline]] inline void
-check_rel_procedure(Relation index_relation, member IndexAmRoutine::* proc, const char* pname)
+check_rel_procedure(
+    Relation index_relation,
+    p_member IndexAmRoutine::* proc,
+    const char* pname)
 {
     if (index_relation->rd_indam->*proc == nullptr)
         bioseq_log<logging_level::error, logging_target::postgres>("function \"{}\" is not defined for index \"{}\"",

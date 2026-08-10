@@ -94,7 +94,7 @@
 
   "bench_io_lazy_sequence_expression": {
     "tags": ["io", "lazy-sequence", "materialization"],
-    "description": "Single DOC0377 case comparing eager materialize-each-step with one deferred canonical-facade nested slice/concat expression.",
+    "description": "Single case comparing eager materialize-each-step with one deferred canonical-facade nested slice/concat expression.",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 377018 },

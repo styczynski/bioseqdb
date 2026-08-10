@@ -15,7 +15,10 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::cache::pg::sql_catalog {
 
-/** Retire every exact and reusable cache generation. */
+/**
+ * @brief Retire every exact and reusable cache generation.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .null_input = bioseq::sql::null_input_policy::strict,
@@ -28,7 +31,10 @@ export namespace bioseq::cache::pg::sql_catalog {
     return sql_backend::invalidate_all();
 }
 
-/** Retire generations which depend on one PostgreSQL relation. */
+/**
+ * @brief Retire generations that depend on one PostgreSQL relation.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .null_input = bioseq::sql::null_input_policy::strict,
@@ -45,7 +51,10 @@ export namespace bioseq::cache::pg::sql_catalog {
     return sql_backend::invalidate_relation(relation_oid);
 }
 
-/** Reset all public cache counters. */
+/**
+ * @brief Reset all public cache counters.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .null_input = bioseq::sql::null_input_policy::strict,

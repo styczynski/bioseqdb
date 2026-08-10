@@ -48,31 +48,31 @@ import bioseq.postgres.storage.indexing.handles;
 
 namespace bioseq::postgres::scheduler {
 
-template <class F>
-auto invoke_async_mps_materialization_pg_leaf(
+template <class p_function>
+auto invoke_async_minimizer_sequence_materialization_pg_leaf(
         async_minimizer_sequence_worker_pg_failure point,
-        F&& function)
-    -> std::invoke_result_t<std::remove_reference_t<F>&> {
-    record_async_mps_worker_pg_leaf_call(point);
+        p_function&& function)
+    -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
+    record_async_minimizer_sequence_worker_pg_leaf_call(point);
     try {
         return bioseq::postgres::support::invoke_pg_as_cpp(
-            std::forward<F>(function));
+            std::forward<p_function>(function));
     } catch (const bioseq::postgres::support::postgres_error&) {
-        record_async_mps_worker_pg_leaf_failure(point);
+        record_async_minimizer_sequence_worker_pg_leaf_failure(point);
         throw;
     }
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct async_minimizer_sequence_resident_target {
-    bioseq::storage::admitted_packed_sequence<Alphabet> owner;
+    bioseq::storage::admitted_packed_sequence<p_alphabet> owner;
     std::uint64_t packed_bytes = 0;
 };
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] std::optional<async_minimizer_sequence_resident_target<Alphabet>>
-try_materialize_async_mps_worker_target(
-        bioseq::storage::lazy_sequence_view<Alphabet> seq,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] std::optional<async_minimizer_sequence_resident_target<p_alphabet>>
+try_materialize_async_minimizer_sequence_worker_target(
+        bioseq::storage::lazy_sequence_view<p_alphabet> seq,
         std::uint8_t requested_width,
         std::uint64_t sequence_rowno,
         std::string_view index_name) {
@@ -103,7 +103,7 @@ try_materialize_async_mps_worker_target(
     auto permit = admission.try_reserve(reserve_bytes);
     if (!permit) {
         bioseq_log<logging_level::debug>(
-            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "[bioseq] index: async minimizer-sequence worker row={} index={} target_bp={} "
             "admitted_bytes={} not admitted for resident materialization; "
             "using rank stream",
             static_cast<unsigned long long>(sequence_rowno), index_name,
@@ -111,25 +111,25 @@ try_materialize_async_mps_worker_target(
             static_cast<unsigned long long>(access.admission_bytes));
         return std::nullopt;
     }
-    record_async_mps_materialize_admission();
+    record_async_minimizer_sequence_materialize_admission();
     try {
-        invoke_async_mps_materialization_pg_leaf(
+        invoke_async_minimizer_sequence_materialization_pg_leaf(
             async_minimizer_sequence_worker_pg_failure::materialize_error_log,
             [] {
-                inject_async_mps_worker_pg_failure_leaf(
+                inject_async_minimizer_sequence_worker_pg_failure_leaf(
                     async_minimizer_sequence_worker_pg_failure::materialize_error_log);
             });
-        invoke_async_mps_materialization_pg_leaf(
+        invoke_async_minimizer_sequence_materialization_pg_leaf(
             async_minimizer_sequence_worker_pg_failure::materialize_interrupt,
             [] {
-                inject_async_mps_worker_pg_failure_leaf(
+                inject_async_minimizer_sequence_worker_pg_failure_leaf(
                     async_minimizer_sequence_worker_pg_failure::materialize_interrupt);
                 CHECK_FOR_INTERRUPTS();
             });
-        invoke_async_mps_materialization_pg_leaf(
+        invoke_async_minimizer_sequence_materialization_pg_leaf(
             async_minimizer_sequence_worker_pg_failure::materialize_scanner_read,
             [] {
-                inject_async_mps_worker_pg_failure_leaf(
+                inject_async_minimizer_sequence_worker_pg_failure_leaf(
                     async_minimizer_sequence_worker_pg_failure::materialize_scanner_read);
             });
         auto owner = bioseq::storage::materialize_packed_sequence(
@@ -139,23 +139,23 @@ try_materialize_async_mps_worker_target(
             static_cast<std::uint64_t>(descriptor.unit_count)
             * descriptor.storage_unit_byte_width;
         bioseq_log<logging_level::debug>(
-            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "[bioseq] index: async minimizer-sequence worker row={} index={} target_bp={} "
             "packed_bytes={} materialized resident target",
             static_cast<unsigned long long>(sequence_rowno), index_name,
             static_cast<unsigned long long>(seq.bp_size()),
             static_cast<unsigned long long>(packed_bytes));
-        return async_minimizer_sequence_resident_target<Alphabet>{
+        return async_minimizer_sequence_resident_target<p_alphabet>{
             std::move(owner), packed_bytes};
     } catch (...) {
         permit->release();
         const std::uint64_t reserved_after = admission.reserved_bytes();
-        record_async_mps_materialize_failure_unwind(
+        record_async_minimizer_sequence_materialize_failure_unwind(
             reserved_after == reserved_before);
         throw;
     }
 }
 
-void process_mps_build_claim_cpp(
+void process_minimizer_sequence_build_claim_cpp(
         const persist_claim& claim,
         const char* base,
         Size mapped,
@@ -163,16 +163,16 @@ void process_mps_build_claim_cpp(
     const std::uint64_t worker_start_ns =
         static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
     const std::optional<minimizer_sequence_build_metadata> meta =
-        parse_mps_build_metadata(base, mapped);
+        parse_minimizer_sequence_build_metadata(base, mapped);
     if (!meta.has_value()) {
-        bioseq_log<logging_level::debug>("[bioseq] index: discarded invalid async mps build metadata row={}",
+        bioseq_log<logging_level::debug>("[bioseq] index: discarded invalid async minimizer-sequence build metadata row={}",
                 static_cast<unsigned long long>(claim.target.sequence_rowno));
         return;
     }
     persist_target target = claim.target;
     target.index_name = meta->index_name;
     if (!worker_target_accepts_index_persist(target, meta->index_name)) {
-        bioseq_log<logging_level::debug>("[bioseq] index: discarded stale async mps build job row={} index={}",
+        bioseq_log<logging_level::debug>("[bioseq] index: discarded stale async minimizer-sequence build job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 meta->index_name);
         return;
@@ -204,7 +204,7 @@ void process_mps_build_claim_cpp(
 
     bool built = false;
     bool has_shareable_lazy_worker = false;
-    bioseq_log<logging_level::debug>("[bioseq] index: async mps build worker starting row={} index={} target_bp={} mode={} max_concurrency={} index_memory_cap_mb={} sort_impl={}",
+    bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence build worker starting row={} index={} target_bp={} mode={} max_concurrency={} index_memory_cap_mb={} sort_impl={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             meta->index_name,
             static_cast<unsigned long long>(meta->locator.logical_length),
@@ -213,7 +213,7 @@ void process_mps_build_claim_cpp(
             meta->index_memory_cap_mb,
             meta->pair_sort_impl);
     bioseq_log<logging_level::debug>(
-        "[bioseq] index: async mps build worker backend={}",
+        "[bioseq] index: async minimizer-sequence build worker backend={}",
         bioseq::minimizers::minimizer_sketch_backend_name(worker_backend));
     const auto abandon_pg_resources_noexcept = [&]() noexcept {
         if (caches != nullptr) {
@@ -240,7 +240,7 @@ void process_mps_build_claim_cpp(
         work = bioseq::postgres::support::invoke_pg_as_cpp([] {
             return AllocSetContextCreate(
                 CurrentMemoryContext,
-                "bioseq_async_mps_build",
+                "bioseq_async_minimizer_sequence_build",
                 ALLOCSET_DEFAULT_SIZES);
         });
         caches = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -269,14 +269,14 @@ void process_mps_build_claim_cpp(
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("asynchronous bounded_nthash_simd persistence requires the scheme-tagged READY-generation format"),
+                     errmsg("asynchronous bounded_nthash_simd persistence requires the scheme-tagged READY-generation storage layout"),
                      errdetail("unsupported minimizer-sequence payloads do not record a minimizer-scheme identity; the queued build is rejected without fallback")));
             });
         }
         bioseq::pg_types::seq::dispatch_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
-            [&]<class S>() {
+            [&]<class p_sequence>() {
                 auto store = bioseq::storage::indexing::open_fragment_storage(
                     target.user_relid,
                     target.db_oid,
@@ -289,13 +289,14 @@ void process_mps_build_claim_cpp(
                     caches,
                     work);
                 try {
-                    const bioseq::storage::postgres_lazy_sequence_binding<S>
+                    const bioseq::storage::postgres_lazy_sequence_binding<
+                        p_sequence>
                         source_binding{
                             target.db_oid, target.tablespace_oid,
                             target.main_relfilenode, target.column_attno,
                             meta->locator, meta->last_fragment_padding,
                             registered_snapshot, caches, work};
-                    bioseq::storage::with_postgres_lazy_sequence<S>(
+                    bioseq::storage::with_postgres_lazy_sequence<p_sequence>(
                         source_binding,
                         [&has_shareable_lazy_worker, meta, &target, &store,
                          worker_backend, worker_kernels](auto source_view) {
@@ -306,7 +307,7 @@ void process_mps_build_claim_cpp(
                                 postgres_lazy_worker_is_shareable;
                             if (!postgres_lazy_worker_is_shareable) {
                                 if (auto resident =
-                                        try_materialize_async_mps_worker_target(
+                                        try_materialize_async_minimizer_sequence_worker_target(
                                             source_view,
                                             meta->storage_unit_byte_width,
                                             target.sequence_rowno,
@@ -317,7 +318,7 @@ void process_mps_build_claim_cpp(
                                     has_shareable_lazy_worker =
                                         bioseq::storage::is_worker_shareable(
                                             resident_view);
-                                    bioseq_log<logging_level::debug>("[bioseq] index: async mps worker row={} index={} "
+                                    bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence worker row={} index={} "
                                             "using resident target packed_bytes={} "
                                             "has_shareable_lazy_worker={}",
                                             static_cast<unsigned long long>(
@@ -334,7 +335,7 @@ void process_mps_build_claim_cpp(
                                     return;
                                 }
                             }
-                            bioseq_log<logging_level::debug>("[bioseq] index: async mps worker row={} index={} "
+                            bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence worker row={} index={} "
                                     "using scanner_pg target has_shareable_lazy_worker={}",
                                     static_cast<unsigned long long>(
                                         target.sequence_rowno),
@@ -403,7 +404,8 @@ void process_mps_build_claim_cpp(
 
     const std::uint64_t worker_end_ns =
         static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
-    const auto stats = bioseq::storage::indexing::g_last_mps_build_stats;
+    const auto stats =
+        bioseq::storage::indexing::g_last_minimizer_sequence_build_stats;
     publish_async_minimizer_sequence_build_stats(
         stats,
         worker_end_ns - worker_start_ns,
@@ -411,7 +413,7 @@ void process_mps_build_claim_cpp(
         static_cast<std::uint64_t>(worker_concurrency),
         static_cast<std::uint64_t>(std::max(0, meta->index_memory_cap_mb)),
         has_shareable_lazy_worker);
-    bioseq_log<logging_level::debug>("[bioseq] index: async mps build worker built row={} index={} target_bp={} worker_build_ns={} mode={} max_concurrency={} has_shareable_lazy_worker={} runs={} resident_runs={} file_runs={} resident_peak_bytes={} spilled_run_bytes={} postgres_temp_file_bytes={} merge_passes={} position_spill_bytes={}",
+    bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence build worker built row={} index={} target_bp={} worker_build_ns={} mode={} max_concurrency={} has_shareable_lazy_worker={} runs={} resident_runs={} file_runs={} resident_peak_bytes={} spilled_run_bytes={} postgres_temp_file_bytes={} merge_passes={} position_spill_bytes={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             meta->index_name,
             static_cast<unsigned long long>(meta->locator.logical_length),
@@ -440,7 +442,7 @@ void process_minimizer_sequence_build_claim(
     ErrorData* exact_error = nullptr;
     char cpp_error_detail[512] = "unknown C++ exception";
     try {
-        process_mps_build_claim_cpp(
+        process_minimizer_sequence_build_claim_cpp(
             claim, base, mapped, registered_snapshot);
         return;
     } catch (bioseq::postgres::support::postgres_error& error) {

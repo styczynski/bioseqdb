@@ -39,17 +39,17 @@ import bioseq.indexing.type;
 
 namespace bioseq::postgres::scheduler {
 
-template <class F>
+template <class p_function>
 auto invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure point,
-        F&& function)
-    -> std::invoke_result_t<std::remove_reference_t<F>&> {
-    record_async_mps_worker_pg_leaf_call(point);
+        p_function&& function)
+    -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
+    record_async_minimizer_sequence_worker_pg_leaf_call(point);
     try {
         return bioseq::postgres::support::invoke_pg_as_cpp(
-            std::forward<F>(function));
+            std::forward<p_function>(function));
     } catch (const bioseq::postgres::support::postgres_error&) {
-        record_async_mps_worker_pg_leaf_failure(point);
+        record_async_minimizer_sequence_worker_pg_leaf_failure(point);
         throw;
     }
 }
@@ -77,9 +77,8 @@ auto invoke_async_minimizer_sequence_worker_pg_leaf(
                 rejected_generations[slot_index] = generation;
                 record_unsupported_persist_rejection("queue_claim");
             }
-            // Fail closed: do not claim and therefore never acknowledge a
-            // legacy DSM/file payload. Identity-queue replacement will
-            // reclaim administratively quarantined slots.
+            // Do not claim unsupported DSM/file payloads. The identity queue
+            // replacement reclaims administratively quarantined slots.
             continue;
         }
         std::uint32_t expected = 1;
@@ -139,7 +138,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
     Relation rel = invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_open,
         [relid = target.user_relid] {
-            inject_async_mps_worker_pg_failure_leaf(
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(
                 async_minimizer_sequence_worker_pg_failure::relation_open);
             return bioseq::postgres::support::try_open_postgres_relation(relid, AccessShareLock);
         });
@@ -155,7 +154,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
     const relation_identity identity = invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_identity,
         [rel] {
-            inject_async_mps_worker_pg_failure_leaf(
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(
                 async_minimizer_sequence_worker_pg_failure::relation_identity);
             relation_identity result{};
             result.tablespace = OidIsValid(rel->rd_rel->reltablespace)
@@ -171,7 +170,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
     invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_close,
         [rel] {
-            inject_async_mps_worker_pg_failure_leaf(
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(
                 async_minimizer_sequence_worker_pg_failure::relation_close);
             relation_close(rel, AccessShareLock);
         });
@@ -209,8 +208,8 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
              column_attno = target.column_attno,
              index_name_cstr] noexcept {
             spi.current_stage = async_minimizer_sequence_worker_pg_failure::spi_connect;
-            record_async_mps_worker_pg_leaf_call(spi.current_stage);
-            inject_async_mps_worker_pg_failure_leaf(spi.current_stage);
+            record_async_minimizer_sequence_worker_pg_leaf_call(spi.current_stage);
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(spi.current_stage);
             spi.connect_status = SPI_connect();
             if (spi.connect_status != SPI_OK_CONNECT) {
                 ereport(ERROR,
@@ -221,8 +220,8 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
             }
 
             spi.current_stage = async_minimizer_sequence_worker_pg_failure::spi_execute;
-            record_async_mps_worker_pg_leaf_call(spi.current_stage);
-            inject_async_mps_worker_pg_failure_leaf(spi.current_stage);
+            record_async_minimizer_sequence_worker_pg_leaf_call(spi.current_stage);
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(spi.current_stage);
             Oid argument_types[4] = {OIDOID, OIDOID, INT2OID, TEXTOID};
             Datum arguments[4] = {
                 ObjectIdGetDatum(user_relid),
@@ -244,8 +243,8 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
             spi.table_present = SPI_tuptable != nullptr;
             if (spi.processed > 0) {
                 spi.current_stage = async_minimizer_sequence_worker_pg_failure::spi_read;
-                record_async_mps_worker_pg_leaf_call(spi.current_stage);
-                inject_async_mps_worker_pg_failure_leaf(spi.current_stage);
+                record_async_minimizer_sequence_worker_pg_leaf_call(spi.current_stage);
+                inject_async_minimizer_sequence_worker_pg_failure_leaf(spi.current_stage);
                 if (SPI_tuptable == nullptr || SPI_tuptable->vals == nullptr) {
                     ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
@@ -272,8 +271,8 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
             }
 
             spi.current_stage = async_minimizer_sequence_worker_pg_failure::spi_finish;
-            record_async_mps_worker_pg_leaf_call(spi.current_stage);
-            inject_async_mps_worker_pg_failure_leaf(spi.current_stage);
+            record_async_minimizer_sequence_worker_pg_leaf_call(spi.current_stage);
+            inject_async_minimizer_sequence_worker_pg_failure_leaf(spi.current_stage);
             spi.finish_status = SPI_finish();
             if (spi.finish_status != SPI_OK_FINISH) {
                 ereport(ERROR,
@@ -285,7 +284,7 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
             spi.current_stage = async_minimizer_sequence_worker_pg_failure::none;
         });
     } catch (const bioseq::postgres::support::postgres_error&) {
-        record_async_mps_worker_pg_leaf_failure(spi.current_stage);
+        record_async_minimizer_sequence_worker_pg_leaf_failure(spi.current_stage);
         throw;
     }
     return spi.enabled && spi.update_on_insert;
@@ -306,8 +305,8 @@ void process_minimizer_sequence_identity_claim(const persist_claim& claim) {
         record_unsupported_persist_rejection("worker_dispatch");
         ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-             errmsg("legacy asynchronous persistence payload is prohibited"),
-                errdetail("only the temporary minimizer-sequence identity build payload is accepted until the PostgreSQL identity queue replacement lands")));
+             errmsg("unsupported asynchronous persistence payload is prohibited"),
+             errdetail("only the minimizer-sequence identity build payload is accepted")));
     }
     StartTransactionCommand();
     Snapshot registered_snapshot =
@@ -330,8 +329,8 @@ void process_minimizer_sequence_identity_claim(const persist_claim& claim) {
         record_unsupported_persist_rejection("worker_magic");
         ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-             errmsg("legacy asynchronous persistence DSM payload is prohibited"),
-             errdetail("magic=%u expected_mps_identity_magic=%u",
+             errmsg("unsupported asynchronous persistence DSM payload is prohibited"),
+             errdetail("magic=%u expected_minimizer_sequence_identity_magic=%u",
                 magic, k_minimizer_sequence_build_dsm_magic)));
     }
     process_minimizer_sequence_build_claim(

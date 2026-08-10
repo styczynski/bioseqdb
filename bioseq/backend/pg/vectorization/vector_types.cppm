@@ -27,7 +27,7 @@ export module bioseq.postgres.vectorization.types;
 
 import bioseq.postgres.support.datums;
 import bioseq.postgres.support;
-import bioseq.postgres.support.runtime_test_counters;
+import bioseq.postgres.support.runtime_diagnostics;
 import bioseq.parallelism.memory_admission;
 
 /** Maximum scalar rows stored in one vector batch. */
@@ -214,12 +214,12 @@ namespace {
 void
 note_owned_varlena_source_form(Datum source) noexcept
 {
-	if (!bioseq::postgres::support::runtime_test_counters::
-			bpchar_source_observation_active())
+	if (!bioseq::postgres::support::runtime_diagnostics::
+			is_bpchar_source_observation_active())
 		return;
 
 	const Pointer raw = DatumGetPointer(source);
-	using enum bioseq::postgres::support::runtime_test_counters::
+	using enum bioseq::postgres::support::runtime_diagnostics::
 		bpchar_source_form;
 	auto form = unknown;
 	if (raw != nullptr)
@@ -233,21 +233,21 @@ note_owned_varlena_source_form(Datum source) noexcept
 		else if (VARATT_IS_SHORT(raw))
 			form = short_header;
 	}
-	bioseq::postgres::support::runtime_test_counters::
-		note_bpchar_source_form(
+	bioseq::postgres::support::runtime_diagnostics::
+		record_bpchar_source_form(
 			form,
-			bioseq::postgres::support::runtime_test_counters::
+			bioseq::postgres::support::runtime_diagnostics::
 				bpchar_source_site::vector_copy);
 }
 
 void
 cleanup_vector_slot_contents(
 	vector_tuple_table_slot_storage* vector_slot,
-	bioseq::postgres::support::runtime_test_counters::
+	bioseq::postgres::support::runtime_diagnostics::
 		vector_payload_cleanup_kind cleanup_kind)
 {
-	bioseq::postgres::support::runtime_test_counters::
-		note_vector_cleanup_call(cleanup_kind);
+	bioseq::postgres::support::runtime_diagnostics::
+		record_vector_cleanup(cleanup_kind);
 	TupleDesc tuple_desc = vector_slot->virtual_slot.base.tts_tupleDescriptor;
 	if (tuple_desc == nullptr)
 		return;
@@ -270,8 +270,8 @@ cleanup_vector_slot_contents(
 				if (!column->is_null[row_index] &&
 					DatumGetPointer(datum) != nullptr)
 				{
-					bioseq::postgres::support::runtime_test_counters::
-						note_vector_payload_cleanup_free(cleanup_kind);
+					bioseq::postgres::support::runtime_diagnostics::
+						record_vector_payload_cleanup_free(cleanup_kind);
 					pfree(DatumGetPointer(datum));
 				}
 				datum = static_cast<Datum>(0);
@@ -291,7 +291,7 @@ clear_vector_tuple_slot(TupleTableSlot* slot)
 {
 	cleanup_vector_slot_contents(
 		reinterpret_cast<vector_tuple_table_slot_storage*>(slot),
-		bioseq::postgres::support::runtime_test_counters::
+		bioseq::postgres::support::runtime_diagnostics::
 			vector_payload_cleanup_kind::slot_clear);
 	TTSOpsVirtual.clear(slot);
 }
@@ -302,7 +302,7 @@ release_vector_tuple_slot(TupleTableSlot* slot)
 	auto* vector_slot = reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 	cleanup_vector_slot_contents(
 		vector_slot,
-		bioseq::postgres::support::runtime_test_counters::
+		bioseq::postgres::support::runtime_diagnostics::
 			vector_payload_cleanup_kind::slot_release);
 	TTSOpsVirtual.clear(slot);
 
@@ -496,8 +496,8 @@ export void write_datum_to_vector_column(
 		!column->is_null[row_index] &&
 		DatumGetPointer(column->data[row_index]) != nullptr)
 	{
-		bioseq::postgres::support::runtime_test_counters::
-			note_vector_payload_overwrite_free();
+		bioseq::postgres::support::runtime_diagnostics::
+			record_vector_payload_overwrite_free();
 		pfree(DatumGetPointer(column->data[row_index]));
 		column->data[row_index] = static_cast<Datum>(0);
 	}
@@ -525,12 +525,12 @@ export void write_datum_to_vector_column(
 							data_length);
 			});
 			std::memcpy(owned_copy, varlena_source, data_length);
-			bioseq::postgres::support::runtime_test_counters::
-				note_vector_payload_allocation();
+			bioseq::postgres::support::runtime_diagnostics::
+				record_vector_payload_allocation();
 			if (reinterpret_cast<Pointer>(varlena_source) != original_pointer)
 			{
-				bioseq::postgres::support::runtime_test_counters::
-					note_detoast_temporary_free();
+				bioseq::postgres::support::runtime_diagnostics::
+					record_detoast_temporary_free();
 				pfree(varlena_source);
 			}
 			*reinterpret_cast<Datum*>(write_position) =
@@ -582,6 +582,6 @@ export void reset_vector_tuple_table_slot(
 {
 	cleanup_vector_slot_contents(
 		vector_slot,
-		bioseq::postgres::support::runtime_test_counters::
+		bioseq::postgres::support::runtime_diagnostics::
 			vector_payload_cleanup_kind::explicit_cleanup);
 }

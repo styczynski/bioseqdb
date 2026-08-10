@@ -14,11 +14,12 @@ extern "C" {
 #include "postgres.h"
 
 #include "executor/executor.h"
-#include "miscadmin.h"
 #include "optimizer/planner.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "tcop/utility.h"
+
+#include "miscadmin.h"
 }
 
 export module bioseq.cache.pg.executor:lifecycle;
@@ -40,7 +41,7 @@ bool g_shared_memory_hooks_installed = false;
 
 export namespace bioseq::cache::pg::executor::lifecycle {
 
-struct BackendHookCallbacksV1 {
+struct backend_hook_callbacks {
     planner_hook_type planner = nullptr;
     create_upper_paths_hook_type create_upper_paths = nullptr;
     ExecutorStart_hook_type executor_start = nullptr;
@@ -50,7 +51,7 @@ struct BackendHookCallbacksV1 {
 };
 
 /** Install the permanently chained planner, executor, and utility hooks. */
-void install_backend_hooks(const BackendHookCallbacksV1& callbacks) noexcept {
+void install_backend_hooks(const backend_hook_callbacks& callbacks) noexcept {
     if (detail::g_backend_hooks_installed) {
         return;
     }
@@ -70,9 +71,8 @@ void install_backend_hooks(const BackendHookCallbacksV1& callbacks) noexcept {
 }
 
 /** Install the shared-memory hooks during shared-preload processing. */
-void install_shared_memory_hooks(
-        shmem_request_hook_type request,
-        shmem_startup_hook_type startup) noexcept {
+void install_shared_memory_hooks(shmem_request_hook_type request,
+                                 shmem_startup_hook_type startup) noexcept {
     if (detail::g_shared_memory_hooks_installed) {
         return;
     }
@@ -95,8 +95,7 @@ void install_shared_memory_hooks(
     return detail::g_previous_planner;
 }
 
-[[nodiscard]] create_upper_paths_hook_type
-previous_create_upper_paths() noexcept {
+[[nodiscard]] create_upper_paths_hook_type previous_create_upper_paths() noexcept {
     return detail::g_previous_create_upper_paths;
 }
 

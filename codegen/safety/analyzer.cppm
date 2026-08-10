@@ -730,7 +730,8 @@ validate_external_provenance(
             target.external_provenance->declaration_sha256)) {
         analysis_failure(
             target.target_qualified_name,
-            "standard/system declaration lacks versioned hash provenance");
+            "standard/system declaration lacks revision-pinned "
+            "contract provenance");
     }
     const provenance_record* record = find_provenance(
         provenance, target.external_provenance->record_id);
@@ -890,7 +891,7 @@ inline void validate_bridge_transition(
         }
         expected_implementation =
             evidence.implementation_qualified_name;
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_region =
             "bioseq.postgres.support.sql_boundary.context/"
             + std::string{expected_implementation.substr(
@@ -900,7 +901,7 @@ inline void validate_bridge_transition(
         == bridge_kind::generated_boundary_tail) {
         expected_implementation =
             "bioseq::postgres::support::invoke_postgres_callback";
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_region =
             "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
@@ -1988,7 +1989,7 @@ converter_families(const safety_manifest_overload& overload) {
     }
     for (const function_flow* step : site.path) {
         const std::string_view name = step->qualified_name;
-        if (step->module_name == "bioseq.pg_sql_boundary"
+        if (step->module_name == "bioseq.postgres.sql_boundary"
             && (name
                     == "bioseq::postgres::support::spi_session::connect"
                 || name
@@ -2051,7 +2052,7 @@ converter_families(const safety_manifest_overload& overload) {
         const bridge_transition_evidence& evidence =
             *reachable.bridge_transition_call
                  ->bridge_primitive_evidence;
-        result.bridge_evidence = bridge_transition_proof{
+        result.bridge_evidence = bridge_transition_validation{
             .primitive = evidence.primitive,
             .target_usr = evidence.target_usr,
             .target_qualified_name =
@@ -2183,7 +2184,7 @@ converter_families(const safety_manifest_overload& overload) {
         severity_authority =
             analyzer_detail::require_postgresql_severity_authority(
                 provenance);
-    if (facts.schema_version != 2
+    if (facts.schema_revision != 2
         || facts.compiler_profile != profile_name(facts.profile)
         || facts.clang_version.empty()
         || !analyzer_detail::lowercase_sha256(
@@ -2380,7 +2381,7 @@ converter_families(const safety_manifest_overload& overload) {
             std::move(compiler_facts_sha256),
         .clang_version = facts.clang_version,
         .analyzer_version =
-            "bioseq-clang-cfg-lifetime-v2/" + facts.clang_version,
+            clang_cfg_lifetime_identity(facts.clang_version),
         .generator_revision = std::move(generator_revision),
         .callback_root_count = callback_roots.size(),
         .callback_closure_sha256 =

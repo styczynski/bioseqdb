@@ -73,16 +73,19 @@ struct record_parse_result {
 /// Per-record FASTA parser state. Aligned to a cache line so a future
 /// multi-parser pipeline can store one state per parser
 /// thread without false-sharing the partial-encoding fields.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_char,
+          std::size_t p_letters_per_unit>
 struct alignas(64) fasta_parser_state {
     fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
     /// Offset into the batch's `_header_storage` where the current
     /// record's header bytes start. Captured when header parsing begins
     /// and used by the emit-record callback.
     std::size_t header_start_offset = 0;
-    bioseq::simd::active_target::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    bioseq::simd::active_target::encode_state<
+        p_storage_unit,
+        p_bits_per_char,
+        p_letters_per_unit> body{};
     /// Borrowed pointer to the batch's shared header buffer. The FSM
     /// pushes header bytes into this directly to avoid per-record allocation.
     std::vector<char>* header_storage = nullptr;
@@ -98,7 +101,7 @@ struct alignas(64) fasta_parser_state {
     /// realloc on the batch's vector is observed before the next
     /// emit-record.
     void attach_to_batch(std::vector<char>& header_buf,
-                         std::vector<storage_unit_t>& seq_buf) noexcept {
+                         std::vector<p_storage_unit>& seq_buf) noexcept {
         header_storage = &header_buf;
         body.output_storage = &seq_buf;
     }
@@ -117,27 +120,33 @@ struct alignas(64) fasta_parser_state {
 /// — offsets into the batch's shared storage, plus the encoder's
 /// `(word_count, padding)` summary.
 template <
-    sequence_alphabet alphabet_t,
-    typename storage_unit_t = std::uint64_t,
-    typename emit_record_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    typename p_storage_unit = std::uint64_t,
+    typename p_emit_record,
+    typename p_failure>
 [[nodiscard]] record_parse_result parse_one_fasta_record(
-    fasta_parser_state<storage_unit_t,
-        compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::bits_per_char,
-        compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::letters_per_unit>& state,
+    fasta_parser_state<p_storage_unit,
+        compact_sequence_range<sequence_custom_alphabet<
+            p_alphabet,
+            p_storage_unit>>::traits::bits_per_char,
+        compact_sequence_range<sequence_custom_alphabet<
+            p_alphabet,
+            p_storage_unit>>::traits::letters_per_unit>& state,
     const std::uint8_t* slab_data,
     std::size_t slab_size,
     bool is_eof,
     std::size_t cursor,
     std::size_t global_offset,
-    emit_record_fn_t&& emit_record,
-    failure_fn_t&& failure_fn) {
+    p_emit_record&& emit_record,
+    p_failure&& failure_fn) {
 
-    using sequence_traits =
+    using sequence_traits_type =
         typename compact_sequence_range<
-            sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits;
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
+            sequence_custom_alphabet<p_alphabet, p_storage_unit>>::traits;
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
 
     DEBUG_ASSERT(state.header_storage != nullptr,
                  "fasta_parser_state must be attached to a batch via attach_to_batch");
@@ -205,8 +214,8 @@ template <
     //     loop with the scalar encoder. The multiline encoder is a
     //     dna4-uint64 specialisation.
     constexpr bool use_multiline_encoder =
-        std::is_same_v<alphabet_t, seq::dna4>
-        && std::is_same_v<storage_unit_t, std::uint64_t>
+        std::is_same_v<p_alphabet, seq::dna4>
+        && std::is_same_v<p_storage_unit, std::uint64_t>
         && bits_per_char == 2 && letters_per_unit == 32;
 
     if constexpr (use_multiline_encoder) {
@@ -272,9 +281,9 @@ template <
                         line_size -= 1;
                     }
                     bioseq::simd::active_target::encode_body_chunk<
-                        alphabet_t,
-                        bioseq::simd::active_target::unknown_byte_policy::DROP,
-                        storage_unit_t, bits_per_char, letters_per_unit>(
+                        p_alphabet,
+                        bioseq::simd::active_target::unknown_byte_policy::drop,
+                        p_storage_unit, bits_per_char, letters_per_unit>(
                             state.body, slab_data + cursor, line_size);
                     cursor += remaining;
                     state.progress = fasta_parser_progress::finished_record;
@@ -287,9 +296,9 @@ template <
                 line_size -= 1;
             }
             bioseq::simd::active_target::encode_body_chunk<
-                alphabet_t,
-                bioseq::simd::active_target::unknown_byte_policy::DROP,
-                storage_unit_t, bits_per_char, letters_per_unit>(
+                p_alphabet,
+                bioseq::simd::active_target::unknown_byte_policy::drop,
+                p_storage_unit, bits_per_char, letters_per_unit>(
                     state.body, slab_data + cursor, line_size);
             cursor += newline_offset + 1;  // consume '\n'
         }
@@ -301,7 +310,7 @@ template <
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] =
-            bioseq::simd::active_target::finalize_encode_state<storage_unit_t,
+            bioseq::simd::active_target::finalize_encode_state<p_storage_unit,
                                                   bits_per_char,
                                                   letters_per_unit>(state.body);
         emit_record(state.header_start_offset,

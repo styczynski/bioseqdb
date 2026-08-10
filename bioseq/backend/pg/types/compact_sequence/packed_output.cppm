@@ -2285,7 +2285,7 @@ bool slice_trace_worker_failure_probe(std::int32_t action) {
   if (IsParallelWorker()) {
     ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("injected DOC0377 SliceProject parallel worker failure"),
+             errmsg("injected compact-sequence parallel worker failure"),
              errdetail("the original worker ERROR must survive DSM cleanup")));
   }
   return true;
@@ -2366,10 +2366,10 @@ export [[nodiscard]] inline Size checked_round_up_to_uint64(Size value)
     return round_up_to_uint64(value);
 }
 
-export template<class Instance>
+export template<class p_instance>
 [[nodiscard]] inline Size bound_flat_size(std::uint64_t bp_length)
 {
-    using range = compact_sequence_range<Instance>;
+    using range = compact_sequence_range<p_instance>;
     using traits = typename range::traits;
     if (bp_length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
@@ -2433,8 +2433,8 @@ enum class materialization_size_probe : std::uint8_t {
       case materialization_size_probe::bound_flat_bp_overflow:
         bioseq::pg_types::seq::dispatch_instance(
             pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
-            []<class Instance>() {
-              (void)bound_flat_size<Instance>(
+            []<class p_instance>() {
+              (void)bound_flat_size<p_instance>(
                   static_cast<std::uint64_t>(UINT32_MAX) + 1u);
             });
         break;
@@ -2459,8 +2459,8 @@ enum class materialization_size_probe : std::uint8_t {
   Size zero_flat_size = 0u;
   bioseq::pg_types::seq::dispatch_instance(
       pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
-      [&zero_flat_size]<class Instance>() {
-        zero_flat_size = bound_flat_size<Instance>(0u);
+      [&zero_flat_size]<class p_instance>() {
+        zero_flat_size = bound_flat_size<p_instance>(0u);
       });
   const Size framed_overhead = static_cast<Size>(VARHDRSZ + 1u);
   return checked_size_cast(0u) == 0u
@@ -2510,8 +2510,8 @@ enum class materialization_size_probe : std::uint8_t {
     bioseq::pg_types::seq::dispatch_instance(
         value.type_params.alphabet_code,
         value.type_params.storage_unit_byte_width,
-        [&size, &value]<class Instance>() {
-            size = bound_flat_size<Instance>(value.bp_length);
+        [&size, &value]<class p_instance>() {
+            size = bound_flat_size<p_instance>(value.bp_length);
         });
     return size;
 }
@@ -2607,10 +2607,10 @@ enum class materialization_size_probe : std::uint8_t {
     __builtin_unreachable();
 }
 
-template<class Instance, class View>
-void pack_view_into(bioseq::pg_types::seq& destination, View view, std::uint64_t length)
+template<class p_instance, class p_view>
+void pack_view_into(bioseq::pg_types::seq& destination, p_view view, std::uint64_t length)
 {
-    using range = compact_sequence_range<Instance>;
+    using range = compact_sequence_range<p_instance>;
     using traits = typename range::traits;
     using unit = typename traits::storage_unit;
     const std::uint64_t unit_count = checked_ceil_div(
@@ -2620,7 +2620,7 @@ void pack_view_into(bioseq::pg_types::seq& destination, View view, std::uint64_t
         static_cast<std::size_t>(unit_count)};
     using sink = bioseq::sequences::fixed_rank_pack_unit_sink<unit>;
     using writer_type = bioseq::sequences::checked_rank_pack_sink<
-        Instance,
+        p_instance,
         bioseq::sequences::invalid_rank_policy::reject,
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
@@ -2634,8 +2634,8 @@ void pack_view_into(bioseq::pg_types::seq& destination, View view, std::uint64_t
     }
     destination.alphabet_code =
         pgseq_supported_alphabets::template index_of<
-            typename Instance::alphabet_type>();
-    destination.storage_unit_byte_width = Instance::byte_width;
+            typename p_instance::alphabet_type>();
+    destination.storage_unit_byte_width = p_instance::byte_width;
     destination.padding_letters = result.padding_letters;
     destination.bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(length);
 }
@@ -2748,11 +2748,11 @@ export inline void pg_sequence_flatten_into(
                 value.type_params.alphabet_code,
                 value.type_params.storage_unit_byte_width,
                 [&destination, &value, local_session, header,
-                 descriptor]<class Instance>() {
-                    using alphabet = typename Instance::alphabet_type;
+                 descriptor]<class p_instance>() {
+                    using alphabet = typename p_instance::alphabet_type;
                     auto* owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, EOHPGetRODatum(header), descriptor);
-                    pack_view_into<Instance>(
+                    pack_view_into<p_instance>(
                         destination, owner->view(), value.bp_length);
                 });
             finish_pg_sequence_read_session(local_session, true);
@@ -2882,16 +2882,16 @@ export inline void pending_root_reset(void* argument) noexcept
     guard->destination_arena = nullptr;
 }
 
-template<class Build>
+template<class p_build>
 [[nodiscard]] inline tracked_piece_edge invoke_piece_root_build(
-    Build&& build,
+    p_build&& build,
     piece_tree_arena& arena,
     piece_edge_cleanup_ledger& ledger)
 {
     /* A root builder must publish every returned owning edge to the reset
      * callback's ledger before it may perform another PostgreSQL operation.
      * Requiring the tracked return type makes that contract structural. */
-    tracked_piece_edge built = std::forward<Build>(build)(arena, ledger);
+    tracked_piece_edge built = std::forward<p_build>(build)(arena, ledger);
     return built;
 }
 
@@ -2913,13 +2913,13 @@ inline void transfer_built_root_from_ledger(
     }
 }
 
-export template<class Build>
+export template<class p_build>
 inline void replace_root_error_safe(
     pg_sequence_expanded& value,
     compact_sequence_stdc_type_params type,
     std::uint64_t length,
     bool alphabet_bound,
-    Build&& build)
+    p_build&& build)
 {
     MemoryContext build_context = AllocSetContextCreate(
         CurrentMemoryContext, "bioseq piece build", ALLOCSET_SMALL_SIZES);
@@ -2940,7 +2940,7 @@ inline void replace_root_error_safe(
          * second EOH can retain/share it after this EOH is reset. */
         guard->destination_arena = make_piece_tree_arena();
         const tracked_piece_edge built = invoke_piece_root_build(
-            std::forward<Build>(build), *guard->destination_arena,
+            std::forward<p_build>(build), *guard->destination_arena,
             guard->build_edges);
         guard->root = built.edge;
         guard->root_cleanup = built.cleanup;
@@ -2972,7 +2972,7 @@ inline void replace_root_error_safe(
  * the height-guided concat path, so validation remains O(log pieces) while
  * preserving the same publish-after-validation and unwind ownership contract
  * as replace_root_error_safe. */
-template<class Build>
+template<class p_build>
 inline void replace_root_trusted_join_error_safe(
     pg_sequence_expanded& value,
     compact_sequence_stdc_type_params type,
@@ -2982,7 +2982,7 @@ inline void replace_root_trusted_join_error_safe(
     std::uint64_t left_length,
     piece_edge trusted_right,
     std::uint64_t right_length,
-    Build&& build)
+    p_build&& build)
 {
     MemoryContext build_context = AllocSetContextCreate(
         CurrentMemoryContext, "bioseq trusted join build", ALLOCSET_SMALL_SIZES);
@@ -3001,7 +3001,7 @@ inline void replace_root_trusted_join_error_safe(
 
         guard->destination_arena = make_piece_tree_arena();
         const tracked_piece_edge built = invoke_piece_root_build(
-            std::forward<Build>(build), *guard->destination_arena,
+            std::forward<p_build>(build), *guard->destination_arena,
             guard->build_edges);
         guard->root = built.edge;
         guard->root_cleanup = built.cleanup;
@@ -3321,7 +3321,7 @@ export [[nodiscard]] Datum concat_pg_sequences(
     const std::uint64_t left_length = left.value->bp_length;
     const std::uint64_t right_length = right.bp_length();
     if (bind_left || bind_right) {
-        /* Alphabet adoption necessarily visits the unbound literal side and
+        /* Adopting an alphabet necessarily visits the unbound literal side and
          * retains the full validator for that type-changing operation. */
         replace_root_error_safe(
             *left.value, result_type, result_length, bound,
@@ -3414,7 +3414,7 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
     bool complete = true;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
-        [alphabet_code, &complete]<class Alphabet>() {
+        [alphabet_code, &complete]<class p_alphabet>() {
             for (std::uint16_t rank = 0u; rank <= UINT8_MAX; ++rank) {
                 char original = '\0';
                 if (!pgseq_symbol_for_rank(
@@ -3423,7 +3423,7 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
                     continue;
                 }
                 const auto complemented =
-                    bioseq::storage::lazy_sequence_traits<Alphabet>::
+                    bioseq::storage::lazy_sequence_traits<p_alphabet>::
                         letter_complement(static_cast<std::uint8_t>(rank));
                 char symbol = '\0';
                 if (!pgseq_symbol_for_rank(

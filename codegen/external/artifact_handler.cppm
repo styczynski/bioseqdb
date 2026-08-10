@@ -35,8 +35,8 @@ namespace bioseq::codegen::external {
 /// @return Path relative to the client's artifact root.
 [[nodiscard]] fs::path client_integration_test_path(
     std::string_view client_name) {
-    return fs::path("integration_tests")
-        / ("test_" + std::string(client_name) + "_client.cpp");
+    return fs::path("tests") / "integration"
+        / (std::string(client_name) + "_client_test.cpp");
 }
 
 /// @brief Renders the standalone CMake graph for one generated client.

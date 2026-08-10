@@ -395,17 +395,17 @@ inline void merge_report_once_identity(
     has_identity_conflict = true;
 }
 
-/// Exact hash-major cold-reader stats kept out of the frozen alignment-stats
-/// column ABI. Identity fields are merged only when identical; counters use
-/// the same saturating arithmetic as the rest of the operational snapshot.
-struct hash_major_reader_stats {
-    std::uint64_t format_revision = 0;
+/// Hash-major cold-reader identities and counters for operational aggregation.
+/// Identity fields are merged only when identical; counters use the same
+/// saturating arithmetic as the rest of the operational snapshot.
+struct hash_major_index_reader_stats {
+    std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;
     bool identity_available = false;
     std::uint64_t generation_id = 0;
     std::array<std::byte, 16> source_identity{};
     std::uint64_t source_content_crc64 = 0;
-    std::array<std::byte, 32> compatibility_digest{};
+    std::array<std::byte, 32> storage_contract_digest{};
     std::uint64_t directory_rows = 0;
     std::uint64_t directory_bytes = 0;
     std::uint64_t control_rows = 0;
@@ -438,10 +438,10 @@ struct hash_major_reader_stats {
     bool is_saturated = false;
 
     [[nodiscard]] constexpr bool operator==(
-        const hash_major_reader_stats&) const noexcept = default;
+        const hash_major_index_reader_stats&) const noexcept = default;
 
     [[nodiscard]] bool merge(
-            const hash_major_reader_stats& rhs,
+            const hash_major_index_reader_stats& rhs,
             bool& has_identity_conflict) noexcept {
         bool overflow = is_saturated || rhs.is_saturated;
         const auto add = [&overflow](
@@ -449,10 +449,10 @@ struct hash_major_reader_stats {
                 const std::uint64_t increment) noexcept {
             overflow = merge_counter(destination, increment) || overflow;
         };
-        if (rhs.format_revision != 0u) {
-            if (format_revision == 0u) {
-                format_revision = rhs.format_revision;
-            } else if (format_revision != rhs.format_revision) {
+        if (rhs.layout_revision != 0u) {
+            if (layout_revision == 0u) {
+                layout_revision = rhs.layout_revision;
+            } else if (layout_revision != rhs.layout_revision) {
                 has_identity_conflict = true;
             }
         }
@@ -460,12 +460,12 @@ struct hash_major_reader_stats {
             generation_id != 0u
             || source_identity != std::array<std::byte, 16>{}
             || source_content_crc64 != 0u
-            || compatibility_digest != std::array<std::byte, 32>{};
+            || storage_contract_digest != std::array<std::byte, 32>{};
         const bool incoming_identity_payload =
             rhs.generation_id != 0u
             || rhs.source_identity != std::array<std::byte, 16>{}
             || rhs.source_content_crc64 != 0u
-            || rhs.compatibility_digest != std::array<std::byte, 32>{};
+            || rhs.storage_contract_digest != std::array<std::byte, 32>{};
         if ((!identity_available && destination_identity_payload)
             || (!rhs.identity_available && incoming_identity_payload)) {
             has_identity_conflict = true;
@@ -476,11 +476,11 @@ struct hash_major_reader_stats {
                 generation_id = rhs.generation_id;
                 source_identity = rhs.source_identity;
                 source_content_crc64 = rhs.source_content_crc64;
-                compatibility_digest = rhs.compatibility_digest;
+                storage_contract_digest = rhs.storage_contract_digest;
             } else if (generation_id != rhs.generation_id
                 || source_identity != rhs.source_identity
                 || source_content_crc64 != rhs.source_content_crc64
-                || compatibility_digest != rhs.compatibility_digest) {
+                || storage_contract_digest != rhs.storage_contract_digest) {
                 has_identity_conflict = true;
             }
         }
@@ -591,7 +591,7 @@ static_assert(static_cast<std::uint64_t>(
 /// Grouped-SoA provider stats. Counter producers build operation-local
 /// deltas through record_counter(); aggregation remains checked and clamps at
 /// SQL bigint max. Stable codes use explicit presence bits because provider
-/// code zero (postgres_relation) is a is_valid published identity.
+/// Code zero identifies the validated relation-backed storage provider.
 struct grouped_soa_provider_stats {
     std::uint64_t provider_configured = 0u;
     std::uint64_t provider_captured = 0u;
@@ -988,7 +988,7 @@ struct pipeline_operational_stats {
     grouped_soa_provider_stats grouped_soa_provider{};
     bioseq::indexing::prepared_fragment_anchor_batch_stats
         fragment_native_query_stats{};
-    hash_major_reader_stats hash_major_reader{};
+    hash_major_index_reader_stats hash_major_index_reader{};
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
     // authenticity witness use has_nthash_vector_activity() instead of
@@ -1054,9 +1054,9 @@ struct pipeline_operational_stats {
     std::uint64_t full_segment_hydrations = 0;
     std::uint64_t backend_declines = 0;
     std::uint64_t backend_fallbacks = 0;
-	// Cold grouped-SoA source/route stats. The two compatibility counters name only
-	// pair-index conversion work; segment-local validation inside the direct
-	// reader is not a compatibility globalize/rebase pass.
+	// Cold grouped-SoA source/route stats. The conversion counters name only
+	// pair-index transformation work; segment-local direct-reader validation is
+	// tracked independently.
 	std::uint64_t persisted_source_parent_rows_read = 0;
 	std::uint64_t persisted_source_catalog_rows_read = 0;
 	std::uint64_t persisted_source_catalog_index_scans = 0;
@@ -1327,8 +1327,8 @@ struct pipeline_operational_stats {
         fragment_native_query_stats.merge(
             rhs.fragment_native_query_stats);
         is_saturated = fragment_native_query_stats.is_saturated || is_saturated;
-        is_saturated = hash_major_reader.merge(
-            rhs.hash_major_reader,
+        is_saturated = hash_major_index_reader.merge(
+            rhs.hash_major_index_reader,
             has_operational_identity_conflict) || is_saturated;
         add(nthash_vector_batches, rhs.nthash_vector_batches);
         add(nthash_resident_vector_stream_kernel_calls,
@@ -1641,11 +1641,11 @@ struct execution_environment_snapshot {
     }
 
     /// Compare environment identity while treating a zero Highway mask as an
-    /// observation that has not arrived yet.  This is the compatibility
-    /// predicate used only while merging independently completed stats shards;
+    /// observation that has not arrived yet. This identity predicate is used
+    /// only while merging independently completed stats shards;
     /// final validation still requires an all-or-none, internally consistent
     /// Highway plan and a singular executed target.
-    [[nodiscard]] static constexpr bool is_payload_compatible(
+    [[nodiscard]] static constexpr bool has_same_payload_identity(
         const execution_environment_snapshot& lhs,
         const execution_environment_snapshot& rhs) noexcept {
         const auto mask_compatible = [](const std::int64_t left,
@@ -1733,7 +1733,7 @@ public:
             || rhs.effective_cpu_workers == 0
             || is_mixed_invalid
             || rhs.is_mixed_invalid
-            || !is_payload_compatible(*this, rhs)) {
+            || !has_same_payload_identity(*this, rhs)) {
             is_mixed_invalid = true;
             return;
         }
@@ -2230,7 +2230,7 @@ struct pipeline_execution_stats {
     std::uint64_t unattested_alignment_jobs = 0;
     // Internal merge provenance. These are intentionally not part of the SQL
     // ABI: they let an aggregate-level identity/environment failure name the
-    // first formerly-attested job that must now be reclassified.
+    // first attempted job that must be reclassified.
     std::uint64_t first_attempted_target_row = k_unset_job_ordinal;
     std::uint64_t first_attempted_query_ordinal = k_unset_job_ordinal;
     std::uint64_t first_unattested_target_row = k_unset_job_ordinal;
@@ -2282,7 +2282,7 @@ struct pipeline_execution_stats {
             || (actual_target_index_source != target_index_source::none
                 && actual_target_index_source != job.actual_target_index_source)
             || (!execution_environment_snapshot::is_unset(environment)
-                && (!execution_environment_snapshot::is_payload_compatible(
+                && (!execution_environment_snapshot::has_same_payload_identity(
                         environment, job.environment)
                     || environment.is_mixed_invalid
                     || job.environment.is_mixed_invalid))) {
@@ -2603,7 +2603,7 @@ struct pipeline_execution_stats {
             && rhs_environment_valid
             && attempted_alignment_jobs != 0
             && rhs.attempted_alignment_jobs != 0
-            && !execution_environment_snapshot::is_payload_compatible(
+            && !execution_environment_snapshot::has_same_payload_identity(
                 environment, rhs.environment);
         const bool lhs_empty = is_exact_empty_stats_operand(*this);
         const bool rhs_empty = is_exact_empty_stats_operand(rhs);
@@ -2922,16 +2922,16 @@ struct persisted_gpu_cache_validation_result {
     }
 
     [[nodiscard]] bool is_internally_consistent() const noexcept {
-        const auto nonzero = [](const auto& bytes) noexcept {
+        const auto nonzero = [](const auto& p_bytes) noexcept {
             return std::any_of(
-                bytes.begin(), bytes.end(),
-                [](const auto value) { return value != 0u; });
+                p_bytes.begin(), p_bytes.end(),
+                [](const auto p_value) { return p_value != 0u; });
         };
-        const auto safe_text = [](const auto& bytes,
-                                  const std::uint32_t size) noexcept {
-            if (size == 0u || size > bytes.size()) return false;
-            for (std::size_t i = 0u; i < size; ++i) {
-                const auto value = static_cast<unsigned char>(bytes[i]);
+        const auto safe_text = [](const auto& p_bytes,
+                                  const std::uint32_t p_size) noexcept {
+            if (p_size == 0u || p_size > p_bytes.size()) return false;
+            for (std::size_t i = 0u; i < p_size; ++i) {
+                const auto value = static_cast<unsigned char>(p_bytes[i]);
                 if (value < 0x20u || value > 0x7eu
                     || value == static_cast<unsigned char>('"')
                     || value == static_cast<unsigned char>('\\')) {
@@ -2939,7 +2939,7 @@ struct persisted_gpu_cache_validation_result {
                 }
             }
             return std::all_of(
-                bytes.begin() + size, bytes.end(),
+                p_bytes.begin() + p_size, p_bytes.end(),
                 [](const char value) { return value == '\0'; });
         };
         return qualification_wire_revision == 2u && identity != 0u
@@ -3426,24 +3426,26 @@ public:
         const auto& operation = chunk->operation();
         for (const persisted_gpu_operation_chunk* existing = head_.get();
              existing != nullptr; existing = existing->next()) {
-            const auto& old = existing->operation();
-            if (old.operation_identity == operation.operation_identity
-                || old.query_pipeline_operation_identity
+            const auto& existing_operation = existing->operation();
+            if (existing_operation.operation_identity
+                    == operation.operation_identity
+                || existing_operation.query_pipeline_operation_identity
                     == operation.query_pipeline_operation_identity
-                || old.query_pipeline_operation_identity
+                || existing_operation.query_pipeline_operation_identity
                     == operation.shape_pipeline_operation_identity
-                || old.shape_pipeline_operation_identity
+                || existing_operation.shape_pipeline_operation_identity
                     == operation.query_pipeline_operation_identity) {
                 invalidate(1u, false);
                 return {};
             }
-            if (old.generation_id != operation.generation_id
-                || old.source_identity != operation.source_identity
-                || old.cold_load_identity != operation.cold_load_identity
-                || old.seed_receipt_identity
+            if (existing_operation.generation_id != operation.generation_id
+                || existing_operation.source_identity != operation.source_identity
+                || existing_operation.cold_load_identity
+                    != operation.cold_load_identity
+                || existing_operation.seed_receipt_identity
                     != operation.seed_receipt_identity
-                || old.environment != operation.environment
-                || old.cache_qualification
+                || existing_operation.environment != operation.environment
+                || existing_operation.cache_qualification
                     != operation.cache_qualification) {
                 invalidate(1u, false);
                 return {};
@@ -3694,7 +3696,7 @@ make_persisted_grouped_soa_gpu_environment_snapshot(
     execution_environment_snapshot environment{};
     environment.effective_cpu_workers =
         static_cast<std::uint32_t>(effective_cpu_workers);
-    environment.is_gpu_environment_available = binding.is_gpu_environment_available;
+    environment.is_gpu_environment_available = binding.gpu_environment_present;
     environment.gpu_device_uuid = binding.gpu_device_uuid;
     environment.gpu_driver_identity = binding.gpu_driver_identity;
     environment.gpu_pipeline_cache_policy =

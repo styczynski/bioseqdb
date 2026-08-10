@@ -2,9 +2,9 @@
  * @file instrumentation/arena.cppm
  * @brief Scoped allocation attribution and allocator tracker hook.
  *
- * The arena_scope<configuration_type> RAII type stamps a kind into the per-thread
+ * The arena_scope<p_configuration_type> RAII type stamps a kind into the per-thread
  * profiler block; allocations through the matching foonathan/memory
- * tracker increment the per-arena counter. When configuration_type::enable_arena_tracking
+ * tracker increment the per-arena counter. When p_configuration_type::enable_arena_tracking
  * is false the entire mechanism collapses (every if constexpr branch is
  * empty in the discarded instantiation).
  */
@@ -20,14 +20,14 @@ import bioseq.instrumentation.profiler_state;
 
 export namespace bioseq::instrumentation {
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] arena_scope {
     arena_kind previous_arena = arena_kind::none;
 
     [[gnu::always_inline]]
     explicit arena_scope(arena_kind kind) noexcept {
-        if constexpr (configuration_type::enable_arena_tracking) {
-            auto* profiler = active_thread_profiler<configuration_type>;
+        if constexpr (p_configuration_type::enable_arena_tracking) {
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             previous_arena = profiler->active_arena_kind();
             profiler->set_active_arena(kind);
@@ -37,8 +37,8 @@ struct [[nodiscard]] arena_scope {
     }
 
     [[gnu::always_inline]] ~arena_scope() noexcept {
-        if constexpr (configuration_type::enable_arena_tracking) {
-            auto* profiler = active_thread_profiler<configuration_type>;
+        if constexpr (p_configuration_type::enable_arena_tracking) {
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             profiler->set_active_arena(previous_arena);
         }
@@ -50,22 +50,22 @@ struct [[nodiscard]] arena_scope {
     arena_scope& operator=(arena_scope&&) = delete;
 };
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline arena_scope<configuration_type> arena(arena_kind kind) noexcept {
-    return arena_scope<configuration_type>(kind);
+inline arena_scope<p_configuration_type> arena(arena_kind kind) noexcept {
+    return arena_scope<p_configuration_type>(kind);
 }
 
 /// foonathan/memory-compatible tracker. Wire by composing into a memory
 /// arena (`memory::tracked_allocator<profile_tracker, ...>`) — bytes
 /// passed through this tracker are attributed to the currently-active
 /// arena_kind on the per-thread profiler block.
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct profile_tracker {
     [[gnu::always_inline]]
     void on_node_allocation(void*, std::size_t bytes, std::size_t) noexcept {
-        if constexpr (!configuration_type::enable_arena_tracking) return;
-        auto* profiler = active_thread_profiler<configuration_type>;
+        if constexpr (!p_configuration_type::enable_arena_tracking) return;
+        auto* profiler = active_thread_profiler<p_configuration_type>;
         if (profiler == nullptr) return;
         const auto kind = profiler->active_arena_kind();
         if (kind == arena_kind::none) return;
@@ -80,8 +80,8 @@ struct profile_tracker {
 
     [[gnu::always_inline]]
     void on_node_deallocation(void*, std::size_t bytes, std::size_t) noexcept {
-        if constexpr (!configuration_type::enable_arena_tracking) return;
-        auto* profiler = active_thread_profiler<configuration_type>;
+        if constexpr (!p_configuration_type::enable_arena_tracking) return;
+        auto* profiler = active_thread_profiler<p_configuration_type>;
         if (profiler == nullptr) return;
         const auto kind = profiler->active_arena_kind();
         if (kind == arena_kind::none) return;

@@ -37,7 +37,7 @@ struct alignas(64) sample_record {
 static_assert(sizeof(sample_record) == 128);
 static_assert(alignof(sample_record) == 64);
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct sample_ring {
     static constexpr std::size_t ring_capacity = 4096;
 
@@ -47,7 +47,7 @@ struct sample_ring {
     std::uint64_t dropped_sample_count = 0;
 
     sample_ring() noexcept {
-        if constexpr (configuration_type::enable_sampling) {
+        if constexpr (p_configuration_type::enable_sampling) {
             buffer = new (std::align_val_t{64}) sample_record[ring_capacity]{};
         }
     }
@@ -64,7 +64,7 @@ struct sample_ring {
 
     [[gnu::always_inline]]
     void push(const sample_record& sample) noexcept {
-        if constexpr (!configuration_type::enable_sampling) {
+        if constexpr (!p_configuration_type::enable_sampling) {
             (void)sample;
             return;
         } else {

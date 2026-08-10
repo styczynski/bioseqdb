@@ -94,21 +94,21 @@ enum class sql_schema_binding : std::uint8_t {
 };
 
 /** Structural, lifetime-owning catalog identifier usable as a template value. */
-template<std::size_t Extent>
+template<std::size_t p_extent>
 struct fixed_catalog_name final {
-    std::array<char, Extent> bytes{};
+    std::array<char, p_extent> bytes{};
 
-    consteval fixed_catalog_name(const char (&text)[Extent]) {
-        for (std::size_t index = 0; index != Extent; ++index)
+    consteval fixed_catalog_name(const char (&text)[p_extent]) {
+        for (std::size_t index = 0; index != p_extent; ++index)
             bytes[index] = text[index];
     }
 
     [[nodiscard]] constexpr std::string_view view() const noexcept {
-        return {bytes.data(), Extent - 1};
+        return {bytes.data(), p_extent - 1};
     }
 
     [[nodiscard]] consteval bool valid() const noexcept {
-        return Extent > 1 && bytes[Extent - 1] == '\0';
+        return p_extent > 1 && bytes[p_extent - 1] == '\0';
     }
 };
 
@@ -119,19 +119,19 @@ static_assert(std::is_standard_layout_v<fixed_catalog_name<2>>);
  * Stateless resolver for a pg_class entity with an exact name, schema, and
  * relation kind.
  */
-template<char ExpectedRelkind,
-         fixed_catalog_name Leaf,
-         sql_schema_binding Binding,
-         fixed_catalog_name Scope>
+template<char p_expected_relkind,
+         fixed_catalog_name p_leaf,
+         sql_schema_binding p_binding,
+         fixed_catalog_name p_scope>
 class relation_entity_handle final {
-    static_assert(Leaf.valid());
-    static_assert(Scope.valid());
-    static_assert(ExpectedRelkind != '\0');
-    static_assert(Leaf.view().size() < NAMEDATALEN);
-    static_assert(Scope.view().size() < NAMEDATALEN);
+    static_assert(p_leaf.valid());
+    static_assert(p_scope.valid());
+    static_assert(p_expected_relkind != '\0');
+    static_assert(p_leaf.view().size() < NAMEDATALEN);
+    static_assert(p_scope.view().size() < NAMEDATALEN);
     static_assert(
-        Binding == sql_schema_binding::fixed
-        || Binding == sql_schema_binding::extension);
+        p_binding == sql_schema_binding::fixed
+        || p_binding == sql_schema_binding::extension);
 
     enum class relation_lookup_state : std::uint8_t {
         found,
@@ -159,14 +159,14 @@ class relation_entity_handle final {
     [[nodiscard]] static Oid namespace_oid(
             catalog_missing_policy policy) {
         Oid result = InvalidOid;
-        if constexpr (Binding == sql_schema_binding::fixed) {
-            const std::string schema{Scope.view()};
+        if constexpr (p_binding == sql_schema_binding::fixed) {
+            const std::string schema{p_scope.view()};
             result = bioseq::postgres::support::invoke_pg_as_cpp(
                 [schema_name = schema.c_str()] {
                     return get_namespace_oid(schema_name, true);
                 });
         } else {
-            const std::string extension{Scope.view()};
+            const std::string extension{p_scope.view()};
             const Oid extension_oid =
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [extension_name = extension.c_str()] {
@@ -230,18 +230,18 @@ public:
 
     [[nodiscard]] static constexpr std::string_view
     leaf_name() noexcept {
-        return Leaf.view();
+        return p_leaf.view();
     }
 
     [[nodiscard]] static constexpr sql_schema_binding
     schema_binding() noexcept {
-        return Binding;
+        return p_binding;
     }
 
     [[nodiscard]] static constexpr std::string_view
     stable_schema_name() noexcept {
-        if constexpr (Binding == sql_schema_binding::fixed)
-            return Scope.view();
+        if constexpr (p_binding == sql_schema_binding::fixed)
+            return p_scope.view();
         return "$extension";
     }
 
@@ -332,11 +332,11 @@ public:
                             relation_lookup_state::wrong_namespace;
                     } else if (std::strncmp(
                                    NameStr(relation->relname),
-                                   Leaf.bytes.data(),
+                                   p_leaf.bytes.data(),
                                    NAMEDATALEN) != 0) {
                         result =
                             relation_lookup_state::disappeared;
-                    } else if (relation->relkind != ExpectedRelkind) {
+                    } else if (relation->relkind != p_expected_relkind) {
                         result = relation_lookup_state::wrong_relkind;
                     }
                     ReleaseSysCache(tuple);

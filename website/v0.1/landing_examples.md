@@ -26,7 +26,7 @@ into a sequence search that still projects normal metadata columns.
 
 ```sql runnable id=landing_hero_query timeout=10s
 -- bioseq:setup
-SET bioseq.update_index_on_insert = on;
+SET bioseq.index.insert_maintenance.enabled = on;
 CREATE TABLE landing_hero_sequences (
   id INT PRIMARY KEY,
   accession TEXT NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE run_reads (
   seq           bioseq.seq('dna4', 64)
 ) USING bioseq;
 
-SET bioseq.update_index_on_insert = on;
+SET bioseq.index.insert_maintenance.enabled = on;
 
 SELECT bioseq.load(
   'run_reads'::regclass,
@@ -108,8 +108,8 @@ the exact final predicate still plans as the `BioseqScan` custom scan.
 
 ```sql runnable id=landing_similarity_search timeout=20s
 -- bioseq:setup
-SET bioseq.update_index_on_insert = on;
-SET bioseq.enable_vectorization = on;
+SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.vectorization.enabled = on;
 DO $$
 DECLARE
   plan_json jsonb;

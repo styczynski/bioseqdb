@@ -498,7 +498,7 @@ inline void validate_bridge_evidence(
             site.site_id,
             "bridged site lacks bridge primitive evidence");
     }
-    const bridge_transition_proof& evidence =
+    const bridge_transition_validation& evidence =
         *site.bridge_evidence;
     std::string expected_implementation;
     std::string expected_module;
@@ -583,9 +583,9 @@ inline void validate_bridge_evidence(
         }
         expected_implementation =
             evidence.implementation_qualified_name;
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_source_suffix =
-            "/common/pg_sql_boundary/"
+            "/common/postgres/sql_boundary/"
             "call_context_implementation.cppm";
         expected_region =
             "bioseq.postgres.support.sql_boundary.context/"
@@ -595,9 +595,9 @@ inline void validate_bridge_evidence(
         site.bridge == bridge_kind::generated_boundary_tail) {
         expected_implementation =
             "bioseq::postgres::support::invoke_postgres_callback";
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_source_suffix =
-            "/common/pg_sql_boundary/index.cppm";
+            "/common/postgres/sql_boundary/index.cppm";
         expected_region =
             "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
@@ -906,7 +906,7 @@ inline void validate_analysis(
 inline void validate_provenance_bundle(
     const provenance_bundle& bundle,
     const ledger_policy& policy = {}) {
-    if (bundle.schema_version != 2 || bundle.postgresql_major != 17
+    if (bundle.schema_revision != 2 || bundle.postgresql_major != 17
         || bundle.postgresql_tag
             != policy.expected_postgresql_tag
         || bundle.postgresql_revision
@@ -1247,7 +1247,7 @@ inline void validate_safety_ledger(
     std::string_view reviewed_provenance_sha256,
     const ledger_policy& policy = {}) {
     validate_provenance_bundle(provenance, policy);
-    if (ledger.schema_version != 2 || ledger.postgresql_major != 17
+    if (ledger.schema_revision != 2 || ledger.postgresql_major != 17
         || ledger.postgresql_revision != provenance.postgresql_revision
         || ledger.provenance_bundle_sha256
             != reviewed_provenance_sha256
@@ -1271,7 +1271,8 @@ inline void validate_safety_ledger(
                 : !detail::lowercase_sha256(
                       ledger.callback_closure_sha256))
         || ledger.clang_version.empty()
-        || ledger.analyzer_version.empty()
+        || ledger.analyzer_version
+            != clang_cfg_lifetime_identity(ledger.clang_version)
         || ledger.generator_revision.empty()) {
         detail::safety_failure(
             profile_name(ledger.profile),

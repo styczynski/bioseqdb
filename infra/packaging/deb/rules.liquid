@@ -1,6 +1,6 @@
 #!/usr/bin/make -f
 
-export BIOSEQ_OPTTIMIZATION_LEVEL=0
+export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
 export DEB_BUILD_MAINT_OPTIONS=hardening=+all
 
 BUILD_DIR := $(CURDIR)/_bioseq-package-build
@@ -10,10 +10,10 @@ DESTROOT := $(CURDIR)/debian/{{ package_name }}
 	dh $@
 
 override_dh_auto_configure:
-	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+	test "$(BIOSEQ_TEMPLATE_FLATTEN_PROFILE)" = "{{ template_flatten_profile }}"
 
 override_dh_auto_build:
-	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+	test "$(BIOSEQ_TEMPLATE_FLATTEN_PROFILE)" = "{{ template_flatten_profile }}"
 	infra/packaging/scripts/build_and_stage.sh build "$(BUILD_DIR)" "{{ postgres_major }}"
 
 override_dh_auto_test:
@@ -25,5 +25,5 @@ override_dh_auto_test:
 override_dh_installchangelogs:
 
 override_dh_auto_install:
-	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+	test "$(BIOSEQ_TEMPLATE_FLATTEN_PROFILE)" = "{{ template_flatten_profile }}"
 	infra/packaging/scripts/build_and_stage.sh install "$(BUILD_DIR)" "$(DESTROOT)" "{{ postgres_major }}"

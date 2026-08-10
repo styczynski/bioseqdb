@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import ipaddress
 import json
 import os
@@ -12,6 +11,7 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from .artifacts import sha256_file
 from .commands import Command, CommandRunner, Redactor
 from .model import CellContext, DistroId, PackageBuildError, PackageFormat, PublishedObject
 from .repositories import RepositoryBuild
@@ -262,10 +262,10 @@ class Publisher:
         if not destination.is_file():
             raise PackageBuildError(f"get-object did not create {destination}")
         downloaded_size = destination.stat().st_size
-        downloaded_sha256 = self._sha256(destination)
+        downloaded_sha256 = sha256_file(destination)
         if downloaded_size != size:
             raise PackageBuildError(f"GET size differs from exact-version HEAD for {key}")
-        if downloaded_size != source.stat().st_size or downloaded_sha256 != self._sha256(source):
+        if downloaded_size != source.stat().st_size or downloaded_sha256 != sha256_file(source):
             raise PackageBuildError(f"exact-version S3 bytes differ from published source for {key}")
 
         return PublishedObject(
@@ -594,14 +594,6 @@ class Publisher:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_symlink() or (destination.exists() and not destination.is_file()):
             raise PackageBuildError(f"unsafe exact-version download destination: {destination}")
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _run(self, *argv: str) -> str:
         try:

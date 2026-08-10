@@ -497,7 +497,7 @@ make_gpu_source_direct_sorted_dense_identity(
     std::uint32_t kmer_size,
     std::uint32_t window_size) noexcept
 {
-    using Layout = typename p_minimizer::layout_t;
+    using layout = typename p_minimizer::layout_type;
     return gpu_index_cache_identity{
         .assembly_identity = 0u,
         .table_size = distinct_count,
@@ -508,8 +508,8 @@ make_gpu_source_direct_sorted_dense_identity(
         .window_size = window_size,
         .minimizer_size = sizeof(p_minimizer),
         .minimizer_alignment = alignof(p_minimizer),
-        .minimizer_hash_bits = Layout::hash_bits,
-        .minimizer_position_bits = Layout::pos_bits,
+        .minimizer_hash_bits = layout::k_hash_bits,
+        .minimizer_position_bits = layout::k_position_bits,
         .sorted_dense_abi_revision =
             k_minimizer_sorted_dense_gpu_abi_revision,
         .representation = gpu_index_representation::source_direct_sorted_dense,
@@ -551,15 +551,15 @@ template <class p_minimizer>
     std::int64_t kmer_size,
     std::int64_t window_size) noexcept
 {
-    using Layout = typename p_minimizer::layout_t;
+    using layout = typename p_minimizer::layout_type;
     return gpu_source_direct_tuple_supported(
         alphabet_size,
         kmer_size,
         window_size,
         sizeof(p_minimizer),
         alignof(p_minimizer),
-        Layout::hash_bits,
-        Layout::pos_bits);
+        layout::k_hash_bits,
+        layout::k_position_bits);
 }
 
 [[nodiscard]] inline bool gpu_source_direct_identity_well_formed(
@@ -1040,7 +1040,7 @@ plan_gpu_index_materialization(
         .slot_buffer_bytes = slot_buffer_bytes,
         .position_bytes = position_bytes,
         .position_buffer_bytes = position_buffer_bytes,
-        .resident_bytes = bioseq::gpu::vulkan::sat_add(
+        .resident_bytes = bioseq::common::saturating_add(
             slot_buffer_bytes, position_buffer_bytes),
         .load_ppm = gpu_index_load_ppm(distinct, slot_capacity),
     };
@@ -1301,14 +1301,14 @@ materialize_sorted_dense_from_presorted_minimizers(
     const gpu_minimizer_index_cache_key& key,
     bioseq::parallelism::memory_permit& resident_permit)
 {
-    using Layout = typename p_minimizer::layout_t;
+    using layout = typename p_minimizer::layout_type;
     if constexpr (sizeof(p_minimizer) != 8u
         || alignof(p_minimizer) != 8u
         || !std::is_standard_layout_v<p_minimizer>
         || !std::is_trivially_copyable_v<p_minimizer>
-        || Layout::storage_bits != 64u
-        || Layout::hash_bits != 30u
-        || Layout::pos_bits != 33u) {
+        || layout::k_storage_bits != 64u
+        || layout::k_hash_bits != 30u
+        || layout::k_position_bits != 33u) {
         return std::unexpected{gpu_source_direct_materialization_failure{
             .error = gpu_source_direct_materialization_error::
                 representation_ineligible}};
@@ -1337,8 +1337,8 @@ materialize_sorted_dense_from_presorted_minimizers(
         || key.kmer_size != 15u || key.window_size != 10u
         || key.minimizer_size != sizeof(p_minimizer)
         || key.minimizer_alignment != alignof(p_minimizer)
-        || key.minimizer_hash_bits != Layout::hash_bits
-        || key.minimizer_position_bits != Layout::pos_bits
+        || key.minimizer_hash_bits != layout::k_hash_bits
+        || key.minimizer_position_bits != layout::k_position_bits
         || key.representation != gpu_index_representation::source_direct_sorted_dense
         || key.sorted_dense_abi_revision
             != k_minimizer_sorted_dense_gpu_abi_revision
@@ -1655,12 +1655,12 @@ adopt_gpu_built_index(
         return std::unexpected{gpu_built_index_adoption_error::invalid_build};
     }
     const std::uint64_t bytes =
-        bioseq::gpu::vulkan::sat_add(
+        bioseq::common::saturating_add(
             built.slots.allocation_bytes, built.positions.allocation_bytes);
     const auto key_gate_identity = gpu_index_gate_identity_from_key(key);
-    if (!built.gate_identity.well_formed()
-        || !key_gate_identity.well_formed()
-        || !built.gate_identity.exact_equals(key_gate_identity)) {
+    if (!built.gate_identity.is_well_formed()
+        || !key_gate_identity.is_well_formed()
+        || !built.gate_identity.is_exactly_equal_to(key_gate_identity)) {
         return std::unexpected{gpu_built_index_adoption_error::stats_mismatch};
     }
     const auto& commit = built.materialization;
@@ -1973,14 +1973,14 @@ public:
             };
         }
 
-        [[nodiscard]] bool well_formed() const noexcept {
-            return runtime_identity().well_formed();
+        [[nodiscard]] bool is_well_formed() const noexcept {
+            return runtime_identity().is_well_formed();
         }
 
         [[nodiscard]] bool metadata_matches(
             const gpu_minimizer_index_cache_key& key) const noexcept
         {
-            return runtime_identity().exact_equals(
+            return runtime_identity().is_exactly_equal_to(
                 gpu_index_gate_identity_from_key(key));
         }
 
@@ -2000,7 +2000,7 @@ public:
     [[nodiscard]] std::expected<void, gate_bind_error> bind_gate_once(
             gate_identity identity) {
         std::lock_guard<std::mutex> guard(mu_);
-        if (!identity.well_formed()) {
+        if (!identity.is_well_formed()) {
             return std::unexpected{gate_bind_error::invalid_identity};
         }
         if (gate_binding_) {
@@ -2085,10 +2085,10 @@ public:
                 built_insert_error::gate_identity_mismatch};
         }
         const auto key_gate_identity = gpu_index_gate_identity_from_key(key);
-        if (!handle->gate_identity.well_formed()
-            || !handle->gate_identity.exact_equals(key_gate_identity)
+        if (!handle->gate_identity.is_well_formed()
+            || !handle->gate_identity.is_exactly_equal_to(key_gate_identity)
             || (gate_binding_
-                && !handle->gate_identity.exact_equals(
+                && !handle->gate_identity.is_exactly_equal_to(
                     gate_binding_->runtime_identity()))) {
             return std::unexpected{
                 built_insert_error::gate_identity_mismatch};
@@ -2256,7 +2256,7 @@ private:
         const gpu_minimizer_index_cache_key& key) const noexcept
     {
         if (gate_binding_) {
-            return gate_binding_->well_formed()
+            return gate_binding_->is_well_formed()
                 && gate_binding_->metadata_matches(key);
         }
         // A gate-enabled key without an exact canonical binding would make a
@@ -2279,7 +2279,7 @@ private:
     [[nodiscard]] static std::uint64_t handle_resident_bytes(
         const gpu_resident_minimizer_index& handle) noexcept
     {
-        return bioseq::gpu::vulkan::sat_add(
+        return bioseq::common::saturating_add(
             handle.slots.allocation_bytes,
             handle.positions.allocation_bytes);
     }
@@ -2331,7 +2331,7 @@ private:
         }
         entries_[key] = handle;
         lru_.push_front(key);
-        resident_bytes_ = bioseq::gpu::vulkan::sat_add(
+        resident_bytes_ = bioseq::common::saturating_add(
             resident_bytes_, handle_bytes);
     }
 
@@ -2458,7 +2458,7 @@ private:
                 resident->positions = runtime.create_device_buffer(
                     plan.position_buffer_bytes, usage);
                 const std::uint64_t actual_allocation_bytes =
-                    bioseq::gpu::vulkan::sat_add(
+                    bioseq::common::saturating_add(
                         resident->slots.allocation_bytes,
                         resident->positions.allocation_bytes);
                 if (!resident_permit->grow_to(
@@ -2613,7 +2613,7 @@ private:
         const std::uint64_t pos_bytes =
             static_cast<std::uint64_t>(upload.positions.size()) * sizeof(std::uint64_t);
         const std::uint64_t resident_bytes =
-            bioseq::gpu::vulkan::sat_add(slot_bytes, pos_bytes);
+            bioseq::common::saturating_add(slot_bytes, pos_bytes);
         auto resident_permit =
             memory_admission_controller::instance().try_reserve(resident_bytes);
         if (!resident_permit) return nullptr;
@@ -2694,7 +2694,7 @@ struct gpu_grouped_soa_resident_identity {
     std::uint64_t generation_id = 0u;
     std::uint64_t source_identity = 0u;
     std::uint64_t source_content_checksum = 0u;
-    std::uint64_t compatibility_checksum = 0u;
+    std::uint64_t storage_contract_checksum = 0u;
     std::uint64_t manifest_checksum = 0u;
     std::uint64_t directory_checksum = 0u;
     std::uint64_t payload_checksum = 0u;
@@ -2966,7 +2966,7 @@ public:
                 == k_grouped_soa_gpu_abi_revision
             && directory.profile() == *manifest_profile;
         if (!compatible
-            || !validate_minimizer_generation_compatibility(
+            || !validate_minimizer_generation_storage_contract(
                 manifest, expected)
             || !validate_minimizer_generation_metadata(
                 head, manifest, directory)) {
@@ -3171,7 +3171,7 @@ public:
             .generation_id = manifest.generation_id,
             .source_identity = manifest.source_identity,
             .source_content_checksum = manifest.source_content_checksum,
-            .compatibility_checksum = head.compatibility_checksum,
+            .storage_contract_checksum = head.storage_contract_checksum,
             .manifest_checksum = head.manifest_checksum,
             .directory_checksum = manifest.directory_checksum,
             .payload_checksum = manifest.payload_checksum,
@@ -3465,8 +3465,8 @@ private:
           payload_checksum_expected_(payload_checksum_expected),
           expected_payload_rows_(expected_payload_rows) {}
 
-    template <class T>
-    [[nodiscard]] std::expected<T, gpu_grouped_soa_ingest_error>
+    template <class p_value>
+    [[nodiscard]] std::expected<p_value, gpu_grouped_soa_ingest_error>
     fail(gpu_grouped_soa_ingest_error error) noexcept {
         failure_ = error;
         return std::unexpected(error);

@@ -33,12 +33,12 @@ enum class sequence_iteration_part : std::uint8_t {
  * The iterator keeps a bounded circular buffer for delayed streams, invokes
  * the handler once per decoded logical symbol, and masks the padded tail.
  *
- * @tparam delay_types Integral delay argument types.
- * @tparam sequence_range Packed sequence range type.
- * @tparam handler_type Callable receiving the live mask and current symbols.
- * @tparam finish_type Callable invoked after the masked tail is consumed.
- * @tparam iterator_type Iterator into the packed range.
- * @tparam maximum_delay Maximum admitted delay in logical symbols.
+ * @tparam p_delay_types Integral delay argument types.
+ * @tparam p_sequence_range Packed sequence range type.
+ * @tparam p_handler_type Callable receiving the live mask and current symbols.
+ * @tparam p_finish_type Callable invoked after the masked tail is consumed.
+ * @tparam p_iterator_type Iterator into the packed range.
+ * @tparam p_maximum_delay Maximum admitted delay in logical symbols.
  * @param sequence Packed sequence range; storage remains borrowed.
  * @param begin First packed unit to inspect.
  * @param end One-past-last packed unit.
@@ -48,24 +48,24 @@ enum class sequence_iteration_part : std::uint8_t {
  * @param delays Logical-symbol delays for additional lock-step streams.
  */
 template<
-	typename... delay_types,
-	supports_compact_sequence_range sequence_range,
-	typename handler_type,
-	typename finish_type,
-	typename iterator_type =
-		decltype(compact_sequence_range<sequence_range>().begin()),
-	std::size_t maximum_delay = 256
+	typename... p_delay_types,
+	supports_compact_sequence_range p_sequence_range,
+	typename p_handler_type,
+	typename p_finish_type,
+	typename p_iterator_type =
+		decltype(compact_sequence_range<p_sequence_range>().begin()),
+	std::size_t p_maximum_delay = 256
 >
 inline void iterate_sequence_bp_simd_offsets(
-	const compact_sequence_range<sequence_range>& sequence,
-	const iterator_type& begin,
-	const iterator_type& end,
+	const compact_sequence_range<p_sequence_range>& sequence,
+	const p_iterator_type& begin,
+	const p_iterator_type& end,
 	const std::size_t context_bps,
-	handler_type&& handler,
-	finish_type&& finish,
-	delay_types... delays
+	p_handler_type&& handler,
+	p_finish_type&& finish,
+	p_delay_types... delays
 ) {
-    using sequence_traits = compact_sequence_range<sequence_range>::traits;
+    using sequence_traits = compact_sequence_range<p_sequence_range>::traits;
 
 	// Function-entry log gated behind BIOSEQ_HOT_TRACE_LOGS — formatting
 	// the offsets vector + sequence pretty-print costs ~5-10 us per call,
@@ -85,7 +85,7 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	const std::size_t largest_delay =
 		std::max<std::size_t>({std::size_t{0}, delays...});
-	DEBUG_ASSERT(largest_delay <= maximum_delay,
+	DEBUG_ASSERT(largest_delay <= p_maximum_delay,
 		"sequence iteration delay exceeds the configured bound");
 
 	const hn::ScalableTag<typename sequence_traits::storage_unit> d;
@@ -107,7 +107,7 @@ inline void iterate_sequence_bp_simd_offsets(
 			matrix_size).first + 1) * matrix_size;
 	constexpr std::size_t buffer_size_bound =
 		(::bioseq::simd::iteration_geometry::int_div_ceil(
-			maximum_delay / sequence_traits::letters_per_unit,
+			p_maximum_delay / sequence_traits::letters_per_unit,
 			matrix_size_bound).first + 1) * matrix_size_bound;
 
 	const auto [units_per_lane, offsets] =
@@ -189,8 +189,9 @@ inline void iterate_sequence_bp_simd_offsets(
 	HWY_ALIGN std::array<vector_type, delay_count> all_bp_vecs{
 		((void)delays, hn::Undefined(d))...};
 
-	auto handle_row_bp = [&]<sequence_iteration_part mode>(vector_type row)
-		[[gnu::always_inline]] -> bool {
+	auto handle_row_bp = [&]<sequence_iteration_part p_mode>(vector_type p_row)
+			[[gnu::always_inline]] -> bool {
+		vector_type row = p_row;
 		for (std::size_t bp_index = 0;
 			 bp_index < sequence_traits::letters_per_unit; ++bp_index) {
 			vector_type base_bp_vec = hn::And(row, symbol_mask);
@@ -203,7 +204,7 @@ inline void iterate_sequence_bp_simd_offsets(
 						delayed_buffer = buffer.get_value_at(read_pos);
 						counter = delay;
 						buffer.advance_position(read_pos);
-						if (mode == sequence_iteration_part::full_matrix
+						if (p_mode == sequence_iteration_part::full_matrix
 							|| delays_counters[delay_no] < main_counter_only_left) {
 							delays_masks[delay_no] = full_mask;
 						}
@@ -216,7 +217,7 @@ inline void iterate_sequence_bp_simd_offsets(
 						delayed_buffer, sequence_traits::bits_per_char);
 				}
 			}
-			if constexpr (mode == sequence_iteration_part::full_matrix) {
+			if constexpr (p_mode == sequence_iteration_part::full_matrix) {
 				std::apply(handler, std::tuple_cat(std::forward_as_tuple(
 					std::bool_constant<true>{}, offsets, d, full_mask,
 					base_bp_vec), delays_masks, all_bp_vecs));
@@ -226,7 +227,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					base_bp_vec), delays_masks, all_bp_vecs));
 			}
 
-			if constexpr (mode == sequence_iteration_part::partial_matrix) {
+			if constexpr (p_mode == sequence_iteration_part::partial_matrix) {
 				if constexpr (delay_count > 0) {
 					for(std::size_t delay_no = 0; delay_no < delay_count;
 						++delay_no) {
@@ -335,15 +336,15 @@ inline void iterate_sequence_bp_simd_offsets(
  * stream bundle by value without allocating or materializing sequence data.
  * The tail transitions from a full mask to the left mask before completion.
  *
- * @tparam stream_count Number of interleaved streams, in the range `[1, 4]`.
- * @tparam descriptor_tag Optional Highway descriptor override; `void` selects
+ * @tparam p_stream_count Number of interleaved streams, in the range `[1, 4]`.
+ * @tparam p_descriptor_tag Optional Highway descriptor override; `void` selects
  * the scalable descriptor for the view's storage unit.
- * @tparam delay_types Reserved delay argument types; the pack must be empty.
- * @tparam sequence_view Packed sequence view satisfying the bit-cast contract.
- * @tparam handler_type Callable receiving full/partial state, offsets,
+ * @tparam p_delay_types Reserved delay argument types; the pack must be empty.
+ * @tparam p_sequence_view Packed sequence view satisfying the bit-cast contract.
+ * @tparam p_handler_type Callable receiving full/partial state, offsets,
  * descriptor, live mask, and the vector stream.
- * @tparam finish_type Callable receiving offsets, descriptor, and final mask.
- * @tparam iterator_type Iterator exposed by the sequence view.
+ * @tparam p_finish_type Callable receiving offsets, descriptor, and final mask.
+ * @tparam p_iterator_type Iterator exposed by the sequence view.
  * @param sequence Borrowed sequence view; no sequence materialization occurs.
  * @param begin First packed view unit.
  * @param end One-past-last packed view unit.
@@ -353,32 +354,32 @@ inline void iterate_sequence_bp_simd_offsets(
  * @param delays Reserved delay pack, required to be empty.
  */
 template<
-	std::size_t stream_count,
-	typename descriptor_tag = void,
-	typename... delay_types,
-	supports_compact_sequence_bitcast_view sequence_view,
-	typename handler_type,
-	typename finish_type,
-	typename iterator_type = typename sequence_view::iterator
+	std::size_t p_stream_count,
+	typename p_descriptor_tag = void,
+	typename... p_delay_types,
+	supports_compact_sequence_bitcast_view p_sequence_view,
+	typename p_handler_type,
+	typename p_finish_type,
+	typename p_iterator_type = typename p_sequence_view::iterator
 >
 [[gnu::always_inline]] [[gnu::flatten]] inline void
 iterate_sequence_bp_simd(
-	const sequence_view& sequence,
-	const iterator_type& begin,
-	const iterator_type& end,
+	const p_sequence_view& sequence,
+	const p_iterator_type& begin,
+	const p_iterator_type& end,
 	const std::size_t context_bps,
-	handler_type&& handler,
-	finish_type&& finish,
-	delay_types... delays
+	p_handler_type&& handler,
+	p_finish_type&& finish,
+	p_delay_types... delays
 ) {
-	using sequence_traits = typename sequence_view::traits;
+	using sequence_traits = typename p_sequence_view::traits;
 	constexpr std::size_t delay_count = sizeof...(delays);
 
 	static_assert(delay_count == 0,
 		"multi-stream sequence iteration does not accept delayed streams; "
 		"use iterate_sequence_bp_simd_offsets for delayed single-stream work");
-	static_assert(stream_count >= 1, "stream_count must be at least one");
-	static_assert(stream_count <= 4, "stream_count must not exceed four");
+	static_assert(p_stream_count >= 1, "p_stream_count must be at least one");
+	static_assert(p_stream_count <= 4, "p_stream_count must not exceed four");
 
 	// Suppress unused-parameter warnings for the parameter-pack args we are
 	// retaining for the shared iterator call shape.
@@ -400,9 +401,9 @@ iterate_sequence_bp_simd(
 	using default_descriptor =
 		hn::ScalableTag<typename sequence_traits::storage_unit>;
 	using resolved_descriptor = std::conditional_t<
-		std::same_as<descriptor_tag, void>,
+		std::same_as<p_descriptor_tag, void>,
 		default_descriptor,
-		std::remove_cvref_t<descriptor_tag>>;
+		std::remove_cvref_t<p_descriptor_tag>>;
 	static_assert(std::same_as<hn::TFromD<resolved_descriptor>,
 		typename sequence_traits::storage_unit>,
 		"sequence iterator tag must preserve the packed storage unit type");
@@ -412,7 +413,7 @@ iterate_sequence_bp_simd(
 	using stream_bundle = vector_stream<
 		resolved_descriptor,
 		typename sequence_traits::storage_unit,
-		stream_count>;
+		p_stream_count>;
 	resolved_descriptor descriptor;
 
 	const vector_type symbol_mask =
@@ -422,18 +423,18 @@ iterate_sequence_bp_simd(
 	const std::size_t lanes_per_stream = hn::Lanes(descriptor);
 	constexpr std::size_t max_lanes_per_stream =
 		hn::MaxLanes(resolved_descriptor{});
-	const std::size_t total_lanes = lanes_per_stream * stream_count;
+	const std::size_t total_lanes = lanes_per_stream * p_stream_count;
 	constexpr std::size_t total_max_lanes =
-		max_lanes_per_stream * stream_count;
+		max_lanes_per_stream * p_stream_count;
 
 	const auto [units_per_lane, offsets] =
 		::bioseq::simd::iteration_geometry::calculate_iteration_offsets<
 			total_max_lanes>(sequence_length, total_lanes, context_units);
 
 	HWY_ALIGN std::array<
-		std::array<std::size_t, max_lanes_per_stream>, stream_count>
+		std::array<std::size_t, max_lanes_per_stream>, p_stream_count>
 		offsets_per_stream{};
-	for (std::size_t stream = 0; stream < stream_count; ++stream) {
+	for (std::size_t stream = 0; stream < p_stream_count; ++stream) {
 		for (std::size_t lane = 0; lane < lanes_per_stream; ++lane) {
 			offsets_per_stream[stream][lane] =
 				offsets[stream * lanes_per_stream + lane];
@@ -473,24 +474,24 @@ iterate_sequence_bp_simd(
 	// Aggregate initialization avoids targetless construction of fixed-target
 	// vectors on descriptor families such as NEON_BF16.
 	HWY_ALIGN std::array<
-		std::array<vector_type, max_lanes_per_stream>, stream_count>
+		std::array<vector_type, max_lanes_per_stream>, p_stream_count>
 		raw_matrix_storage{};
 
 	for (std::size_t chunk_index = 0;
 		 chunk_index < full_chunks_count; ++chunk_index) {
-		for_each_stream<stream_count>(
-			[&](auto stream_index_constant) [[gnu::always_inline]] {
+		for_each_stream<p_stream_count>(
+			[&](auto p_stream_index_constant) [[gnu::always_inline]] {
 			constexpr std::size_t stream =
-				decltype(stream_index_constant)::value;
+				decltype(p_stream_index_constant)::value;
 			matrix(raw_matrix_storage[stream].data())
 				.load_rows_at_offsets(descriptor, offsets_per_stream[stream],
 					sequence.read_cptr(iter));
 		});
-		sequence_view::advance_iter(iter, lanes_per_stream);
-		for_each_stream<stream_count>(
-			[&](auto stream_index_constant) [[gnu::always_inline]] {
+		p_sequence_view::advance_iter(iter, lanes_per_stream);
+		for_each_stream<p_stream_count>(
+			[&](auto p_stream_index_constant) [[gnu::always_inline]] {
 			constexpr std::size_t stream =
-				decltype(stream_index_constant)::value;
+				decltype(p_stream_index_constant)::value;
 			matrix(raw_matrix_storage[stream].data())
 				.transpose_in_place(descriptor);
 		});
@@ -500,7 +501,7 @@ iterate_sequence_bp_simd(
 			stream_bundle row = make_vector_stream_from_rows<
 				resolved_descriptor,
 				typename sequence_traits::storage_unit,
-				stream_count>(raw_matrix_storage, row_index);
+				p_stream_count>(raw_matrix_storage, row_index);
 			for (std::size_t symbol_index = 0;
 				 symbol_index < sequence_traits::letters_per_unit;
 				 ++symbol_index) {
@@ -513,11 +514,11 @@ iterate_sequence_bp_simd(
 	}
 
 	const std::size_t partial_units_remaining =
-		sequence_view::view_distance(iter, end);
-	for_each_stream<stream_count>(
-		[&](auto stream_index_constant) [[gnu::always_inline]] {
+		p_sequence_view::view_distance(iter, end);
+	for_each_stream<p_stream_count>(
+		[&](auto p_stream_index_constant) [[gnu::always_inline]] {
 		constexpr std::size_t stream =
-			decltype(stream_index_constant)::value;
+			decltype(p_stream_index_constant)::value;
 		matrix(raw_matrix_storage[stream].data())
 			.load_bounded_rows_at_offsets(
 				descriptor, partial_units_remaining,
@@ -544,7 +545,7 @@ iterate_sequence_bp_simd(
 		stream_bundle row = make_vector_stream_from_rows<
 			resolved_descriptor,
 			typename sequence_traits::storage_unit,
-			stream_count>(raw_matrix_storage, row_index);
+			p_stream_count>(raw_matrix_storage, row_index);
 		for (std::size_t symbol_index = 0;
 			 symbol_index < sequence_traits::letters_per_unit;
 			 ++symbol_index) {
@@ -574,10 +575,10 @@ iterate_sequence_bp_simd(
 /// vectors holding the two halves of a 32-byte table indexed by
 /// `chunk[i] & 0x1F`. Result: `lut[chunk & 0x1F]` per lane. Used by
 /// the dna4/dna5 SIMD encoders for both `DROP` (with 0xFF sentinels)
-/// and `MAP_TO_DEFAULT` (with default-rank fill) lookups.
+/// and `map_to_default` (with default-rank fill) lookups.
 ///
 /// Non-ASCII bytes (bit 7 set) are routed to slot 0 of the LUT
-/// (which holds the default rank under MAP_TO_DEFAULT, and the
+/// (which holds the default rank under map_to_default, and the
 /// `0xFF` skip-sentinel under DROP). Without this clamp, an input
 /// byte like `0xD4` (whose `& 0x1F == 20`) would land in the same
 /// slot as `'T'` and be silently miscategorised as T — diverging

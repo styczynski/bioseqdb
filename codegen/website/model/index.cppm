@@ -17,7 +17,7 @@ import bioseq.codegen.support;
 
 // Source-neutral data model shared by every website stage. It never exposes
 // MD4C, Doxygen, pugixml, Clang, or libpq types; parsers project their inputs
-// onto these owned trees before any cross-stage artifact is written (see §8).
+// onto these owned trees before any cross-stage artifact is written.
 export namespace bioseq::codegen::website {
 
 using bioseq::codegen::diagnostic;
@@ -87,7 +87,7 @@ struct code_annotation {
 /// @brief Expected outcome of a runnable SQL example.
 enum class sql_expectation : std::uint8_t { success, error };
 
-/// @brief Runnable SQL example split into hidden and visible phases.
+/// @brief Runnable SQL example split into hidden and visible sections.
 struct sql_example {
     std::string local_id;
     std::string canonical_id;
@@ -116,14 +116,17 @@ struct tutorial {
 /// @brief One content input recorded in the deterministic site plan.
 struct source_input {
     std::string path;          // repository-relative forward-slash path
-    std::string content_hash;  // content digest (SHA-256 once §6 promotion lands)
+    std::string content_hash;  // SHA-256 content digest
 };
 
 /// @brief Deterministic aggregate written by the `website plan` stage.
 struct site_plan {
-    std::string schema_version;
-    std::string parser_version;         // Markdown/frontmatter parser schema
-    std::string binding_schema_version; // template binding-schema version (§5.1)
+    std::string schema;
+    std::uint32_t schema_revision{};
+    std::string parser_identity;
+    std::uint32_t parser_revision{};
+    std::string binding_schema;
+    std::uint32_t binding_schema_revision{};
     release_identifier version;
     std::string base_path;
     std::string source_revision;
@@ -135,8 +138,10 @@ struct site_plan {
 
 /// @brief Shape of one captured SQL execution result.
 enum class result_shape : std::uint8_t { rows, command, error };
-/// @brief Execution phase associated with a captured SQL notice.
-enum class sql_phase : std::uint8_t { session_setup, setup, visible, teardown, cleanup };
+/// @brief Execution stage associated with a captured SQL notice.
+enum class sql_execution_stage : std::uint8_t {
+    session_setup, setup, visible, teardown, cleanup
+};
 
 /// @brief Column metadata projected from a tuple result.
 struct sql_column {
@@ -164,9 +169,9 @@ struct sql_result_set {
     std::string hint;
 };
 
-/// @brief Notice captured during an identified execution phase.
+/// @brief Notice captured during an identified execution stage.
 struct sql_notice {
-    sql_phase phase{};
+    sql_execution_stage stage{};
     std::string severity;
     std::string sqlstate;
     std::string message;
@@ -179,7 +184,7 @@ struct sql_example_result {
     std::vector<sql_notice> notices;
 };
 
-/// @brief Wall-time telemetry retained outside the published content model.
+/// @brief Wall-time statistics retained outside the published content model.
 struct sql_example_measurement {
     std::string example_id;
     std::chrono::milliseconds elapsed{};
@@ -235,13 +240,13 @@ struct reference_entity {
     std::optional<std::string> implementation_entity_id;
     std::vector<std::string> overload_ids;
     // Overload-group members as (identity signature, base-aware route); populated
-    // transiently at render time for the group page, never serialized (§12.3).
+    // transiently at render time for the group page, never serialized.
     std::vector<std::pair<std::string, std::string>> overload_members;
     // Container child index as (label, base-aware route): class/struct members and
-    // module/namespace children, populated transiently at render time (§12.3).
+    // module/namespace children, populated transiently at render time.
     std::vector<std::pair<std::string, std::string>> child_members;
     // Resolved base-aware route of implementation_entity_id, for the "Implemented by"
-    // cross-link; populated transiently at render time (§12.2).
+    // cross-link; populated transiently at render time.
     std::string implemented_by_route;
     std::map<std::string, std::string, std::less<>> attributes;
     std::string route_path;  // leading-slash, base-independent site route
@@ -255,9 +260,9 @@ struct sql_catalog_snapshot {
     std::string staged_artifact_sha256;
 };
 
-// One executed landing-page runnable slot (§15.2). `visible_sql` is the visible
-// phase only; hidden setup/teardown never enters this projection (§5.1). `result`
-// is meaningful only when has_result is set and the visible phase returned rows.
+// One executed landing-page runnable slot. `visible_sql` contains only the visible
+// section; hidden setup/teardown never enters this projection. `result` is
+// meaningful only when has_result is set and the visible statement returned rows.
 struct landing_example_view {
     std::string slot;
     std::string visible_sql;
@@ -265,7 +270,7 @@ struct landing_example_view {
     sql_result_set result;
 };
 
-// Per-module / SQL-domain documentation totals for the coverage report (§11.4).
+// Per-module / SQL-domain documentation totals for the coverage report.
 struct coverage_group_view {
     std::string group;
     std::uint32_t public_total{};
@@ -273,16 +278,19 @@ struct coverage_group_view {
 };
 
 // The fully resolved, database-independent site model written by `website execute`
-// (schema bioseq.website.site_model/v1, §5.1/§180) and consumed by `website render`
+// (schema bioseq.website.site_model, revision 1) and consumed by `website render`
 // without a cluster. It carries only normalized semantic projections: resolved
 // tutorial/landing trees, executed visible-result models, the entity graph with
 // base-independent routes, coverage, and server/extension provenance. It never
 // carries setup/teardown SQL, credentials, OIDs, timings, or machine paths, so the
 // same model can be rendered at two base paths without re-executing SQL.
 struct site_model {
-    std::string schema_version;   // bioseq.website.site_model/v1
-    std::string parser_version;
-    std::string binding_schema_version;
+    std::string schema;
+    std::uint32_t schema_revision{};
+    std::string parser_identity;
+    std::uint32_t parser_revision{};
+    std::string binding_schema;
+    std::uint32_t binding_schema_revision{};
     release_identifier version;
     std::string site_title;
     std::string source_revision;
@@ -290,7 +298,7 @@ struct site_model {
     std::vector<landing_example_view> landing_examples;
     std::vector<reference_entity> cpp_entities;   // base-independent route_path
     std::vector<reference_entity> sql_entities;   // allowlisted public SQL pages
-    std::vector<reference_entity> omitted_sql_entities;  // §11.4 inventory-only
+    std::vector<reference_entity> omitted_sql_entities;  // inventory-only
     std::uint32_t coverage_public_total{};
     std::uint32_t coverage_documented_total{};
     std::vector<std::string> coverage_missing;             // undocumented, non-fatal
@@ -307,9 +315,9 @@ struct site_model {
 };
 
 /// @brief Executor contract required by the site SQL orchestration layer.
-template <typename executor_t>
+template <typename p_executor>
 concept sql_example_executor =
-    requires(executor_t& executor, sql_example const& example) {
+    requires(p_executor& executor, sql_example const& example) {
         { executor.read_catalog() }
             -> std::same_as<std::expected<sql_catalog_snapshot, diagnostic>>;
         { executor.execute(example) }
@@ -328,7 +336,7 @@ struct search_record {
     std::vector<std::string> keywords;
 };
 
-// Site-wide fields bound into every rendered page's context (§14, §15.1). All
+// Site-wide fields bound into every rendered page's context. All
 // URLs are pre-resolved (base-path aware) so templates never build paths.
 struct site_view {
     std::string title;

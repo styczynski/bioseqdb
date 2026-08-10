@@ -46,7 +46,7 @@ struct pending_persist_job {
     return jobs;
 }
 
-void enqueue_pending_mps_build(
+void enqueue_pending_minimizer_sequence_build(
         const persist_target& target,
         dsm_handle handle,
         std::uint64_t payload_bytes) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entry point for the native BioSeq packaging worker."""
+"""Direct entry point for the native BioSeq packaging worker."""
 
 from __future__ import annotations
 

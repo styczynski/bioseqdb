@@ -111,7 +111,7 @@ void chain_anchors_scalar(
         bioseq::instrumentation::register_static_loop("mg_lchain_dp_forward");
     auto forward_instrumentation_scope = bioseq::instrumentation::loop(forward_instrumentation_descriptor);
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
-        forward_instrumentation_scope.tick();
+        forward_instrumentation_scope.record_iteration();
         int64_t best_predecessor_idx = -1;
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
         int32_t skip_count = 0;

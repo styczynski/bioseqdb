@@ -7,7 +7,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -23,13 +22,11 @@ module;
 #include <sys/utsname.h>
 #include <unistd.h>
 
-#include "../test/support/legacy_migration_ledger.hpp"
-
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
 
-export module bioseq.cache.benchmark;
+export module bioseq.cache.benchmark.common;
 
 import bioseq.common.durable_file_io;
 import bioseq.test.postgres;
@@ -62,7 +59,7 @@ constexpr std::uint64_t minimum_data_space =
 constexpr std::uint64_t io_probe_bytes = gibibyte;
 constexpr double minimum_io_mib_per_second = 150.0;
 constexpr std::uint64_t standalone_fixture_rows = 20'000ULL;
-constexpr std::string_view report_schema{"bioseq-cache-benchmark-v2"};
+constexpr std::uint64_t report_schema_revision{2};
 constexpr std::chrono::milliseconds rss_sample_interval{50};
 constexpr std::chrono::milliseconds temp_sample_interval{1000};
 constexpr std::string_view standalone_measurement_cohort{
@@ -107,7 +104,6 @@ struct benchmark_options {
     std::optional<std::filesystem::path> bioseq_control;
     std::optional<std::filesystem::path> bioseq_install_sql;
     std::optional<std::filesystem::path> bioseq_dso;
-    std::filesystem::path migration_ledger;
     std::filesystem::path report;
     std::uint32_t samples{7};
     std::uint32_t warmup_samples{1};
@@ -126,7 +122,7 @@ struct cache_counters {
 };
 
 struct benchmark_sample {
-    std::string phase;
+    std::string stage;
     std::string measurement_cohort;
     std::uint32_t ordinal{};
     std::uint64_t wall_time_ns{};
@@ -210,17 +206,6 @@ struct benchmark_cleanup_evidence {
         "retained processes, roots, and supervision state out of process"};
 };
 
-struct benchmark_migration_probe {
-    std::string owner;
-    std::string role;
-    std::string stable_id;
-    std::string origin_kind{"benchmark-phase"};
-    std::string origin;
-    std::string permutation;
-    std::uint64_t ordinal{};
-    bool passed{};
-};
-
 struct benchmark_report {
     std::string status{"passed"};
     std::string error;
@@ -242,32 +227,12 @@ struct benchmark_report {
     std::uint64_t logical_bytes{};
     std::uint64_t stored_bytes{};
     benchmark_resource_report resources;
-    std::vector<postgres_test::artifact_report> artifacts;
-    std::string migration_evidence_harness;
-    std::string migration_report_role;
-    std::string migration_coverage{"full-role"};
-    std::filesystem::path migration_ledger;
-    std::string migration_ledger_sha256;
-    std::string evidence_contract_sha256;
-    std::string migration_phase{"not-sealed"};
-    std::uint64_t migration_mapped_rows{};
-    std::uint64_t migration_passing_rows{};
-    std::uint64_t migration_retired_with_proof_rows{};
-    std::vector<benchmark_migration_probe> migration_probes;
+    std::vector<postgres_test::artifact_observation> artifacts;
     benchmark_cleanup_evidence cleanup;
 };
 
-struct sealed_migration_contract {
-    std::filesystem::path path;
-    std::string raw_document;
-    bioseq::cache_test::migration::ledger parsed;
-    std::string raw_sha256;
-    std::string evidence_contract_sha256;
-    std::string phase;
-};
-
 struct measured_result {
-    libpq::result rows;
+    libpq::command_result rows;
     std::uint64_t wall_time_ns{};
     std::uint64_t time_to_first_row_ns{};
 };
@@ -344,7 +309,7 @@ struct measured_result {
     return build_identity_evidence{
         .executable_path = executable,
         .executable_sha256 =
-            postgres_test::sha256_file(executable).hex(),
+            postgres_test::hash_sha256_file(executable).render_hex(),
         .compiler = compiler_name(),
         .compiler_version = compiler_version(),
         .cxx_standard = static_cast<std::uint64_t>(__cplusplus),
@@ -380,7 +345,7 @@ struct measured_result {
     material.append(std::to_string(evidence.logical_cpu_count));
     material.append("|");
     material.append(std::to_string(evidence.page_size_bytes));
-    evidence.identity_sha256 = postgres_test::sha256(material).hex();
+    evidence.identity_sha256 = postgres_test::hash_sha256_bytes(material).render_hex();
     return evidence;
 }
 
@@ -394,7 +359,7 @@ void finalize_build_identity(benchmark_report& report) {
     material.append(std::to_string(report.build_identity.cxx_standard));
     material.append("|");
     material.append(report.build_identity.build_mode);
-    for (const postgres_test::artifact_report& artifact : report.artifacts) {
+    for (const postgres_test::artifact_observation& artifact : report.artifacts) {
         material.append("|");
         material.append(artifact.name);
         material.append("|");
@@ -409,7 +374,7 @@ void finalize_build_identity(benchmark_report& report) {
         material.append(artifact.staged_control_sha256);
     }
     report.build_identity.identity_sha256 =
-        postgres_test::sha256(material).hex();
+        postgres_test::hash_sha256_bytes(material).render_hex();
 }
 
 [[nodiscard]] bool resource_sampling_contract_satisfied(
@@ -423,7 +388,7 @@ void finalize_build_identity(benchmark_report& report) {
 }
 
 [[nodiscard]] benchmark_resource_report adapt_resource_report(
-    const postgres_test::resource_sampling_report& source) noexcept {
+    const postgres_test::resource_usage_samples& source) noexcept {
     return benchmark_resource_report{
         .peak_postgres_rss_bytes =
             source.peak_postmaster_process_tree_rss_bytes,
@@ -435,7 +400,7 @@ void finalize_build_identity(benchmark_report& report) {
             source.owned_root_sampling_failures};
 }
 
-/// @brief Adapts the shared sampler to stable benchmark-v2 field names.
+/// @brief Adapts the shared sampler to stable benchmark report field names.
 class benchmark_resource_tracker {
 public:
     benchmark_resource_tracker(
@@ -462,8 +427,8 @@ public:
         }
     }
 
-    void observe_phase_boundary(std::string_view phase) noexcept {
-        sampler_.observe_phase_boundary(phase);
+    void record_stage_boundary(std::string_view stage) noexcept {
+        sampler_.record_stage_boundary(stage);
     }
 
     [[nodiscard]] benchmark_resource_report finish() {
@@ -480,7 +445,7 @@ public:
     }
 
 private:
-    postgres_test::resource_sampler sampler_;
+    postgres_test::cluster_resource_sampler sampler_;
     benchmark_resource_report* destination_{};
     bool finished_{};
 };
@@ -506,10 +471,10 @@ private:
         "scenario must be standalone or bioseq-2gbp");
 }
 
-template <class Integer>
-[[nodiscard]] Integer parse_integer(
+template <class p_integer>
+[[nodiscard]] p_integer parse_integer(
     std::string_view value, std::string_view option, bool allow_zero) {
-    Integer parsed{};
+    p_integer parsed{};
     const auto [end, error] =
         std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (error != std::errc{} || end != value.data() + value.size()
@@ -599,10 +564,6 @@ template <class Integer>
         } else if (argument.starts_with("--bioseq-dso=")) {
             options.bioseq_dso =
                 std::filesystem::path(argument.substr(13));
-        } else if (argument == "--migration-ledger") {
-            assign_path(options.migration_ledger, argument);
-        } else if (argument.starts_with("--migration-ledger=")) {
-            options.migration_ledger = argument.substr(19);
         } else if (argument == "--report") {
             assign_path(options.report, argument);
         } else if (argument.starts_with("--report=")) {
@@ -640,7 +601,6 @@ template <class Integer>
              {options.cache_control, "--cache-control"},
              {options.cache_install_sql, "--cache-install-sql"},
              {options.cache_dso, "--cache-dso"},
-             {options.migration_ledger, "--migration-ledger"},
              {options.report, "--report"}}) {
         if (path.empty()) {
             throw std::invalid_argument(
@@ -705,7 +665,6 @@ void validate_native_parser_contract() {
             "--cache-control=/contract/cache.control",
             "--cache-install-sql=/contract/cache.sql",
             "--cache-dso=/contract/cache.so",
-            "--migration-ledger=/contract/ledger.tsv",
             "--report=/contract/report.json",
             "--samples=2",
         },
@@ -744,33 +703,33 @@ void validate_native_parser_contract() {
 }
 
 [[nodiscard]] cache_counters read_cache_counters(
-    libpq::connection& connection,
+    libpq::client_connection& connection,
     std::chrono::milliseconds timeout = 30s) {
-    const libpq::result result = connection.exec(
+    const libpq::command_result result = connection.execute(
         "SELECT produced, completed_hits, inflight_waits, reuse_hits, "
         "fallbacks, invalidations, evictions, logical_bytes, stored_bytes "
         "FROM bioseq_cache.stats()",
         timeout);
-    if (result.rows() != 1 || result.columns() != 9) {
+    if (result.row_count() != 1 || result.column_count() != 9) {
         throw std::runtime_error(
             "bioseq_cache.stats() returned an unexpected shape");
     }
-    for (int column = 0; column < result.columns(); ++column) {
-        if (result.is_null(0, column)) {
+    for (int column = 0; column < result.column_count(); ++column) {
+        if (result.cell_is_null(0, column)) {
             throw std::runtime_error(
                 "bioseq_cache.stats() returned a null counter");
         }
     }
     return cache_counters{
-        .produced = parse_i64(result.value(0, 0)),
-        .completed_hits = parse_i64(result.value(0, 1)),
-        .inflight_waits = parse_i64(result.value(0, 2)),
-        .reuse_hits = parse_i64(result.value(0, 3)),
-        .fallbacks = parse_i64(result.value(0, 4)),
-        .invalidations = parse_i64(result.value(0, 5)),
-        .evictions = parse_i64(result.value(0, 6)),
-        .logical_bytes = parse_i64(result.value(0, 7)),
-        .stored_bytes = parse_i64(result.value(0, 8))};
+        .produced = parse_i64(result.text_value(0, 0)),
+        .completed_hits = parse_i64(result.text_value(0, 1)),
+        .inflight_waits = parse_i64(result.text_value(0, 2)),
+        .reuse_hits = parse_i64(result.text_value(0, 3)),
+        .fallbacks = parse_i64(result.text_value(0, 4)),
+        .invalidations = parse_i64(result.text_value(0, 5)),
+        .evictions = parse_i64(result.text_value(0, 6)),
+        .logical_bytes = parse_i64(result.text_value(0, 7)),
+        .stored_bytes = parse_i64(result.text_value(0, 8))};
 }
 
 [[nodiscard]] cache_counters subtract_counters(
@@ -806,25 +765,25 @@ void validate_native_parser_contract() {
 }
 
 void execute(
-    libpq::connection& connection, std::string_view sql,
+    libpq::client_connection& connection, std::string_view sql,
     std::chrono::milliseconds timeout) {
-    static_cast<void>(connection.exec(sql, timeout));
+    static_cast<void>(connection.execute(sql, timeout));
 }
 
 [[nodiscard]] measured_result measure(
-    libpq::connection& connection, std::string_view sql,
+    libpq::client_connection& connection, std::string_view sql,
     std::chrono::milliseconds timeout) {
-    libpq::single_row_observed_result observed =
-        connection.exec_single_row_observed(
+    libpq::timed_command_result observed =
+        connection.execute_with_row_timing(
             sql,
             timeout,
-            libpq::execution_limits{
+            libpq::result_limits{
                 .max_rows = 1'000'000,
                 .max_columns = 32,
                 .max_cell_bytes = 64ULL * 1024ULL * 1024ULL,
                 .max_total_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL,
                 .max_result_sets = 1});
-    if (observed.rows.rows() > 0 && !observed.time_to_first_row) {
+    if (observed.outcome.row_count() > 0 && !observed.time_to_first_row) {
         throw std::runtime_error(
             "libpq returned rows without a first-row observation");
     }
@@ -834,7 +793,7 @@ void execute(
             "libpq first-row observation exceeds completion time");
     }
     return measured_result{
-        .rows = std::move(observed.rows),
+        .rows = std::move(observed.outcome),
         .wall_time_ns = static_cast<std::uint64_t>(
             observed.elapsed.count()),
         .time_to_first_row_ns =
@@ -844,28 +803,28 @@ void execute(
                 : 0};
 }
 
-void configure_cpu_path(libpq::connection& connection) {
+void configure_cpu_path(libpq::client_connection& connection) {
     execute(
         connection,
-        "SET bioseq.aligner.vulkan_enabled = off; "
-        "SET bioseq.aligner.vulkan_seed_hits_enabled = off; "
-        "SET bioseq.aligner.vulkan_index_cache_enabled = off; "
-        "SET bioseq.aligner.vulkan_fused_frontend_enabled = off; "
-        "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off; "
-        "SET bioseq.aligner.vulkan_extend_enabled = off; "
-        "SET bioseq.index_async_persist = off; "
-        "SET bioseq.recompute_async_persist = off; "
-        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on; "
-        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash'; "
-        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2'; "
-        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner'; "
-        "SET bioseq.enable_custom_scan = on; "
-        "SET bioseq.enable_column_cache = on; "
-        "SET bioseq.read_sequence_index = on",
+        "SET bioseq.aligner.vulkan.enabled = off; "
+        "SET bioseq.aligner.vulkan.seed_lookup.enabled = off; "
+        "SET bioseq.aligner.vulkan.index_cache.enabled = off; "
+        "SET bioseq.aligner.vulkan.fused_frontend.enabled = off; "
+        "SET bioseq.aligner.vulkan.index_build.enabled = off; "
+        "SET bioseq.aligner.vulkan.alignment_extension.enabled = off; "
+        "SET bioseq.index.async_persistence.enabled = off; "
+        "SET bioseq.index.recompute_async_persistence.enabled = off; "
+        "SET bioseq.aligner.grouped_soa_generation.enabled = on; "
+        "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash'; "
+        "SET bioseq.aligner.chaining.algorithm = 'simd_minimap2'; "
+        "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner'; "
+        "SET bioseq.planner.custom_scan.enabled = on; "
+        "SET bioseq.column_cache.enabled = on; "
+        "SET bioseq.index.sequence_read.enabled = on",
         30s);
 }
 
-void create_standalone_fixture(libpq::connection& connection) {
+void create_standalone_fixture(libpq::client_connection& connection) {
     execute(
         connection,
         "CREATE TABLE cache_benchmark_rows("
@@ -883,16 +842,16 @@ void create_standalone_fixture(libpq::connection& connection) {
 }
 
 [[nodiscard]] fixture_evidence create_bioseq_fixture(
-    libpq::connection& connection) {
+    libpq::client_connection& connection) {
     configure_cpu_path(connection);
     execute(
         connection,
-        "SET bioseq.update_index_on_insert = off; "
+        "SET bioseq.index.insert_maintenance.enabled = off; "
         "SELECT bioseq.create_query_target_sample_table("
         "'cache_bioseq_2gbp', 1, 5000000, 0.0, 1995000000, "
         "0.001, 0.0, 0.0, 1.0, 1.0, 0.5, 3219876)",
         40min);
-    const libpq::result measured_input = connection.exec(
+    const libpq::command_result measured_input = connection.execute(
         "SELECT count(*)::bigint, "
         "sum(query_locator.total_bp_size)::bigint, "
         "sum(target_locator.total_bp_size)::bigint, "
@@ -904,25 +863,25 @@ void create_standalone_fixture(libpq::connection& connection) {
         "CROSS JOIN LATERAL "
         "bioseq.inspect_locator(sample.target) AS target_locator",
         5min);
-    if (measured_input.rows() != 1
-        || measured_input.columns() != 4) {
+    if (measured_input.row_count() != 1
+        || measured_input.column_count() != 4) {
         throw std::runtime_error(
             "bioseq-2gbp stored-input measurement has wrong shape");
     }
-    for (int column = 0; column < measured_input.columns(); ++column) {
-        if (measured_input.is_null(0, column)) {
+    for (int column = 0; column < measured_input.column_count(); ++column) {
+        if (measured_input.cell_is_null(0, column)) {
             throw std::runtime_error(
                 "bioseq-2gbp stored-input measurement is null");
         }
     }
     const std::int64_t measured_source_rows =
-        parse_i64(measured_input.value(0, 0));
+        parse_i64(measured_input.text_value(0, 0));
     const std::int64_t measured_query_bases =
-        parse_i64(measured_input.value(0, 1));
+        parse_i64(measured_input.text_value(0, 1));
     const std::int64_t measured_target_bases =
-        parse_i64(measured_input.value(0, 2));
+        parse_i64(measured_input.text_value(0, 2));
     const std::int64_t measured_total_input_bases =
-        parse_i64(measured_input.value(0, 3));
+        parse_i64(measured_input.text_value(0, 3));
     if (measured_source_rows != 1
         || measured_query_bases
             != static_cast<std::int64_t>(query_bases)
@@ -957,16 +916,16 @@ void create_standalone_fixture(libpq::connection& connection) {
         .query = std::string(bioseq_query)};
 }
 
-[[nodiscard]] std::vector<postgres_test::extension_artifact>
+[[nodiscard]] std::vector<postgres_test::extension_install_source>
 extension_artifacts(const benchmark_options& options) {
-    std::vector<postgres_test::extension_artifact> artifacts{
-        postgres_test::extension_artifact{
+    std::vector<postgres_test::extension_install_source> artifacts{
+        postgres_test::extension_install_source{
             .name = "bioseq_cache",
             .control_file = options.cache_control,
             .install_sql = options.cache_install_sql,
             .dso = options.cache_dso}};
     if (options.selected_scenario == scenario::bioseq_2gbp) {
-        artifacts.push_back(postgres_test::extension_artifact{
+        artifacts.push_back(postgres_test::extension_install_source{
             .name = "bioseq",
             .control_file = *options.bioseq_control,
             .install_sql = *options.bioseq_install_sql,
@@ -975,13 +934,13 @@ extension_artifacts(const benchmark_options& options) {
     return artifacts;
 }
 
-[[nodiscard]] postgres_test::cluster_options cluster_options(
+[[nodiscard]] postgres_test::private_cluster_options cluster_options(
     const benchmark_options& options) {
     std::vector<std::string> preloads{"bioseq_cache"};
     if (options.selected_scenario == scenario::bioseq_2gbp) {
         preloads.emplace_back("bioseq");
     }
-    postgres_test::cluster_options result{
+    postgres_test::private_cluster_options result{
         .postgres_bin_dir = options.postgres_bin_dir,
         .preinstalled_stage_root = options.postgres_stage_root,
         .preinstalled_stage_manifest = options.postgres_stage_manifest,
@@ -995,7 +954,7 @@ extension_artifacts(const benchmark_options& options) {
         .stop_timeout = 30s};
     if (options.selected_scenario == scenario::bioseq_2gbp) {
         result.pre_initdb =
-            [](const postgres_test::pre_initdb_context& context) {
+            [](const postgres_test::pre_initdb_paths& context) {
                 static_cast<void>(
                     postgres_test::qualify_host_before_initdb(
                         context.data_directory,
@@ -1020,7 +979,7 @@ extension_artifacts(const benchmark_options& options) {
 
 [[nodiscard]] exact_2gbp_host_qualification_evidence
 qualification_evidence(
-    const postgres_test::host_qualification_report& source,
+    const postgres_test::host_qualification_result& source,
     const host_identity_evidence& host) {
     exact_2gbp_host_qualification_evidence evidence{
         .required = true,
@@ -1054,7 +1013,7 @@ qualification_evidence(
             source.required_io_mib_per_second};
     const auto data_filesystem = std::find_if(
         source.filesystems.begin(), source.filesystems.end(),
-        [](const postgres_test::filesystem_qualification_report&
+        [](const postgres_test::filesystem_qualification_result&
                filesystem) {
             return filesystem.role == "data";
         });
@@ -1071,8 +1030,8 @@ qualification_evidence(
 
 void capture_qualification_evidence_if_available(
     benchmark_report& report) {
-    const std::vector<postgres_test::host_qualification_report>
-        qualifications = postgres_test::host_qualification_reports();
+    const std::vector<postgres_test::host_qualification_result>
+        qualifications = postgres_test::host_qualification_results();
     if (qualifications.size() == 1) {
         report.exact_2gbp_host_qualification =
             qualification_evidence(
@@ -1081,29 +1040,29 @@ void capture_qualification_evidence_if_available(
 }
 
 [[nodiscard]] benchmark_sample run_sample(
-    libpq::connection& data, libpq::connection& admin,
+    libpq::client_connection& data, libpq::client_connection& admin,
     std::string_view query, std::chrono::milliseconds timeout,
-    std::string phase, std::string_view measurement_cohort,
+    std::string stage, std::string_view measurement_cohort,
     std::uint32_t ordinal,
     const postgres_test::sha256_digest& expected_digest,
     std::uint64_t expected_rows) {
     const cache_counters before = read_cache_counters(admin, timeout);
     measured_result measured = measure(data, query, timeout);
     const cache_counters after = read_cache_counters(admin, timeout);
-    const auto digest = postgres_test::exact_row_hash(measured.rows);
+    const auto digest = postgres_test::hash_ordered_result_rows(measured.rows);
     if (digest != expected_digest
-        || static_cast<std::uint64_t>(measured.rows.rows()) != expected_rows) {
+        || static_cast<std::uint64_t>(measured.rows.row_count()) != expected_rows) {
         throw std::runtime_error(
             "benchmark result differs from the disabled oracle");
     }
     return benchmark_sample{
-        .phase = std::move(phase),
+        .stage = std::move(stage),
         .measurement_cohort = std::string(measurement_cohort),
         .ordinal = ordinal,
         .wall_time_ns = measured.wall_time_ns,
         .time_to_first_row_ns = measured.time_to_first_row_ns,
         .rows = expected_rows,
-        .correctness_digest = digest.hex(),
+        .correctness_digest = digest.render_hex(),
         .counter_delta = subtract_counters(after, before)};
 }
 
@@ -1126,20 +1085,20 @@ void require_hit(const benchmark_sample& sample) {
 }
 
 [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> entry_sizes(
-    libpq::connection& connection, std::chrono::milliseconds timeout) {
-    const libpq::result result = connection.exec(
+    libpq::client_connection& connection, std::chrono::milliseconds timeout) {
+    const libpq::command_result result = connection.execute(
         "SELECT COALESCE(sum(logical_bytes), 0)::bigint, "
         "COALESCE(sum(stored_bytes), 0)::bigint "
         "FROM bioseq_cache.entries() "
         "WHERE state = 'COMPLETE'",
         timeout);
-    if (result.rows() != 1 || result.columns() != 2
-        || result.is_null(0, 0) || result.is_null(0, 1)) {
+    if (result.row_count() != 1 || result.column_count() != 2
+        || result.cell_is_null(0, 0) || result.cell_is_null(0, 1)) {
         throw std::runtime_error(
             "bioseq_cache.entries() returned an unexpected size shape");
     }
-    const std::int64_t logical = parse_i64(result.value(0, 0));
-    const std::int64_t stored = parse_i64(result.value(0, 1));
+    const std::int64_t logical = parse_i64(result.text_value(0, 0));
+    const std::int64_t stored = parse_i64(result.text_value(0, 1));
     if (logical <= 0 || stored <= 0) {
         throw std::runtime_error(
             "completed cache entry has no measured storage");
@@ -1152,7 +1111,7 @@ void require_hit(const benchmark_sample& sample) {
 class benchmark_cleanup_guard {
 public:
     benchmark_cleanup_guard(
-        postgres_test::postgres_fixture& fixture,
+        postgres_test::private_cluster_fixture& fixture,
         benchmark_report& report) noexcept
         : fixture_(&fixture),
           report_(&report),
@@ -1187,7 +1146,7 @@ private:
             .attempted = true,
             .private_root = private_root_};
         try {
-            const postgres_test::cluster_cleanup_result& cleanup =
+            const postgres_test::private_cluster_cleanup_result& cleanup =
                 fixture_->cluster().cleanup();
             std::error_code exists_error;
             const bool root_exists =
@@ -1216,7 +1175,7 @@ private:
         report_->cleanup = std::move(evidence);
     }
 
-    postgres_test::postgres_fixture* fixture_{};
+    postgres_test::private_cluster_fixture* fixture_{};
     benchmark_report* report_{};
     std::filesystem::path private_root_;
     bool captured_{};
@@ -1250,170 +1209,21 @@ private:
         : "not required for standalone scenario";
     report.exact_2gbp_host_qualification.host_identity_sha256 =
         report.host_identity.identity_sha256;
-    report.migration_evidence_harness =
-        selected_scenario == scenario::bioseq_2gbp
-        ? "cache-bioseq-bench"
-        : "cache-bench";
-    report.migration_report_role =
-        report.migration_evidence_harness;
     return report;
-}
-
-void record_migration_probe(
-    benchmark_report& report, std::string_view stable_id,
-    std::string_view origin) {
-    report.migration_probes.push_back(benchmark_migration_probe{
-        .owner = report.migration_evidence_harness,
-        .role = report.migration_report_role,
-        .stable_id = std::string(stable_id),
-        .origin = std::string(origin),
-        .permutation =
-            std::string(scenario_name(report.selected_scenario)),
-        .ordinal = static_cast<std::uint64_t>(
-            report.migration_probes.size()),
-        .passed = true});
-}
-
-[[nodiscard]] sealed_migration_contract seal_migration_contract(
-    const std::filesystem::path& path) {
-    const std::filesystem::path absolute =
-        std::filesystem::absolute(path);
-    std::ifstream input(absolute, std::ios::binary);
-    if (!input) {
-        throw std::runtime_error(
-            "cannot read migration ledger: " + absolute.string());
-    }
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    if (input.bad() || !buffer) {
-        throw std::runtime_error(
-            "failed while sealing migration ledger: "
-            + absolute.string());
-    }
-    std::string raw_document = buffer.str();
-    std::istringstream parser{raw_document};
-    bioseq::cache_test::migration::ledger parsed =
-        bioseq::cache_test::migration::parse_ledger(parser);
-    const std::string raw_sha256 =
-        postgres_test::sha256(raw_document).hex();
-    const std::string evidence_contract_sha256 =
-        postgres_test::sha256(
-            bioseq::cache_test::migration::
-                canonical_evidence_contract_material(parsed))
-            .hex();
-    const std::string phase{
-        bioseq::cache_test::migration::ledger_phase_name(parsed)};
-    return sealed_migration_contract{
-        .path = absolute,
-        .raw_document = std::move(raw_document),
-        .parsed = std::move(parsed),
-        .raw_sha256 = raw_sha256,
-        .evidence_contract_sha256 = evidence_contract_sha256,
-        .phase = phase};
-}
-
-void attach_migration_contract(
-    const sealed_migration_contract& contract,
-    benchmark_report& report) {
-    namespace migration = bioseq::cache_test::migration;
-    report.migration_ledger = contract.path;
-    report.migration_ledger_sha256 = contract.raw_sha256;
-    report.evidence_contract_sha256 =
-        contract.evidence_contract_sha256;
-    report.migration_phase = contract.phase;
-    for (const migration::ledger_row& row : contract.parsed.rows) {
-        switch (row.migration_status) {
-        case migration::status::mapped:
-            ++report.migration_mapped_rows;
-            break;
-        case migration::status::passing:
-            ++report.migration_passing_rows;
-            break;
-        case migration::status::retired_with_proof:
-            ++report.migration_retired_with_proof_rows;
-            break;
-        }
-    }
-}
-
-void validate_migration_evidence(
-    const sealed_migration_contract& contract,
-    const benchmark_report& report) {
-    namespace migration = bioseq::cache_test::migration;
-    const migration::evidence_harness owner =
-        migration::parse_evidence_harness(
-            report.migration_evidence_harness);
-    const migration::evidence_role role =
-        migration::parse_evidence_role(
-            report.migration_report_role);
-    if (migration::role_harness(role) != owner) {
-        throw std::runtime_error(
-            "benchmark migration role does not belong to its harness");
-    }
-
-    std::vector<migration::probe_observation> observations;
-    observations.reserve(report.migration_probes.size());
-    for (std::size_t index = 0;
-         index < report.migration_probes.size(); ++index) {
-        const benchmark_migration_probe& probe =
-            report.migration_probes[index];
-        if (probe.owner != report.migration_evidence_harness
-            || probe.role != report.migration_report_role) {
-            throw std::runtime_error(
-                "benchmark migration probe has the wrong harness or role: "
-                + probe.stable_id);
-        }
-        if (!probe.passed || probe.origin_kind != "benchmark-phase"
-            || probe.origin.empty() || probe.permutation.empty()
-            || probe.ordinal
-                != static_cast<std::uint64_t>(index)) {
-            throw std::runtime_error(
-                "benchmark migration probe has invalid runtime evidence: "
-                + probe.stable_id);
-        }
-        observations.push_back(migration::probe_observation{
-            .owner = owner,
-            .role = role,
-            .stable_id = probe.stable_id,
-            .test_case = {},
-            .section = {},
-            .permutation = probe.permutation,
-            .origin_kind = probe.origin_kind,
-            .origin = probe.origin,
-            .passed = probe.passed});
-    }
-    migration::validate_report_evidence(
-        contract.parsed, owner, role, observations);
-}
-
-void require_migration_contract_unchanged(
-    const benchmark_report& report) {
-    const std::string current_sha256 =
-        postgres_test::sha256_file(report.migration_ledger).hex();
-    if (current_sha256 != report.migration_ledger_sha256) {
-        throw std::runtime_error(
-            "migration ledger changed during the native benchmark");
-    }
 }
 
 void execute_benchmark(
     const benchmark_options& options, benchmark_report& report) {
     report.configured_samples = options.samples;
     report.configured_warmup_samples = options.warmup_samples;
-    const sealed_migration_contract migration_contract =
-        seal_migration_contract(options.migration_ledger);
-    attach_migration_contract(migration_contract, report);
     const bool combined =
         options.selected_scenario == scenario::bioseq_2gbp;
     if (!combined) {
         validate_native_parser_contract();
-        record_migration_probe(
-            report, "python.benchmark.input_validation",
-            "native-parser-rejection-contract");
     }
 
-    postgres_test::clear_host_qualification_reports();
-    postgres_test::postgres_fixture fixture{cluster_options(options)};
+    postgres_test::clear_host_qualifications();
+    postgres_test::private_cluster_fixture fixture{cluster_options(options)};
     benchmark_cleanup_guard cleanup_guard{fixture, report};
     if (combined) {
         capture_qualification_evidence_if_available(report);
@@ -1424,12 +1234,12 @@ void execute_benchmark(
                 "pre-initdb qualification");
         }
     }
-    report.artifacts = postgres_test::artifact_reports(
+    report.artifacts = postgres_test::collect_artifact_observations(
         fixture.cluster().staged_artifacts());
     finalize_build_identity(report);
     auto& admin = fixture.admin();
     auto data = fixture.connect(90s);
-    report.postgres_server_version = data.server_version();
+    report.postgres_server_version = data.postgresql_release();
     benchmark_resource_tracker resource_tracker{
         fixture.cluster().root_directory(),
         fixture.cluster().data_directory(),
@@ -1453,23 +1263,23 @@ void execute_benchmark(
             .aggregate_input_base_count = 0,
             .query = std::string(query)};
     }
-    resource_tracker.observe_phase_boundary("fixture-ready");
+    resource_tracker.record_stage_boundary("fixture-ready");
 
     execute(
         data,
-        "SET bioseq.query_cache_optimisation_mode = 'disabled'",
+        "SET bioseq_cache.query_cache.mode = 'disabled'",
         30s);
     measured_result oracle = measure(data, query, query_timeout);
-    if (oracle.rows.rows() <= 0) {
+    if (oracle.rows.row_count() <= 0) {
         throw std::runtime_error(
             "disabled benchmark oracle returned no rows");
     }
     const postgres_test::sha256_digest oracle_digest =
-        postgres_test::exact_row_hash(oracle.rows);
+        postgres_test::hash_ordered_result_rows(oracle.rows);
     const std::uint64_t oracle_rows =
-        static_cast<std::uint64_t>(oracle.rows.rows());
-    report.correctness_digest = oracle_digest.hex();
-    resource_tracker.observe_phase_boundary("disabled-oracle");
+        static_cast<std::uint64_t>(oracle.rows.row_count());
+    report.correctness_digest = oracle_digest.render_hex();
+    resource_tracker.record_stage_boundary("disabled-oracle");
 
     execute(
         admin,
@@ -1478,8 +1288,8 @@ void execute_benchmark(
         30s);
     execute(
         data,
-        "SET bioseq.query_cache_optimisation_mode = 'same'; "
-        "SET bioseq.query_cache_ttl = 3600000",
+        "SET bioseq_cache.query_cache.mode = 'exact_query'; "
+        "SET bioseq_cache.query_cache.completed_result_ttl_ms = 3600000",
         30s);
     const cache_counters before_all = read_cache_counters(admin, 30s);
 
@@ -1489,7 +1299,7 @@ void execute_benchmark(
         oracle_digest, oracle_rows);
     require_producer(producer);
     report.cold_producer = std::move(producer);
-    resource_tracker.observe_phase_boundary("cold-producer");
+    resource_tracker.record_stage_boundary("cold-producer");
 
     for (std::uint32_t warmup = 0;
          warmup < options.warmup_samples; ++warmup) {
@@ -1498,7 +1308,7 @@ void execute_benchmark(
             report.measurement_cohort, warmup,
             oracle_digest, oracle_rows);
         require_hit(discarded);
-        resource_tracker.observe_phase_boundary("warmup-cache-hit");
+        resource_tracker.record_stage_boundary("warmup-cache-hit");
     }
 
     for (std::uint32_t sample = 0; sample < options.samples; ++sample) {
@@ -1508,18 +1318,9 @@ void execute_benchmark(
             oracle_digest, oracle_rows);
         require_hit(warm);
         report.samples.push_back(std::move(warm));
-        resource_tracker.observe_phase_boundary(
+        resource_tracker.record_stage_boundary(
             "measured-warm-cache-hit");
     }
-    if (!combined) {
-        record_migration_probe(
-            report, "python.benchmark.sample_contract",
-            "measured-warm-cache-hit-cohort");
-        record_migration_probe(
-            report, "python.benchmark.correctness_digest",
-            "disabled-producer-warm-digest-equivalence");
-    }
-
     const cache_counters after_all = read_cache_counters(admin, 30s);
     report.counter_deltas = subtract_counters(after_all, before_all);
     if (report.counter_deltas.produced != 1
@@ -1528,24 +1329,13 @@ void execute_benchmark(
                 options.warmup_samples + options.samples)
         || report.counter_deltas.fallbacks != 0) {
         throw std::runtime_error(
-            "aggregate cache counters do not match benchmark phases");
-    }
-    if (!combined) {
-        record_migration_probe(
-            report, "python.benchmark.counter_deltas",
-            "aggregate-cache-counter-deltas");
+            "aggregate cache counters do not match benchmark stages");
     }
     const auto [logical_bytes, stored_bytes] =
         entry_sizes(admin, query_timeout);
     report.logical_bytes = logical_bytes;
     report.stored_bytes = stored_bytes;
     report.resources = resource_tracker.finish();
-    if (!combined) {
-        record_migration_probe(
-            report, "python.benchmark.resource_sampling",
-            "terminal-zero-failure-resource-sampling");
-    }
-    validate_migration_evidence(migration_contract, report);
     cleanup_guard.finish();
 }
 
@@ -1566,7 +1356,7 @@ void validate_passed_report(const benchmark_report& report) {
             "passed benchmark report has the wrong measurement cohort");
     }
     if (!report.cold_producer
-        || report.cold_producer->phase != "producer"
+        || report.cold_producer->stage != "producer"
         || report.cold_producer->measurement_cohort
             != report.measurement_cohort
         || report.cold_producer->correctness_digest
@@ -1582,7 +1372,7 @@ void validate_passed_report(const benchmark_report& report) {
     for (std::size_t index = 0;
          index < report.samples.size(); ++index) {
         const benchmark_sample& sample = report.samples[index];
-        if (sample.phase != "warm"
+        if (sample.stage != "warm"
             || sample.ordinal
                 != static_cast<std::uint32_t>(index)
             || sample.measurement_cohort
@@ -1600,40 +1390,6 @@ void validate_passed_report(const benchmark_report& report) {
         throw std::runtime_error(
             "passed benchmark report has no successful native cleanup "
             "verdict");
-    }
-    const std::string_view expected_owner =
-        report.selected_scenario == scenario::bioseq_2gbp
-        ? "cache-bioseq-bench"
-        : "cache-bench";
-    if (report.migration_evidence_harness != expected_owner
-        || report.migration_report_role != expected_owner
-        || report.migration_coverage != "full-role"
-        || report.migration_ledger.empty()
-        || report.migration_ledger_sha256.size() != 64
-        || report.evidence_contract_sha256.size() != 64
-        || (report.migration_phase != "mapped"
-            && report.migration_phase != "passing"
-            && report.migration_phase != "retired_with_proof"
-            && report.migration_phase != "mixed")
-        || report.migration_mapped_rows
-                + report.migration_passing_rows
-                + report.migration_retired_with_proof_rows
-            == 0
-        || std::any_of(
-            report.migration_probes.begin(),
-            report.migration_probes.end(),
-            [&report](const benchmark_migration_probe& probe) {
-                return probe.owner
-                        != report.migration_evidence_harness
-                    || probe.role != report.migration_report_role
-                    || probe.stable_id.empty()
-                    || probe.origin_kind != "benchmark-phase"
-                    || probe.origin.empty()
-                    || probe.permutation.empty()
-                    || !probe.passed;
-            })) {
-        throw std::runtime_error(
-            "passed benchmark report has invalid migration evidence");
     }
     if (report.selected_scenario != scenario::bioseq_2gbp) {
         return;
@@ -1735,8 +1491,8 @@ void counters(std::ostream& output, const cache_counters& value) {
 
 void sample(std::ostream& output, const benchmark_sample& value) {
     output.put('{');
-    key(output, "phase");
-    string(output, value.phase);
+    key(output, "stage");
+    string(output, value.stage);
     output.put(',');
     key(output, "measurement_cohort");
     string(output, value.measurement_cohort);
@@ -1777,8 +1533,8 @@ void sample(std::ostream& output, const benchmark_sample& value) {
 void write(std::ostream& output, const benchmark_report& report) {
     validate_passed_report(report);
     output.put('{');
-    key(output, "schema_version");
-    string(output, report_schema);
+    key(output, "schema_revision");
+    output << report_schema_revision;
     output.put(',');
     key(output, "metadata");
     output.put('{');
@@ -1862,7 +1618,7 @@ void write(std::ostream& output, const benchmark_report& report) {
     string(
         output,
         "from the running private-cluster fixture before workload setup "
-        "through the final measured cache-hit phase; excludes initdb, "
+        "through the final measured cache-hit stage; excludes initdb, "
         "server startup, shutdown, and cleanup");
     output.put(',');
     key(output, "rss_scope");
@@ -1901,7 +1657,7 @@ void write(std::ostream& output, const benchmark_report& report) {
         if (index != 0) {
             output.put(',');
         }
-        const postgres_test::artifact_report& artifact =
+        const postgres_test::artifact_observation& artifact =
             report.artifacts[index];
         output.put('{');
         key(output, "name");
@@ -2018,76 +1774,6 @@ void write(std::ostream& output, const benchmark_report& report) {
     output.put(',');
     key(output, "required_io_mib_per_second");
     output << qualification.required_io_mib_per_second;
-    output.put('}');
-    output.put(',');
-    key(output, "migration_evidence");
-    output.put('{');
-    key(output, "migration_evidence_harness");
-    string(output, report.migration_evidence_harness);
-    output.put(',');
-    key(output, "migration_report_role");
-    string(output, report.migration_report_role);
-    output.put(',');
-    key(output, "coverage");
-    string(output, report.migration_coverage);
-    output.put(',');
-    key(output, "ledger");
-    string(output, report.migration_ledger.string());
-    output.put(',');
-    key(output, "ledger_sha256");
-    string(output, report.migration_ledger_sha256);
-    output.put(',');
-    key(output, "evidence_contract_sha256");
-    string(output, report.evidence_contract_sha256);
-    output.put(',');
-    key(output, "migration_phase");
-    string(output, report.migration_phase);
-    output.put(',');
-    key(output, "mapped_rows");
-    output << report.migration_mapped_rows;
-    output.put(',');
-    key(output, "passing_rows");
-    output << report.migration_passing_rows;
-    output.put(',');
-    key(output, "retired_with_proof_rows");
-    output << report.migration_retired_with_proof_rows;
-    output.put(',');
-    key(output, "probes");
-    output.put('[');
-    for (std::size_t index = 0;
-         index < report.migration_probes.size(); ++index) {
-        if (index != 0) {
-            output.put(',');
-        }
-        const benchmark_migration_probe& probe =
-            report.migration_probes[index];
-        output.put('{');
-        key(output, "owner");
-        string(output, probe.owner);
-        output.put(',');
-        key(output, "role");
-        string(output, probe.role);
-        output.put(',');
-        key(output, "stable_id");
-        string(output, probe.stable_id);
-        output.put(',');
-        key(output, "origin_kind");
-        string(output, probe.origin_kind);
-        output.put(',');
-        key(output, "origin");
-        string(output, probe.origin);
-        output.put(',');
-        key(output, "permutation");
-        string(output, probe.permutation);
-        output.put(',');
-        key(output, "ordinal");
-        output << probe.ordinal;
-        output.put(',');
-        key(output, "passed");
-        output << (probe.passed ? "true" : "false");
-        output.put('}');
-    }
-    output.put(']');
     output.put('}');
     output.put(',');
     key(output, "fixture");
@@ -2316,36 +2002,7 @@ void write(std::ostream& output, const benchmark_report& report) {
                     passed
                     ? "postmaster stopped and private root removed"
                     : "contract failure before cleanup"}};
-    report.migration_evidence_harness =
-        combined ? "cache-bioseq-bench" : "cache-bench";
-    report.migration_report_role =
-        report.migration_evidence_harness;
-    if (passed) {
-        report.migration_ledger =
-            "/source/legacy_migration_ledger.tsv";
-        report.migration_ledger_sha256 = std::string(64, 'd');
-        report.evidence_contract_sha256 = std::string(64, 'e');
-        report.migration_phase = "mapped";
-        report.migration_mapped_rows = 5;
-    }
-    if (passed && !combined) {
-        record_migration_probe(
-            report, "python.benchmark.input_validation",
-            "native-parser-rejection-contract");
-        record_migration_probe(
-            report, "python.benchmark.sample_contract",
-            "measured-warm-cache-hit-cohort");
-        record_migration_probe(
-            report, "python.benchmark.correctness_digest",
-            "disabled-producer-warm-digest-equivalence");
-        record_migration_probe(
-            report, "python.benchmark.counter_deltas",
-            "aggregate-cache-counter-deltas");
-        record_migration_probe(
-            report, "python.benchmark.resource_sampling",
-            "terminal-zero-failure-resource-sampling");
-    }
-    report.artifacts.push_back(postgres_test::artifact_report{
+    report.artifacts.push_back(postgres_test::artifact_observation{
         .name = "bioseq_cache",
         .preinstalled_stage_root = std::move(preinstalled_stage_root),
         .stage_manifest = std::move(stage_manifest),
@@ -2362,7 +2019,7 @@ void write(std::ostream& output, const benchmark_report& report) {
         .staged_control_sha256 = digest});
     if (passed) {
         report.cold_producer = benchmark_sample{
-            .phase = "producer",
+            .stage = "producer",
             .measurement_cohort = cohort,
             .ordinal = 0,
             .wall_time_ns = 999,
@@ -2372,7 +2029,7 @@ void write(std::ostream& output, const benchmark_report& report) {
             .counter_delta = cache_counters{.produced = 1}};
         for (const std::uint64_t wall_time : {30U, 10U, 20U}) {
             report.samples.push_back(benchmark_sample{
-                .phase = "warm",
+                .stage = "warm",
                 .measurement_cohort = cohort,
                 .ordinal =
                     static_cast<std::uint32_t>(report.samples.size()),
@@ -2548,7 +2205,8 @@ render_report_contract_probe_with_stage_provenance(
 }
 
 /// @brief Parse, execute, validate, and report one fixed native benchmark.
-int run(int argc, char** argv, scenario required_scenario) noexcept {
+int run_benchmark(
+    int argc, char** argv, scenario required_scenario) noexcept {
     const std::optional<std::filesystem::path> report_hint =
         report_path_hint(argc, argv);
     const std::string_view argument_zero =
@@ -2557,8 +2215,8 @@ int run(int argc, char** argv, scenario required_scenario) noexcept {
             : std::string_view{};
     const std::string executable =
         required_scenario == scenario::standalone
-            ? "bioseq_cache_bench"
-            : "bioseq_cache_bioseq_bench";
+            ? "bioseq_cache_benchmark"
+            : "bioseq_cache_bioseq_benchmark";
     std::optional<benchmark_report> report;
     try {
         report.emplace(make_base_report(
@@ -2566,9 +2224,7 @@ int run(int argc, char** argv, scenario required_scenario) noexcept {
         const benchmark_options options =
             parse_options(argc, argv, required_scenario);
         execute_benchmark(options, *report);
-        require_migration_contract_unchanged(*report);
         write_report(options.report, *report);
-        require_migration_contract_unchanged(*report);
         return 0;
     } catch (const std::exception& error) {
         write_failure_report(

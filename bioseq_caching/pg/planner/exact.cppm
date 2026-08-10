@@ -24,11 +24,11 @@ import bioseq.cache.pg.provider;
 export namespace bioseq::cache::pg::planner {
 
 /** Provider-completeness evidence associated with one relation dependency. */
-struct ExactDependencyEvidenceV1 {
+struct exact_dependency_evidence_result {
     bool references_relation = false;
     bool complete_provider = false;
     std::uint32_t provider_id = 0;
-    std::uint32_t provider_abi_version = 0;
+    std::uint32_t provider_abi_revision = 0;
     bool provider_ambiguous = false;
 };
 
@@ -38,12 +38,12 @@ namespace detail {
  * Bounded recursive plan walker which associates a complete provider wrapper
  * with every relation in its subtree.
  */
-class ExactDependencyEvidenceWalkerV1 {
+class exact_dependency_evidence_walker {
 public:
-    ExactDependencyEvidenceWalkerV1(
+    exact_dependency_evidence_walker(
         EState* estate,
         Oid relation_oid,
-        const provider_registry::ProviderSnapshotV2& providers,
+        const provider_registry::provider_snapshot& providers,
         std::size_t& visited,
         std::size_t maximum_nodes) noexcept
         : estate_(estate),
@@ -53,9 +53,9 @@ public:
           maximum_nodes_(maximum_nodes) {}
 
     /** Collect evidence for one plan subtree. */
-    [[nodiscard]] ExactDependencyEvidenceV1 collect(
+    [[nodiscard]] exact_dependency_evidence_result collect(
             const Plan* plan) noexcept {
-        ExactDependencyEvidenceV1 result{};
+        exact_dependency_evidence_result result{};
         if (plan == nullptr || visited_ >= maximum_nodes_) {
             return result;
         }
@@ -105,15 +105,15 @@ public:
                 break;
         }
 
-        const provider_registry::ProviderV2* matched_provider = nullptr;
+        const provider_registry::provider* matched_provider = nullptr;
         for (std::uint32_t index = 0;
              index < providers_.provider_count;
              ++index) {
-            const provider_registry::ProviderV2* provider =
+            const provider_registry::provider* provider =
                 providers_.providers[index];
             if (provider == nullptr
                 || (provider->provider_flags
-                        & BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION)
+                        & bioseq_cache_provider_complete_write_observation)
                     == 0
                 || !reuse::provider_plan_matches(plan, provider)) {
                 continue;
@@ -132,8 +132,8 @@ public:
                 result.provider_ambiguous = true;
             } else {
                 result.provider_id = matched_provider->provider_id;
-                result.provider_abi_version =
-                    matched_provider->abi_version;
+                result.provider_abi_revision =
+                    matched_provider->abi_revision;
             }
         }
         return result;
@@ -185,8 +185,8 @@ private:
 
     /** Merge one child result while rejecting conflicting provider ownership. */
     static void merge(
-            ExactDependencyEvidenceV1& result,
-            const ExactDependencyEvidenceV1& child) noexcept {
+            exact_dependency_evidence_result& result,
+            const exact_dependency_evidence_result& child) noexcept {
         result.references_relation =
             result.references_relation || child.references_relation;
         result.complete_provider =
@@ -202,12 +202,12 @@ private:
             return;
         }
         result.provider_id = child.provider_id;
-        result.provider_abi_version = child.provider_abi_version;
+        result.provider_abi_revision = child.provider_abi_revision;
     }
 
     /** Merge every plan in one PostgreSQL list. */
     void collect_list(
-            ExactDependencyEvidenceV1& result,
+            exact_dependency_evidence_result& result,
             const List* plans) noexcept {
         const ListCell* cell = nullptr;
         foreach(cell, plans) {
@@ -219,7 +219,7 @@ private:
 
     EState* estate_ = nullptr;
     Oid relation_oid_ = InvalidOid;
-    const provider_registry::ProviderSnapshotV2& providers_;
+    const provider_registry::provider_snapshot& providers_;
     std::size_t& visited_;
     std::size_t maximum_nodes_ = 0;
 };
@@ -227,14 +227,14 @@ private:
 } // namespace detail
 
 /** Collect bounded provider/write evidence for one relation dependency. */
-[[nodiscard]] inline ExactDependencyEvidenceV1 exact_dependency_evidence(
+[[nodiscard]] inline exact_dependency_evidence_result exact_dependency_evidence(
         const Plan* plan,
         EState* estate,
         Oid relation_oid,
-        const provider_registry::ProviderSnapshotV2& providers,
+        const provider_registry::provider_snapshot& providers,
         std::size_t& visited,
         std::size_t maximum_nodes) noexcept {
-    return detail::ExactDependencyEvidenceWalkerV1{
+    return detail::exact_dependency_evidence_walker{
         estate, relation_oid, providers, visited, maximum_nodes}.collect(plan);
 }
 

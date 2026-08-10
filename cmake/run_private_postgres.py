@@ -49,9 +49,6 @@ def _parse_args(runner_argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--library-dir", action="append", default=[])
     parser.add_argument("--preload-library", action="append", default=[])
     parser.add_argument("--disable-prepared-transactions", action="store_true")
-    parser.add_argument(
-        "--postgresql-setting", action="append", default=[],
-        help=argparse.SUPPRESS)  # compatibility: one fail-closed value only
     parser.add_argument("--init-command-timeout", type=int, default=60)
     parser.add_argument("--bootstrap-timeout", type=int, default=60)
     parser.add_argument("--startup-timeout", type=int, default=60)
@@ -63,11 +60,6 @@ def _parse_args(runner_argv: Sequence[str]) -> argparse.Namespace:
 
 def _inputs_from_args(args: argparse.Namespace) -> ClusterInputs:
     bindir = _resolved_dir(args.pg_bin_dir, "pg-bin-dir")
-    if any(value != "max_prepared_transactions=0"
-           for value in args.postgresql_setting):
-        raise ClusterCommandError(
-            "--postgresql-setting only accepts max_prepared_transactions=0; "
-            "use a dedicated lifecycle option for any future override")
     log_dir: Path | None = None
     if args.log_dir:
         log_dir = Path(args.log_dir).expanduser().resolve()
@@ -85,8 +77,7 @@ def _inputs_from_args(args: argparse.Namespace) -> ClusterInputs:
         library_dirs=tuple(
             _resolved_dir(path, "library-dir") for path in args.library_dir),
         preload_libraries=tuple(args.preload_library),
-        disable_prepared_transactions=(
-            args.disable_prepared_transactions or bool(args.postgresql_setting)),
+        disable_prepared_transactions=args.disable_prepared_transactions,
         data_dir_parent=(
             Path(args.data_dir_parent).expanduser().resolve()
             if args.data_dir_parent else None),

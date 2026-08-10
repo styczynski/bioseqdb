@@ -18,7 +18,7 @@ module;
 export module bioseq.cache.pg.sql.rows;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_sql_boundary;
+import bioseq.postgres.sql_boundary;
 
 export namespace bioseq::cache::pg::sql_rows {
 
@@ -57,22 +57,22 @@ struct cache_entry_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::timestamptz,
     })]]
-    std::optional<bioseq::pg_utils::sql_timestamptz> created_at;
+    std::optional<bioseq::postgres::support::timestamp_with_time_zone> created_at;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::timestamptz,
     })]]
-    std::optional<bioseq::pg_utils::sql_timestamptz> completed_at;
+    std::optional<bioseq::postgres::support::timestamp_with_time_zone> completed_at;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::interval,
     })]]
-    bioseq::pg_utils::sql_interval age;
+    bioseq::postgres::support::interval_value age;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::interval,
     })]]
-    bioseq::pg_utils::sql_interval ttl;
+    bioseq::postgres::support::interval_value ttl;
 
     std::int64_t rows;
     std::int64_t logical_bytes;
@@ -86,7 +86,7 @@ struct cache_entry_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::jsonb,
     })]]
-    std::optional<bioseq::pg_utils::sql_jsonb> dependencies;
+    std::optional<bioseq::postgres::support::jsonb_value> dependencies;
 };
 
 static_assert(std::is_aggregate_v<stats_row>);
@@ -168,7 +168,7 @@ struct injected_coverage_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::bytea,
     })]]
-    bioseq::pg_utils::sql_bytea predicate_key;
+    bioseq::postgres::support::bytea_value predicate_key;
 
     std::string state;
 };
@@ -196,19 +196,19 @@ struct coverage_bucket_state_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::bytea,
     })]]
-    bioseq::pg_utils::sql_bytea provider_security_digest;
+    bioseq::postgres::support::bytea_value provider_security_digest;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::bytea,
     })]]
-    bioseq::pg_utils::sql_bytea coverage_domain_digest;
+    bioseq::postgres::support::bytea_value coverage_domain_digest;
 
     std::int32_t generation_count;
 
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::custom_type<"bigint[]">,
     })]]
-    bioseq::pg_utils::sql_int64_array generation_ids;
+    bioseq::postgres::support::bigint_array generation_ids;
 };
 
 static_assert(std::is_aggregate_v<storage_tier_stats_row>);

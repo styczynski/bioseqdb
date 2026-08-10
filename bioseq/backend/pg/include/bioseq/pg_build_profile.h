@@ -2,34 +2,59 @@
 #define BIOSEQ_PG_BUILD_CONFIG_H
 
 /*
- * PostgreSQL extension template-instantiation profile.
+ * PostgreSQL extension template-flatten profile.
  *
- * The intentionally user-facing spelling BIOSEQ_OPTTIMIZATION_LEVEL is
- * retained exactly. Levels are cumulative where stated by the profile:
+ * Profiles name the exact specialization domain they enable:
  *
- *   0 - fastest iteration: PostgreSQL sequences support only dna4 with
- *       uint64_t storage; pipeline behavior is also level 2.
- *   1 - all PostgreSQL alphabets, but uint64_t storage only; pipeline
- *       behavior is also level 2.
- *   2 - one k-mer bucket and a fixed int64 sequence-length layout.
- *   3 - one k-mer bucket with sequence-length layout dispatch.
- *   4 - all standard k-mer buckets with sequence-length layout dispatch.
- *   5 - level 4 plus specialised ConstexprAlignerParams (SpecCep) branches.
+ *   dna4_uint64                     - dna4 with uint64_t storage.
+ *   all_alphabets_uint64            - every alphabet with uint64_t storage.
+ *   all_coordinates                 - every alphabet/storage coordinate with
+ *                                     a fixed int64 sequence-length layout.
+ *   all_coordinates_adaptive_lengths - every coordinate with sequence-length
+ *                                       layout dispatch.
+ *   extended_kmer_coordinates       - adaptive layouts and all standard k-mer
+ *                                     buckets.
+ *   full_specialization             - extended k-mer coordinates plus
+ *                                     specialised aligner branches.
  *
  * Lower levels reduce compile time and binary size by pruning template
  * instantiations. This literal define is the default source of truth: CMake
  * reads it to prune split typed-dispatch translation units and automatically
  * reconfigures when this file changes. Isolated qualification presets may
- * provide the same macro on the compiler command line without changing this
- * checked-in default.
+ * select another profile on the compiler command line without changing this
+ * checked-in default. CMake publishes separate semantic capability macros to
+ * translation units; production code never compares profile ordinals.
  */
-/* AI agents must not change this default optimization level. */
-#ifndef BIOSEQ_OPTTIMIZATION_LEVEL
-#define BIOSEQ_OPTTIMIZATION_LEVEL 0
+/* AI agents must not change this default template-flatten profile. */
+#ifndef BIOSEQ_TEMPLATE_FLATTEN_PROFILE
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64
 #endif
 
-#if BIOSEQ_OPTTIMIZATION_LEVEL < 0 || BIOSEQ_OPTTIMIZATION_LEVEL > 5
-#error "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5"
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_dna4_uint64 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_alphabets_uint64 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_coordinates 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_coordinates_adaptive_lengths 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_extended_kmer_coordinates 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_full_specialization 1
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT_IMPL(left, right) left##right
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT(left, right) \
+    BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT_IMPL(left, right)
+#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID(profile) \
+    BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT( \
+        BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_, profile)
+
+#if !BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID(BIOSEQ_TEMPLATE_FLATTEN_PROFILE)
+#error "BIOSEQ_TEMPLATE_FLATTEN_PROFILE has an unsupported value"
 #endif
+
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_CONCAT_IMPL
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_full_specialization
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_extended_kmer_coordinates
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_coordinates_adaptive_lengths
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_coordinates
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_all_alphabets_uint64
+#undef BIOSEQ_TEMPLATE_FLATTEN_PROFILE_VALID_dna4_uint64
 
 #endif /* BIOSEQ_PG_BUILD_CONFIG_H */

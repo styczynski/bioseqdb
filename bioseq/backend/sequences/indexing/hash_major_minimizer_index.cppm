@@ -149,7 +149,7 @@ inline constexpr std::array<std::byte, 18> source_domain{
     std::byte{'S'}, std::byte{'O'}, std::byte{'U'}, std::byte{'R'},
     std::byte{'C'}, std::byte{'E'}, std::byte{'-'}, std::byte{'v'},
     std::byte{'1'}, std::byte{0}};
-inline constexpr std::array<std::byte, 18> compatibility_domain{
+inline constexpr std::array<std::byte, 18> storage_profile_domain{
     std::byte{'B'}, std::byte{'S'}, std::byte{'E'}, std::byte{'Q'},
     std::byte{'-'}, std::byte{'F'}, std::byte{'6'}, std::byte{'-'},
     std::byte{'C'}, std::byte{'O'}, std::byte{'M'}, std::byte{'P'},
@@ -161,7 +161,7 @@ inline constexpr std::array<std::byte, 18> compatibility_domain{
 export namespace bioseq::indexing {
 
 /// Current serialized hash-major layout revision.
-inline constexpr std::uint16_t k_hash_major_minimizer_format_revision = 6u;
+inline constexpr std::uint16_t k_hash_major_minimizer_layout_revision = 6u;
 /// Encoded publication-head size in bytes.
 inline constexpr std::size_t k_hash_major_minimizer_head_bytes = 224u;
 /// Fixed manifest prefix size in bytes.
@@ -193,14 +193,14 @@ inline constexpr std::size_t k_hash_major_minimizer_maximum_control_block_bytes 
 enum class hash_major_minimizer_error : std::uint8_t {
     encoded_size,
     magic,
-    format_revision,
+    layout_revision,
     declared_size,
     flags,
     reserved_nonzero,
     checksum,
     expected_generation,
     source_identity,
-    compatibility,
+    storage_contract_mismatch,
     stream_descriptor,
     directory,
     control,
@@ -223,7 +223,7 @@ enum class hash_major_minimizer_stream_kind : std::uint16_t {
 };
 
 /** @brief Hash, alphabet, position, and producer identity bound into an image. */
-struct hash_major_minimizer_compatibility {
+struct hash_major_minimizer_storage_profile {
     std::uint32_t hash_scheme_identity = 0;
     std::uint16_t hash_scheme_revision = 0;
     std::uint16_t alphabet_code = 0;
@@ -240,17 +240,17 @@ struct hash_major_minimizer_compatibility {
     std::uint64_t hash_seed = 0;
 
     [[nodiscard]] bool operator==(
-        const hash_major_minimizer_compatibility&) const = default;
+        const hash_major_minimizer_storage_profile&) const = default;
 };
 
-/** @brief Immutable source and compatibility inputs for one generation. */
+/** @brief Immutable source and storage-profile inputs for one generation. */
 struct hash_major_minimizer_generation_options {
     std::uint64_t generation_id = 0;
     std::uint64_t query_key = 0;
     std::uint64_t source_epoch = 0;
     std::uint64_t source_content_crc64 = 0;
     std::uint64_t target_length = 0;
-    hash_major_minimizer_compatibility compatibility{};
+    hash_major_minimizer_storage_profile storage_profile{};
 };
 
 /** @brief Optional authenticated dense-heap publication identity. */
@@ -274,7 +274,7 @@ struct hash_major_minimizer_head {
     std::uint64_t source_epoch = 0;
     std::array<std::byte, 16> source_identity{};
     std::uint64_t source_content_crc64 = 0;
-    std::array<std::byte, 32> compatibility_digest{};
+    std::array<std::byte, 32> storage_profile_digest{};
     std::uint64_t manifest_address_bound_row_crc64 = 0;
     std::uint64_t manifest_payload_crc64 = 0;
     std::uint64_t head_crc64 = 0;
@@ -307,8 +307,8 @@ struct hash_major_minimizer_manifest {
     std::uint64_t target_length = 0;
     std::uint64_t unique_hash_count = 0;
     std::uint64_t total_posting_count = 0;
-    hash_major_minimizer_compatibility compatibility{};
-    std::array<std::byte, 32> compatibility_digest{};
+    hash_major_minimizer_storage_profile storage_profile{};
+    std::array<std::byte, 32> storage_profile_digest{};
     std::uint64_t authenticated_directory_crc64 = 0;
     std::uint64_t generation_crc64 = 0;
     std::uint64_t total_control_bytes = 0;
@@ -385,7 +385,7 @@ struct canonical_query_hash_view {
     std::span<const std::uint64_t> values64{};
     std::uint8_t width_bytes = 0u;
     std::uint8_t storage_width_bytes = 0u;
-    std::array<std::byte, 32> compatibility_digest{};
+    std::array<std::byte, 32> storage_profile_digest{};
 
     [[nodiscard]] std::size_t size() const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
@@ -436,11 +436,11 @@ struct canonical_query_hash_view {
 using canonical_query_hash_storage = std::variant<
     std::vector<std::uint32_t>, std::vector<std::uint64_t>>;
 
-/** @brief Move-only canonical query hashes with their compatibility identity. */
+/** @brief Move-only canonical query hashes with their storage-profile identity. */
 struct canonical_query_hash_image {
     canonical_query_hash_storage values{};
     std::uint8_t width_bytes = 0u;
-    std::array<std::byte, 32> compatibility_digest{};
+    std::array<std::byte, 32> storage_profile_digest{};
 
     canonical_query_hash_image() = default;
     canonical_query_hash_image(const canonical_query_hash_image&) = delete;
@@ -457,7 +457,7 @@ struct canonical_query_hash_image {
                 canonical_query_hash_view view{
                     .width_bytes = width_bytes,
                     .storage_width_bytes = sizeof(p_value_type),
-                    .compatibility_digest = compatibility_digest,
+                    .storage_profile_digest = storage_profile_digest,
                 };
                 if constexpr (std::is_same_v<p_value_type, std::uint32_t>) {
                     view.values32 = std::span<const p_value_type>{value};
@@ -477,7 +477,7 @@ struct expected_hash_major_minimizer_generation {
     std::uint64_t source_epoch = 0u;
     std::uint64_t source_content_crc64 = 0u;
     std::uint64_t target_length = 0u;
-    hash_major_minimizer_compatibility compatibility{};
+    hash_major_minimizer_storage_profile storage_profile{};
 };
 
 /** @brief Exact count replacing one saturated compact count. */
@@ -546,27 +546,27 @@ hash_major_minimizer_source_identity(
     return identity;
 }
 
-/** @brief Hashes compatibility fields with their original serialized widths. */
+/** @brief Hashes storage-profile fields with their original serialized widths. */
 [[nodiscard]] inline std::array<std::byte, 32>
-hash_major_minimizer_compatibility_digest(
-        const hash_major_minimizer_compatibility& compatibility) noexcept {
+hash_major_minimizer_storage_profile_digest(
+        const hash_major_minimizer_storage_profile& profile) noexcept {
     bioseq::common::sha256_hasher sha;
-    sha.update(hash_major_minimizer_detail::compatibility_domain);
-    sha.update_little_endian(k_hash_major_minimizer_format_revision);
-    sha.update_little_endian(compatibility.hash_scheme_identity);
-    sha.update_little_endian(compatibility.hash_scheme_revision);
-    sha.update_little_endian(compatibility.alphabet_code);
-    sha.update_little_endian(compatibility.kmer_size);
-    sha.update_little_endian(compatibility.window_size);
-    sha.update_little_endian(compatibility.hash_width_bytes);
-    sha.update_little_endian(compatibility.stored_posting_width_bytes);
-    sha.update_little_endian(compatibility.position_encoding_revision);
-    sha.update_little_endian(compatibility.hash_semantics_revision);
-    sha.update_little_endian(compatibility.count_semantics_revision);
-    sha.update_little_endian(compatibility.producer_backend_identity);
-    sha.update_little_endian(compatibility.producer_backend_revision);
-    sha.update_little_endian(compatibility.controls_per_block);
-    sha.update_little_endian(compatibility.hash_seed);
+    sha.update(hash_major_minimizer_detail::storage_profile_domain);
+    sha.update_little_endian(k_hash_major_minimizer_layout_revision);
+    sha.update_little_endian(profile.hash_scheme_identity);
+    sha.update_little_endian(profile.hash_scheme_revision);
+    sha.update_little_endian(profile.alphabet_code);
+    sha.update_little_endian(profile.kmer_size);
+    sha.update_little_endian(profile.window_size);
+    sha.update_little_endian(profile.hash_width_bytes);
+    sha.update_little_endian(profile.stored_posting_width_bytes);
+    sha.update_little_endian(profile.position_encoding_revision);
+    sha.update_little_endian(profile.hash_semantics_revision);
+    sha.update_little_endian(profile.count_semantics_revision);
+    sha.update_little_endian(profile.producer_backend_identity);
+    sha.update_little_endian(profile.producer_backend_revision);
+    sha.update_little_endian(profile.controls_per_block);
+    sha.update_little_endian(profile.hash_seed);
     return sha.finalize();
 }
 
@@ -576,9 +576,9 @@ hash_major_minimizer_compatibility_digest(
     return target_length <= (std::uint64_t{1} << 31u);
 }
 
-/** @brief Validates an authenticated compatibility tuple for a target length. */
-[[nodiscard]] constexpr bool is_valid_hash_major_minimizer_compatibility(
-        const hash_major_minimizer_compatibility& value,
+/** @brief Validates an authenticated storage profile for a target length. */
+[[nodiscard]] constexpr bool is_valid_hash_major_minimizer_storage_profile(
+        const hash_major_minimizer_storage_profile& value,
         std::uint64_t target_length) noexcept {
     if (target_length > (std::uint64_t{1} << 63u)
         || value.alphabet_code != 0u || value.kmer_size != 15u
@@ -611,9 +611,9 @@ hash_major_minimizer_compatibility_digest(
 
 /** @brief Returns the maximum hash representable by the selected hash scheme. */
 [[nodiscard]] constexpr std::uint64_t hash_major_minimizer_max_hash(
-        const hash_major_minimizer_compatibility& compatibility) noexcept {
-    return compatibility.hash_scheme_identity == 0u
-            && compatibility.hash_scheme_revision == 0u
+        const hash_major_minimizer_storage_profile& profile) noexcept {
+    return profile.hash_scheme_identity == 0u
+            && profile.hash_scheme_revision == 0u
         ? 0x3fffffffu : 0xffffffffu;
 }
 
@@ -863,7 +863,7 @@ private:
             || !vector_capacity_bytes_(query_offsets_, bytes) || !add(bytes)
             || !checked_multiply(
                 retained_position_count_,
-                manifest_.compatibility.stored_posting_width_bytes,
+                manifest_.storage_profile.stored_posting_width_bytes,
                 bytes)
             || !add(bytes)
             || !vector_capacity_bytes_(canonical_radix_prefix_, bytes)
@@ -987,15 +987,15 @@ private:
         context.control_stream_crc->update(encoded_control);
         auto control = decode_hash_major_minimizer_control_block_into(
             encoded_control,
-            context.manifest->compatibility.hash_width_bytes,
-            context.manifest->compatibility.stored_posting_width_bytes,
+            context.manifest->storage_profile.hash_width_bytes,
+            context.manifest->storage_profile.stored_posting_width_bytes,
             *context.scratch);
         if (!control) {
             context.error = control.error();
             return false;
         }
         const std::uint64_t maximum_hash =
-            hash_major_minimizer_max_hash(context.manifest->compatibility);
+            hash_major_minimizer_max_hash(context.manifest->storage_profile);
         std::uint64_t expected_posting_bytes = 0u;
         if (control->header.first_hash != entry.first_hash
             || control->hashes.back() != entry.last_hash
@@ -1007,7 +1007,7 @@ private:
                 != entry.posting_byte_offset
             || !checked_multiply(
                 entry.exact_posting_count,
-                context.manifest->compatibility.stored_posting_width_bytes,
+                context.manifest->storage_profile.stored_posting_width_bytes,
                 expected_posting_bytes)
             || expected_posting_bytes != entry.posting_byte_length
             || hash_major_minimizer_block_crc64(
@@ -1077,7 +1077,7 @@ private:
                     std::uint64_t posting_offset = 0u;
                     if (!checked_multiply(
                             posting_prefix,
-                            context.manifest->compatibility
+                            context.manifest->storage_profile
                                 .stored_posting_width_bytes,
                             posting_delta)
                         || !checked_add(
@@ -1129,7 +1129,7 @@ private:
         }
         const hash_major_minimizer_authorized_posting_range& range =
             (*context.ranges)[range_ordinal];
-        const std::uint8_t width = context.manifest->compatibility
+        const std::uint8_t width = context.manifest->storage_profile
             .stored_posting_width_bytes;
         if (range.reserved_zero != 0u || (range.flags & ~1u) != 0u
             || range_byte_offset > range.byte_count
@@ -1403,35 +1403,35 @@ public:
         auto manifest = decode_hash_major_minimizer_manifest(encoded_manifest);
         if (!manifest) return std::unexpected(manifest.error());
         const auto expected_digest =
-            hash_major_minimizer_compatibility_digest(expected.compatibility);
+            hash_major_minimizer_storage_profile_digest(expected.storage_profile);
         const auto expected_source = hash_major_minimizer_source_identity(
             expected.query_key,
             expected.source_epoch,
             expected.source_content_crc64,
             expected.target_length);
-        if (!is_valid_hash_major_minimizer_compatibility(
-                expected.compatibility, expected.target_length)
+        if (!is_valid_hash_major_minimizer_storage_profile(
+                expected.storage_profile, expected.target_length)
             || expected.generation_id == 0u
             || head->generation_id != expected.generation_id
             || head->query_key != expected.query_key
             || head->source_epoch != expected.source_epoch
             || head->source_content_crc64 != expected.source_content_crc64
             || head->source_identity != expected_source
-            || head->compatibility_digest != expected_digest
+            || head->storage_profile_digest != expected_digest
             || manifest->generation_id != expected.generation_id
             || manifest->source_epoch != expected.source_epoch
             || manifest->source_content_crc64 != expected.source_content_crc64
             || manifest->source_identity != expected_source
             || manifest->target_length != expected.target_length
-            || manifest->compatibility != expected.compatibility
-            || manifest->compatibility_digest != expected_digest) {
+            || manifest->storage_profile != expected.storage_profile
+            || manifest->storage_profile_digest != expected_digest) {
             return std::unexpected(hash_major_minimizer_error::expected_generation);
         }
         if (head->generation_id != manifest->generation_id
             || head->source_epoch != manifest->source_epoch
             || head->source_identity != manifest->source_identity
             || head->source_content_crc64 != manifest->source_content_crc64
-            || head->compatibility_digest != manifest->compatibility_digest
+            || head->storage_profile_digest != manifest->storage_profile_digest
             || head->manifest_payload_crc64 != crc64_ecma182(encoded_manifest)
             || head->manifest_address_bound_row_crc64
                 != crc64_index_chunk_row(
@@ -1445,16 +1445,16 @@ public:
         }
         if (!query_hashes.storage_matches_width()
             || query_hashes.width_bytes
-                != manifest->compatibility.hash_width_bytes
-            || query_hashes.compatibility_digest != expected_digest
+                != manifest->storage_profile.hash_width_bytes
+            || query_hashes.storage_profile_digest != expected_digest
             || query_hashes.size()
                 > (std::numeric_limits<std::uint32_t>::max)()) {
-            return std::unexpected(hash_major_minimizer_error::compatibility);
+            return std::unexpected(hash_major_minimizer_error::storage_contract_mismatch);
         }
         std::uint64_t previous_query = 0u;
         bool have_previous_query = false;
         const std::uint64_t maximum_hash =
-            hash_major_minimizer_max_hash(manifest->compatibility);
+            hash_major_minimizer_max_hash(manifest->storage_profile);
         for (std::size_t ordinal = 0u; ordinal < query_hashes.size(); ++ordinal) {
             const std::uint64_t hash = query_hashes.at(ordinal);
             if (hash > maximum_hash
@@ -1462,7 +1462,7 @@ public:
                 return std::unexpected(
                     have_previous_query && hash <= previous_query
                         ? hash_major_minimizer_error::order
-                        : hash_major_minimizer_error::compatibility);
+                        : hash_major_minimizer_error::storage_contract_mismatch);
             }
             previous_query = hash;
             have_previous_query = true;
@@ -1611,13 +1611,13 @@ public:
                 || (index != 0u
                     && entry->first_hash <= directory.back().last_hash)
                 || entry->posting_byte_offset
-                    % manifest->compatibility.stored_posting_width_bytes != 0u
+                    % manifest->storage_profile.stored_posting_width_bytes != 0u
                 || entry->control_byte_length
                     > k_hash_major_minimizer_maximum_control_block_bytes
                 || entry->last_hash > maximum_hash
                 || !checked_multiply(
                     entry->exact_posting_count,
-                    manifest->compatibility.stored_posting_width_bytes,
+                    manifest->storage_profile.stored_posting_width_bytes,
                     entry_posting_bytes)
                 || entry_posting_bytes != entry->posting_byte_length
                 || !checked_add(
@@ -1971,7 +1971,7 @@ public:
         std::uint64_t posting_requested = 0u;
         if (!checked_multiply(
                 retained_count,
-                manifest->compatibility.stored_posting_width_bytes,
+                manifest->storage_profile.stored_posting_width_bytes,
                 retained_logical_bytes)
             || !checked_multiply(
                 requested_wave_capacity,
@@ -1999,7 +1999,7 @@ public:
         }
         try {
             if (retained_count != 0u) {
-                if (manifest->compatibility.stored_posting_width_bytes
+                if (manifest->storage_profile.stored_posting_width_bytes
                         == sizeof(std::uint32_t)) {
                     reader.retained_positions32_ =
                         std::make_unique_for_overwrite<std::uint32_t[]>(
@@ -2143,7 +2143,7 @@ public:
                     if (count == 0u
                         || !checked_multiply(
                             count,
-                            manifest->compatibility
+                            manifest->storage_profile
                                 .stored_posting_width_bytes,
                             posting_bytes)
                         || !checked_add(
@@ -2182,7 +2182,7 @@ public:
                     std::uint64_t range_end = 0u;
                     if (!checked_multiply(
                             requests[begin].exact_count,
-                            manifest->compatibility
+                            manifest->storage_profile
                                 .stored_posting_width_bytes,
                             first_request_bytes)
                         || !checked_add(
@@ -2199,7 +2199,7 @@ public:
                         std::uint64_t next_request_bytes = 0u;
                         if (!checked_multiply(
                                 requests[end].exact_count,
-                                manifest->compatibility
+                                manifest->storage_profile
                                     .stored_posting_width_bytes,
                                 next_request_bytes)
                             || !checked_add(
@@ -2385,7 +2385,7 @@ public:
             static_cast<std::size_t>(offset);
         const std::size_t position_count =
             static_cast<std::size_t>(count);
-        if (manifest_.compatibility.stored_posting_width_bytes
+        if (manifest_.storage_profile.stored_posting_width_bytes
                 == sizeof(std::uint32_t)) {
             return minimizer_lookup_spans::contiguous(
                 std::span<const std::uint32_t>{
@@ -2593,13 +2593,13 @@ private:
             return std::unexpected(hash_major_minimizer_error::state);
         }
         const std::uint8_t posting_width =
-            options_.compatibility.stored_posting_width_bytes;
+            options_.storage_profile.stored_posting_width_bytes;
         auto control = encode_hash_major_minimizer_control_block(
             block_hashes_,
             block_counts_,
             block_posting_byte_offset_,
             block_posting_crc_.checksum(),
-            options_.compatibility.hash_width_bytes,
+            options_.storage_profile.hash_width_bytes,
             posting_width);
         if (!control) return std::unexpected(control.error());
         const std::uint64_t control_offset = stream_bytes_[stream_index_(
@@ -2695,9 +2695,9 @@ public:
             std::uint64_t hash,
             std::uint64_t exact_count) {
         if (finished_ || hash_open_ || exact_count == 0u
-            || !is_valid_hash_major_minimizer_compatibility(
-                options_.compatibility, options_.target_length)
-            || hash > hash_major_minimizer_max_hash(options_.compatibility)
+            || !is_valid_hash_major_minimizer_storage_profile(
+                options_.storage_profile, options_.target_length)
+            || hash > hash_major_minimizer_max_hash(options_.storage_profile)
             || (have_previous_hash_ && hash <= previous_hash_)) {
             return std::unexpected(
                 exact_count == 0u ? hash_major_minimizer_error::count
@@ -2731,7 +2731,7 @@ public:
         if (global_bp >= options_.target_length
             || (current_have_posting_
                 && encoded_position <= current_previous_posting_)
-            || (options_.compatibility.stored_posting_width_bytes == 4u
+            || (options_.storage_profile.stored_posting_width_bytes == 4u
                 && encoded_position
                     > (std::numeric_limits<std::uint32_t>::max)())) {
             return std::unexpected(
@@ -2740,7 +2740,7 @@ public:
                     : hash_major_minimizer_error::order);
         }
         std::array<std::byte, 8> encoded{};
-        if (options_.compatibility.stored_posting_width_bytes == 4u) {
+        if (options_.storage_profile.stored_posting_width_bytes == 4u) {
             hash_major_minimizer_detail::write_le<std::uint32_t>(
                 encoded, 0u, static_cast<std::uint32_t>(encoded_position));
         } else {
@@ -2748,7 +2748,7 @@ public:
         }
         if (auto appended = append_posting_bytes_(std::span<const std::byte>{
                 encoded.data(),
-                options_.compatibility.stored_posting_width_bytes});
+                options_.storage_profile.stored_posting_width_bytes});
             !appended) {
             return appended;
         }
@@ -2800,8 +2800,8 @@ public:
     finish() {
         using namespace hash_major_minimizer_detail;
         if (finished_ || hash_open_ || options_.generation_id == 0u
-            || !is_valid_hash_major_minimizer_compatibility(
-                options_.compatibility, options_.target_length)) {
+            || !is_valid_hash_major_minimizer_storage_profile(
+                options_.storage_profile, options_.target_length)) {
             return std::unexpected(hash_major_minimizer_error::state);
         }
         if (auto block = finish_block_(); !block) {
@@ -2815,8 +2815,8 @@ public:
             options_.source_epoch,
             options_.source_content_crc64,
             options_.target_length);
-        const auto compatibility_digest =
-            hash_major_minimizer_compatibility_digest(options_.compatibility);
+        const auto storage_profile_digest =
+            hash_major_minimizer_storage_profile_digest(options_.storage_profile);
         hash_major_minimizer_manifest manifest{
             .generation_id = options_.generation_id,
             .source_epoch = options_.source_epoch,
@@ -2825,8 +2825,8 @@ public:
             .target_length = options_.target_length,
             .unique_hash_count = unique_hash_count_,
             .total_posting_count = total_posting_count_,
-            .compatibility = options_.compatibility,
-            .compatibility_digest = compatibility_digest,
+            .storage_profile = options_.storage_profile,
+            .storage_profile_digest = storage_profile_digest,
             .authenticated_directory_crc64 =
                 stream_crc_[stream_index_(
                     hash_major_minimizer_stream_kind::directory)].checksum(),
@@ -2875,7 +2875,7 @@ public:
             hash_major_minimizer_stream_descriptor{
                 .kind = hash_major_minimizer_stream_kind::postings,
                 .encoding_revision = 1u,
-                .element_width = options_.compatibility
+                .element_width = options_.storage_profile
                     .stored_posting_width_bytes,
                 .element_count = total_posting_count_,
                 .logical_bytes = stream_bytes_[2],
@@ -2900,7 +2900,7 @@ public:
             .source_epoch = options_.source_epoch,
             .source_identity = identity,
             .source_content_crc64 = options_.source_content_crc64,
-            .compatibility_digest = compatibility_digest,
+            .storage_profile_digest = storage_profile_digest,
             .manifest_address_bound_row_crc64 = crc64_index_chunk_row(
                 options_.generation_id,
                 0,
@@ -3359,11 +3359,11 @@ read_stream_descriptor(
 [[nodiscard]] inline bool valid_manifest_shape(
         const hash_major_minimizer_manifest& manifest) noexcept {
     if (manifest.generation_id == 0u
-        || !is_valid_hash_major_minimizer_compatibility(
-            manifest.compatibility, manifest.target_length)
-        || manifest.compatibility_digest
-            != hash_major_minimizer_compatibility_digest(
-                manifest.compatibility)
+        || !is_valid_hash_major_minimizer_storage_profile(
+            manifest.storage_profile, manifest.target_length)
+        || manifest.storage_profile_digest
+            != hash_major_minimizer_storage_profile_digest(
+                manifest.storage_profile)
         || manifest.streams[0].element_count
             != manifest.directory_entry_count
         || manifest.streams[1].element_count
@@ -3385,7 +3385,7 @@ read_stream_descriptor(
         || !valid_stream_descriptor(
             manifest.streams[2],
             hash_major_minimizer_stream_kind::postings,
-            manifest.compatibility.stored_posting_width_bytes)) {
+            manifest.storage_profile.stored_posting_width_bytes)) {
         return false;
     }
     std::uint64_t directory_bytes = 0;
@@ -3399,7 +3399,7 @@ read_stream_descriptor(
         && directory_bytes == manifest.streams[0].logical_bytes
         && checked_multiply(
             manifest.total_posting_count,
-            manifest.compatibility.stored_posting_width_bytes,
+            manifest.storage_profile.stored_posting_width_bytes,
             posting_bytes)
         && posting_bytes == manifest.total_posting_bytes
         && manifest.streams[0].first_row_ordinal == 0u
@@ -3425,7 +3425,7 @@ constexpr void write_manifest_fields(
         const hash_major_minimizer_manifest& manifest,
         std::uint64_t generation_crc64) noexcept {
     write_bytes(output, 0u, manifest_magic);
-    write_le<std::uint16_t>(output, 8u, k_hash_major_minimizer_format_revision);
+    write_le<std::uint16_t>(output, 8u, k_hash_major_minimizer_layout_revision);
     write_le<std::uint16_t>(
         output, 10u, k_hash_major_minimizer_manifest_header_bytes);
     write_le<std::uint32_t>(output, 12u, 0u);
@@ -3436,31 +3436,31 @@ constexpr void write_manifest_fields(
     write_le(output, 56u, manifest.target_length);
     write_le(output, 64u, manifest.unique_hash_count);
     write_le(output, 72u, manifest.total_posting_count);
-    write_le(output, 80u, manifest.compatibility.hash_scheme_identity);
-    write_le(output, 84u, manifest.compatibility.hash_scheme_revision);
-    write_le(output, 86u, manifest.compatibility.alphabet_code);
-    write_le(output, 88u, manifest.compatibility.kmer_size);
-    write_le(output, 90u, manifest.compatibility.window_size);
-    write_le(output, 92u, manifest.compatibility.hash_width_bytes);
+    write_le(output, 80u, manifest.storage_profile.hash_scheme_identity);
+    write_le(output, 84u, manifest.storage_profile.hash_scheme_revision);
+    write_le(output, 86u, manifest.storage_profile.alphabet_code);
+    write_le(output, 88u, manifest.storage_profile.kmer_size);
+    write_le(output, 90u, manifest.storage_profile.window_size);
+    write_le(output, 92u, manifest.storage_profile.hash_width_bytes);
     write_le(
-        output, 93u, manifest.compatibility.stored_posting_width_bytes);
+        output, 93u, manifest.storage_profile.stored_posting_width_bytes);
     write_le<std::uint8_t>(output, 94u, 0u);
     write_le<std::uint8_t>(output, 95u, 3u);
     write_le(
-        output, 96u, manifest.compatibility.position_encoding_revision);
-    write_le(output, 98u, manifest.compatibility.hash_semantics_revision);
-    write_le(output, 100u, manifest.compatibility.count_semantics_revision);
-    write_le(output, 102u, manifest.compatibility.producer_backend_identity);
+        output, 96u, manifest.storage_profile.position_encoding_revision);
+    write_le(output, 98u, manifest.storage_profile.hash_semantics_revision);
+    write_le(output, 100u, manifest.storage_profile.count_semantics_revision);
+    write_le(output, 102u, manifest.storage_profile.producer_backend_identity);
     write_le(
-        output, 104u, manifest.compatibility.producer_backend_revision);
-    write_le(output, 108u, manifest.compatibility.controls_per_block);
-    write_bytes(output, 112u, manifest.compatibility_digest);
+        output, 104u, manifest.storage_profile.producer_backend_revision);
+    write_le(output, 108u, manifest.storage_profile.controls_per_block);
+    write_bytes(output, 112u, manifest.storage_profile_digest);
     write_le(output, 144u, manifest.authenticated_directory_crc64);
     write_le(output, 152u, generation_crc64);
     write_le(output, 160u, manifest.total_control_bytes);
     write_le(output, 168u, manifest.total_posting_bytes);
     write_le(output, 176u, manifest.directory_entry_count);
-    write_le(output, 184u, manifest.compatibility.hash_seed);
+    write_le(output, 184u, manifest.storage_profile.hash_seed);
     for (std::size_t index = 0; index < manifest.streams.size(); ++index) {
         write_stream_descriptor(
             output,
@@ -3508,7 +3508,7 @@ encode_hash_major_minimizer_head(const hash_major_minimizer_head& head) noexcept
     encoded_hash_major_minimizer_head output{};
     std::span<std::byte> bytes{output};
     write_bytes(bytes, 0u, head_magic);
-    write_le<std::uint16_t>(bytes, 8u, k_hash_major_minimizer_format_revision);
+    write_le<std::uint16_t>(bytes, 8u, k_hash_major_minimizer_layout_revision);
     write_le<std::uint16_t>(bytes, 10u, k_hash_major_minimizer_head_bytes);
     write_le<std::uint32_t>(bytes, 12u, head.dense_seal ? 1u : 0u);
     write_le(bytes, 16u, head.generation_id);
@@ -3516,7 +3516,7 @@ encode_hash_major_minimizer_head(const hash_major_minimizer_head& head) noexcept
     write_le(bytes, 32u, head.source_epoch);
     write_bytes(bytes, 40u, head.source_identity);
     write_le(bytes, 56u, head.source_content_crc64);
-    write_bytes(bytes, 64u, head.compatibility_digest);
+    write_bytes(bytes, 64u, head.storage_profile_digest);
     write_le<std::uint64_t>(bytes, 96u, 0u);
     write_le<std::uint64_t>(bytes, 104u, 0u);
     write_le<std::uint64_t>(bytes, 112u, 0u);
@@ -3552,8 +3552,8 @@ decode_hash_major_minimizer_head(std::span<const std::byte> input) noexcept {
     if (read_bytes<8>(input, 0u) != head_magic) {
         return std::unexpected(hash_major_minimizer_error::magic);
     }
-    if (read_le<std::uint16_t>(input, 8u) != k_hash_major_minimizer_format_revision) {
-        return std::unexpected(hash_major_minimizer_error::format_revision);
+    if (read_le<std::uint16_t>(input, 8u) != k_hash_major_minimizer_layout_revision) {
+        return std::unexpected(hash_major_minimizer_error::layout_revision);
     }
     if (read_le<std::uint16_t>(input, 10u) != k_hash_major_minimizer_head_bytes
         || read_le<std::uint32_t>(input, 120u)
@@ -3588,7 +3588,7 @@ decode_hash_major_minimizer_head(std::span<const std::byte> input) noexcept {
         .source_epoch = read_le<std::uint64_t>(input, 32u),
         .source_identity = read_bytes<16>(input, 40u),
         .source_content_crc64 = read_le<std::uint64_t>(input, 56u),
-        .compatibility_digest = read_bytes<32>(input, 64u),
+        .storage_profile_digest = read_bytes<32>(input, 64u),
         .manifest_address_bound_row_crc64 =
             read_le<std::uint64_t>(input, 128u),
         .manifest_payload_crc64 = read_le<std::uint64_t>(input, 136u),
@@ -3649,8 +3649,8 @@ decode_hash_major_minimizer_manifest(
     if (read_bytes<8>(input, 0u) != manifest_magic) {
         return std::unexpected(hash_major_minimizer_error::magic);
     }
-    if (read_le<std::uint16_t>(input, 8u) != k_hash_major_minimizer_format_revision) {
-        return std::unexpected(hash_major_minimizer_error::format_revision);
+    if (read_le<std::uint16_t>(input, 8u) != k_hash_major_minimizer_layout_revision) {
+        return std::unexpected(hash_major_minimizer_error::layout_revision);
     }
     if (read_le<std::uint16_t>(input, 10u)
             != k_hash_major_minimizer_manifest_header_bytes
@@ -3675,7 +3675,7 @@ decode_hash_major_minimizer_manifest(
         .target_length = read_le<std::uint64_t>(input, 56u),
         .unique_hash_count = read_le<std::uint64_t>(input, 64u),
         .total_posting_count = read_le<std::uint64_t>(input, 72u),
-        .compatibility = hash_major_minimizer_compatibility{
+        .storage_profile = hash_major_minimizer_storage_profile{
             .hash_scheme_identity = read_le<std::uint32_t>(input, 80u),
             .hash_scheme_revision = read_le<std::uint16_t>(input, 84u),
             .alphabet_code = read_le<std::uint16_t>(input, 86u),
@@ -3691,7 +3691,7 @@ decode_hash_major_minimizer_manifest(
             .controls_per_block = read_le<std::uint32_t>(input, 108u),
             .hash_seed = read_le<std::uint64_t>(input, 184u),
         },
-        .compatibility_digest = read_bytes<32>(input, 112u),
+        .storage_profile_digest = read_bytes<32>(input, 112u),
         .authenticated_directory_crc64 = read_le<std::uint64_t>(input, 144u),
         .generation_crc64 = read_le<std::uint64_t>(input, 152u),
         .total_control_bytes = read_le<std::uint64_t>(input, 160u),

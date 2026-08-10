@@ -313,8 +313,8 @@ private:
 static_assert(prov::external_api_session_compatible<ebi_session>);
 
 struct ebi_provider {
-  static constexpr auto id = bioseq::common::templating::CompTimeStr("ebi");
-  static constexpr auto name = bioseq::common::templating::CompTimeStr("EBI");
+  static constexpr auto id = bioseq::common::templating::compile_time_string("ebi");
+  static constexpr auto name = bioseq::common::templating::compile_time_string("EBI");
   static constexpr bool supports_sequence_retrieval = false;
 
   using plan_type = ebi_plan;

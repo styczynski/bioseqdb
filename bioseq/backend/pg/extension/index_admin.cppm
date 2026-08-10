@@ -66,7 +66,6 @@ import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif
-import bioseq.postgres.support.runtime_test_counters;
 import bioseq.postgres.support.sql_catalog_entities;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;

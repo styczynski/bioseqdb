@@ -27,8 +27,6 @@ import bioseq.postgres.external.relation;
 import bioseq.external.provider.base;
 import bioseq.external.provider.model;
 import bioseq.external.provider.messages;
-import bioseq.common.seqan_adapter;
-import bioseq.sequences.simd;
 import bioseq.postgres.types.compact_sequence;
 
 namespace bioseq::postgres::external {
@@ -130,11 +128,11 @@ set_text(TupleTableSlot* slot, std::size_t i, std::string_view sv)
 	slot->tts_isnull[i] = false;
 }
 
-/* Any bounded_string<N> optional -> text, null when absent. */
-template <std::size_t N>
+/* Any bounded string optional -> text, null when absent. */
+template <std::size_t p_capacity>
 inline void
 set_text_opt(TupleTableSlot* slot, std::size_t i,
-			 const std::optional<provider::bounded_string<N>>& v)
+			 const std::optional<provider::bounded_string<p_capacity>>& v)
 {
 	if (v)
 		set_text(slot, i, v->view());
@@ -268,10 +266,10 @@ set_provenance(TupleTableSlot* slot, std::size_t i, provider::provider_id provid
 /* provider_attributes_json is already a JSON document: pass it through jsonb_in
  * (copied to a NUL-terminated buffer). Guard: skip (null) anything that does
  * not begin with '{' or '['. */
-template <std::size_t N>
+template <std::size_t p_capacity>
 inline void
 set_provider_attributes(TupleTableSlot* slot, std::size_t i,
-						const std::optional<provider::bounded_string<N>>& v)
+						const std::optional<provider::bounded_string<p_capacity>>& v)
 {
 	if (!v)
 	{
@@ -310,10 +308,10 @@ set_bigint_array_opt(TupleTableSlot* slot, std::size_t i,
 	slot->tts_isnull[i] = false;
 }
 
-template <std::size_t N>
+template <std::size_t p_capacity>
 inline void
 set_text_array_opt(TupleTableSlot* slot, std::size_t i,
-				   const std::optional<std::vector<provider::bounded_string<N>>>& v)
+				   const std::optional<std::vector<provider::bounded_string<p_capacity>>>& v)
 {
 	if (!v)
 	{
@@ -335,11 +333,11 @@ set_text_array_opt(TupleTableSlot* slot, std::size_t i,
 	slot->tts_isnull[i] = false;
 }
 
-template <class value_type, class append_value_type>
+template <class p_value, class p_append_value>
 void
 set_json_array_opt(TupleTableSlot *slot, std::size_t index,
-				   const std::optional<std::vector<value_type>> &values,
-				   append_value_type append_value)
+				   const std::optional<std::vector<p_value>> &values,
+				   p_append_value append_value)
 {
 	if (!values)
 	{
@@ -349,7 +347,7 @@ set_json_array_opt(TupleTableSlot *slot, std::size_t index,
 
 	std::string json{"["};
 	bool needs_separator = false;
-	for (const value_type &value : *values)
+	for (const p_value &value : *values)
 	{
 		if (needs_separator)
 		{
@@ -454,9 +452,9 @@ set_locations_jsonb(TupleTableSlot* slot, std::size_t i,
 		});
 }
 
-template <class row_type>
+template <class p_row>
 void
-set_record_identity(TupleTableSlot *slot, const row_type &row)
+set_record_identity(TupleTableSlot *slot, const p_row &row)
 {
 	set_text(slot, 0, row.provider.value);
 	set_text(slot, 1, row.key.domain.view());
@@ -466,9 +464,9 @@ set_record_identity(TupleTableSlot *slot, const row_type &row)
 	set_uint32_opt_as_int32(slot, 5, row.key.version);
 }
 
-template <class row_type>
+template <class p_row>
 void
-set_audit_columns(TupleTableSlot *slot, const row_type &row,
+set_audit_columns(TupleTableSlot *slot, const p_row &row,
 				  std::size_t version_column,
 				  std::size_t provenance_column,
 				  std::size_t retrieved_at_column)
@@ -596,23 +594,13 @@ fill_record_location(const provider::owning_catalog_row& row, std::size_t sub_in
 	set_audit_columns(slot, row, 14, 15, 16);
 }
 
-/* Builds a bioseq.seq datum with the configured unconstrained-input alphabet. */
+/* Builds an unbound bioseq.seq datum for typmodless provider input. */
 inline void
 set_sequence_value(TupleTableSlot* slot, std::size_t i,
 				   std::string_view bases)
 {
-	bioseq::pg_types::seq* header =
-		::bioseq::simd::active_target::stdc_convert_from_cstr<
-			bioseq::pg_types::seq, pgseq_unconstrained_input_alphabet>(
-			pgseq_normalize_storage_unit_byte_width(1u),
-			static_cast<bioseq::pg_types::seq::bp_size_t>(bases.size()),
-			bases.empty() ? "" : bases.data(),
-			pg_alloc);
-	if (header == nullptr)
-		ereport(ERROR,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("bioseq_external: out of memory building bioseq.seq")));
-	slot->tts_values[i] = PointerGetDatum(header);
+	slot->tts_values[i] = make_unbound_sequence_from_ascii(
+		bases.empty() ? "" : bases.data(), bases.size());
 	slot->tts_isnull[i] = false;
 }
 

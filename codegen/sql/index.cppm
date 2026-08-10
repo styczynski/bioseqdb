@@ -29,6 +29,7 @@ export import :model;
 export import :policy;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.codegen.sql.collector;
+import :tests.contract;
 import bioseq.codegen.sql.graph;
 import bioseq.codegen.sql.renderer;
 import bioseq.codegen.structural_analysis;
@@ -870,7 +871,8 @@ inline void publish_guc_package(
     }
     std::ranges::sort(rows);
     std::string material =
-        "bioseq_sql_support_descriptor/v1\n"
+        "bioseq_sql_support_descriptor\n"
+        "revision=1\n"
         + std::string{compiler_profile} + "\n";
     for (const std::string& row : rows) {
         material += row + "\n";
@@ -898,7 +900,8 @@ inline void publish_guc_package(
     std::ostringstream output;
     output
         << "{\n"
-        << "  \"schema\": \"bioseq_sql_support_manifest/v1\",\n"
+        << "  \"schema\": \"bioseq_sql_support_manifest\",\n"
+        << "  \"schema_revision\": 1,\n"
         << "  \"compiler_profile\": "
         << json_string(compiler_profile) << ",\n"
         << "  \"clang_version\": "
@@ -929,7 +932,8 @@ inline void publish_guc_package(
            << ",\n"
            << "  \"guc_profile_projection\": {\n"
            << "    \"schema\": "
-           << "\"bioseq_guc_profile_projection/v1\",\n"
+           << "\"bioseq_guc_profile_projection\",\n"
+           << "    \"schema_revision\": 1,\n"
            << "    \"profile\": "
            << json_string(guc_profile_name(guc_projection.profile))
            << ",\n"
@@ -1025,7 +1029,8 @@ inline void publish_guc_package(
     std::ostringstream output;
     output
         << "{\n"
-        << "  \"schema\": \"bioseq_sql_support_seal/v1\",\n"
+        << "  \"schema\": \"bioseq_sql_support_seal\",\n"
+        << "  \"schema_revision\": 1,\n"
         << "  \"compiler_profile\": "
         << json_string(compiler_profile) << ",\n"
         << "  \"compilation_signature\": "
@@ -1095,6 +1100,39 @@ inline void publish_guc_package(
     throw std::runtime_error(
         "unterminated support manifest field '"
         + std::string{field} + "'");
+}
+
+[[nodiscard]] inline std::uint64_t json_unsigned_integer_field(
+    std::string_view document,
+    std::string_view field) {
+    const std::string needle =
+        "\"" + std::string{field} + "\"";
+    const std::size_t position = document.find(needle);
+    if (position == std::string_view::npos
+        || document.find(needle, position + needle.size())
+            != std::string_view::npos) {
+        throw std::runtime_error(
+            "sealed SQL artifact must contain exactly one numeric field '"
+            + std::string{field} + "'");
+    }
+    llvm::Expected<llvm::json::Value> parsed =
+        llvm::json::parse(document);
+    if (!parsed) {
+        llvm::consumeError(parsed.takeError());
+        throw std::runtime_error(
+            "sealed SQL artifact is not valid JSON");
+    }
+    const llvm::json::Object* object = parsed->getAsObject();
+    const std::optional<std::int64_t> value =
+        object == nullptr
+        ? std::nullopt
+        : object->getInteger(field);
+    if (!value || *value < 0) {
+        throw std::runtime_error(
+            "sealed SQL artifact field '" + std::string{field}
+            + "' is not an unsigned integer");
+    }
+    return static_cast<std::uint64_t>(*value);
 }
 
 inline void verify_row_codec_modules(
@@ -1168,7 +1206,9 @@ inline void verify_guc_package(
             + "\t" + bioseq::common::sha256_hex(module.content));
     }
     std::ranges::sort(rows);
-    std::string material{"bioseq_sql_core_descriptor/v1\n"};
+    std::string material{
+        "bioseq_sql_core_descriptor\n"
+        "revision=1\n"};
     for (const std::string& row : rows) {
         material += row + "\n";
     }
@@ -1198,7 +1238,9 @@ inline void verify_guc_package(
             + "\t" + bioseq::common::sha256_hex(module.content));
     }
     std::ranges::sort(rows);
-    std::string material{"bioseq_sql_core_artifact_set/v1\n"};
+    std::string material{
+        "bioseq_sql_core_artifact_set\n"
+        "revision=1\n"};
     for (const std::string& row : rows) {
         material += row + "\n";
     }
@@ -1225,7 +1267,8 @@ inline void verify_guc_package(
     std::ostringstream output;
     output
         << "{\n"
-        << "  \"schema\": \"bioseq_sql_core_manifest/v1\",\n"
+        << "  \"schema\": \"bioseq_sql_core_manifest\",\n"
+        << "  \"schema_revision\": 1,\n"
         << "  \"compiler_profile\": \"production\",\n"
         << "  \"clang_version\": " << json_string(clang_version)
         << ",\n"
@@ -1272,7 +1315,8 @@ inline void verify_guc_package(
     std::ostringstream output;
     output
         << "{\n"
-        << "  \"schema\": \"bioseq_sql_core_seal/v1\",\n"
+        << "  \"schema\": \"bioseq_sql_core_seal\",\n"
+        << "  \"schema_revision\": 1,\n"
         << "  \"core_descriptor_sha256\": "
         << json_string(descriptor) << ",\n"
         << "  \"compilation_signature\": "
@@ -1316,11 +1360,15 @@ inline void verify_core_artifacts(
     const std::string seal =
         read_artifact_bytes(command.expected_core_hash);
     if (json_string_field(manifest, "schema")
-            != "bioseq_sql_core_manifest/v1"
+            != "bioseq_sql_core_manifest"
+        || json_unsigned_integer_field(
+               manifest, "schema_revision") != 1U
         || json_string_field(seal, "schema")
-            != "bioseq_sql_core_seal/v1") {
+            != "bioseq_sql_core_seal"
+        || json_unsigned_integer_field(
+               seal, "schema_revision") != 1U) {
         throw std::runtime_error(
-            "FINAL received an incompatible CORE manifest or seal");
+            "FINAL received a non-current CORE manifest or seal");
     }
     const std::string core_signature =
         json_string_field(manifest, "compilation_signature");
@@ -1397,10 +1445,16 @@ inline void verify_support_manifest(
         vector_registry_modules);
     const std::string document = read_artifact_bytes(command.support_manifest);
     const std::string seal = read_artifact_bytes(command.support_seal);
-    if (json_string_field(seal, "schema")
-            != "bioseq_sql_support_seal/v1") {
+    if (json_string_field(document, "schema")
+            != "bioseq_sql_support_manifest"
+        || json_unsigned_integer_field(
+               document, "schema_revision") != 1U
+        || json_string_field(seal, "schema")
+            != "bioseq_sql_support_seal"
+        || json_unsigned_integer_field(
+               seal, "schema_revision") != 1U) {
         throw std::runtime_error(
-            "FINAL received an incompatible SUPPORT manifest or seal");
+            "FINAL received a non-current SUPPORT manifest or seal");
     }
     const std::string actual = json_string_field(
         document, "support_descriptor_sha256");
@@ -1517,10 +1571,25 @@ load_sealed_guc_profile_projection(
             }
             return value->str();
         };
+    const auto unsigned_integer_field =
+        [](const llvm::json::Object& object,
+           std::string_view field,
+           std::string_view role) -> std::uint64_t {
+            const std::optional<std::int64_t> value =
+                object.getInteger(field);
+            if (!value || *value < 0) {
+                throw std::runtime_error(
+                    std::string{role} + " field '"
+                    + std::string{field}
+                    + "' is not an unsigned integer");
+            }
+            return static_cast<std::uint64_t>(*value);
+        };
     require_exact(
         *root,
         {
             "schema",
+            "schema_revision",
             "compiler_profile",
             "clang_version",
             "compilation_signature",
@@ -1537,6 +1606,7 @@ load_sealed_guc_profile_projection(
         *seal,
         {
             "schema",
+            "schema_revision",
             "compiler_profile",
             "compilation_signature",
             "support_descriptor_sha256",
@@ -1546,9 +1616,13 @@ load_sealed_guc_profile_projection(
     const std::string profile_name{
         guc_profile_name(expected_profile)};
     if (string_field(*root, "schema", "SUPPORT manifest")
-            != "bioseq_sql_support_manifest/v1"
+            != "bioseq_sql_support_manifest"
+        || unsigned_integer_field(
+               *root, "schema_revision", "SUPPORT manifest") != 1U
         || string_field(*seal, "schema", "SUPPORT seal")
-            != "bioseq_sql_support_seal/v1"
+            != "bioseq_sql_support_seal"
+        || unsigned_integer_field(
+               *seal, "schema_revision", "SUPPORT seal") != 1U
         || string_field(
                *root, "compiler_profile", "SUPPORT manifest")
             != profile_name
@@ -1602,6 +1676,7 @@ load_sealed_guc_profile_projection(
         *projection,
         {
             "schema",
+            "schema_revision",
             "profile",
             "registry_content_sha256",
             "owner_content_sha256",
@@ -1617,7 +1692,11 @@ load_sealed_guc_profile_projection(
     };
     if (string_field(
             *projection, "schema", "GUC profile projection")
-            != "bioseq_guc_profile_projection/v1"
+            != "bioseq_guc_profile_projection"
+        || unsigned_integer_field(
+               *projection,
+               "schema_revision",
+               "GUC profile projection") != 1U
         || string_field(
                *projection, "profile", "GUC profile projection")
             != profile_name
@@ -1725,7 +1804,7 @@ load_sealed_guc_profile_projection(
         {"generated_module", "content_sha256"},
         "SUPPORT GUC registry");
     const std::string expected_registry_module =
-        "bioseq.sql.generated." + profile_name + ".guc_registry";
+        "bioseq.postgres.sql.generated." + profile_name + ".guc_registry";
     const std::filesystem::path registry_path =
         guc_output_root / profile_name / "guc_registry.cppm";
     if (string_field(
@@ -1777,7 +1856,7 @@ load_sealed_guc_profile_projection(
         const std::string source_module = string_field(
             *owner, "source_module", "SUPPORT GUC owner seal");
         const std::string expected_generated_module =
-            "bioseq.sql.generated." + profile_name + "."
+            "bioseq.postgres.sql.generated." + profile_name + "."
             + owner_name + ".gucs";
         const std::filesystem::path owner_path =
             guc_output_root / profile_name / "owners"
@@ -2268,6 +2347,7 @@ load_sealed_guc_profile_projection(
 
 [[nodiscard]] inline int self_test() {
     try {
+        run_generator_contract_self_tests();
         detail::run_artifact_path_alias_contract_self_test();
         return 0;
     } catch (const std::exception& error) {
@@ -2324,7 +2404,8 @@ load_sealed_guc_profile_projection(
                     std::move(prepared.dependencies)));
             publish_artifact_if_changed(
                 command.stamp,
-                "bioseq_clang_prepare_stamp/v1\n"
+                "bioseq_clang_prepare_stamp\n"
+                "revision=1\n"
                 "authority=" + command.prepare_authority + "\n"
                 "profile=" + command.compiler_profile + "\n"
                 "compilation_signature="
@@ -2375,7 +2456,8 @@ load_sealed_guc_profile_projection(
                 .compiler_profile = command.compiler_profile,
             });
         program.compilation_signature = bioseq::common::sha256_hex(
-            "bioseq_sql_relocatable_prepared_closure/v1\n"
+            "bioseq_sql_relocatable_prepared_closure\n"
+            "revision=1\n"
             + prepared_validation.relocatable_compilation_signature
             + "\n");
         const bool has_guc_annotations = std::ranges::any_of(
@@ -2497,7 +2579,8 @@ load_sealed_guc_profile_projection(
                 command.core_hash_output, core_seal);
             publish_artifact_if_changed(
                 command.stamp,
-                "bioseq_sql_core_stamp/v1\n"
+                "bioseq_sql_core_stamp\n"
+                "revision=1\n"
                 "profile=production\n"
                 "clang_version=" + clang_version + "\n"
                 "compilation_signature="
@@ -2618,14 +2701,15 @@ load_sealed_guc_profile_projection(
         }
         std::ranges::sort(fmgr_seals);
         std::string publication_material =
-            "bioseq_sql_final_closure/v1\n"
+            "bioseq_sql_final_closure\n"
+            "revision=1\n"
             "clang_version=" + clang_version
             + "\ncompilation_signature=" + compilation_signature
             + "\nrelocatable_prepare_signature="
             + prepared_validation.relocatable_compilation_signature;
         if (command.extension_name != "bioseq"
             || command.generated_module_prefix
-                != "bioseq.sql.generated"
+                != "bioseq.postgres.sql.generated"
             || command.fmgr_boundary_module
                 != "bioseq.postgres.support.sql_boundary"
             || command.fmgr_prelude != "bioseq_common") {
@@ -2671,11 +2755,21 @@ load_sealed_guc_profile_projection(
             publication_material +=
                 "fmgr=" + seal + "\n";
         }
-        publish_artifacts(
-            command,
-            artifact.sql,
-            manifest,
-            publication_material);
+        publish_artifact_if_changed(command.output, artifact.sql);
+        publish_artifact_if_changed(command.manifest, manifest);
+        publish_artifact_if_changed(
+            command.stamp,
+            "bioseq_sql_artifact_stamp\n"
+            "revision=1\n"
+            "operation=generate\n"
+            "profile=" + command.compiler_profile
+            + "\nsql_sha256="
+            + bioseq::common::sha256_hex(artifact.sql)
+            + "\nmanifest_sha256="
+            + bioseq::common::sha256_hex(manifest)
+            + "\npublication_closure_sha256="
+            + bioseq::common::sha256_hex(publication_material) + "\n");
+        mark_artifact_complete(command.stamp);
         return 0;
     } catch (const std::exception& error) {
         std::println(stderr, "bioseq_sql_codegen: {}", error.what());

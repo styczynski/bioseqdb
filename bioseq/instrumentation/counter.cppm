@@ -14,7 +14,7 @@
  * iterations' contributions. This is what allows the framework to run
  * counter-bearing benchmarks in parallel without cross-iteration aliasing.
  *
- * **Compile-time gate.** When `configuration_type::enable_counters` is false, the
+ * **Compile-time gate.** When `p_configuration_type::enable_counters` is false, the
  * body of `add_to_counter` collapses away — no TLS lookup, no mutex.
  *
  * **Caveats.**
@@ -104,9 +104,9 @@ inline named_counter& get_named_counter(
 /// Add `delta` to the calling thread's slot of `c`. Safe to call from
 /// any thread concurrently — different threads write to different
 /// slots, all serialised through `c.mu`.
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 inline void add_to_counter(named_counter& counter, std::int64_t delta) noexcept {
-    if constexpr (configuration_type::enable_counters) {
+    if constexpr (p_configuration_type::enable_counters) {
         std::lock_guard<std::mutex> lock(counter.mutex);
         counter.values_by_thread[std::this_thread::get_id()] += delta;
     } else {

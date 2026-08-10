@@ -51,8 +51,7 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-inline constexpr int alignment_stats_base_column_count = 150;
-inline constexpr int alignment_stats_with_simd_column_count = 151;
+inline constexpr int alignment_stats_column_count = 151;
 
 [[nodiscard]] std::string cold_index_preparation_json(
 		const bioseq::pipeline_stats::pipeline_operational_stats& stats)
@@ -245,9 +244,9 @@ inline constexpr int alignment_stats_with_simd_column_count = 151;
 	return result;
 }
 
-template<int column_count>
+template<int p_column_count>
 struct alignment_stats_row_builder {
-	bioseq::postgres::support::pg_datum_list<column_count> row{};
+	bioseq::postgres::support::pg_datum_list<p_column_count> row{};
 	int next_attnum = 1;
 
 	void null_value() noexcept
@@ -330,7 +329,7 @@ struct alignment_stats_row_builder {
 
 	void finish() const
 	{
-		if (next_attnum != column_count + 1) {
+		if (next_attnum != p_column_count + 1) {
 			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_INTERNAL_ERROR,
 				{
@@ -338,7 +337,7 @@ struct alignment_stats_row_builder {
 						"bioseq alignment result mapping is incomplete",
 					.detail = fmt::format(
 						"mapped={} expected={}",
-						next_attnum - 1, column_count),
+						next_attnum - 1, p_column_count),
 				});
 		}
 	}
@@ -414,16 +413,12 @@ validate_alignment_snapshot_environment(
 
 namespace {
 
-template<int column_count>
-[[nodiscard]] bioseq::postgres::support::pg_datum_list<column_count>
+[[nodiscard]] bioseq::postgres::support::pg_datum_list<alignment_stats_column_count>
 make_alignment_stats_row(
 		const alignment_exec::alignment_execution_snapshot& snapshot,
 		bioseq::pipeline_stats::pipeline_stage stage)
 {
-	static_assert(
-		column_count == alignment_stats_base_column_count
-		|| column_count == alignment_stats_with_simd_column_count);
-	alignment_stats_row_builder<column_count> out{};
+	alignment_stats_row_builder<alignment_stats_column_count> out{};
 	const auto& stats = snapshot.pipeline;
 	const auto& environment = stats.environment;
 	const auto& operational = stats.operational;
@@ -636,35 +631,33 @@ make_alignment_stats_row(
 	out.bigint(operational.persisted_pair_index_conversion_calls);        // 148
 	out.bigint(operational.persisted_segment_rebase_calls);           // 149
 	out.jsonb(cold_index_preparation_json(operational));             // 150
-	if constexpr (column_count == alignment_stats_with_simd_column_count) {
-		out.jsonb(simd_execution_stats_json(stats));                   // 151
-	}
+	out.jsonb(simd_execution_stats_json(stats));                     // 151
 	out.finish();
 	return out.row;
 }
 
-template<class value_type>
+template<class p_value>
 struct alignment_optional_traits {
 	static constexpr bool is_optional = false;
 };
 
-template<class value_type>
-struct alignment_optional_traits<std::optional<value_type>> {
+template<class p_value>
+struct alignment_optional_traits<std::optional<p_value>> {
 	static constexpr bool is_optional = true;
-	using contained_type = value_type;
+	using contained_type = p_value;
 };
 
-template<class value_type, std::size_t column_count>
-[[nodiscard]] value_type alignment_stats_field(
-		const bioseq::postgres::support::pg_datum_list<column_count>& raw,
+template<class p_value, std::size_t p_column_count>
+[[nodiscard]] p_value alignment_stats_field(
+		const bioseq::postgres::support::pg_datum_list<p_column_count>& raw,
 		const int attnum) {
-	if constexpr (alignment_optional_traits<value_type>::is_optional) {
+	if constexpr (alignment_optional_traits<p_value>::is_optional) {
 		if (raw.is_null(attnum)) {
 			return std::nullopt;
 		}
 		using contained_type =
-			typename alignment_optional_traits<value_type>::contained_type;
-		return value_type{alignment_stats_field<contained_type>(raw, attnum)};
+			typename alignment_optional_traits<p_value>::contained_type;
+		return p_value{alignment_stats_field<contained_type>(raw, attnum)};
 	} else {
 		if (raw.is_null(attnum)) {
 			bioseq::postgres::support::raise_sql_error(
@@ -676,15 +669,15 @@ template<class value_type, std::size_t column_count>
 				});
 		}
 		const Datum datum = raw.at(attnum).raw();
-		if constexpr (std::is_same_v<value_type, bool>) {
+		if constexpr (std::is_same_v<p_value, bool>) {
 			return DatumGetBool(datum);
-		} else if constexpr (std::is_same_v<value_type, std::int32_t>) {
+		} else if constexpr (std::is_same_v<p_value, std::int32_t>) {
 			return DatumGetInt32(datum);
-		} else if constexpr (std::is_same_v<value_type, std::int64_t>) {
+		} else if constexpr (std::is_same_v<p_value, std::int64_t>) {
 			return DatumGetInt64(datum);
-		} else if constexpr (std::is_same_v<value_type, Oid>) {
+		} else if constexpr (std::is_same_v<p_value, Oid>) {
 			return DatumGetObjectId(datum);
-		} else if constexpr (std::is_same_v<value_type, std::string>) {
+		} else if constexpr (std::is_same_v<p_value, std::string>) {
 			const auto* value =
 				reinterpret_cast<const text*>(DatumGetPointer(datum));
 			if (value == nullptr) {
@@ -697,7 +690,7 @@ template<class value_type, std::size_t column_count>
 				VARDATA_ANY(value),
 				static_cast<std::size_t>(VARSIZE_ANY_EXHDR(value))};
 		} else if constexpr (
-				std::is_same_v<value_type, bioseq::postgres::support::jsonb_value>) {
+				std::is_same_v<p_value, bioseq::postgres::support::jsonb_value>) {
 			char* encoded = bioseq::postgres::support::invoke_pg_as_cpp(
 				[datum] {
 					return DatumGetCString(
@@ -709,7 +702,7 @@ template<class value_type, std::size_t column_count>
 			return bioseq::postgres::support::jsonb_value{std::move(owned)};
 		} else {
 			static_assert(
-				std::is_same_v<value_type, void>,
+				std::is_same_v<p_value, void>,
 				"unsupported alignment SQL result field type");
 		}
 	}
@@ -867,24 +860,16 @@ template<class value_type, std::size_t column_count>
 	.persisted_segment_rebase_calls = alignment_stats_field<std::int64_t>(raw, 149), \
 	.cold_index_preparation = alignment_stats_field<bioseq::postgres::support::jsonb_value>(raw, 150),
 
-template<int column_count>
 [[nodiscard]] auto make_owned_alignment_stats_row(
 		const alignment_exec::alignment_execution_snapshot& snapshot,
 		const bioseq::pipeline_stats::pipeline_stage stage) {
-	auto raw = make_alignment_stats_row<column_count>(snapshot, stage);
-	if constexpr (column_count == alignment_stats_base_column_count) {
-		return bioseq::postgres::sql_rows::alignment_execution_stats_row{
-			BIOSEQ_ALIGNMENT_COMMON_FIELDS(raw)
-		};
-	} else {
-		static_assert(column_count == alignment_stats_with_simd_column_count);
-		return bioseq::postgres::sql_rows::alignment_execution_stats_with_simd_row{
-			BIOSEQ_ALIGNMENT_COMMON_FIELDS(raw)
-			.simd_execution_stats =
-				alignment_stats_field<bioseq::postgres::support::jsonb_value>(
-					raw, 151),
-		};
-	}
+	auto raw = make_alignment_stats_row(snapshot, stage);
+	return bioseq::postgres::sql_rows::alignment_execution_stats_row{
+		BIOSEQ_ALIGNMENT_COMMON_FIELDS(raw)
+		.simd_execution_stats =
+			alignment_stats_field<bioseq::postgres::support::jsonb_value>(
+				raw, 151),
+	};
 }
 
 #undef BIOSEQ_ALIGNMENT_COMMON_FIELDS
@@ -910,8 +895,7 @@ last_alignment_execution_stats() {
 				stage_no < bioseq::pipeline_stats::k_pipeline_stage_count;
 				++stage_no) {
 			rows.push_back(
-				make_owned_alignment_stats_row<
-					alignment_stats_base_column_count>(
+				make_owned_alignment_stats_row(
 						snapshot,
 						static_cast<
 							bioseq::pipeline_stats::pipeline_stage>(
@@ -920,34 +904,6 @@ last_alignment_execution_stats() {
 	}
 	return bioseq::postgres::support::table_rows<
 		bioseq::postgres::sql_rows::alignment_execution_stats_row>{
-			std::move(rows)};
-}
-
-bioseq::postgres::support::table_rows<
-	bioseq::postgres::sql_rows::alignment_execution_stats_with_simd_row>
-last_alignment_execution_stats_with_simd() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	std::vector<
-		bioseq::postgres::sql_rows::alignment_execution_stats_with_simd_row> rows;
-	if (last_alignment_execution_snapshot.has_value()) {
-		const auto& snapshot = *last_alignment_execution_snapshot;
-		(void)validate_alignment_snapshot_environment(snapshot);
-		rows.reserve(bioseq::pipeline_stats::k_pipeline_stage_count);
-		for (std::size_t stage_no = 0;
-				stage_no < bioseq::pipeline_stats::k_pipeline_stage_count;
-				++stage_no) {
-			rows.push_back(
-				make_owned_alignment_stats_row<
-					alignment_stats_with_simd_column_count>(
-						snapshot,
-						static_cast<
-							bioseq::pipeline_stats::pipeline_stage>(
-								stage_no)));
-		}
-	}
-	return bioseq::postgres::support::table_rows<
-		bioseq::postgres::sql_rows::alignment_execution_stats_with_simd_row>{
 			std::move(rows)};
 }
 

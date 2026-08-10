@@ -1,7 +1,0 @@
-select
-  sum(time.duration.ns) as Time,
-  count()
-group by
-  path
-format
-  tree

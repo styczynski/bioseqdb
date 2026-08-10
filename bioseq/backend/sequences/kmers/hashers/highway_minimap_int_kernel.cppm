@@ -103,7 +103,7 @@ public:
 	// Highway sibling of `scramble`: the exact same seven-step integer mix,
 	// applied to every canonical-kmer lane before two-stack window selection.
 	// Keeping this beside the scalar definition makes scalar/SIMD drift visible
-	// and removes the old per-emitted-minimizer scalar hash tail.
+	// and avoids a per-emitted-minimizer scalar hash tail.
 	template<class p_simd_tag>
 	[[nodiscard, gnu::always_inline]] static HWY_INLINE hn::Vec<p_simd_tag> scramble_simd(
 		p_simd_tag simd_tag,

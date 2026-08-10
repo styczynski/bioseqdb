@@ -55,7 +55,6 @@ import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif
-import bioseq.postgres.support.runtime_test_counters;
 import bioseq.postgres.support.sql_catalog_entities;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
@@ -109,10 +108,10 @@ namespace {
 		});
 }
 
-template<class result_type>
-[[nodiscard]] result_type unowned_projection_result(
+template<class p_result>
+[[nodiscard]] p_result unowned_projection_result(
 		const std::string_view routine_name,
-		result_type fallback)
+		p_result fallback)
 {
 	bioseq_log<logging_level::debug>(
 		"[bioseq] pg: {}() direct call without a custom-scan rewrite",

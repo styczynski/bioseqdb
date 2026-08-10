@@ -2,7 +2,7 @@
  *
  * storage/sequence_storage.cppm
  *
- * Phase A (DOC0260) length-bucketed sub-table sharding for sequence
+ * Length-bucketed sub-table sharding for sequence
  * storage. Owns:
  *   - the locator stub format (a fixed-size bioseq::pg_types::seq-shaped varlena that
  *     the main columnar relation stores in place of the full sequence);
@@ -97,20 +97,20 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
-import bioseq.storage.size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
+import bioseq.common.seqan_adapter;  // ceil_log2 used in letters_per_unit_for
+import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-// DOC0260 §12.1 — the PG-free bucket math + sequence_locator POD live in their own
+// The PG-free bucket math and sequence_locator value live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.
 export import bioseq.storage.layout;
 
 static_assert(__cplusplus >= 202302L,
-              "DOC0260 requires C++23-or-later (project default: C++26)");
+              "sequence storage requires C++23-or-later (project default: C++26)");
 
 namespace storage_manager_entity_handles =
     bioseq::sql::generated::core::
@@ -198,9 +198,9 @@ namespace internal_catalog_detail {
 
 } // namespace internal_catalog_detail
 
-inline constexpr std::int16_t kSequenceSourceStateUnpublished = 0;
-inline constexpr std::int16_t kSequenceSourceStateReady = 1;
-inline constexpr std::int16_t kSequenceSourceStateInvalid = 2;
+inline constexpr std::int16_t k_sequence_source_state_unpublished = 0;
+inline constexpr std::int16_t k_sequence_source_state_ready = 1;
+inline constexpr std::int16_t k_sequence_source_state_invalid = 2;
 
 [[noreturn]] inline void storage_error_as_cpp(
         int sqlstate, std::string message) {
@@ -217,19 +217,19 @@ inline constexpr std::int16_t kSequenceSourceStateInvalid = 2;
 [[nodiscard]] constexpr bool sequence_source_state_transition_allowed(
         const std::int16_t current,
         const std::int16_t requested) noexcept {
-    return (current == kSequenceSourceStateUnpublished
-            && (requested == kSequenceSourceStateReady
-                || requested == kSequenceSourceStateInvalid))
-        || (current == kSequenceSourceStateReady
-            && requested == kSequenceSourceStateInvalid);
+    return (current == k_sequence_source_state_unpublished
+            && (requested == k_sequence_source_state_ready
+                || requested == k_sequence_source_state_invalid))
+        || (current == k_sequence_source_state_ready
+            && requested == k_sequence_source_state_invalid);
 }
 
 static_assert(sequence_source_state_transition_allowed(
-    kSequenceSourceStateUnpublished, kSequenceSourceStateReady));
+    k_sequence_source_state_unpublished, k_sequence_source_state_ready));
 static_assert(sequence_source_state_transition_allowed(
-    kSequenceSourceStateReady, kSequenceSourceStateInvalid));
+    k_sequence_source_state_ready, k_sequence_source_state_invalid));
 static_assert(!sequence_source_state_transition_allowed(
-    kSequenceSourceStateInvalid, kSequenceSourceStateReady));
+    k_sequence_source_state_invalid, k_sequence_source_state_ready));
 
 /// Exact PostgreSQL-owned identity record for one immutable sequence source.
 /// The checksum is the CRC-64/ECMA-182 of decoded logical symbols, calculated
@@ -249,7 +249,7 @@ struct sequence_source_version_row {
     std::uint8_t storage_unit_byte_width = 0;
     std::uint16_t padding_letters = 0;
     std::uint64_t source_content_checksum = 0;
-    std::int16_t state = kSequenceSourceStateUnpublished;
+    std::int16_t state = k_sequence_source_state_unpublished;
 };
 
 /// Optional observational counters for one immutable source-catalog lookup.
@@ -265,9 +265,9 @@ struct sequence_source_lookup_telemetry {
 
 namespace source_version_detail {
 
-template<auto Member>
+template<auto p_member>
 inline constexpr AttrNumber source_attribute =
-    sequence_source_version_codec::attribute_number<Member>();
+    sequence_source_version_codec::attribute_number<p_member>();
 
 inline constexpr AttrNumber source_epoch =
     source_attribute<&sequence_source_version_catalog_row::source_epoch>;
@@ -410,8 +410,8 @@ inline void validate_catalog_schema(Relation relation) {
 }
 
 /// Validate the exact source-version primary index that is already open for a
-/// cold reader.  The same descriptor is used by the ordered scan, avoiding the
-/// former validate-all-indexes followed by primary-index reopen sequence.
+/// cold reader. The ordered scan reuses this descriptor, so validation and
+/// reading share one open primary-index relation.
 inline void validate_bound_read_catalog_contract(
         Relation relation,
         Relation primary,
@@ -497,7 +497,7 @@ inline void validate_bound_read_catalog_contract(
     if (locator_version_value != sequence_locator_payload_version
         || bucket_value < 0
         || bucket_value > (std::numeric_limits<std::uint8_t>::max)()) {
-        source_catalog_error("locator version or bucket is outside its wire domain");
+        source_catalog_error("locator revision or bucket is outside its wire domain");
     }
     row.locator.payload_version = static_cast<std::uint8_t>(locator_version_value);
     row.locator.bucket_index = static_cast<std::uint8_t>(bucket_value);
@@ -547,9 +547,9 @@ inline void validate_bound_read_catalog_contract(
     row.source_content_checksum =
         bigint_bits(catalog.source_content_checksum);
     row.state = catalog.state;
-    if (row.state != kSequenceSourceStateUnpublished
-        && row.state != kSequenceSourceStateReady
-        && row.state != kSequenceSourceStateInvalid) {
+    if (row.state != k_sequence_source_state_unpublished
+        && row.state != k_sequence_source_state_ready
+        && row.state != k_sequence_source_state_invalid) {
         source_catalog_error("source state is outside its state-machine domain");
     }
     return row;
@@ -604,12 +604,12 @@ inline void validate_bound_read_catalog_contract(
 
 } // namespace source_version_detail
 
-// DOC0383 P5 — the descriptor catalog deliberately permits nullable payload
-// locator attributes and owns two partial indexes, so the legacy eight-column
-// sidecar validator cannot describe it.  Keep this cold schema authority next
-// to the existing PostgreSQL-owned sequence-source catalog contracts; mapped
-// image/lifecycle code consumes the exported entry point without importing a
-// second tuple-shape authority.
+// The descriptor catalog owns required relation locator attributes and two
+// partial indexes, so the generic eight-column sidecar validator cannot
+// describe it. Keep this cold schema authority next to the existing
+// PostgreSQL-owned sequence-source catalog contracts; generation-image
+// lifecycle code consumes the exported entry point without importing a second
+// tuple-shape authority.
 namespace minimizer_generation_catalog_detail {
 
 enum class default_kind : std::uint8_t {
@@ -623,12 +623,12 @@ enum class default_kind : std::uint8_t {
 inline constexpr std::array<
     default_kind,
     minimizer_generation_storage_codec::fields_count>
-kStorageDefaults{};
+k_storage_defaults{};
 
 inline constexpr std::array<
     default_kind,
     minimizer_generation_reaper_codec::fields_count>
-kReaperDefaults{{
+k_reaper_defaults{{
     default_kind::none,
     default_kind::zero_int4,
     default_kind::zero_int2,
@@ -637,7 +637,7 @@ kReaperDefaults{{
 }};
 
 inline constexpr std::array<std::string_view, 13>
-kStorageCheckExpressions{{
+k_storage_check_expressions{{
     "database_oid <> 0",
     "tablespace_oid <> 0",
     "main_relfilenode <> 0",
@@ -646,31 +646,19 @@ kStorageCheckExpressions{{
     "index_name = 'minimizers_per_fragment'",
     "query_key >= 0",
     "generation_id > 0",
-    "provider IN (0, 1)",
+    "provider = 0",
     "image_bytes >= 4096",
     "state IN (1, 2)",
-    "((provider = 0 "
-        "AND payload_relation_oid IS NOT NULL "
-        "AND payload_database_oid IS NOT NULL "
-        "AND payload_tablespace_oid IS NOT NULL "
-        "AND payload_relfilenode IS NOT NULL "
-        "AND payload_relation_name IS NOT NULL "
-        "AND payload_relation_oid <> 0 "
+    "(payload_relation_oid <> 0 "
         "AND payload_database_oid = database_oid "
         "AND payload_tablespace_oid <> 0 "
-        "AND payload_relfilenode <> 0) "
-      "OR (provider = 1 "
-        "AND payload_relation_oid IS NULL "
-        "AND payload_database_oid IS NULL "
-        "AND payload_tablespace_oid IS NULL "
-        "AND payload_relfilenode IS NULL "
-        "AND payload_relation_name IS NULL))",
+        "AND payload_relfilenode <> 0)",
     "((state = 1 AND retire_full_xid IS NULL) "
       "OR (state = 2 AND retire_full_xid IS NOT NULL))",
 }};
 
 inline constexpr std::array<std::string_view, 4>
-kReaperCheckExpressions{{
+k_reaper_check_expressions{{
     "database_oid <> 0",
     "tablespace_root_ordinal >= 0",
     "shard_ordinal BETWEEN 0 AND 255",
@@ -729,15 +717,15 @@ kReaperCheckExpressions{{
     return false;
 }
 
-template <std::size_t AttributeCount>
+template <std::size_t p_attribute_count>
 inline void validate_relation_shape(
         Relation relation,
         const Oid expected_relation_oid,
         const std::string_view expected_name,
         const std::array<
             bioseq::postgres::support::row_descriptor_field,
-            AttributeCount>& attributes,
-        const std::array<default_kind, AttributeCount>& defaults,
+            p_attribute_count>& attributes,
+        const std::array<default_kind, p_attribute_count>& defaults,
         const std::uint16_t expected_check_count) {
     if (relation == nullptr
         || RelationGetRelid(relation) != expected_relation_oid
@@ -760,11 +748,11 @@ inline void validate_relation_shape(
     for (std::size_t index = 0; index < attributes.size(); ++index) {
         const bioseq::postgres::support::row_descriptor_field& expected =
             attributes[index];
-        const default_kind default_kind = defaults[index];
+        const default_kind expected_default_kind = defaults[index];
         const Form_pg_attribute attribute = TupleDescAttr(
             descriptor, expected.attribute_number - 1);
         const bool expects_default =
-            default_kind != default_kind::none;
+            expected_default_kind != default_kind::none;
         if (attribute->attnum != expected.attribute_number
             || attribute->attisdropped
             || attribute->attinhcount != 0
@@ -838,18 +826,18 @@ inline void validate_relation_shape(
     });
 }
 
-template <std::size_t CheckCount>
+template <std::size_t p_check_count>
 inline void validate_check_expressions(
         Relation relation,
         const std::string_view relation_name,
-        const std::array<std::string_view, CheckCount>& expected_checks) {
+        const std::array<std::string_view, p_check_count>& expected_checks) {
     const TupleConstr* constraints = RelationGetDescr(relation)->constr;
     if (constraints == nullptr
         || constraints->num_check != expected_checks.size()) {
         contract_error(relation_name, "exact CHECK expression count");
     }
-    std::array<Node*, CheckCount> expected_nodes{};
-    std::array<bool, CheckCount> matched{};
+    std::array<Node*, p_check_count> expected_nodes{};
+    std::array<bool, p_check_count> matched{};
     for (std::size_t expected_index = 0;
          expected_index < expected_checks.size(); ++expected_index) {
         expected_nodes[expected_index] = analyze_expected_check_expression(
@@ -911,15 +899,15 @@ inline void validate_check_expressions(
         && DatumGetInt16(constant->constvalue) == expected_state;
 }
 
-template <std::size_t KeyCount>
+template <std::size_t p_key_count>
 [[nodiscard]] inline bool exact_index(
         Relation index,
         const Oid expected_table_oid,
         const std::string_view expected_name,
         const bool expected_primary,
         const bool expected_unique,
-        const std::array<AttrNumber, KeyCount>& keys,
-        const std::array<Oid, KeyCount>& key_types,
+        const std::array<AttrNumber, p_key_count>& keys,
+        const std::array<Oid, p_key_count>& key_types,
         const std::optional<std::int16_t> expected_state) {
     const Form_pg_index shape = index == nullptr ? nullptr : index->rd_index;
     if (shape == nullptr
@@ -1103,7 +1091,7 @@ inline void validate_reaper_indexes(Relation reaper) {
 
 } // namespace minimizer_generation_catalog_detail
 
-/// Fail closed when either installation-local DOC0383 authority drifts.  This
+/// Fail closed when either installation-local catalog authority drifts. This
 /// is intentionally a cold publication/open guard, not a per-anchor check.
 inline void validate_minimizer_generation_storage_catalogs_pg() {
     using namespace minimizer_generation_catalog_detail;
@@ -1137,18 +1125,18 @@ inline void validate_minimizer_generation_storage_catalogs_pg() {
     validate_relation_shape(
         storage, storage_oid, "minimizer_generation_storage",
         minimizer_generation_storage_codec::expected_descriptor,
-        kStorageDefaults, 13);
+        k_storage_defaults, 13);
     validate_check_expressions(
         storage, "minimizer_generation_storage",
-        kStorageCheckExpressions);
+        k_storage_check_expressions);
     validate_storage_indexes(storage);
     validate_relation_shape(
         reaper, reaper_oid, "minimizer_generation_reaper_state",
         minimizer_generation_reaper_codec::expected_descriptor,
-        kReaperDefaults, 4);
+        k_reaper_defaults, 4);
     validate_check_expressions(
         reaper, "minimizer_generation_reaper_state",
-        kReaperCheckExpressions);
+        k_reaper_check_expressions);
     validate_reaper_indexes(reaper);
     bioseq::postgres::support::invoke_pg_as_cpp(
         [reaper] { relation_close(reaper, AccessShareLock); });
@@ -1160,7 +1148,7 @@ class pending_sequence_source;
 
 /// PostgreSQL catalog operations for immutable source epochs. Every lookup
 /// accepts the caller's snapshot; no backend-global or SnapshotSelf read is
-/// allowed in a reader proof.
+/// allowed in a validated reader.
 struct sequence_source_version_manager {
     [[nodiscard]] static std::uint64_t allocate_epoch() {
         const Oid namespace_oid =
@@ -1252,7 +1240,7 @@ struct sequence_source_version_manager {
             || input.column_attno <= 0
             || input.storage_unit_byte_width == 0
             || input.storage_unit_byte_width > 0x0Fu
-            || input.state != kSequenceSourceStateUnpublished
+            || input.state != k_sequence_source_state_unpublished
             || (input.locator.fragment_count == 0
                 ? (OidIsValid(input.fragment_relid)
                     || input.fragment_storage_id != 0
@@ -1353,7 +1341,7 @@ struct sequence_source_version_manager {
         if (HeapTupleIsValid(tuple)) {
             sequence_source_version_row row = source_version_detail::deform(
                 tuple, RelationGetDescr(relation));
-            if (!require_ready || row.state == kSequenceSourceStateReady) {
+            if (!require_ready || row.state == k_sequence_source_state_ready) {
                 result = row;
             }
         }
@@ -1377,8 +1365,8 @@ private:
         if (epoch == 0
             || epoch > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::int64_t>::max)())
-            || (requested_state != kSequenceSourceStateReady
-                && requested_state != kSequenceSourceStateInvalid)) {
+            || (requested_state != k_sequence_source_state_ready
+                && requested_state != k_sequence_source_state_invalid)) {
             source_version_detail::source_catalog_error(
                 "source state transition input is invalid");
         }
@@ -1464,7 +1452,7 @@ private:
     }
 
     static void publish_ready(std::uint64_t epoch) {
-        set_state(epoch, kSequenceSourceStateReady);
+        set_state(epoch, k_sequence_source_state_ready);
     }
 
     friend class pending_sequence_source;
@@ -1474,8 +1462,8 @@ public:
     static void invalidate_epoch(std::uint64_t epoch) {
         if (epoch == 0) return;
         const auto row = lookup(epoch, SnapshotSelf, /*require_ready=*/false);
-        if (!row || row->state == kSequenceSourceStateInvalid) return;
-        set_state(epoch, kSequenceSourceStateInvalid);
+        if (!row || row->state == k_sequence_source_state_invalid) return;
+        set_state(epoch, k_sequence_source_state_invalid);
     }
 
     static void delete_for_main(
@@ -1553,7 +1541,7 @@ public:
             ObjectIdGetDatum(fragment_relation_oid));
         // DROP/invalidation is not a timed path. A validated heap scan avoids
         // trusting a missing, renamed, partial, or otherwise corrupted
-        // secondary index to decide whether READY epochs survive a drop.
+        // secondary index to decide whether ready epochs survive a drop.
         SysScanDesc scan = systable_beginscan(
             relation, InvalidOid, false,
             SnapshotSelf, 1, &key);
@@ -1561,11 +1549,11 @@ public:
         while (HeapTupleIsValid(tuple = systable_getnext(scan))) {
             const sequence_source_version_row current =
                 source_version_detail::deform(tuple, RelationGetDescr(relation));
-            if (current.state == kSequenceSourceStateInvalid) continue;
+            if (current.state == k_sequence_source_state_invalid) continue;
             sequence_source_version_codec::update update{};
             update.set<
                 &sequence_source_version_catalog_row::state>(
-                    kSequenceSourceStateInvalid);
+                    k_sequence_source_state_invalid);
             HeapTuple updated = update.modify(
                 tuple, RelationGetDescr(relation));
             CatalogTupleUpdate(relation, &tuple->t_self, updated);
@@ -1577,13 +1565,15 @@ public:
     }
 };
 
-template<class, std::size_t, std::size_t>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 struct sequence_storage_manager;
 struct sequence_stream_writer;
 
 /// Move-only publication authority. Fragment/catalog creation returns this
-/// token in UNPUBLISHED state; only the caller that has appended the parent
-/// row may consume it to publish READY.
+/// token in unpublished state; only the caller that has appended the parent
+/// row may consume it to publish the ready state.
 class pending_sequence_source {
 private:
     sequence_locator locator_{};
@@ -1592,7 +1582,9 @@ private:
     explicit pending_sequence_source(sequence_locator locator) noexcept
         : locator_(locator), pending_(locator.source_epoch != 0) {}
 
-    template<class, std::size_t, std::size_t>
+    template<class p_length_type,
+             std::size_t p_bucket_minimum_length_bits,
+             std::size_t p_bucket_maximum_length_bits>
     friend struct sequence_storage_manager;
     friend struct sequence_stream_writer;
 
@@ -1620,7 +1612,7 @@ public:
 
     /// Consume a speculative-insert authority whose parent row was rejected.
     /// This is intentionally token-owned: the losing path cannot retain a raw
-    /// epoch and later manufacture READY publication authority.
+    /// epoch and later manufacture ready-state publication authority.
     void invalidate_without_parent_row() {
         if (!pending_) {
             storage_error_as_cpp(
@@ -1636,22 +1628,21 @@ static_assert(!std::is_move_assignable_v<pending_sequence_source>,
               "A pending source authority must never be overwritten by move assignment.");
 
 // ---------------------------------------------------------------------------
-// DOC0371 — Phase C v3 locator stub format. A 56-byte bioseq::pg_types::seq-shaped varlena
-// that lives in the main columnar relation in place of the full sequence
-// payload. Replaces the Phase A 40-byte v1 stub (no on-disk back-compat —
-// DOC0264 R0 / §1.1#10).
+// Current locator stub representation. A 56-byte bioseq::pg_types::seq-shaped
+// varlena lives in the main columnar relation in place of the full sequence
+// payload. No alternate on-disk representation is accepted.
 // ---------------------------------------------------------------------------
 
-// DOC0260 §12.1 + DOC0264 §5 — `sequence_locator_payload_version` and the `sequence_locator` POD
+// `sequence_locator_payload_version` and the `sequence_locator` value
 // (with its 32-byte / offset static_asserts) live in the PG-free
 // `bioseq_bucket_math` module so the unit-test TU can link them; they are
 // re-exported above via `export import bioseq_bucket_math`, so every use of
 // `sequence_locator` / `sequence_locator_payload_version` below resolves unchanged.
 
-constexpr std::size_t kLocatorStubVarlenaBytes =
+constexpr std::size_t k_locator_stub_varlena_bytes =
     bioseq::pg_types::seq::header_bytes() + sizeof(sequence_locator);
-static_assert(kLocatorStubVarlenaBytes == 56,
-              "DOC0371: Phase C v3 locator stub must be exactly 56 bytes.");
+static_assert(k_locator_stub_varlena_bytes == 56,
+              "sequence locator stub must be exactly 56 bytes");
 
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const bioseq::pg_types::seq* hdr) noexcept {
@@ -1675,18 +1666,18 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
                "is_locator_stub(hdr) first.",
                static_cast<unsigned>(hdr->storage_unit_byte_width));
     }
-    if (VARSIZE(hdr) != kLocatorStubVarlenaBytes) {
+    if (VARSIZE(hdr) != k_locator_stub_varlena_bytes) {
         bioseq_log<logging_level::error, logging_target::postgres>(
                "bioseq storage: locator stub size mismatch (got {}, expected {})",
                static_cast<unsigned long long>(VARSIZE(hdr)),
-               static_cast<unsigned long long>(kLocatorStubVarlenaBytes));
+               static_cast<unsigned long long>(k_locator_stub_varlena_bytes));
     }
     const auto payload = std::span<std::byte const>{
         reinterpret_cast<std::byte const*>(hdr->data), sizeof(sequence_locator)};
     const auto decoded = decode_sequence_locator_payload(payload);
     if (!decoded.has_value()) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-               "bioseq storage: locator payload is not canonical v3 data");
+               "bioseq storage: locator payload is not canonical revision-3 data");
     }
     return *decoded;
 }
@@ -1829,23 +1820,24 @@ inline void encode_locator_into_stub(
         || loc.payload_version != sequence_locator_payload_version || loc.source_epoch == 0
         || loc.reserved_16 != 0 || loc.reserved_32 != 0) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: locator stub input is outside the v3 wire domain");
+            "bioseq storage: locator stub input is outside the revision-3 wire domain");
     }
-    std::memset(dst, 0, kLocatorStubVarlenaBytes);
-    SET_VARSIZE(dst, kLocatorStubVarlenaBytes);
+    std::memset(dst, 0, k_locator_stub_varlena_bytes);
+    SET_VARSIZE(dst, k_locator_stub_varlena_bytes);
     dst->alphabet_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
     dst->storage_unit_byte_width = static_cast<std::uint8_t>(
         sequence_locator_stub_width_marker | logical_byte_width);
     dst->padding_letters = padding_letters;
-    constexpr sequence_size_t kBpSizeFieldMax =
+    constexpr sequence_size_t k_base_pair_size_field_maximum =
         static_cast<sequence_size_t>(std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max());
     dst->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(
-        std::min<sequence_size_t>(total_bp_size, kBpSizeFieldMax));
+        std::min<sequence_size_t>(
+            total_bp_size, k_base_pair_size_field_maximum));
     const auto payload = std::span<std::byte>{
         reinterpret_cast<std::byte*>(dst->data), sizeof(sequence_locator)};
     if (!encode_sequence_locator_payload(payload, loc)) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: failed to encode canonical v3 locator payload");
+            "bioseq storage: failed to encode canonical revision-3 locator payload");
     }
 }
 
@@ -1859,22 +1851,23 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
     const sequence_locator& loc)
 {
     bioseq::postgres::support::memory_context_scope ctx_guard{mctx};
-    bioseq::pg_types::seq* dst = static_cast<bioseq::pg_types::seq*>(palloc0(kLocatorStubVarlenaBytes));
+    bioseq::pg_types::seq* dst = static_cast<bioseq::pg_types::seq*>(
+        palloc0(k_locator_stub_varlena_bytes));
     encode_locator_into_stub(dst, logical_alphabet_code, logical_byte_width,
                              padding_letters, total_bp_size, loc);
     return dst;
 }
 
 // ---------------------------------------------------------------------------
-// §4 — Bucket math. The consteval threshold builder, len_log2_for_size, the
+// Bucket math. The consteval threshold builder, len_log2_for_size, the
 // branchless L->bucket LUT and sequence_bucket_index now live in the PG-free
-// `bioseq_bucket_math` module (DOC0260 §12.1) and are re-exported above via
+// `bioseq_bucket_math` module and are re-exported above via
 // `export import bioseq_bucket_math`. The template below delegates to them.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// §7 — Per-scan / per-batch relation cache. Owned by column_scan_descriptor,
-// index_fetch_state, column_write_state and TupleDispatchBuffer.
+// Per-scan / per-batch relation cache. Owned by column_scan_descriptor,
+// index_fetch_state, column_write_state and tuple_dispatch_buffer.
 // Always allocated separately (`palloc(sizeof(seq_caches)) + placement-new`)
 // because std::map's non-standard-layout would otherwise spoil the surrounding
 // POD struct's std::is_standard_layout_v guarantee.
@@ -1945,7 +1938,7 @@ struct seq_caches {
         storage_type entries_{};
     };
 
-    // DOC0260 R14 — sorted-vector map rather than std::map: no per-node
+    // A sorted-vector map avoids per-node allocation, preserves deterministic
     // allocation, deterministic sorted iteration order for close_all, and
     // cache-friendly for the typical <50-entry working set. The hot paths only
     // do find / operator[] / clear, and never hold an `entry&` across an insert.
@@ -2009,12 +2002,13 @@ void destroy_seq_caches(seq_caches* caches) noexcept;
 
 void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
 
-// DOC0286 §4.3 — public alias for the per-fragment storage-unit count
-// (detail::kFragmentStorageUnits below aliases this so the two never drift).
+// Public alias for the per-fragment storage-unit count
+// (detail::k_fragment_storage_units below aliases this so the two never drift).
 // `bioseq.load`'s streaming sink uses it to size fragment payloads.
-inline constexpr std::size_t kSequenceFragmentStorageUnits = std::size_t{1024};
+inline constexpr std::size_t k_sequence_fragment_storage_units =
+    std::size_t{1024};
 
-// DOC0286 §4.4 — flush every open sub-table write state owned by `caches` so an
+// Flush every open sub-table write state owned by `caches` so an
 // in-statement index scan (e.g. the batched update_index `bioseq.load` runs
 // after streaming) sees the just-written fragment rows. Unlike `close_all`,
 // this only flushes pending columnar writes (it does NOT pop/close the write
@@ -2022,11 +2016,11 @@ inline constexpr std::size_t kSequenceFragmentStorageUnits = std::size_t{1024};
 void flush_seq_cache_write_states(seq_caches* caches,
                                   SubTransactionId current_sub_xid);
 
-/// DOC0286 §4.3 — bounded streaming fragment writer for one sequence. Accepts
+/// Bounded streaming fragment writer for one sequence. Accepts
 /// column-native packed bytes, writes full fragment rows (each
-/// `kSequenceFragmentStorageUnits` storage units) as its internal buffer fills,
+/// `k_sequence_fragment_storage_units` storage units) as its internal buffer fills,
 /// retains only the final partial fragment until `finish`, and returns the
-/// Phase-C `sequence_locator`. Peak extra memory is one ≤8 KiB fragment buffer + one
+/// current `sequence_locator`. Peak extra memory is one ≤8 KiB fragment buffer + one
 /// `bioseq::pg_types::seq` fragment row, so a >MaxAllocSize record never materialises as one
 /// buffer. Writes to ONE shard; a single sequence exceeding the sub-table cap
 /// raises ERROR (transaction rollback cleans the partial rows).
@@ -2065,9 +2059,9 @@ private:
     Relation            shard_ = nullptr;
     column_write_state* write_state_ = nullptr;
 
-    std::size_t         frag_payload_bytes_ = 0;  // kSequenceFragmentStorageUnits * byte_width
+    std::size_t         frag_payload_bytes_ = 0;  // k_sequence_fragment_storage_units * byte_width
     std::size_t         frag_varlena_bytes_ = 0;  // header + payload
-    sequence_size_t     frag_bp_ = 0;             // kSequenceFragmentStorageUnits * letters_per_unit
+    sequence_size_t     frag_bp_ = 0;             // k_sequence_fragment_storage_units * letters_per_unit
     std::vector<std::uint8_t> buffer_;            // < frag_payload_bytes_ leftover
     std::uint64_t       first_sub_row_no_ = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t       last_sub_row_no_  = std::numeric_limits<std::uint64_t>::max();
@@ -2080,9 +2074,9 @@ private:
 
 }  // namespace bioseq::storage
 
-// DOC0269 — Phase A required exporting this block so importers (notably
+// Export this block so importers, notably
 // access_method.cppm) can name `sequence_storage_manager`,
-// `bioseq_default_storage_manager`, the §7.10 sidecar I/O helpers, and
+// `bioseq_default_storage_manager`, the sidecar I/O helpers, and
 // `read_max_sub_table_cap_bytes`. Without the `export` keyword on this
 // re-opening of `namespace bioseq::storage`, the declarations land in the
 // module purview but are not exported, so the names are present in the
@@ -2091,7 +2085,7 @@ private:
 export namespace bioseq::storage {
 
 // ---------------------------------------------------------------------------
-// §6 — Catalog access shims. These call into storage_metadata which owns the
+// Catalog access shims. These call into storage_metadata which owns the
 // bioseq_internal.seq_sub_table catalog table.
 // ---------------------------------------------------------------------------
 
@@ -2119,16 +2113,18 @@ format_sidecar_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                     std::int32_t shard_idx);
 
 // ---------------------------------------------------------------------------
-// §7.1 — sequence_storage_manager template.
+// sequence_storage_manager template.
 // ---------------------------------------------------------------------------
 
-template<class p_len_t,
-         std::size_t p_bucket_min_len_bits,
-         std::size_t p_bucket_max_len_bits>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 struct sequence_storage_manager {
-    using len_t = p_len_t;
-    static constexpr std::size_t bucket_min_len_bits = p_bucket_min_len_bits;
-    static constexpr std::size_t bucket_max_len_bits = p_bucket_max_len_bits;
+    using len_t = p_length_type;
+    static constexpr std::size_t bucket_min_len_bits =
+        p_bucket_minimum_length_bits;
+    static constexpr std::size_t bucket_max_len_bits =
+        p_bucket_maximum_length_bits;
     static constexpr std::size_t total_len_bits      = sizeof(len_t) * 8u;
     static constexpr auto table_seq_buckets_len_thresholds =
         generate_seq_buckets_len_thresholds<
@@ -2138,9 +2134,9 @@ struct sequence_storage_manager {
 
     static_assert(bucket_count <= std::numeric_limits<std::uint8_t>::max(),
                   "sequence_locator::bucket_idx is uint8_t; raise the locator "
-                  "format version before configuring more than 255 buckets");
+                  "wire revision before configuring more than 255 buckets");
 
-    // DOC0260 §12.1 — delegate to the PG-free free template so production and
+    // Delegate to the PG-free template so production and
     // the unit-test TU resolve to identical bucketing code (the LUT itself is
     // bucket_lut_v in bioseq_bucket_math).
     [[nodiscard]] [[gnu::always_inline]] static constexpr std::size_t
@@ -2151,20 +2147,20 @@ struct sequence_storage_manager {
 
     // Shard lifecycle / write path.
     //
-    // DOC0264 §8 — `insert_sequence_streamed` writes one fragment per
+    // `insert_sequence_streamed` writes one fragment per
     // sub-table row from a per-fragment producer callback. The producer
     // receives a palloc'd `bioseq::pg_types::seq*` whose header is pre-filled with
     // alphabet/width, and fills `data[]` + `bp_size` + `padding_letters`
     // for fragment `n` (last fragment uses `is_last_fragment=true`). The
     // per-fragment MemoryContext is reset between fragments to bound peak
-    // RSS. Returns an INVALID-to-READY publication token carrying the v3
-    // locator and its PostgreSQL-owned source epoch.
+    // RSS. Returns an invalid-to-ready publication token carrying the
+    // revision-3 locator and its PostgreSQL-owned source epoch.
     //
     // `insert_payload_as_fragments` is the convenience wrapper that the
     // existing single-varlena code paths (TAM rewrite-to-stubs, CLUSTER)
     // use: it slices an already-materialised `bioseq::pg_types::seq*` into fragments
     // via `insert_sequence_streamed`.
-    template<class FragmentProducer>
+    template<class p_fragment_producer>
     [[nodiscard]] static pending_sequence_source
     insert_sequence_streamed(Oid user_relid,
                              std::uint64_t main_storage_id,
@@ -2177,7 +2173,7 @@ struct sequence_storage_manager {
                              std::uint16_t last_fragment_padding_letters,
                              sequence_size_t current_cap_bytes,
                              seq_caches* cache,
-                             FragmentProducer&& producer);
+                             p_fragment_producer&& producer);
 
     [[nodiscard]] static pending_sequence_source
     insert_payload_as_fragments(Oid user_relid,
@@ -2190,9 +2186,9 @@ struct sequence_storage_manager {
                                 seq_caches* cache);
 
     // Read path: single sequence — stitches all fragments into a single
-    // contiguous palloc'd `bioseq::pg_types::seq*` in `out_mctx`. Used by the legacy
-    // hydration path; Phase C raises bioseq_log<logging_level::error, logging_target::postgres>() if the stitched varlena
-    // would exceed MaxAllocSize (DOC0264 §9.4). Streaming readers should
+    // contiguous palloc'd `bioseq::pg_types::seq*` in `out_mctx`. Used by the
+    // bounded hydration path; it raises a PostgreSQL error if the stitched
+    // varlena would exceed MaxAllocSize. Streaming readers should
     // use the source-backed facade adapter directly.
     [[nodiscard]] static bioseq::pg_types::seq*
     fetch_payload(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
@@ -2231,7 +2227,7 @@ struct sequence_storage_manager {
 using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
 
-// DOC0264 §7.9 — exported entry point so the Phase C source-backed adapter
+// Exported entry point so the source-backed adapter
 // can resolve a sub-table relation via the
 // per-scan `seq_caches`. Implementation lives below in the .cppm body.
 [[nodiscard]] Relation
@@ -2247,7 +2243,7 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     bool allow_missing_during_extension_teardown = false);
 
 // ---------------------------------------------------------------------------
-// §7.10 — Sidecar I/O. Per-shard heap relations co-sharded with sub-tables.
+// Sidecar I/O. Per-shard heap relations co-sharded with sub-tables.
 // ---------------------------------------------------------------------------
 
 void
@@ -2271,11 +2267,11 @@ sidecar_read_blob_bulk(
     seq_caches* cache);
 
 // ---------------------------------------------------------------------------
-// §6.4 / §11.3 — Catalog reaper, cascade-drop entry point.
+// Catalog reaper and cascade-drop entry point.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// §8 — TAM hot-path helper for write-state cap-snapshot read.
+// TAM hot-path helper for write-state cap-snapshot read.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] sequence_size_t read_max_sub_table_cap_bytes();
@@ -2288,7 +2284,7 @@ sidecar_read_blob_bulk(
 
 namespace bioseq::storage {
 
-constexpr std::int64_t kSeqStorageAdvisoryLockClass = 0x42105260LL;
+constexpr std::int64_t k_sequence_storage_advisory_lock_class = 0x42105260LL;
 
 [[nodiscard]] static std::int64_t
 shard_alloc_lock_key(Oid db_oid, Oid main_relfilenode,
@@ -2315,7 +2311,7 @@ sequence_column_type_parameters column_typmod_at(TupleDesc parent_tupdesc, std::
         storage_error_as_cpp(
             ERRCODE_INVALID_TABLE_DEFINITION,
             fmt::format(
-                "bioseq storage: SEQ column attno={} has no typmod; Phase A "
+                "bioseq storage: SEQ column attno={} has no typmod; "
                 "requires every bioseq.seq column to carry an "
                 "(alphabet, width) typmod",
                 column_attno));
@@ -2440,7 +2436,7 @@ void seq_caches::close_all(bool commit) noexcept {
                     }
                     e.pending_bytes_delta = 0;
                     e.pending_total_payload_delta = 0;
-                    // The shard WriteState remains owned by WriteStateCache and
+                    // The shard write state remains owned by write_state_cache and
                     // commits with the parent; closing it here double-flushes.
                     e.write_state = nullptr;
                 } else {
@@ -2521,7 +2517,7 @@ void seq_caches::close_all(bool commit) noexcept {
     }
 }
 
-// DOC0286 §4.4 — flush (but do NOT pop/close) every open sub-table write state
+// Flush, but do not pop or close, every open sub-table write state
 // so a same-statement index scan sees the just-written fragment rows.
 // `flush_relation_write_state` is keyed on the shard relation's relfilenode.
 void flush_seq_cache_write_states(seq_caches* caches,
@@ -2552,7 +2548,7 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
         if (it != cache->entries.end() && it->second.rel != nullptr) {
             return it->second.rel;
         }
-        // DOC0260 §7.9 / §A1.4 — the resource owner the shard Relation is
+        // The resource owner with which the shard Relation is
         // pinned under MUST match the owner that is current when
         // `seq_caches::close_all` runs `relation_close()`. That owner differs
         // by side:
@@ -2729,7 +2725,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     const std::string sidecar_name = format_sidecar_name(
         db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx, starting_shard_idx);
 
-    // DOC0260 §7.3 — lazy CREATE TABLE for the sub-table + matching sidecar.
+    // Lazily create the sub-table and matching sidecar.
     // We deliberately do NOT register the freshly-created relations with the
     // extension via ALTER EXTENSION ADD TABLE here: doing so requires a
     // SECURITY DEFINER plpgsql helper that issues ALTER EXTENSION inside SPI
@@ -2837,7 +2833,7 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     // No ACTIVE shard. This happens (a) on the very first insert into the
     // (parent, column, bucket), or (b) when every existing shard has been
     // marked full — e.g. under the cap=0 sentinel where close_all flags each
-    // shard full at commit (DOC0260 §10.2). In case (b) shard 0 (and others)
+    // shard full at commit. In case (b), shard 0 and any following shard
     // already exist, so starting at shard_idx 0 would re-INSERT an existing
     // catalog PK ("duplicate key violates seq_sub_table_pkey"). Allocate the
     // next index after the highest existing shard for this (column, bucket).
@@ -2901,7 +2897,7 @@ struct attribute_contract {
     Oid type_oid = InvalidOid;
 };
 
-inline constexpr std::array<attribute_contract, 11> kAttributeContracts{{
+inline constexpr std::array<attribute_contract, 11> k_attribute_contracts{{
     {1, "database_oid", OIDOID},
     {2, "tablespace_oid", OIDOID},
     {3, "main_relfilenode", OIDOID},
@@ -2942,10 +2938,10 @@ inline void validate_catalog(
     TupleDesc descriptor = RelationGetDescr(catalog);
     if (descriptor == nullptr
         || descriptor->natts
-            != static_cast<int>(kAttributeContracts.size())) {
+            != static_cast<int>(k_attribute_contracts.size())) {
         contract_error("attribute count changed");
     }
-    for (const attribute_contract& expected : kAttributeContracts) {
+    for (const attribute_contract& expected : k_attribute_contracts) {
         const Form_pg_attribute attribute = TupleDescAttr(
             descriptor, expected.attno - 1);
         if (attribute->attnum != expected.attno
@@ -3000,7 +2996,7 @@ bool is_registered_sequence_fragment_relation(
     if (catalog == nullptr) {
         return false;
     }
-    // The exact schema proof above pins sub_table_relid to ordinal 7. This is
+    // The schema validation above pins sub_table_relid to ordinal 7. This is
     // intentionally a heap scan: registration truth cannot depend on an
     // optional or corrupted secondary index.
     ScanKeyData key;
@@ -3015,23 +3011,24 @@ bool is_registered_sequence_fragment_relation(
 }
 
 // ---------------------------------------------------------------------------
-// DOC0264 §8 — insert_sequence_streamed (write hot path).
+// insert_sequence_streamed write hot path.
 //
 // One sequence → ceil(total_bp / fragment_bp) sub-table rows. Producer is
 // invoked once per fragment in a per-fragment MemoryContext that is reset
 // between fragments so peak RSS is bounded by one fragment's worth of state
-// (consolidated-review C3). Per-sequence shard-rollover pre-allocation
-// (§8.3) keeps a sequence's fragments in a single shard so the locator's
+// Per-sequence shard-rollover pre-allocation keeps a sequence's fragments in a
+// single shard so the locator's
 // shard_idx is a single value.
 // ---------------------------------------------------------------------------
 
 namespace detail {
 
-// DOC0264 §4 — per-fragment storage_unit count. Class member from
-// `resident_sequence_scanner<T>::fragment_storage_units` (DOC0263 §3) = 1024.
-// DOC0286 §4.3 — aliases the exported `kSequenceFragmentStorageUnits` so the
+// Per-fragment storage-unit count. The class member from
+// `resident_sequence_scanner<T>::fragment_storage_units` is 1024. This aliases
+// the exported `k_sequence_fragment_storage_units` so the
 // public constant and this hot-path detail constant can never drift.
-inline constexpr std::size_t kFragmentStorageUnits = kSequenceFragmentStorageUnits;
+inline constexpr std::size_t k_fragment_storage_units =
+    k_sequence_fragment_storage_units;
 
 // Look-up bits_per_char via the supported-alphabet pack so a future alphabet
 // addition does not silently produce wrong fragment_bp values.
@@ -3039,10 +3036,11 @@ inline constexpr std::size_t kFragmentStorageUnits = kSequenceFragmentStorageUni
     bioseq::pg_types::seq::alphabet_code_t alpha) noexcept {
     std::size_t bits_per_char = 0;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(alpha,
-        [&bits_per_char]<class A>() {
+        [&bits_per_char]<class p_alphabet>() {
             bits_per_char = static_cast<std::size_t>(
                 seqan3::detail::ceil_log2(
-                    static_cast<std::size_t>(seqan3::alphabet_size<A>)));
+                    static_cast<std::size_t>(
+                        seqan3::alphabet_size<p_alphabet>)));
         });
     return bits_per_char;
 }
@@ -3066,10 +3064,11 @@ inline void update_canonical_source_checksum(
         source_version_detail::source_catalog_error(
             "canonical checksum received a non-fragment value");
     }
-    fragment->convert_to([&checksum]<class S>(
-            const compact_sequence_range<S>& range) {
+    fragment->convert_to([&checksum]<class p_alphabet>(
+            const compact_sequence_range<p_alphabet>& range) {
         const std::string decoded =
-            ::bioseq::simd::active_target::decode_sequence_simd<S>(range);
+            ::bioseq::simd::active_target::decode_sequence_simd<p_alphabet>(
+                range);
         if (decoded.size() != range.bp_size()) {
             source_version_detail::source_catalog_error(
                 "canonical checksum decoded length disagrees");
@@ -3080,10 +3079,15 @@ inline void update_canonical_source_checksum(
 
 }  // namespace detail
 
-template<class L, std::size_t M, std::size_t X>
-template<class FragmentProducer>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
+template<class p_fragment_producer>
 pending_sequence_source
-sequence_storage_manager<L, M, X>::insert_sequence_streamed(
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::insert_sequence_streamed(
     Oid user_relid, std::uint64_t main_storage_id,
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, TupleDesc parent_tupdesc,
@@ -3093,7 +3097,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
     std::uint16_t last_fragment_padding_letters,
     sequence_size_t current_cap_bytes,
     seq_caches* cache,
-    FragmentProducer&& producer)
+    p_fragment_producer&& producer)
 {
     if (!OidIsValid(user_relid) || main_storage_id == 0) {
         storage_error_as_cpp(
@@ -3118,13 +3122,13 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
         storage_error_as_cpp(
             ERRCODE_INTERNAL_ERROR,
             fmt::format(
-                "bioseq storage Phase C: insert_sequence_streamed could not derive "
+                "bioseq storage: insert_sequence_streamed could not derive "
                 "letters_per_unit (alphabet_code={}, byte_width={})",
                 static_cast<unsigned>(alpha_code),
                 static_cast<unsigned>(logical_storage_unit_byte_width)));
     }
     const sequence_size_t frag_bp =
-        static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+        static_cast<sequence_size_t>(detail::k_fragment_storage_units) * lpu;
     const sequence_size_t num_fragments =
         total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
     if (num_fragments > static_cast<sequence_size_t>(
@@ -3132,18 +3136,18 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
         storage_error_as_cpp(
             ERRCODE_INTERNAL_ERROR,
             fmt::format(
-                "bioseq storage Phase C: num_fragments {} exceeds UINT32_MAX",
+                "bioseq storage: fragment count {} exceeds UINT32_MAX",
                 num_fragments));
     }
 
     // Per-row varlena bytes for a full (= non-last) fragment.
     const std::size_t frag_varlena_bytes =
         bioseq::pg_types::seq::header_bytes()
-        + detail::kFragmentStorageUnits
+        + detail::k_fragment_storage_units
               * static_cast<std::size_t>(logical_storage_unit_byte_width);
     // Total varlena bytes the sequence occupies in the shard (= sum of
     // fragment-row sizes). Used for the per-shard cap accounting; each row
-    // is the same size in Phase C because the last fragment row is also
+    // has the same size because the last fragment row is also
     // allocated at `frag_varlena_bytes` (palloc0 leaves trailing units 0).
     const sequence_size_t total_varlena_bytes =
         static_cast<sequence_size_t>(num_fragments) *
@@ -3181,12 +3185,12 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 .storage_unit_byte_width = logical_storage_unit_byte_width,
                 .padding_letters = last_fragment_padding_letters,
                 .source_content_checksum = source_checksum.checksum(),
-                .state = kSequenceSourceStateUnpublished,
+                .state = k_sequence_source_state_unpublished,
             });
         return pending_sequence_source{empty_locator};
     }
 
-    // DOC0264 §8.3 — per-sequence shard pre-allocation. If the active shard
+    // Per-sequence shard pre-allocation. If the active shard
     // cannot fit the WHOLE sequence's bytes, allocate a fresh shard up front.
     Relation shard = open_or_create_shard(db_oid, spc_oid, main_relfilenode,
                                           column_attno, parent_tupdesc, bucket_idx,
@@ -3210,8 +3214,8 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
     }
     const sequence_size_t projected =
         active->bytes_written + pending + total_varlena_bytes;
-    // DOC0264 §8.3 — pre-allocate a fresh shard when the active one cannot
-    // fit the whole sequence. Same semantics as Phase A's per-row rollover,
+    // Pre-allocate a fresh shard when the active one cannot fit the whole
+    // sequence. This follows the normal per-row rollover semantics,
     // but the unit of accounting is the whole sequence now.
     const bool rollover_required =
         active->bytes_written + pending > 0
@@ -3260,7 +3264,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
         shard_idx = active->shard_idx;
     }
 
-    // DOC0264 §8.3 hard guard: refuse to write a sequence whose total bytes
+    // Refuse to write a sequence whose total bytes
     // exceed the cap (would not fit any shard, including a freshly-allocated
     // one). current_cap_bytes==0 is the sentinel "no cap, one shard per
     // sequence" and the check is suppressed.
@@ -3268,8 +3272,9 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
         storage_error_as_cpp(
             ERRCODE_INTERNAL_ERROR,
             fmt::format(
-                "bioseq storage Phase C: sequence with {} bytes exceeds shard cap "
-                "{} bytes ({} GiB). Raise bioseq.storage.max_seq_sub_table_gbs.",
+                "bioseq storage: sequence with {} bytes exceeds shard cap "
+                "{} bytes ({} GiB). Raise "
+                "bioseq.storage.sequence_shard.max_size_gib.",
                 total_varlena_bytes, current_cap_bytes,
                 current_cap_bytes >> 30));
     }
@@ -3292,7 +3297,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
             });
     }
 
-    // DOC0264 §8.4 — serialise writers on this (parent, column, bucket,
+    // Serialize writers on this parent, column, bucket, and shard
     // shard) so the row numbers write_column_row assigns are CONTIGUOUS
     // within one sequence's fragments.
     const std::int64_t row_lock_key =
@@ -3308,7 +3313,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
             pg_advisory_xact_lock_int8, Int64GetDatum(row_lock_key));
     });
 
-    // DOC0264 §8 — separate scratch + per-fragment contexts. The producer
+    // Use separate scratch and per-fragment contexts. The producer
     // may allocate long-lived state in `scratch_mctx`; per-fragment palloc
     // happens in `per_fragment_mctx` which is RESET between fragments to
     // keep peak RSS bounded.
@@ -3357,7 +3362,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
             frag->storage_unit_byte_width =
                 logical_storage_unit_byte_width;
             // Producer fills bp_size + padding_letters + data[] for fragment `n`.
-            std::forward<FragmentProducer>(producer)(
+            std::forward<p_fragment_producer>(producer)(
                 static_cast<std::size_t>(fragment_no),
                 frag,
                 scratch_mctx,
@@ -3372,7 +3377,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 storage_error_as_cpp(
                     ERRCODE_INTERNAL_ERROR,
                     fmt::format(
-                        "bioseq storage Phase C: producer bp_size mismatch on "
+                        "bioseq storage: producer bp_size mismatch on "
                         "fragment {} (got {}, expected {})",
                         fragment_no,
                         static_cast<sequence_size_t>(frag->bp_size),
@@ -3384,7 +3389,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 storage_error_as_cpp(
                     ERRCODE_INTERNAL_ERROR,
                     fmt::format(
-                        "bioseq storage Phase C: producer last-fragment "
+                        "bioseq storage: producer last-fragment "
                         "padding_letters mismatch (got {}, expected {})",
                         static_cast<unsigned>(frag->padding_letters),
                         static_cast<unsigned>(
@@ -3394,7 +3399,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 storage_error_as_cpp(
                     ERRCODE_INTERNAL_ERROR,
                     fmt::format(
-                        "bioseq storage Phase C: producer non-last "
+                        "bioseq storage: producer non-last "
                         "padding_letters must be 0 (fragment {}, got {})",
                         fragment_no,
                         static_cast<unsigned>(frag->padding_letters)));
@@ -3414,7 +3419,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                 storage_error_as_cpp(
                     ERRCODE_INTERNAL_ERROR,
                     fmt::format(
-                        "bioseq storage Phase C: non-contiguous row numbers "
+                        "bioseq storage: non-contiguous row numbers "
                         "during streamed insert (expected {}, got {})",
                         last_sub_row_no + 1, row_no));
             }
@@ -3486,14 +3491,19 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
             .storage_unit_byte_width = logical_storage_unit_byte_width,
             .padding_letters = last_fragment_padding_letters,
             .source_content_checksum = source_checksum.checksum(),
-            .state = kSequenceSourceStateUnpublished,
+            .state = k_sequence_source_state_unpublished,
         });
     return pending_sequence_source{out};
 }
 
-template<class L, std::size_t M, std::size_t X>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 pending_sequence_source
-sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::insert_payload_as_fragments(
     Oid user_relid, std::uint64_t main_storage_id,
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, TupleDesc parent_tupdesc,
@@ -3522,19 +3532,19 @@ sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
     const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
     if (lpu == 0) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-               "bioseq storage Phase C: insert_payload_as_fragments could not derive "
+               "bioseq storage: insert_payload_as_fragments could not derive "
                "letters_per_unit (alphabet_code={}, byte_width={})",
                static_cast<unsigned>(alpha_code),
                static_cast<unsigned>(logical_byte_width));
     }
     const sequence_size_t frag_bp =
-        static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+        static_cast<sequence_size_t>(detail::k_fragment_storage_units) * lpu;
     const sequence_size_t num_fragments =
         total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
     const std::size_t bytes_per_unit =
         static_cast<std::size_t>(logical_byte_width);
     const std::size_t fragment_bytes =
-        detail::kFragmentStorageUnits * bytes_per_unit;
+        detail::k_fragment_storage_units * bytes_per_unit;
 
     // Slice the original payload into N fragment rows.
     const std::uint8_t* const src_data =
@@ -3570,7 +3580,7 @@ sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
 }
 
 // ---------------------------------------------------------------------------
-// DOC0286 §4.3 — sequence_stream_writer implementation. Mirrors the per-fragment
+// sequence_stream_writer implementation. Mirrors the per-fragment
 // row write of insert_sequence_streamed, but driven incrementally: the total
 // length is unknown until finish(), so the shard is opened lazily and the cap
 // is checked as the sequence streams. No cross-shard rollover (one shard per
@@ -3620,9 +3630,11 @@ void sequence_stream_writer::begin(
                 static_cast<unsigned>(alpha),
                 static_cast<unsigned>(byte_width)));
     }
-    frag_payload_bytes_ = detail::kFragmentStorageUnits * static_cast<std::size_t>(byte_width);
+    frag_payload_bytes_ = detail::k_fragment_storage_units
+        * static_cast<std::size_t>(byte_width);
     frag_varlena_bytes_ = bioseq::pg_types::seq::header_bytes() + frag_payload_bytes_;
-    frag_bp_ = static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+    frag_bp_ = static_cast<sequence_size_t>(detail::k_fragment_storage_units)
+        * lpu;
 
     buffer_.clear();
     buffer_.reserve(frag_payload_bytes_ + 256);
@@ -3675,7 +3687,7 @@ void sequence_stream_writer::open_shard() {
             subtransaction);
     }
     write_state_ = entry.write_state;
-    // DOC0264 §8.4 — serialise writers on this (parent, column, bucket, shard)
+    // Serialize writers on this parent, column, bucket, and shard
     // so the row numbers write_column_row assigns stay contiguous within one
     // sequence's fragments (and across the sequences of one load).
     const std::int64_t row_lock_key =
@@ -3704,7 +3716,7 @@ void sequence_stream_writer::write_fragment(
             fmt::format(
                 "bioseq.load: sequence exceeds shard cap {} bytes ({} GiB) "
                 "at fragment {}. Raise "
-                "bioseq.storage.max_seq_sub_table_gbs.",
+                "bioseq.storage.sequence_shard.max_size_gib.",
                 total_varlena_bytes_ + frag_varlena_bytes_,
                 cap_bytes_ >> 30, num_fragments_));
     }
@@ -3837,7 +3849,7 @@ pending_sequence_source sequence_stream_writer::finish(
             .storage_unit_byte_width = byte_width_,
             .padding_letters = last_pad,
             .source_content_checksum = source_checksum_value_,
-            .state = kSequenceSourceStateUnpublished,
+            .state = k_sequence_source_state_unpublished,
         });
     active_ = false;
     return pending_sequence_source{out};
@@ -3852,16 +3864,16 @@ void sequence_stream_writer::abort() {
 }
 
 // ---------------------------------------------------------------------------
-// DOC0264 §9.4 — fetch_payload streams all fragments into a single
-// contiguous bioseq::pg_types::seq* in `out_mctx`. For Phase C sequences this opens the
-// shard once via Phase A's cache, opens a random-access column_read_state,
+// fetch_payload streams all fragments into a single contiguous
+// bioseq::pg_types::seq* in `out_mctx`. It opens the shard once through the
+// caller-owned cache, opens a random-access column_read_state,
 // walks all `num_fragments` rows and memcpys each fragment's `data[]` into
 // the right offset of the destination varlena's payload region.
 //
 // Raises bioseq_log<logging_level::error, logging_target::postgres>() if the assembled varlena would exceed MaxAllocSize —
-// streaming readers must use the source-backed facade instead. The legacy
+// streaming readers must use the source-backed facade instead. The bounded
 // callers (auto-hydration of stub-backed scan slots) are bounded by the
-// MaxAllocSize gate in `hydrate_seq_columns_in_slot` (§9.4 access_method).
+// MaxAllocSize gate in `hydrate_seq_columns_in_slot`.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] inline column_read_state*
@@ -3886,9 +3898,14 @@ begin_sequence_payload_read(Relation shard,
     return read_state;
 }
 
-template<class L, std::size_t M, std::size_t X>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 bioseq::pg_types::seq*
-sequence_storage_manager<L, M, X>::fetch_payload(
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::fetch_payload(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, const sequence_locator& loc,
     Snapshot snapshot,
@@ -3913,7 +3930,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     const bool retain_read_state =
         registered_mvcc_snapshot || snapshot == SnapshotAny;
 
-    // DOC0264 §6.5 — empty sequence (num_fragments == 0). The locator is the
+    // Empty sequence (num_fragments == 0). The locator is the
     // only on-disk artefact; there are no sub-table rows to fetch. Return a
     // minimal empty bioseq::pg_types::seq in `out_mctx`.
     if (loc.fragment_count == 0) {
@@ -3922,7 +3939,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         SET_VARSIZE(out, bioseq::pg_types::seq::header_bytes());
         // alphabet/width/bp_size/padding are all zero — caller-side stub
         // hydration sees an empty payload (compact_sequence_range handles
-        // size=0 correctly per DOC0258 §5.3).
+        // size=0 correctly).
         return out;
     }
 
@@ -3941,7 +3958,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     column_read_state* read_state = nullptr;
     bool transient_read_state = false;
     if (retain_read_state) {
-        // Key compatibility by the caller-owned source snapshot, not the
+        // Key reuse by the caller-owned source snapshot, not the
         // read-state pointer: flushing may replace read_state->snapshot with
         // its own refreshed registered copy while the owner remains the same.
         if (entry.read_state != nullptr
@@ -3962,21 +3979,21 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         transient_read_state = true;
     }
 
-    // DOC0264 §9.4 — derive fragment shape from logical alphabet/width on
+    // Derive fragment shape from logical alphabet and width on
     // first sub-table row.
     Datum first_vals[1]  = { 0 };
     bool  first_nulls[1] = { true };
     if (!read_column_row_by_number(read_state, loc.first_fragment_row,
                                     first_vals, first_nulls)) {
         bioseq_log<logging_level::error, logging_target::postgres>(
-               "bioseq storage Phase C: missing first sub-table row {} "
+               "bioseq storage: missing first sub-table row {} "
                "(locator bucket={} shard={} num_fragments={})",
                loc.first_fragment_row,
                static_cast<unsigned>(loc.bucket_index),
                loc.shard_index, loc.fragment_count);
     }
     if (first_nulls[0]) {
-        bioseq_log<logging_level::error, logging_target::postgres>( "bioseq storage Phase C: first sub-table row {} is NULL",
+        bioseq_log<logging_level::error, logging_target::postgres>( "bioseq storage: first sub-table row {} is NULL",
                loc.first_fragment_row);
     }
     bioseq::pg_types::seq* first_raw = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(first_vals[0]));
@@ -4029,7 +4046,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     }
     const std::size_t bytes_per_unit = static_cast<std::size_t>(logical_byte_width);
     const Size fragment_storage_bytes = checked_mul_size(
-        checked_size_cast(detail::kFragmentStorageUnits), bytes_per_unit);
+        checked_size_cast(detail::k_fragment_storage_units), bytes_per_unit);
     const Size expected_fragment_bytes = checked_add_size(
         bioseq::pg_types::seq::header_bytes(), fragment_storage_bytes);
     validate_sequence_fragment_frame(
@@ -4051,7 +4068,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     const std::uint64_t expected_fragments =
         expected_flat_locator_fragment_count(
             loc.logical_length, static_cast<std::uint64_t>(lpu),
-            detail::kFragmentStorageUnits);
+            detail::k_fragment_storage_units);
     if (expected_fragments != loc.fragment_count) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
@@ -4061,7 +4078,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
                  loc.fragment_count)));
     }
     const std::uint64_t fragment_bp =
-        static_cast<std::uint64_t>(detail::kFragmentStorageUnits)
+        static_cast<std::uint64_t>(detail::k_fragment_storage_units)
         * static_cast<std::uint64_t>(lpu);
     const std::uint64_t expected_last_padding =
         (static_cast<std::uint64_t>(lpu)
@@ -4098,7 +4115,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         static_cast<std::uint16_t>(expected_last_padding);
 
     for (std::uint32_t fragment_no = 1; fragment_no < loc.fragment_count; ++fragment_no) {
-        // DOC0276 — full-hydration of a multi-Gbp target into one varlena walks
+        // Full hydration of a multi-Gbp target into one varlena walks
         // tens of thousands of fragment rows. Make it cancellable and observable.
         CHECK_FOR_INTERRUPTS();
         if (bioseq::settings::diagnostics::logging::enabled && (fragment_no & 0x3FFF) == 0) {
@@ -4110,14 +4127,14 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         bool  nulls[1] = { true };
         if (!read_column_row_by_number(read_state, row_no, vals, nulls)) {
             bioseq_log<logging_level::error, logging_target::postgres>(
-                   "bioseq storage Phase C: missing sub-table fragment row {} "
+                   "bioseq storage: missing sub-table fragment row {} "
                    "(locator bucket={} shard={} fragment={}/{})",
                    row_no,
                    static_cast<unsigned>(loc.bucket_index),
                    loc.shard_index, fragment_no, loc.fragment_count);
         }
         if (nulls[0]) {
-            bioseq_log<logging_level::error, logging_target::postgres>( "bioseq storage Phase C: sub-table row {} is NULL", row_no);
+            bioseq_log<logging_level::error, logging_target::postgres>( "bioseq storage: sub-table row {} is NULL", row_no);
         }
         bioseq::pg_types::seq* raw = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(vals[0]));
         const Size raw_bytes = static_cast<Size>(VARSIZE(raw));
@@ -4165,12 +4182,17 @@ sequence_storage_manager<L, M, X>::fetch_payload(
 }
 
 // ---------------------------------------------------------------------------
-// §7.7 — bulk fetch.
+// Bulk fetch.
 // ---------------------------------------------------------------------------
 
-template<class L, std::size_t M, std::size_t X>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 void
-sequence_storage_manager<L, M, X>::fetch_payload_bulk(
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::fetch_payload_bulk(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, std::int16_t bucket_idx,
     std::span<const fetch_request> requests,
@@ -4210,12 +4232,17 @@ sequence_storage_manager<L, M, X>::fetch_payload_bulk(
 }
 
 // ---------------------------------------------------------------------------
-// §7.8 — DROP cascade.
+// DROP cascade.
 // ---------------------------------------------------------------------------
 
-template<class L, std::size_t M, std::size_t X>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 void
-sequence_storage_manager<L, M, X>::validate_drop_catalog_contracts()
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::validate_drop_catalog_contracts()
 {
     // Acquire both catalog locks in the same order as the mutating OAT_DROP
     // cleanup and retain them to transaction end. ALTER/DROP of either catalog
@@ -4245,14 +4272,19 @@ sequence_storage_manager<L, M, X>::validate_drop_catalog_contracts()
     table_close(registry_guard, NoLock);
 }
 
-template<class L, std::size_t M, std::size_t X>
+template<class p_length_type,
+         std::size_t p_bucket_minimum_length_bits,
+         std::size_t p_bucket_maximum_length_bits>
 void
-sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
+sequence_storage_manager<
+    p_length_type,
+    p_bucket_minimum_length_bits,
+    p_bucket_maximum_length_bits>::drop_sub_tables_for_main(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     const bool allow_missing_during_extension_teardown)
 {
-    // Keep the validated registry relation locked across the legacy manager
-    // calls below. Those calls historically return an empty set when the
+    // Keep the validated registry relation locked across the manager calls
+    // below. Those calls return an empty set when the
     // relation disappears; the guard makes that benign only for the explicit
     // extension-teardown context and closes the validation-to-use race.
     Relation registry_guard = fragment_registry_detail::open_catalog(
@@ -4269,12 +4301,12 @@ sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
         return;
     }
 
-    constexpr std::size_t kDropBatchSize = 32;
+    constexpr std::size_t k_drop_batch_size = 32;
     StringInfo buf = makeStringInfo();
-    for (std::size_t i = 0; i < rows.size(); i += kDropBatchSize) {
+    for (std::size_t i = 0; i < rows.size(); i += k_drop_batch_size) {
         resetStringInfo(buf);
         appendStringInfoString(buf, "DROP TABLE IF EXISTS ");
-        const std::size_t end = std::min(i + kDropBatchSize, rows.size());
+        const std::size_t end = std::min(i + k_drop_batch_size, rows.size());
         bool wrote_one = false;
         for (std::size_t j = i; j < end; ++j) {
             if (wrote_one) appendStringInfoString(buf, ", ");
@@ -4293,10 +4325,10 @@ sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
         }
     }
 
-    for (std::size_t i = 0; i < rows.size(); i += kDropBatchSize) {
+    for (std::size_t i = 0; i < rows.size(); i += k_drop_batch_size) {
         resetStringInfo(buf);
         appendStringInfoString(buf, "DROP TABLE IF EXISTS ");
-        const std::size_t end = std::min(i + kDropBatchSize, rows.size());
+        const std::size_t end = std::min(i + k_drop_batch_size, rows.size());
         bool wrote_one = false;
         for (std::size_t j = i; j < end; ++j) {
             if (wrote_one) appendStringInfoString(buf, ", ");
@@ -4324,7 +4356,7 @@ sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
 template struct sequence_storage_manager<sequence_size_t, 8, 42>;
 
 // ---------------------------------------------------------------------------
-// §7.10 — Per-shard sidecar I/O.
+// Per-shard sidecar I/O.
 // ---------------------------------------------------------------------------
 
 static Oid lookup_sidecar_relid(Oid db_oid, Oid spc_oid, Oid main_relfilenode,

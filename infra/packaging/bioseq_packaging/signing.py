@@ -261,10 +261,6 @@ def normalize_signing_key(
     return result
 
 
-# Short, unambiguous alias used by the Poetry implementation.
-normalize = normalize_signing_key
-
-
 def running_on_aws() -> bool:
     """Detect EC2 without a network/metadata request."""
 
@@ -412,27 +408,6 @@ class SigningKeyProvider:
             self._local_secret = None
 
 
-def fetch_signing_key(
-    *,
-    secret_arn: str | None,
-    aws_bin: str,
-    region: str,
-    environment: Mapping[str, str],
-    is_aws: bool | None = None,
-    register_redaction: RedactionRegistrar | None = None,
-    runner: CommandRunner | None = None,
-) -> SecretBytes:
-    """Compatibility-shaped function for the former worker entry point."""
-
-    return SigningKeyProvider(
-        aws_bin=aws_bin,
-        environment=environment,
-        is_aws=is_aws,
-        register_redaction=register_redaction,
-        runner=runner,
-    ).fetch(secret_arn=secret_arn, region=region)
-
-
 @dataclass(frozen=True, slots=True)
 class SigningWorkspace:
     """Paths inside one isolated, ephemeral GnuPG workspace."""
@@ -524,10 +499,6 @@ def isolated_signing_workspace(
     )
 
 
-# Concise public spelling used by tests and callers.
-signing_workspace = isolated_signing_workspace
-
-
 def _isolated_environment(
     base: Mapping[str, str] | None, home: Path
 ) -> dict[str, str]:
@@ -577,10 +548,6 @@ def parse_gpg_fingerprint(output: str) -> str:
     return fingerprints[0]
 
 
-# Former worker tests used this private spelling.
-_parse_gpg_fingerprint = parse_gpg_fingerprint
-
-
 def fingerprint(
     key: SecretBytes,
     *,
@@ -616,10 +583,6 @@ def fingerprint(
         except UnicodeDecodeError as error:
             raise SigningError("GPG key metadata was not UTF-8") from error
         return require_pinned_fingerprint(actual)
-
-
-# Compatibility spelling used by the previous worker.
-signing_key_fingerprint = fingerprint
 
 
 class SigningMaterial:
@@ -951,10 +914,6 @@ def verify_with_gpgv(
     return PINNED_SIGNING_FINGERPRINT
 
 
-# Explicit semantic alias for repository/acceptance callers.
-verify_agent_free = verify_with_gpgv
-
-
 __all__ = (
     "PINNED_SIGNING_FINGERPRINT",
     "SIGNING_ENVIRONMENT_NAME",
@@ -964,18 +923,13 @@ __all__ = (
     "SigningMaterial",
     "SigningProvider",
     "SigningWorkspace",
-    "fetch_signing_key",
     "fingerprint",
     "isolated_signing_workspace",
-    "normalize",
     "normalize_signing_key",
     "parse_gpg_fingerprint",
     "parse_validsig",
     "repository_environment",
     "require_pinned_fingerprint",
     "running_on_aws",
-    "signing_key_fingerprint",
-    "signing_workspace",
-    "verify_agent_free",
     "verify_with_gpgv",
 )

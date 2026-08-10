@@ -37,7 +37,7 @@ import bioseq.parallelism.memory_admission;
 namespace bioseq::simd::cpu_preparation_detail {
 
 /*
- * Format-6 preparation fans one sketch pass into the authenticated canonical
+ * Hash-major preparation fans one sketch pass into the authenticated canonical
  * u32 union and, when separately admitted, the full per-query minimizer vector
  * later consumed by alignment.  This removes the typed row path's second
  * sketch without introducing a Q-sized conversion owner.
@@ -47,11 +47,11 @@ namespace bioseq::simd::cpu_preparation_detail {
  * target's aggregate permits, including vector reallocation overlap.  Retained
  * per-query growth is best-effort; canonical collection remains fail-closed.
  */
-class AdmittedCanonicalU32QueryCollector {
+class admitted_canonical_u32_query_collector {
 public:
 	using minimizer_type = minimap_sketch_data;
 
-	AdmittedCanonicalU32QueryCollector(
+	admitted_canonical_u32_query_collector(
 			std::vector<std::uint32_t>& destination,
 			bioseq::parallelism::memory_permit& permit,
 			std::uint64_t& retained_bytes,
@@ -106,15 +106,15 @@ public:
 		return true;
 	}
 
-	template<class M = minimap_sketch_data>
+	template<class p_minimizer = minimap_sketch_data>
 	[[nodiscard, always_inline]] bool append_raw_storage(
-			const typename M::storage_t* raw,
+			const typename p_minimizer::storage_t* raw,
 			const std::size_t count)
 		requires (
-			std::same_as<M, minimap_sketch_data>
-			&& requires { typename M::storage_t; }
-			&& std::is_trivially_copyable_v<M>
-			&& sizeof(M) == sizeof(typename M::storage_t))
+			std::same_as<p_minimizer, minimap_sketch_data>
+			&& requires { typename p_minimizer::storage_t; }
+			&& std::is_trivially_copyable_v<p_minimizer>
+			&& sizeof(p_minimizer) == sizeof(typename p_minimizer::storage_t))
 	{
 		const std::size_t old_size = destination_.size();
 		if (count > destination_.max_size() - old_size
@@ -306,19 +306,19 @@ private:
 		return true;
 	}
 
-	template<class Value>
-	[[always_inline]] void append_retained(Value&& minimizer) {
+	template<class p_value>
+	[[always_inline]] void append_retained(p_value&& minimizer) {
 		if (!retention_complete_) return;
 		if (retained_query_->size() == retained_query_->max_size()
 			|| !ensure_retained_capacity(retained_query_->size() + 1u)) {
 			return;
 		}
-		retained_query_->push_back(std::forward<Value>(minimizer));
+		retained_query_->push_back(std::forward<p_value>(minimizer));
 	}
 
-	template<class Storage>
+	template<class p_storage>
 	[[always_inline]] void append_retained_raw(
-			const Storage* raw,
+			const p_storage* raw,
 			const std::size_t count) {
 		if (!retention_complete_) return;
 		const std::size_t old_size = retained_query_->size();
@@ -476,8 +476,8 @@ void release_uncommitted_retained_query(
 		const std::uint64_t query_ordinal,
 		const std::uint64_t query_bp_size,
 		std::vector<minimap_sketch_data>&& minimizers,
-		pipe::minimizer_range_execution_stats proof,
-		std::vector<batch_processor::CpuPreparedQuerySketch>& retained_queries,
+		pipe::minimizer_range_execution_stats execution_stats,
+		std::vector<batch_processor::cpu_prepared_query_sketch>& retained_queries,
 		bioseq::parallelism::memory_permit& permit,
 		std::uint64_t& retained_bytes) {
 	if (!retained_queries.empty()
@@ -485,7 +485,7 @@ void release_uncommitted_retained_query(
 		bioseq::postgres::support::invoke_pg_as_cpp([] {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("BioseqBatchJoin retained query ordinals are not strictly ordered")));
+				 errmsg("bioseq batch join retained query ordinals are not strictly ordered")));
 		});
 		pg_unreachable();
 	}
@@ -499,11 +499,11 @@ void release_uncommitted_retained_query(
 		const std::uint64_t old_bytes =
 			bioseq::parallelism::saturating_mul(
 				retained_queries.capacity(),
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t requested_bytes =
 			bioseq::parallelism::saturating_mul(
 				required,
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t allocation_headroom =
 			bioseq::parallelism::saturating_mul(
 				requested_bytes,
@@ -538,14 +538,14 @@ void release_uncommitted_retained_query(
 		const std::uint64_t measured_bytes =
 			bioseq::parallelism::saturating_mul(
 				retained_queries.capacity(),
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		if (measured_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_bytes > allocation_headroom) {
 			bioseq::postgres::support::invoke_pg_as_cpp([] {
 				ereport(ERROR,
 					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("BioseqBatchJoin retained query cache capacity exceeded admission")));
+					 errmsg("bioseq batch join retained query cache capacity exceeded admission")));
 			});
 			pg_unreachable();
 		}
@@ -557,45 +557,45 @@ void release_uncommitted_retained_query(
 			bioseq::postgres::support::invoke_pg_as_cpp([] {
 				ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("BioseqBatchJoin retained query cache capacity overflow")));
+					 errmsg("bioseq batch join retained query cache capacity overflow")));
 			});
 			pg_unreachable();
 		}
 		permit.shrink_to(retained_bytes);
 	}
-	retained_queries.push_back(batch_processor::CpuPreparedQuerySketch{
+	retained_queries.push_back(batch_processor::cpu_prepared_query_sketch{
 		.query_ordinal = query_ordinal,
 		.query_bp_size = query_bp_size,
 		.minimizers = std::move(minimizers),
-		.proof = std::move(proof),
+		.execution_stats = std::move(execution_stats),
 	});
 	return true;
 }
 
-template <class Alphabet, class DestinationValue>
+template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_sketch_view(
-		const bioseq::storage::lazy_sequence_view<Alphabet> query_view,
+		const bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
 		const std::uint64_t query_ordinal,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const minimizer_sketch_backend sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels,
-		std::vector<DestinationValue>& destination,
+		std::vector<p_destination_value>& destination,
 		bioseq::parallelism::memory_permit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
-		std::vector<batch_processor::CpuPreparedQuerySketch>*
+		std::vector<batch_processor::cpu_prepared_query_sketch>*
 			retained_queries,
 		bioseq::parallelism::memory_permit* retained_query_permit,
 		std::uint64_t* retained_query_bytes) {
 	static_assert(
-		std::is_same_v<DestinationValue, minimap_sketch_data>
-		|| std::is_same_v<DestinationValue, std::uint32_t>);
+		std::is_same_v<p_destination_value, minimap_sketch_data>
+		|| std::is_same_v<p_destination_value, std::uint32_t>);
 	if (!minimizer_query_length_is_representable<minimap_sketch_data>(
 			query_view.bp_size())) {
 		bioseq::postgres::support::invoke_pg_as_cpp([] {
 			ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+				 errmsg("bioseq batch join query exceeds the 28-bit minimizer position domain")));
 		});
 		pg_unreachable();
 	}
@@ -606,9 +606,9 @@ void append_cpu_prepared_query_sketch_view(
 		});
 		pg_unreachable();
 	};
-	if constexpr (std::is_same_v<DestinationValue, std::uint32_t>) {
+	if constexpr (std::is_same_v<p_destination_value, std::uint32_t>) {
 		std::vector<minimap_sketch_data> retained_query;
-		AdmittedCanonicalU32QueryCollector collector{
+		admitted_canonical_u32_query_collector collector{
 			destination,
 			destination_permit,
 			retained_destination_bytes,
@@ -619,7 +619,7 @@ void append_cpu_prepared_query_sketch_view(
 				: nullptr,
 			retained_query_permit,
 			retained_query_bytes};
-		auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+		auto execution_stats = pipe::minimizer_dispatch_indexed_query_whole<
 			minimap_sketch_data>(
 			collector,
 			query_view,
@@ -631,22 +631,22 @@ void append_cpu_prepared_query_sketch_view(
 			bioseq::postgres::support::invoke_pg_as_cpp([] {
 				ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("Format-6 canonical query hash exceeds its authenticated u32 profile")));
+				 errmsg("hash-major canonical query hash exceeds its authenticated u32 profile")));
 			});
 			pg_unreachable();
 		}
 		if (!collector.ok()) {
-			fail("BioseqBatchJoin canonical query-hash destination growth cannot be admitted");
+			fail("bioseq batch join canonical query-hash destination growth cannot be admitted");
 		}
 		if (!pipe::minimizer_range_stats_matches_backend(
 				sketch_backend,
-				proof,
+				execution_stats,
 				/*require_nonempty_vector_work=*/false,
 				pipe::exact_simd_range_route::require_continuation)) {
 			bioseq::postgres::support::invoke_pg_as_cpp([] {
 				ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("BioseqBatchJoin prepared query sketch proof does not match the selected backend")));
+					 errmsg("bioseq batch join prepared query sketch stats do not match the selected backend")));
 			});
 			pg_unreachable();
 		}
@@ -655,7 +655,7 @@ void append_cpu_prepared_query_sketch_view(
 				query_ordinal,
 				static_cast<std::uint64_t>(query_view.bp_size()),
 				std::move(retained_query),
-				std::move(proof),
+				std::move(execution_stats),
 				*retained_queries,
 				*retained_query_permit,
 				*retained_query_bytes);
@@ -666,14 +666,14 @@ void append_cpu_prepared_query_sketch_view(
 		bioseq::parallelism::memory_admission_controller::instance().try_reserve(
 			0u);
 	if (!collector_permit) {
-		fail("BioseqBatchJoin query sketch collector admission owner is unavailable");
+		fail("bioseq batch join query sketch collector admission owner is unavailable");
 	}
 	admitted_sketch_collector_t<
 		minimap_sketch_data,
 		bioseq::parallelism::memory_permit> collector{
 			std::move(*collector_permit),
 			bioseq::parallelism::k_vector_preallocation_headroom_factor};
-	const auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+	const auto execution_stats = pipe::minimizer_dispatch_indexed_query_whole<
 		minimap_sketch_data>(
 		collector,
 		query_view,
@@ -682,17 +682,17 @@ void append_cpu_prepared_query_sketch_view(
 		sketch_backend,
 		highway_kernels);
 	if (!collector.ok()) {
-		fail("BioseqBatchJoin query sketch collector growth cannot be admitted");
+		fail("bioseq batch join query sketch collector growth cannot be admitted");
 	}
 	if (!pipe::minimizer_range_stats_matches_backend(
 			sketch_backend,
-			proof,
+			execution_stats,
 			/*require_nonempty_vector_work=*/false,
 			pipe::exact_simd_range_route::require_continuation)) {
 		bioseq::postgres::support::invoke_pg_as_cpp([] {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("BioseqBatchJoin prepared query sketch proof does not match the selected backend")));
+				 errmsg("bioseq batch join prepared query sketch stats do not match the selected backend")));
 		});
 		pg_unreachable();
 	}
@@ -704,20 +704,20 @@ void append_cpu_prepared_query_sketch_view(
 			== (std::numeric_limits<std::uint64_t>::max)()
 		|| measured_collector_bytes
 			!= collector.admitted_capacity_bytes()) {
-		fail("BioseqBatchJoin query sketch collector capacity disagrees with admission");
+		fail("bioseq batch join query sketch collector capacity disagrees with admission");
 	}
 	if (sketches.size() > destination.max_size() - destination.size()) {
-		fail("BioseqBatchJoin query sketch destination size overflow");
+		fail("bioseq batch join query sketch destination size overflow");
 	}
 	const std::size_t required = destination.size() + sketches.size();
 	if (required > destination.capacity()) {
 		const std::uint64_t old_destination_bytes =
 			bioseq::parallelism::saturating_mul(
-				destination.capacity(), sizeof(DestinationValue));
+				destination.capacity(), sizeof(p_destination_value));
 		const std::uint64_t allocation_headroom =
 			bioseq::parallelism::saturating_mul(
 				bioseq::parallelism::saturating_mul(
-					required, sizeof(DestinationValue)),
+					required, sizeof(p_destination_value)),
 				bioseq::parallelism::k_vector_preallocation_headroom_factor);
 		const std::uint64_t peak = bioseq::parallelism::saturating_add(
 			retained_destination_bytes, allocation_headroom);
@@ -728,23 +728,23 @@ void append_cpu_prepared_query_sketch_view(
 			|| peak == (std::numeric_limits<std::uint64_t>::max)()
 			|| retained_destination_bytes < old_destination_bytes
 			|| !destination_permit.grow_to(peak)) {
-			fail("BioseqBatchJoin query sketch destination growth cannot be admitted");
+			fail("bioseq batch join query sketch destination growth cannot be admitted");
 		}
 		destination.reserve(required);
 		const std::uint64_t measured_destination_bytes =
 			bioseq::parallelism::saturating_mul(
-				destination.capacity(), sizeof(DestinationValue));
+				destination.capacity(), sizeof(p_destination_value));
 		if (measured_destination_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_destination_bytes > allocation_headroom) {
-			fail("BioseqBatchJoin query sketch destination capacity exceeded admission");
+			fail("bioseq batch join query sketch destination capacity exceeded admission");
 		}
 		retained_destination_bytes = bioseq::parallelism::saturating_add(
 			retained_destination_bytes - old_destination_bytes,
 			measured_destination_bytes);
 		if (retained_destination_bytes
 			== (std::numeric_limits<std::uint64_t>::max)()) {
-			fail("BioseqBatchJoin retained query sketch capacity overflow");
+			fail("bioseq batch join retained query sketch capacity overflow");
 		}
 		destination_permit.shrink_to(retained_destination_bytes);
 	}
@@ -754,7 +754,7 @@ void append_cpu_prepared_query_sketch_view(
 	}
 }
 
-template <class Alphabet, std::size_t Width, class DestinationValue>
+template <class p_alphabet, std::size_t p_width, class p_destination_value>
 void append_cpu_prepared_query_sketch(
 		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
@@ -762,16 +762,16 @@ void append_cpu_prepared_query_sketch(
 		const std::int32_t window_size,
 		const minimizer_sketch_backend sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels,
-		std::vector<DestinationValue>& destination,
+		std::vector<p_destination_value>& destination,
 		bioseq::parallelism::memory_permit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
-		std::vector<batch_processor::CpuPreparedQuerySketch>* retained_queries,
+		std::vector<batch_processor::cpu_prepared_query_sketch>* retained_queries,
 		bioseq::parallelism::memory_permit* retained_query_permit,
 		std::uint64_t* retained_query_bytes) {
 	using sequence_t = compact_sequence_stdc_instance<
-		bioseq::pg_types::seq, Alphabet, Width>;
+		bioseq::pg_types::seq, p_alphabet, p_width>;
 	compact_sequence_range<sequence_t> query{header};
-	append_cpu_prepared_query_sketch_view<Alphabet, DestinationValue>(
+	append_cpu_prepared_query_sketch_view<p_alphabet, p_destination_value>(
 		bioseq::storage::make_lazy_sequence_view(query),
 		query_ordinal, kmer_size, window_size, sketch_backend, highway_kernels,
 		destination, destination_permit, retained_destination_bytes,
@@ -779,7 +779,7 @@ void append_cpu_prepared_query_sketch(
 }
 
 
-template <class Alphabet, class DestinationValue>
+template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_recipe_sketch(
 		const Datum recipe,
 		const pg_sequence_descriptor& descriptor,
@@ -791,19 +791,19 @@ void append_cpu_prepared_query_recipe_sketch(
 		const std::int32_t window_size,
 		const minimizer_sketch_backend sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels,
-		std::vector<DestinationValue>& destination,
+		std::vector<p_destination_value>& destination,
 		bioseq::parallelism::memory_permit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
-		std::vector<batch_processor::CpuPreparedQuerySketch>*
+		std::vector<batch_processor::cpu_prepared_query_sketch>*
 			retained_queries,
 		bioseq::parallelism::memory_permit* retained_query_permit,
 		std::uint64_t* retained_query_bytes) {
 	auto* owner = bioseq::postgres::support::invoke_pg_as_cpp(
 		[&session, recipe, descriptor] {
-			return ::make_pg_sequence_call_owner<Alphabet>(
+			return ::make_pg_sequence_call_owner<p_alphabet>(
 				session, recipe, descriptor);
 		});
-	append_cpu_prepared_query_sketch_view<Alphabet, DestinationValue>(
+	append_cpu_prepared_query_sketch_view<p_alphabet, p_destination_value>(
 		owner->view().with_payload_allocation_observer(payload_observer),
 		query_ordinal, kmer_size, window_size,
 		sketch_backend, highway_kernels,
@@ -812,8 +812,8 @@ void append_cpu_prepared_query_recipe_sketch(
 		retained_query_permit, retained_query_bytes);
 }
 
-template <class Alphabet, std::size_t Width>
-[[nodiscard]] batch_processor::CpuPreparationStatus
+template <class p_alphabet, std::size_t p_width>
+[[nodiscard]] batch_processor::cpu_preparation_status
 prepare_independently_admitted_query_sketch(
 		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
@@ -821,29 +821,29 @@ prepare_independently_admitted_query_sketch(
 		const std::int32_t window_size,
 		const minimizer_sketch_backend sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels,
-		batch_processor::CpuPreparedQuerySketch& destination) {
+		batch_processor::cpu_prepared_query_sketch& destination) {
 	using sequence_t = compact_sequence_stdc_instance<
-		bioseq::pg_types::seq, Alphabet, Width>;
+		bioseq::pg_types::seq, p_alphabet, p_width>;
 	compact_sequence_range<sequence_t> query{header};
 	auto query_owner = bioseq::storage::make_resident_lazy_sequence(query);
 	const auto query_view =
 		bioseq::storage::make_lazy_sequence_view(query_owner);
 	if (!minimizer_query_length_is_representable<minimap_sketch_data>(
 			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
-		return batch_processor::CpuPreparationStatus::query_length_unsupported;
+		return batch_processor::cpu_preparation_status::query_length_unsupported;
 	}
 	auto permit =
 		bioseq::parallelism::memory_admission_controller::instance().try_reserve(
 			0u);
 	if (!permit) {
-		return batch_processor::CpuPreparationStatus::admission_unavailable;
+		return batch_processor::cpu_preparation_status::admission_unavailable;
 	}
 	admitted_sketch_collector_t<
 		minimap_sketch_data,
 		bioseq::parallelism::memory_permit> collector{
 			std::move(*permit),
 			bioseq::parallelism::k_vector_preallocation_headroom_factor};
-	auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+	auto execution_stats = pipe::minimizer_dispatch_indexed_query_whole<
 		minimap_sketch_data>(
 		collector,
 		query_view,
@@ -852,14 +852,14 @@ prepare_independently_admitted_query_sketch(
 		sketch_backend,
 		highway_kernels);
 	if (!collector.ok()) {
-		return batch_processor::CpuPreparationStatus::collector_growth_failed;
+		return batch_processor::cpu_preparation_status::collector_growth_failed;
 	}
 	if (!pipe::minimizer_range_stats_matches_backend(
 			sketch_backend,
-			proof,
+			execution_stats,
 			/*require_nonempty_vector_work=*/false,
 			pipe::exact_simd_range_route::require_continuation)) {
-		return batch_processor::CpuPreparationStatus::proof_invalid;
+		return batch_processor::cpu_preparation_status::validation_failed;
 	}
 	auto owned = std::move(collector).release_owned_storage();
 	const std::uint64_t measured_bytes =
@@ -868,42 +868,42 @@ prepare_independently_admitted_query_sketch(
 	if (measured_bytes
 			== (std::numeric_limits<std::uint64_t>::max)()
 		|| measured_bytes != owned.second.bytes()) {
-		return batch_processor::CpuPreparationStatus::capacity_mismatch;
+		return batch_processor::cpu_preparation_status::capacity_mismatch;
 	}
-	destination = batch_processor::CpuPreparedQuerySketch{
+	destination = batch_processor::cpu_prepared_query_sketch{
 		.query_ordinal = query_ordinal,
 		.query_bp_size = static_cast<std::uint64_t>(query.bp_size()),
 		.parallel_preparation_permit =
 			std::optional<bioseq::parallelism::memory_permit>{
 				std::move(owned.second)},
 		.minimizers = std::move(owned.first),
-		.proof = std::move(proof),
+		.execution_stats = std::move(execution_stats),
 	};
-	return batch_processor::CpuPreparationStatus::ready;
+	return batch_processor::cpu_preparation_status::ready;
 }
 
 
-template <class Alphabet, std::size_t Width>
-[[nodiscard]] const batch_processor::CpuPreparationTypmodOps&
+template <class p_alphabet, std::size_t p_width>
+[[nodiscard]] const batch_processor::cpu_preparation_typmod_operations&
 typmod_ops() noexcept {
-	static constexpr batch_processor::CpuPreparationTypmodOps operations{
+	static constexpr batch_processor::cpu_preparation_typmod_operations operations{
 		.alphabet_code = static_cast<std::uint8_t>(
-			pgseq_supported_alphabets::index_of<Alphabet>()),
-		.storage_unit_byte_width = static_cast<std::uint8_t>(Width),
+			pgseq_supported_alphabets::index_of<p_alphabet>()),
+		.storage_unit_byte_width = static_cast<std::uint8_t>(p_width),
 		.append_header_sketch =
 			&append_cpu_prepared_query_sketch<
-				Alphabet, Width, minimap_sketch_data>,
+				p_alphabet, p_width, minimap_sketch_data>,
 		.append_header_u32 =
 			&append_cpu_prepared_query_sketch<
-				Alphabet, Width, std::uint32_t>,
+				p_alphabet, p_width, std::uint32_t>,
 		.append_recipe_sketch =
 			&append_cpu_prepared_query_recipe_sketch<
-				Alphabet, minimap_sketch_data>,
+				p_alphabet, minimap_sketch_data>,
 		.append_recipe_u32 =
 			&append_cpu_prepared_query_recipe_sketch<
-				Alphabet, std::uint32_t>,
+				p_alphabet, std::uint32_t>,
 		.prepare_independent =
-			&prepare_independently_admitted_query_sketch<Alphabet, Width>,
+			&prepare_independently_admitted_query_sketch<p_alphabet, p_width>,
 	};
 	static_assert(operations.complete());
 	return operations;

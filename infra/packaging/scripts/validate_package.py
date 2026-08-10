@@ -170,7 +170,7 @@ def validate_staged(
         "passed": True,
         "six_artifacts": True,
         "postgres_major": postgres_major,
-        "optimization_level": 0,
+        "template_flatten_profile": "dna4_uint64",
         "binaries": binaries,
     }
 
@@ -439,7 +439,7 @@ def validate_artifact(
         "postgres_major": postgres_major,
         "postgres_runtime_dependency": postgres_runtime_package,
         "vulkan_runtime_dependency": vulkan_runtime_package,
-        "optimization_level": 0,
+        "template_flatten_profile": "dna4_uint64",
         "binaries": binaries,
     }
 

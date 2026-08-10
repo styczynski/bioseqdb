@@ -40,7 +40,7 @@ struct safety_manifest_owner {
 
 /// Parsed SQL code-generation authority consumed by safety analysis.
 struct safety_manifest {
-    std::uint32_t manifest_version{1};
+    std::uint32_t schema_revision{1};
     std::string authority_mode;
     std::vector<std::string> c_routine_identities;
     std::vector<std::string> c_link_symbols;
@@ -71,6 +71,71 @@ struct string_array_contract {
     bool allow_empty{true};
     bool require_unique{true};
 };
+
+inline void require_current_manifest_root(
+    const json_value::object& root) {
+    static const std::set<std::string, std::less<>> fields{
+        "schema_revision",
+        "authority_mode",
+        "compiler_profile",
+        "clang_version",
+        "compilation_signature",
+        "extension_name",
+        "extension_schema",
+        "generated_module_prefix",
+        "fmgr_boundary_module",
+        "script_sha256",
+        "statement_count",
+        "statements",
+        "entity_count",
+        "public_entity_count",
+        "public_stable_identities",
+        "public_installed_identities",
+        "routine_entity_count",
+        "c_routine_identity_count",
+        "c_link_symbol_inventory_count",
+        "c_finfo_symbol_inventory_count",
+        "c_wrapper_entity_count",
+        "generated_wrapper_symbol_count",
+        "handwritten_fmgr_export_symbol_count",
+        "handwritten_fmgr_export_external_symbol_count",
+        "handwritten_fmgr_export_owner_count",
+        "c_symbol_sharing_group_count",
+        "generated_cpp_profile_invariant",
+        "entity_handle_count",
+        "entity_handle_module_count",
+        "entity_handle_modules",
+        "row_codec_count",
+        "row_codec_module_count",
+        "row_codec_modules",
+        "routine_boundary_contract_count",
+        "routine_boundary_contracts",
+        "result_shape_contract_count",
+        "result_shape_contracts",
+        "row_codec_contract_count",
+        "row_codec_contracts",
+        "c_routine_identities",
+        "c_link_symbols",
+        "c_finfo_symbols",
+        "generated_wrapper_symbols",
+        "handwritten_fmgr_export_symbols",
+        "handwritten_fmgr_export_external_symbols",
+        "fmgr_entrypoint_module_count",
+        "fmgr_entrypoint_modules",
+        "handwritten_fmgr_export_owners",
+        "c_symbol_owners",
+        "entity_counts_by_kind",
+        "entities",
+        "guc_generation",
+    };
+    for (const auto& [field, value] : root) {
+        static_cast<void>(value);
+        if (!fields.contains(field)) {
+            throw std::runtime_error(
+                "SQL manifest has unknown root field '" + field + "'");
+        }
+    }
+}
 
 [[nodiscard]] inline std::size_t parse_nonnegative_size(
     const json_value& input,
@@ -183,17 +248,19 @@ inline void validate_runtime_sql_identity(
     const json_value document = parse_json(text);
     const json_value::object& root =
         json_object(document, "SQL manifest");
-    const std::size_t version =
+    manifest_detail::require_current_manifest_root(root);
+    const std::size_t schema_revision =
         manifest_detail::parse_nonnegative_size(
             json_field(
-                root, "manifest_version", "SQL manifest"),
-            "SQL manifest.manifest_version");
-    if (version != 1) {
+                root, "schema_revision", "SQL manifest"),
+            "SQL manifest.schema_revision");
+    if (schema_revision != 1) {
         throw std::runtime_error(
-            "SQL manifest has an unsupported version");
+            "SQL manifest has an unsupported schema revision");
     }
     safety_manifest result{
-        .manifest_version = static_cast<std::uint32_t>(version),
+        .schema_revision =
+            static_cast<std::uint32_t>(schema_revision),
         .authority_mode = manifest_detail::required_string(
             root, "authority_mode", "SQL manifest"),
         .c_routine_identities = manifest_detail::parse_string_array(

@@ -1,8 +1,6 @@
 .DS_Store
 *.dylib
 
-columnar-experiments/columnar/configure~
-paradedb-experiments/target/
 **/build
 
 *.log
@@ -11,6 +9,13 @@ paradedb-experiments/target/
 **/.cache
 **/target/
 **/vcpkg_installed/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
 
 **/.claude/scheduled_tasks.lock
 .mcp.json

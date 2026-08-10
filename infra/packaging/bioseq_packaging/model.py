@@ -2,7 +2,7 @@
 
 Secret bytes are intentionally absent from every record in this module.  The
 records that cross the manifest boundary expose explicit ``to_manifest``
-methods so adding a dataclass field cannot silently alter schema version 1.
+methods so adding a dataclass field cannot silently alter the manifest schema.
 """
 
 from __future__ import annotations

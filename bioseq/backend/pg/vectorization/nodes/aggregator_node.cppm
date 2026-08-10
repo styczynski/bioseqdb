@@ -2,12 +2,9 @@
  *
  * vectorization/nodes/aggregator_node.cppm
  *
- * Custom scan node that replaces nodeAgg.c for columnar+vectorised queries.
- * This is a lightly adapted port of the PostgreSQL aggregate executor
- * (see src/backend/executor/nodeAgg.c in the upstream tree). The node
- * consumes vector tuple-table slots produced by the columnar custom scan,
- * advances the aggregate transition functions in a batched manner and
- * materialises final-value tuples through the standard nodeAgg machinery.
+ * Custom scan node for columnar, vectorized aggregate execution. The node
+ * consumes vector tuple-table slots, advances PostgreSQL aggregate transition
+ * functions in batches, and materializes final-value tuples through AggState.
  *
  *-------------------------------------------------------------------------
  */
@@ -22,7 +19,7 @@ extern "C" {
 #include <algorithm>
 
 /*
- *  nodeAgg.c (from PostgreSQL core) — original header preserved below.
+ *  PostgreSQL aggregate-executor semantics.
  *
  *	  ExecAgg normally evaluates each aggregate in the following steps:
  *
@@ -257,9 +254,8 @@ extern "C" {
  */
 
 /*
- * PostgreSQL forward-declares hash_aggregate_spill in execnodes.h; we fill in the
- * body here in the global module fragment so the full layout shares linkage
- * with PG's internal declaration.
+ * Complete PostgreSQL's hash_aggregate_spill declaration in the global module
+ * fragment so its layout and linkage match execnodes.h.
  */
 struct hash_aggregate_spill
 {
@@ -312,17 +308,17 @@ struct vector_aggregate_state
 	AggState *aggregate_state;
 };
 
-/* Hash-aggregate spill tuning constants (file-local). */
-constexpr double HASHAGG_PARTITION_FACTOR = 1.50;
-constexpr int HASHAGG_MIN_PARTITIONS = 4;
-constexpr int HASHAGG_MAX_PARTITIONS = 1024;
+/* File-local hash-aggregate spill policy. */
+constexpr double hash_aggregate_partition_factor = 1.50;
+constexpr int hash_aggregate_min_partitions = 4;
+constexpr int hash_aggregate_max_partitions = 1024;
 
-constexpr int HASHAGG_READ_BUFFER_SIZE = BLCKSZ;
-constexpr int HASHAGG_WRITE_BUFFER_SIZE = BLCKSZ;
+constexpr int hash_aggregate_read_buffer_bytes = BLCKSZ;
+constexpr int hash_aggregate_write_buffer_bytes = BLCKSZ;
 
-constexpr int HASHAGG_HLL_BIT_WIDTH = 5;
+constexpr int hash_aggregate_hll_bit_width = 5;
 
-constexpr Size CHUNKHDRSZ = 16;
+constexpr Size aggregate_chunk_header_bytes = 16;
 
 }
 
@@ -1628,15 +1624,15 @@ hash_agg_entry_size(int numTrans, Size tupleWidth, Size transitionSpace)
 							 tupleWidth);
 	Size		pergroupSize = numTrans * sizeof(AggStatePerGroupData);
 
-	tupleChunkSize = CHUNKHDRSZ + tupleSize;
+	tupleChunkSize = aggregate_chunk_header_bytes + tupleSize;
 
 	if (pergroupSize > 0)
-		pergroupChunkSize = CHUNKHDRSZ + pergroupSize;
+		pergroupChunkSize = aggregate_chunk_header_bytes + pergroupSize;
 	else
 		pergroupChunkSize = 0;
 
 	if (transitionSpace > 0)
-		transitionChunkSize = CHUNKHDRSZ + transitionSpace;
+		transitionChunkSize = aggregate_chunk_header_bytes + transitionSpace;
 	else
 		transitionChunkSize = 0;
 
@@ -1653,8 +1649,8 @@ hash_agg_entry_size(int numTrans, Size tupleWidth, Size transitionSpace)
  * Identifies the right phase, compiles the right expression given the
  * arguments, and then sets phase->evalfunc to that expression.
  *
- * Different versions of the compiled expression are needed depending on
- * whether hash aggregation has spilled or not, and whether it's reading from
+ * Separate compiled expressions are needed depending on whether hash
+ * aggregation has spilled and whether it is reading from
  * the outer plan or a tape. Before spilling to disk, the expression reads
  * from the outer plan and does not need to perform a NULL check. After
  * HashAgg begins to spill, new groups will not be created in the hash table,
@@ -1754,8 +1750,8 @@ hash_agg_set_limits(double hashentrysize, double input_groups, int used_bits,
 		*num_partitions = npartitions;
 
 	partition_mem =
-		HASHAGG_READ_BUFFER_SIZE +
-		HASHAGG_WRITE_BUFFER_SIZE * npartitions;
+		hash_aggregate_read_buffer_bytes +
+		hash_aggregate_write_buffer_bytes * npartitions;
 
 	/*
 	 * Don't set the limit below 3/4 of hash_mem. In that case, we are at the
@@ -1861,9 +1857,9 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 	hashkey_mem = MemoryContextMemAllocated(aggstate->hashcontext->ecxt_per_tuple_memory, true);
 
 	/* memory for read/write tape buffers, if spilled */
-	buffer_mem = npartitions * HASHAGG_WRITE_BUFFER_SIZE;
+	buffer_mem = npartitions * hash_aggregate_write_buffer_bytes;
 	if (from_tape)
-		buffer_mem += HASHAGG_READ_BUFFER_SIZE;
+		buffer_mem += hash_aggregate_read_buffer_bytes;
 
 	/* update peak mem */
 	total_mem = meta_mem + hashkey_mem + buffer_mem;
@@ -1932,10 +1928,10 @@ hash_choose_num_partitions(double input_groups, double hashentrysize,
 	 * open partition files are greater than 1/4 of hash_mem.
 	 */
 	partition_limit =
-		(hash_mem_limit * 0.25 - HASHAGG_READ_BUFFER_SIZE) /
-		HASHAGG_WRITE_BUFFER_SIZE;
+		(hash_mem_limit * 0.25 - hash_aggregate_read_buffer_bytes) /
+		hash_aggregate_write_buffer_bytes;
 
-	mem_wanted = HASHAGG_PARTITION_FACTOR * input_groups * hashentrysize;
+	mem_wanted = hash_aggregate_partition_factor * input_groups * hashentrysize;
 
 	/* make enough partitions so that each one is likely to fit in memory */
 	dpartitions = 1 + (mem_wanted / hash_mem_limit);
@@ -1943,12 +1939,12 @@ hash_choose_num_partitions(double input_groups, double hashentrysize,
 	if (dpartitions > partition_limit)
 		dpartitions = partition_limit;
 
-	if (dpartitions < HASHAGG_MIN_PARTITIONS)
-		dpartitions = HASHAGG_MIN_PARTITIONS;
-	if (dpartitions > HASHAGG_MAX_PARTITIONS)
-		dpartitions = HASHAGG_MAX_PARTITIONS;
+	if (dpartitions < hash_aggregate_min_partitions)
+		dpartitions = hash_aggregate_min_partitions;
+	if (dpartitions > hash_aggregate_max_partitions)
+		dpartitions = hash_aggregate_max_partitions;
 
-	/* HASHAGG_MAX_PARTITIONS limit makes this safe */
+	/* The partition cap makes this cast safe. */
 	npartitions = (int) dpartitions;
 
 	/* ceil(log2(npartitions)) */
@@ -2893,7 +2889,7 @@ hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *tapeset, int use
 	spill->npartitions = npartitions;
 
 	for (int i = 0; i < npartitions; i++)
-		initHyperLogLog(&spill->hll_card[i], HASHAGG_HLL_BIT_WIDTH);
+		initHyperLogLog(&spill->hll_card[i], hash_aggregate_hll_bit_width);
 }
 
 /*
@@ -3090,7 +3086,7 @@ hashagg_spill_finish(AggState *aggstate, hash_aggregate_spill *spill, int setno)
 		freeHyperLogLog(&spill->hll_card[i]);
 
 		/* rewinding frees the buffer while not in use */
-		LogicalTapeRewindForRead(tape, HASHAGG_READ_BUFFER_SIZE);
+		LogicalTapeRewindForRead(tape, hash_aggregate_read_buffer_bytes);
 
 		new_batch = hashagg_batch_new(tape, setno,
 									  spill->ntuples[i], cardinality,

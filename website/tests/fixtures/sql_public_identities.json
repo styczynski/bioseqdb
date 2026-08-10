@@ -1,5 +1,6 @@
 {
-  "schema": "bioseq.website.sql_public_identities/v1",
+  "schema": "bioseq.website.sql_public_identities",
+  "schema_revision": 1,
   "stable_identities": [
     "sql:type:bioseq.seq",
     "sql:function:bioseq.len(bioseq.seq)",

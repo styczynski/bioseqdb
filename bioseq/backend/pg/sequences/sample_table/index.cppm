@@ -68,12 +68,12 @@ using bioseq::storage::sequence_size_t;
 namespace bioseq::sequences::generation::pg {
 
 // dna4: 2 bits per letter, packed LSB-first per storage unit.
-constexpr std::uint8_t  kDna4AlphabetCode = 0;
-constexpr std::uint8_t  kDna4StorageWidth = 8;   // uint64
-constexpr std::size_t   kDna4LettersPerUnit = 32;
-constexpr std::size_t   kFragmentStorageUnits = 1024;
-constexpr std::size_t   kFragmentBp =
-    kFragmentStorageUnits * kDna4LettersPerUnit;  // 32 768
+constexpr std::uint8_t  k_dna4_alphabet_code = 0;
+constexpr std::uint8_t  k_dna4_storage_width = 8;   // uint64
+constexpr std::size_t   k_dna4_letters_per_unit = 32;
+constexpr std::size_t   k_fragment_storage_units = 1024;
+constexpr std::size_t   k_fragment_bp =
+    k_fragment_storage_units * k_dna4_letters_per_unit;  // 32 768
 
 class detoasted_sequence final {
 public:
@@ -302,20 +302,20 @@ void close_sample_relation_after_writes(
     }
 }
 
-template <bioseq::sequences::generation::packed_sequence_config R>
+template <bioseq::sequences::generation::packed_sequence_config p_sequence_config>
 [[nodiscard]] bioseq::storage::pending_sequence_source insert_compact_range_streamed(
-    const compact_sequence_range<R>& seq,
+    const compact_sequence_range<p_sequence_config>& seq,
     Relation parent_rel,
     TupleDesc parent_td,
     std::int16_t attno,
     std::uint64_t main_storage_id,
     sequence_size_t cap_bytes,
     bioseq::storage::seq_caches* caches) {
-    using traits = typename compact_sequence_range<R>::traits;
+    using traits = typename compact_sequence_range<p_sequence_config>::traits;
     using unit_t = typename traits::storage_unit;
-    static_assert(sizeof(unit_t) == kDna4StorageWidth,
+    static_assert(sizeof(unit_t) == k_dna4_storage_width,
                   "create_query_target_sample_table expects dna4/u64 storage");
-    static_assert(traits::letters_per_unit == kDna4LettersPerUnit,
+    static_assert(traits::letters_per_unit == k_dna4_letters_per_unit,
                   "create_query_target_sample_table expects dna4/u64 packing");
 
     const sequence_size_t total_bp = static_cast<sequence_size_t>(seq.bp_size());
@@ -327,10 +327,10 @@ template <bioseq::sequences::generation::packed_sequence_config R>
         bool is_last) noexcept {
         const sequence_size_t frag_global_bp_start =
             static_cast<sequence_size_t>(frag_no) *
-            static_cast<sequence_size_t>(kFragmentBp);
+            static_cast<sequence_size_t>(k_fragment_bp);
         const sequence_size_t this_fragment_bp = is_last
             ? (total_bp - frag_global_bp_start)
-            : static_cast<sequence_size_t>(kFragmentBp);
+            : static_cast<sequence_size_t>(k_fragment_bp);
         dst->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(this_fragment_bp);
         dst->padding_letters = is_last ? padding : std::uint16_t{0};
 
@@ -358,8 +358,8 @@ template <bioseq::sequences::generation::packed_sequence_config R>
                     parent_rel->rd_locator.relNumber,
                     attno,
                     parent_td,
-                    kDna4AlphabetCode,
-                    kDna4StorageWidth,
+                    k_dna4_alphabet_code,
+                    k_dna4_storage_width,
                     total_bp,
                     padding,
                     cap_bytes,
@@ -373,7 +373,7 @@ template <bioseq::sequences::generation::packed_sequence_config R>
     const std::uint64_t mean = static_cast<std::uint64_t>(
         std::max<std::size_t>(1, params.fragment_length_mean));
     const std::uint64_t query_units =
-        (mean + kDna4LettersPerUnit - 1) / kDna4LettersPerUnit;
+        (mean + k_dna4_letters_per_unit - 1) / k_dna4_letters_per_unit;
     const std::uint64_t query_bytes =
         bioseq::parallelism::saturating_mul(query_units, sizeof(std::uint64_t));
     const std::uint64_t rank_scratch =
@@ -477,9 +477,9 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
             static_cast<std::uint16_t>(
                 sequence_bp == 0
                     ? 0
-                    : ((total_bp + kDna4LettersPerUnit - 1)
-                        / kDna4LettersPerUnit)
-                        * kDna4LettersPerUnit - total_bp);
+                    : ((total_bp + k_dna4_letters_per_unit - 1)
+                        / k_dna4_letters_per_unit)
+                        * k_dna4_letters_per_unit - total_bp);
         std::mt19937_64 rng{seed_value};
 
         for (std::int32_t seq_no = 0;
@@ -493,12 +493,12 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                     bool is_last) noexcept {
                     const sequence_size_t frag_global_bp_start =
                         static_cast<sequence_size_t>(frag_no)
-                        * static_cast<sequence_size_t>(kFragmentBp);
+                        * static_cast<sequence_size_t>(k_fragment_bp);
                     const sequence_size_t this_fragment_bp =
                         is_last
                             ? (total_bp - frag_global_bp_start)
                             : static_cast<sequence_size_t>(
-                                kFragmentBp);
+                                k_fragment_bp);
                     dst->bp_size =
                         static_cast<
                             bioseq::pg_types::seq::bp_size_t>(
@@ -516,7 +516,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                         const sequence_size_t letters_this_unit =
                             std::min<sequence_size_t>(
                                 static_cast<sequence_size_t>(
-                                    kDna4LettersPerUnit),
+                                    k_dna4_letters_per_unit),
                                 this_fragment_bp - bp_emitted);
                         std::uint64_t packed = 0;
                         const std::uint64_t random_bits = rng();
@@ -546,8 +546,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                                     context.parent_rel->rd_locator.relNumber,
                                     seq_attno,
                                     context.parent_td,
-                                    kDna4AlphabetCode,
-                                    kDna4StorageWidth,
+                                    k_dna4_alphabet_code,
+                                    k_dna4_storage_width,
                                     total_bp,
                                     last_fragment_padding,
                                     context.cap_bytes,
@@ -564,8 +564,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                             alloc_locator_stub_in(
                                 get_column_write_per_tuple_context(
                                     context.write_state),
-                                kDna4AlphabetCode,
-                                kDna4StorageWidth,
+                                k_dna4_alphabet_code,
+                                k_dna4_storage_width,
                                 last_fragment_padding,
                                 total_bp,
                                 locator);
@@ -797,8 +797,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                                 alloc_locator_stub_in(
                                     get_column_write_per_tuple_context(
                                         context.write_state),
-                                    kDna4AlphabetCode,
-                                    kDna4StorageWidth,
+                                    k_dna4_alphabet_code,
+                                    k_dna4_storage_width,
                                     query_padding,
                                     query_total_bp,
                                     query_locator);
@@ -811,8 +811,8 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                                 alloc_locator_stub_in(
                                     get_column_write_per_tuple_context(
                                         context.write_state),
-                                    kDna4AlphabetCode,
-                                    kDna4StorageWidth,
+                                    k_dna4_alphabet_code,
+                                    k_dna4_storage_width,
                                     target_padding,
                                     target_total_bp,
                                     target_locator);

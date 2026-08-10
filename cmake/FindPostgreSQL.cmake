@@ -69,18 +69,18 @@ list(APPEND PostgreSQL_LIBRARY_DIRS "${PostgreSQL_LIBRARY_DIR}")
 # and its library when they link.  Keep this dependency on the PostgreSQL
 # interfaces instead of adding Homebrew include/link flags globally.
 set(PostgreSQL_SERVER_LINK_LIBRARIES "")
-set(_PostgreSQL_CONFIG_HEADER "${PostgreSQL_SERVER_INCLUDE_DIR}/pg_config.h")
-if(EXISTS "${_PostgreSQL_CONFIG_HEADER}")
-  file(STRINGS "${_PostgreSQL_CONFIG_HEADER}" _PostgreSQL_ENABLE_NLS
+set(_postgresql_config_header "${PostgreSQL_SERVER_INCLUDE_DIR}/pg_config.h")
+if(EXISTS "${_postgresql_config_header}")
+  file(STRINGS "${_postgresql_config_header}" _postgresql_enable_nls
     REGEX "^#define[ \t]+ENABLE_NLS([ \t]+1)?[ \t]*$")
-  if(_PostgreSQL_ENABLE_NLS)
+  if(_postgresql_enable_nls)
     find_package(Intl REQUIRED)
     list(APPEND PostgreSQL_INCLUDE_DIRS ${Intl_INCLUDE_DIRS})
     list(APPEND PostgreSQL_SERVER_LINK_LIBRARIES Intl::Intl)
   endif()
 endif()
-unset(_PostgreSQL_ENABLE_NLS)
-unset(_PostgreSQL_CONFIG_HEADER)
+unset(_postgresql_enable_nls)
+unset(_postgresql_config_header)
 
 # Set library to search for (which is different on WIN32)
 set(FIND_LIBRARY pq)

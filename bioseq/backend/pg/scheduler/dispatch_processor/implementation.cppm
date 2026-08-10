@@ -12,10 +12,11 @@
  *
  * There are two separate policy concepts in this file:
  *
- * 1. The active minimizer policy (`ScannerPgContext::active_index`).
+ * 1. The active minimizer policy (`scanner_pg_context::active_index`).
  *    - Resolved once for the target column when a user relation is known.
- *      `bioseq.read_sequence_index` controls whether stored chunks are read;
- *      recompute paths still use this policy to choose transient MPF vs MPS.
+ *      `bioseq.index.sequence_read.enabled` controls whether stored chunks are read;
+ *      recompute paths still use this policy to choose transient
+ *      minimizer-fragment vs minimizer-sequence storage.
  *    - Default when no enabled active row is found is
  *      `minimizers_per_fragment`.
  *    - The SQL schema has a unique partial index on
@@ -27,8 +28,8 @@
  *
  * 2. The deferred recompute persistence choice.
  *    - Used only when `can_defer_recompute_minimizer_persist()` is true:
- *      `bioseq.recompute_async_persist = on`,
- *      `bioseq.index_async_persist = on`, a user relation is known, and the
+ *      `bioseq.index.recompute_async_persistence.enabled = on`,
+ *      `bioseq.index.async_persistence.enabled = on`, a user relation is known, and the
  *      effective minimizer parameters are the persisted-index pair `k=15,w=10`.
  *    - It ignores `active_index` and scans `k_minimizer_index_names` in persistence
  *      preference order: `minimizers_per_fragment`, then
@@ -39,24 +40,24 @@
  *
  * GUC meanings in this dispatch path:
  *
- * - `bioseq.update_index_on_insert`: write/load-time policy gate. When off,
+ * - `bioseq.index.insert_maintenance.enabled`: write/load-time policy gate. When off,
  *   INSERT/load does not build UPDATE_ON_INSERT indexes. It does not by itself
  *   change the read path except by making stored indexes absent.
  *
- * - `bioseq.read_sequence_index`: read-time gate for stored-index reuse. When
+ * - `bioseq.index.sequence_read.enabled`: read-time gate for stored-index reuse. When
  *   on, each row tries to assemble the active stored index if chunks exist.
  *   When off, no stored minimizer index is read even if chunks are present;
- *   rows go to recompute/transient paths that still honor the active MPF/MPS
- *   policy shape.
+ *   rows go to recompute/transient paths that still honor the active
+ *   minimizer-fragment/minimizer-sequence policy shape.
  *
- * - `bioseq.index_async_persist`: global async persistence gate. If off, async
+ * - `bioseq.index.async_persistence.enabled`: global async persistence gate. If off, async
  *   staging functions refuse to enqueue/write opportunistically built indexes.
  *   It does not pick an index by itself.
  *
- * - `bioseq.recompute_async_persist`: no-index recompute gate. It allows a
+ * - `bioseq.index.recompute_async_persistence.enabled`: no-index recompute gate. It allows a
  *   recompute path to consult UPDATE_ON_INSERT minimizer policy and stage or
  *   otherwise handle a deferred minimizer target, but only together with
- *   `bioseq.index_async_persist` and only for persisted parameters `k=15,w=10`.
+ *   `bioseq.index.async_persistence.enabled` and only for persisted parameters `k=15,w=10`.
  *
  * - `bioseq.index_memory_cap_mb`: memory-admission cap for resident targets,
  *   assembled indexes, sorted runs, and opportunistic RAM-first builds. `0`
@@ -78,14 +79,15 @@
  *   If chunks are missing, fall through to recompute.
  *
  * - Active read index = `minimizers_per_sequence`.
- *   If the row has MPS chunks, assemble a query-specific index from the stored
- *   MPS representation and search with it. Legacy logical-fragment-backed MPS
- *   chunks are also supported. No new persistence is staged. If chunks are
+ *   If the row has minimizer-sequence chunks, assemble a query-specific index
+ *   from the stored minimizer-sequence representation and search with it.
+ *   Logical-fragment-backed minimizer-sequence chunks remain supported. No new
+ *   persistence is staged. If chunks are
  *   missing, fall through to recompute.
  *
  * - No active read row.
  *   The resolver defaults to `minimizers_per_fragment` when reads are enabled.
- *   If `bioseq.read_sequence_index` is off, no stored index is read; the
+ *   If `bioseq.index.sequence_read.enabled` is off, no stored index is read; the
  *   resolved policy still chooses the transient recompute shape.
  *
  * Stored-index missing or reads disabled:
@@ -93,24 +95,24 @@
  * - Active read index = `minimizers_per_fragment`.
  *   Recompute the search index. If RAM-first opportunistic build is admitted,
  *   the computed fragment chunks may be staged under
- *   `minimizers_per_fragment` when `bioseq.index_async_persist` is on.
+ *   `minimizers_per_fragment` when `bioseq.index.async_persistence.enabled` is on.
  *   In later resident recompute paths, if deferred choice also selects
  *   `minimizers_per_fragment`, the recomputed fragment index is written to a
  *   temp payload and staged for async persistence.
  *
  * - Active read index = `minimizers_per_sequence`.
  *   First, the RAM-first opportunistic branch may build fragment-shaped chunks
- *   and stage them under the MPS name if memory admission succeeds and
- *   `bioseq.index_async_persist` is on. If that is not admitted, the DOC0301
- *   fast no-index MPS branch can run when the deferred recompute gates are on
- *   and the UPDATE_ON_INSERT minimizer choice is MPS. That branch materializes
+ *   and stage them under the minimizer-sequence name if memory admission succeeds and
+ *   `bioseq.index.async_persistence.enabled` is on. If that is not admitted, the transient
+ *   no-index minimizer-sequence branch can run when the deferred recompute gates are on
+ *   and the UPDATE_ON_INSERT minimizer choice is minimizer-sequence. That branch materializes
  *   the target in memory when admitted, builds query-filtered transient segment
  *   indexes, searches, and logs `persisted=false`. This is an intentional
  *   semantic exception: the GUCs are used as eligibility gates, but no durable
- *   MPS rows are staged by that fast path.
+ *   minimizer-sequence rows are staged by that fast path.
  *
  * - No UPDATE_ON_INSERT minimizer choice.
- *   Recompute and search normally. If `bioseq.recompute_async_persist` was on
+ *   Recompute and search normally. If `bioseq.index.recompute_async_persistence.enabled` was on
  *   but no eligible minimizer policy exists, the code logs that async-persist
  *   was skipped.
  *
@@ -197,14 +199,14 @@ namespace bioseq::simd {
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
     const bioseq::pg_types::seq* query_hdr,
-    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
-    const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
+    const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
+    const std::array<int32_t, dispatch_batch_capacity>& query_ids,
     const minimap2_parameters& base_params,
     batch_invocation_role invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
-    batch_processor::ScannerPgContext* scanner_pg_ctx)
+    batch_processor::scanner_pg_context* scanner_pg_ctx)
 {
     std::map<int32_t, std::vector<match_result>> results;
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
@@ -225,7 +227,7 @@ namespace bioseq::simd {
 	}
 
     const auto highway_plan =
-        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
+        ::bioseq::simd_dispatch::registered_highway_dispatch_plan();
     const auto& highway_binding =
         ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
     if (highway_binding.target == 0
@@ -289,13 +291,13 @@ namespace bioseq::simd {
     return results;
 }
 
-batch_processor::CpuPreparedIndexGroup*
-batch_processor::CpuPreparedTarget::find_group(
+batch_processor::cpu_prepared_index_group*
+batch_processor::cpu_prepared_target::find_group(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const std::int32_t max_occ,
 		const minimizer_sketch_backend sketch_backend) noexcept {
-	for (CpuPreparedIndexGroup& group : groups) {
+	for (cpu_prepared_index_group& group : groups) {
 		if (group.kmer_size == kmer_size
 			&& group.window_size == window_size
 			&& group.max_occ == max_occ
@@ -333,11 +335,11 @@ minimap2_parameters batch_processor::effective_params_for_pair(
 
 namespace {
 
-using CpuPreparationStatus = batch_processor::CpuPreparationStatus;
-using cpu_preparation_detail::AdmittedCanonicalU32QueryCollector;
+using cpu_preparation_status = batch_processor::cpu_preparation_status;
+using cpu_preparation_detail::admitted_canonical_u32_query_collector;
 
 [[nodiscard]] bool reserve_parallel_query_sketch_slots(
-		std::vector<batch_processor::CpuPreparedQuerySketch>& destination,
+		std::vector<batch_processor::cpu_prepared_query_sketch>& destination,
 		const std::size_t required,
 		bioseq::parallelism::memory_permit& permit,
 		std::uint64_t& retained_bytes) {
@@ -348,11 +350,11 @@ using cpu_preparation_detail::AdmittedCanonicalU32QueryCollector;
 		const std::uint64_t old_bytes =
 			bioseq::parallelism::saturating_mul(
 				destination.capacity(),
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t requested_bytes =
 			bioseq::parallelism::saturating_mul(
 				required,
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t allocation_headroom =
 			bioseq::parallelism::saturating_mul(
 				requested_bytes,
@@ -382,7 +384,7 @@ using cpu_preparation_detail::AdmittedCanonicalU32QueryCollector;
 		const std::uint64_t measured_bytes =
 			bioseq::parallelism::saturating_mul(
 				destination.capacity(),
-				sizeof(batch_processor::CpuPreparedQuerySketch));
+				sizeof(batch_processor::cpu_prepared_query_sketch));
 		if (measured_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_bytes > allocation_headroom) {
@@ -417,9 +419,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		const std::span<const std::uint64_t> query_ordinals,
 		const minimap2_parameters& base_params,
 		const bool include_persisted_parameter_group,
-		const CpuQueryUnionStorage union_storage,
-		const CpuPreparationTypmodOps& typmod_ops,
-		CpuPreparedTarget& prepared_target) {
+		const cpu_query_union_storage union_storage,
+		const cpu_preparation_typmod_operations& typmod_ops,
+		cpu_prepared_target& prepared_target) {
 	if (!typmod_ops.matches(alphabet_code, storage_unit_byte_width)) {
 		throw std::logic_error{
 			"CPU preparation typmod operations disagree with the request"};
@@ -435,11 +437,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	prepared_target.query_union_prepare_host_wall_ns = 0;
 	prepared_target.unions_ready = false;
 	prepared_target.query_union_prepare_host_wall_published = false;
-	CpuQueryUnionStorage effective_union_storage = union_storage;
+	cpu_query_union_storage effective_union_storage = union_storage;
 	if (pipe::vulkan_components_requested(base_params)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("Vulkan BatchJoin cannot use CPU target preparation"),
+			 errmsg("Vulkan batch join cannot use CPU target preparation"),
 			 errdetail("biological Vulkan components were requested for this statement")));
 	}
 	if (query_recipe_datums.size() != query_headers.size()
@@ -447,7 +449,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		|| query_ordinals.size() != query_headers.size()) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("BioseqBatchJoin query preparation columns disagree")));
+			 errmsg("bioseq batch join query preparation columns disagree")));
 	}
 	std::vector<std::uint64_t> query_bp_sizes(query_headers.size(), 0u);
 	bool has_recipe_query = false;
@@ -459,7 +461,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				+ static_cast<unsigned>(recipe != Datum{0}) != 1u) {
 			ereport(ERROR,
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("BioseqBatchJoin query preparation ownership is not exclusive")));
+				 errmsg("bioseq batch join query preparation ownership is not exclusive")));
 		}
 		if (query_header != nullptr) {
 			if (query_header->alphabet_code != alphabet_code
@@ -467,7 +469,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 					!= storage_unit_byte_width) {
 				ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
+					 errmsg("bioseq batch join query typmod changed during CPU preparation")));
 			}
 			query_bp_sizes[query_index] = query_header->bp_size;
 		} else {
@@ -482,7 +484,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				|| descriptor.alphabet_code != alphabet_code) {
 				ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("BioseqBatchJoin query recipe metadata is invalid during CPU preparation")));
+					 errmsg("bioseq batch join query recipe metadata is invalid during CPU preparation")));
 			}
 			query_bp_sizes[query_index] = descriptor.bp_length;
 		}
@@ -490,14 +492,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				query_bp_sizes[query_index])) {
 			ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+				 errmsg("bioseq batch join query exceeds the 28-bit minimizer position domain")));
 		}
 	}
 	for (std::size_t index = 1u; index < query_ordinals.size(); ++index) {
 		if (query_ordinals[index - 1u] >= query_ordinals[index]) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("BioseqBatchJoin query ordinals are not strictly ordered")));
+				 errmsg("bioseq batch join query ordinals are not strictly ordered")));
 		}
 	}
 	auto union_permit =
@@ -506,12 +508,12 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	if (!union_permit) {
 		ereport(ERROR,
 			(errcode(ERRCODE_OUT_OF_MEMORY),
-			 errmsg("BioseqBatchJoin query-hash union admission owner is unavailable")));
+			 errmsg("bioseq batch join query-hash union admission owner is unavailable")));
 	}
 	prepared_target.query_union_permit.emplace(std::move(*union_permit));
-	if (effective_union_storage == CpuQueryUnionStorage::canonical_u32
+	if (effective_union_storage == cpu_query_union_storage::canonical_u32
 		|| effective_union_storage
-			== CpuQueryUnionStorage::retained_sketch_only) {
+			== cpu_query_union_storage::retained_sketch_only) {
 		auto retained_query_permit =
 			bioseq::parallelism::memory_admission_controller::instance().
 				try_reserve(0u);
@@ -525,7 +527,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			const std::int32_t w,
 			const std::int32_t max_occ,
 			const minimizer_sketch_backend sketch_backend)
-			-> CpuPreparedIndexGroup& {
+			-> cpu_prepared_index_group& {
 		if (auto* existing = prepared_target.find_group(
 				k, w, max_occ, sketch_backend)) {
 			return *existing;
@@ -536,11 +538,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			const std::uint64_t old_outer_bytes =
 				bioseq::parallelism::saturating_mul(
 					prepared_target.groups.capacity(),
-					sizeof(CpuPreparedIndexGroup));
+					sizeof(cpu_prepared_index_group));
 			const std::uint64_t allocation_headroom =
 				bioseq::parallelism::saturating_mul(
 					bioseq::parallelism::saturating_mul(
-						required, sizeof(CpuPreparedIndexGroup)),
+						required, sizeof(cpu_prepared_index_group)),
 					bioseq::parallelism::
 						k_vector_preallocation_headroom_factor);
 			const std::uint64_t peak = bioseq::parallelism::saturating_add(
@@ -557,7 +559,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("BioseqBatchJoin query-union group growth cannot be admitted")));
+						 errmsg("bioseq batch join query-union group growth cannot be admitted")));
 				});
 				pg_unreachable();
 			}
@@ -565,14 +567,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			const std::uint64_t measured_outer_bytes =
 				bioseq::parallelism::saturating_mul(
 					prepared_target.groups.capacity(),
-					sizeof(CpuPreparedIndexGroup));
+					sizeof(cpu_prepared_index_group));
 			if (measured_outer_bytes
 					== (std::numeric_limits<std::uint64_t>::max)()
 				|| measured_outer_bytes > allocation_headroom) {
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("BioseqBatchJoin query-union group capacity exceeded admission")));
+						 errmsg("bioseq batch join query-union group capacity exceeded admission")));
 				});
 				pg_unreachable();
 			}
@@ -586,14 +588,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						 errmsg("BioseqBatchJoin retained group capacity overflow")));
+						 errmsg("bioseq batch join retained group capacity overflow")));
 				});
 				pg_unreachable();
 			}
 			prepared_target.query_union_permit->shrink_to(
 				prepared_target.query_union_admission_bytes);
 		}
-		prepared_target.groups.push_back(CpuPreparedIndexGroup{
+		prepared_target.groups.push_back(cpu_prepared_index_group{
 			.kmer_size = k,
 			.window_size = w,
 			.max_occ = max_occ,
@@ -603,9 +605,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	};
 	bool used_parallel_canonical_preparation = false;
 	bool parallel_group_is_uniform =
-		(effective_union_storage == CpuQueryUnionStorage::canonical_u32
+		(effective_union_storage == cpu_query_union_storage::canonical_u32
 			|| effective_union_storage
-				== CpuQueryUnionStorage::retained_sketch_only)
+				== cpu_query_union_storage::retained_sketch_only)
 		&& include_persisted_parameter_group
 		&& !has_recipe_query
 		&& query_headers.size() >= 2u
@@ -635,15 +637,15 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		parallel_group_is_uniform
 		&& bioseq::parallelism::has_parallel_dispatch(pool.get_mode())
 		&& pool.maximum_concurrency() > 1u;
-	if (effective_union_storage == CpuQueryUnionStorage::retained_sketch_only
+	if (effective_union_storage == cpu_query_union_storage::retained_sketch_only
 		&& !parallel_group_is_uniform) {
 		/* Retention is an optimization, not a correctness prerequisite.  If
 		 * full-batch retention cannot be proven before sketching starts, retain
-		 * the historical admitted canonical owner and publish synchronously. */
-		effective_union_storage = CpuQueryUnionStorage::canonical_u32;
+		 * the admitted canonical owner and publish synchronously. */
+		effective_union_storage = cpu_query_union_storage::canonical_u32;
 	}
 	if (parallel_group_is_uniform) {
-		CpuPreparedIndexGroup& group = ensure_group(
+		cpu_prepared_index_group& group = ensure_group(
 			15, 10, parallel_max_occ, parallel_sketch_backend);
 		if (!reserve_parallel_query_sketch_slots(
 				group.retained_query_sketches,
@@ -653,13 +655,13 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			bioseq::postgres::support::invoke_pg_as_cpp([] {
 				ereport(ERROR,
 					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("BioseqBatchJoin parallel query-sketch slots cannot be admitted")));
+					 errmsg("bioseq batch join parallel query-sketch slots cannot be admitted")));
 			});
 			pg_unreachable();
 		}
-		std::vector<CpuPreparationStatus> statuses(
+		std::vector<cpu_preparation_status> statuses(
 			query_headers.size(),
-			CpuPreparationStatus::pending);
+			cpu_preparation_status::pending);
 		std::vector<std::exception_ptr> exceptions(query_headers.size());
 		pool.parallel_for_with_context_tracked(
 			0u,
@@ -695,56 +697,56 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				std::rethrow_exception(exceptions[query_index]);
 			}
 			switch (statuses[query_index]) {
-				case CpuPreparationStatus::ready:
+				case cpu_preparation_status::ready:
 					break;
-				case CpuPreparationStatus::
+				case cpu_preparation_status::
 						query_length_unsupported:
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-							 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+							 errmsg("bioseq batch join query exceeds the 28-bit minimizer position domain")));
 					});
 					pg_unreachable();
-				case CpuPreparationStatus::
+				case cpu_preparation_status::
 						admission_unavailable:
-				case CpuPreparationStatus::
+				case cpu_preparation_status::
 						collector_growth_failed:
-				case CpuPreparationStatus::
+				case cpu_preparation_status::
 						capacity_mismatch:
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_OUT_OF_MEMORY),
-							 errmsg("BioseqBatchJoin parallel query sketch exceeded admission")));
+							 errmsg("bioseq batch join parallel query sketch exceeded admission")));
 					});
 					pg_unreachable();
-				case CpuPreparationStatus::proof_invalid:
+				case cpu_preparation_status::validation_failed:
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("BioseqBatchJoin parallel query sketch proof does not match the selected backend")));
+							 errmsg("bioseq batch join parallel query sketch stats do not match the selected backend")));
 					});
 					pg_unreachable();
-				case CpuPreparationStatus::
+				case cpu_preparation_status::
 						unsupported_typmod:
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_DATATYPE_MISMATCH),
-							 errmsg("BioseqBatchJoin parallel query preparation received an unsupported typmod")));
+							 errmsg("bioseq batch join parallel query preparation received an unsupported typmod")));
 					});
 					pg_unreachable();
-				case CpuPreparationStatus::pending:
+				case cpu_preparation_status::pending:
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("BioseqBatchJoin parallel query preparation left an incomplete slot")));
+							 errmsg("bioseq batch join parallel query preparation left an incomplete slot")));
 					});
 					pg_unreachable();
 			}
 		}
 		const bool materialize_canonical =
-			effective_union_storage == CpuQueryUnionStorage::canonical_u32;
+			effective_union_storage == cpu_query_union_storage::canonical_u32;
 		std::size_t canonical_size = 0u;
-		for (CpuPreparedQuerySketch& retained
+		for (cpu_prepared_query_sketch& retained
 			 : group.retained_query_sketches) {
 			const std::uint64_t retained_minimizer_bytes =
 				bioseq::parallelism::saturating_mul(
@@ -770,7 +772,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("BioseqBatchJoin parallel query cache cannot be consolidated")));
+						 errmsg("bioseq batch join parallel query cache cannot be consolidated")));
 				});
 				pg_unreachable();
 			}
@@ -782,7 +784,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			}
 		}
 		if (materialize_canonical) {
-			AdmittedCanonicalU32QueryCollector canonical_collector{
+			admitted_canonical_u32_query_collector canonical_collector{
 				group.canonical_query_hash_union_u32,
 				*prepared_target.query_union_permit,
 				prepared_target.query_union_admission_bytes};
@@ -790,11 +792,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("BioseqBatchJoin parallel canonical query union cannot be admitted")));
+						 errmsg("bioseq batch join parallel canonical query union cannot be admitted")));
 				});
 				pg_unreachable();
 			}
-			for (const CpuPreparedQuerySketch& retained
+			for (const cpu_prepared_query_sketch& retained
 					 : group.retained_query_sketches) {
 				for (const minimap_sketch_data& minimizer
 						 : retained.minimizers) {
@@ -813,7 +815,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
-						 errmsg("BioseqBatchJoin parallel canonical query union growth cannot be admitted")));
+						 errmsg("bioseq batch join parallel canonical query union growth cannot be admitted")));
 				});
 				pg_unreachable();
 			}
@@ -832,11 +834,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
 					target_bp_size, query_bp_sizes[query_index]));
 			const minimizer_sketch_backend sketch_backend =
 				pipe::target_index_sketch_backend_from_params(effective);
-			auto append_to = [&](CpuPreparedIndexGroup& group) {
+			auto append_to = [&](cpu_prepared_index_group& group) {
 				if (effective_union_storage
-						== CpuQueryUnionStorage::canonical_u32
+						== cpu_query_union_storage::canonical_u32
 					|| effective_union_storage
-						== CpuQueryUnionStorage::
+						== cpu_query_union_storage::
 							canonical_u32_sequential_fallback) {
 				const auto append_canonical =
 					[query_ordinal, &group, &prepared_target, &base_params](
@@ -936,45 +938,45 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			}
 		}
 	}
-	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
+	for (cpu_prepared_index_group& group : prepared_target.groups) {
 		if (effective_union_storage
-				== CpuQueryUnionStorage::retained_sketch_only) {
-			bool retained_proofs_match =
+				== cpu_query_union_storage::retained_sketch_only) {
+			bool retained_stats_match =
 				group.retained_query_sketches.size() == query_headers.size()
 				&& group.query_hash_union.empty()
 				&& group.query_hash_union.capacity() == 0u
 				&& group.canonical_query_hash_union_u32.empty()
 				&& group.canonical_query_hash_union_u32.capacity() == 0u;
 			for (std::size_t query_index = 0u;
-				 retained_proofs_match
+				 retained_stats_match
 					&& query_index < group.retained_query_sketches.size();
 				 ++query_index) {
-				const CpuPreparedQuerySketch& retained =
+				const cpu_prepared_query_sketch& retained =
 					group.retained_query_sketches[query_index];
-				retained_proofs_match =
+				retained_stats_match =
 					retained.query_ordinal == query_ordinals[query_index]
 					&& retained.query_bp_size
 						== query_bp_sizes[query_index]
 					&& pipe::minimizer_range_stats_matches_backend(
 						group.sketch_backend,
-						retained.proof,
+					 retained.execution_stats,
 						/*require_nonempty_vector_work=*/false,
 						pipe::exact_simd_range_route::require_continuation);
 			}
-			if (!retained_proofs_match) {
+			if (!retained_stats_match) {
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("compact-direct retained-only query cache/proof is incomplete")));
+						 errmsg("compact-direct retained-only query cache stats are incomplete")));
 				});
 				pg_unreachable();
 			}
-			group.compact_direct_query_set_proof_pending = true;
+			group.compact_direct_query_set_validation_pending = true;
 			continue;
 		}
-		if (effective_union_storage == CpuQueryUnionStorage::canonical_u32
+		if (effective_union_storage == cpu_query_union_storage::canonical_u32
 			|| effective_union_storage
-				== CpuQueryUnionStorage::canonical_u32_sequential_fallback) {
+				== cpu_query_union_storage::canonical_u32_sequential_fallback) {
 			if (!group.query_hash_union.empty()
 				|| group.query_hash_union.capacity() != 0u) {
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
@@ -984,18 +986,18 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				});
 				pg_unreachable();
 			}
-			for (const CpuPreparedQuerySketch& retained
+			for (const cpu_prepared_query_sketch& retained
 				 : group.retained_query_sketches) {
 				if (!pipe::minimizer_range_stats_matches_backend(
 						group.sketch_backend,
-						retained.proof,
+					retained.execution_stats,
 						/*require_nonempty_vector_work=*/false,
 						pipe::exact_simd_range_route::
 							require_continuation)) {
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
-							 errmsg("hash-major retained query sketch proof is invalid")));
+						 errmsg("hash-major retained query sketch stats are invalid")));
 					});
 					pg_unreachable();
 				}
@@ -1137,8 +1139,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	std::uint64_t measured_query_union_bytes =
 		bioseq::parallelism::saturating_mul(
 			prepared_target.groups.capacity(),
-			static_cast<std::uint64_t>(sizeof(CpuPreparedIndexGroup)));
-	for (const CpuPreparedIndexGroup& group : prepared_target.groups) {
+			static_cast<std::uint64_t>(sizeof(cpu_prepared_index_group)));
+	for (const cpu_prepared_index_group& group : prepared_target.groups) {
 		measured_query_union_bytes =
 			bioseq::parallelism::saturating_add(
 				measured_query_union_bytes,
@@ -1166,7 +1168,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		bioseq::postgres::support::invoke_pg_as_cpp([retained, admitted] {
 			ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("BioseqBatchJoin retained query-union capacity exceeded admission"),
+				 errmsg("bioseq batch join retained query-union capacity exceeded admission"),
 				 errdetail("retained_bytes=%llu admitted_headroom=%llu",
 					static_cast<unsigned long long>(retained),
 					static_cast<unsigned long long>(admitted))));
@@ -1177,15 +1179,15 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	prepared_target.query_union_permit->shrink_to(
 		prepared_target.query_union_admission_bytes);
 	std::uint64_t measured_query_sketch_cache_bytes = 0u;
-	for (const CpuPreparedIndexGroup& group : prepared_target.groups) {
+	for (const cpu_prepared_index_group& group : prepared_target.groups) {
 		measured_query_sketch_cache_bytes =
 			bioseq::parallelism::saturating_add(
 				measured_query_sketch_cache_bytes,
 				bioseq::parallelism::saturating_mul(
 					group.retained_query_sketches.capacity(),
 					static_cast<std::uint64_t>(
-						sizeof(CpuPreparedQuerySketch))));
-		for (const CpuPreparedQuerySketch& retained
+						sizeof(cpu_prepared_query_sketch))));
+		for (const cpu_prepared_query_sketch& retained
 			 : group.retained_query_sketches) {
 			measured_query_sketch_cache_bytes =
 				bioseq::parallelism::saturating_add(
@@ -1207,7 +1209,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		bioseq::postgres::support::invoke_pg_as_cpp([] {
 			ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("BioseqBatchJoin retained query cache exceeded admission")));
+				 errmsg("bioseq batch join retained query cache exceeded admission")));
 		});
 		pg_unreachable();
 	}
@@ -1227,19 +1229,19 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	prepared_target.unions_ready = true;
 }
 
-bool batch_processor::publish_compact_direct_query_set_proof(
-		CpuPreparedTarget& prepared_target,
-		CpuPreparedIndexGroup& group,
-		const bioseq::indexing::compact_direct_query_set_stats& proof) noexcept {
+bool batch_processor::publish_compact_direct_query_set_stats(
+		cpu_prepared_target& prepared_target,
+		cpu_prepared_index_group& group,
+		const bioseq::indexing::compact_direct_query_set_stats& query_set_stats) noexcept {
 	if (!prepared_target.unions_ready
 		|| prepared_target.groups.size() != 1u
 		|| &prepared_target.groups.front() != &group
-		|| !group.compact_direct_query_set_proof_pending
+		|| !group.compact_direct_query_set_validation_pending
 		|| group.max_occ <= 0
-		|| !proof.present
-		|| proof.query_count != prepared_target.query_count
-		|| proof.query_count != group.retained_query_sketches.size()
-		|| proof.unique_hash_count > proof.query_occurrence_count
+		|| !query_set_stats.present
+		|| query_set_stats.query_count != prepared_target.query_count
+		|| query_set_stats.query_count != group.retained_query_sketches.size()
+		|| query_set_stats.unique_hash_count > query_set_stats.query_occurrence_count
 		|| !group.query_hash_union.empty()
 		|| group.query_hash_union.capacity() != 0u
 		|| !group.canonical_query_hash_union_u32.empty()
@@ -1254,7 +1256,7 @@ bool batch_processor::publish_compact_direct_query_set_proof(
 	}
 
 	std::uint64_t retained_occurrence_count = 0u;
-	for (const CpuPreparedQuerySketch& retained
+	for (const cpu_prepared_query_sketch& retained
 			: group.retained_query_sketches) {
 		retained_occurrence_count = bioseq::parallelism::saturating_add(
 			retained_occurrence_count,
@@ -1262,14 +1264,14 @@ bool batch_processor::publish_compact_direct_query_set_proof(
 	}
 	if (retained_occurrence_count
 			== (std::numeric_limits<std::uint64_t>::max)()
-		|| retained_occurrence_count != proof.query_occurrence_count) {
+		|| retained_occurrence_count != query_set_stats.query_occurrence_count) {
 		return false;
 	}
 
-	group.key_set_checksum = proof.group_key_set_checksum;
-	group.build_set_checksum = proof.group_key_set_checksum;
+	group.key_set_checksum = query_set_stats.group_key_set_checksum;
+	group.build_set_checksum = query_set_stats.group_key_set_checksum;
 	group.build_set_checksum_present = true;
-	prepared_target.total_unique_keys = proof.unique_hash_count;
+	prepared_target.total_unique_keys = query_set_stats.unique_hash_count;
 	auto mix = [&prepared_target](const std::uint64_t value) noexcept {
 		prepared_target.key_set_checksum ^= value;
 		prepared_target.key_set_checksum *=
@@ -1279,22 +1281,22 @@ bool batch_processor::publish_compact_direct_query_set_proof(
 	mix(static_cast<std::uint64_t>(group.window_size));
 	mix(static_cast<std::uint64_t>(group.max_occ));
 	mix(static_cast<std::uint64_t>(group.sketch_backend));
-	mix(proof.unique_hash_count);
-	mix(proof.group_key_set_checksum);
-	group.compact_direct_query_set_proof_pending = false;
+	mix(query_set_stats.unique_hash_count);
+	mix(query_set_stats.group_key_set_checksum);
+	group.compact_direct_query_set_validation_pending = false;
 	return true;
 }
 
-void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
-		CpuPreparedTarget& prepared_target) {
-	if (prepared_target.query_set_proof_ready()) return;
+void batch_processor::finalize_pending_compact_direct_query_set_validation_fallback(
+		cpu_prepared_target& prepared_target) {
+	if (prepared_target.query_set_validation_ready()) return;
 	if (!prepared_target.unions_ready
 		|| prepared_target.groups.size() != 1u) {
 		throw bioseq::indexing::persisted_minimizer_lookup_error(
 			"compact-direct query-set fallback has no exclusive prepared group");
 	}
-	CpuPreparedIndexGroup& group = prepared_target.groups.front();
-	if (!group.compact_direct_query_set_proof_pending
+	cpu_prepared_index_group& group = prepared_target.groups.front();
+	if (!group.compact_direct_query_set_validation_pending
 		|| group.max_occ <= 0
 		|| group.retained_query_sketches.size()
 			!= prepared_target.query_count
@@ -1308,17 +1310,17 @@ void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
 
 	std::uint64_t occurrence_count = 0u;
 	std::optional<std::uint64_t> previous_query_ordinal;
-	for (const CpuPreparedQuerySketch& retained
+	for (const cpu_prepared_query_sketch& retained
 			: group.retained_query_sketches) {
 		if ((previous_query_ordinal
 				&& *previous_query_ordinal >= retained.query_ordinal)
 			|| !pipe::minimizer_range_stats_matches_backend(
 				group.sketch_backend,
-				retained.proof,
+				retained.execution_stats,
 				/*require_nonempty_vector_work=*/false,
 				pipe::exact_simd_range_route::require_continuation)) {
 			throw bioseq::indexing::persisted_minimizer_lookup_error(
-				"compact-direct query-set fallback retained proof is invalid");
+				"compact-direct query-set fallback retained stats are invalid");
 		}
 		previous_query_ordinal = retained.query_ordinal;
 		occurrence_count = bioseq::parallelism::saturating_add(
@@ -1348,7 +1350,7 @@ void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
 			allocation_headroom);
 	if (!fallback_permit) {
 		throw bioseq::indexing::persisted_minimizer_lookup_error(
-			bioseq::indexing::persisted_minimizer_lookup_error::Reason::
+			bioseq::indexing::persisted_minimizer_lookup_error::reason::
 				admission_or_allocation,
 			"compact-direct query-set fallback cannot be admitted");
 	}
@@ -1362,12 +1364,12 @@ void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_bytes > fallback_permit->bytes()) {
 			throw bioseq::indexing::persisted_minimizer_lookup_error(
-				bioseq::indexing::persisted_minimizer_lookup_error::Reason::
+				bioseq::indexing::persisted_minimizer_lookup_error::reason::
 					admission_or_allocation,
 				"compact-direct query-set fallback exceeded admission");
 		}
 		fallback_permit->shrink_to(measured_bytes);
-		for (const CpuPreparedQuerySketch& retained
+		for (const cpu_prepared_query_sketch& retained
 				: group.retained_query_sketches) {
 			for (const minimap_sketch_data& minimizer : retained.minimizers) {
 				if (minimizer.kmer()
@@ -1387,7 +1389,7 @@ void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
 		canonical.erase(
 			std::unique(canonical.begin(), canonical.end()),
 			canonical.end());
-		const bioseq::indexing::compact_direct_query_set_stats proof{
+		const bioseq::indexing::compact_direct_query_set_stats query_set_stats{
 			.query_count = prepared_target.query_count,
 			.query_occurrence_count = occurrence_count,
 			.unique_hash_count = canonical.size(),
@@ -1399,14 +1401,14 @@ void batch_processor::finalize_pending_compact_direct_query_set_proof_fallback(
 					static_cast<std::uint32_t>(group.max_occ)),
 			.present = true,
 		};
-		if (!publish_compact_direct_query_set_proof(
-				prepared_target, group, proof)) {
+		if (!publish_compact_direct_query_set_stats(
+				prepared_target, group, query_set_stats)) {
 			throw bioseq::indexing::persisted_minimizer_lookup_error(
 				"compact-direct query-set fallback publication was rejected");
 		}
 	} catch (const std::bad_alloc&) {
 		throw bioseq::indexing::persisted_minimizer_lookup_error(
-			bioseq::indexing::persisted_minimizer_lookup_error::Reason::
+			bioseq::indexing::persisted_minimizer_lookup_error::reason::
 				admission_or_allocation,
 			"compact-direct query-set fallback allocation failed");
 	}
@@ -1434,8 +1436,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		const minimap2_parameters& base_params,
 		const bioseq::storage::indexing::borrowed_executor_read_context&
 			executor_read,
-		const CpuPreparationTypmodOps& typmod_ops,
-		CpuPreparedTarget& prepared_target) {
+		const cpu_preparation_typmod_operations& typmod_ops,
+		cpu_prepared_target& prepared_target) {
 	if (!typmod_ops.matches(alphabet_code, storage_unit_byte_width)) {
 		throw std::logic_error{
 			"persisted CPU preparation typmod operations disagree with the request"};
@@ -1449,7 +1451,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("required compatible persisted minimizer index is invalid"),
 				 errdetail("%s", message.c_str()),
-				 errhint("Rebuild the exact revision-3 grouped-SoA READY generation; "
+				 errhint("Rebuild the exact grouped-SoA READY generation; "
 					"the required route has no recompute or cache fallback.")));
 		});
 	};
@@ -1459,7 +1461,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("required compatible persisted minimizer index unavailable"),
 				 errdetail("%s", message.c_str()),
-				 errhint("Build the exact revision-3 grouped-SoA READY generation; "
+				 errhint("Build the exact grouped-SoA READY generation; "
 					"the required route has no recompute or cache fallback.")));
 		});
 	};
@@ -1498,14 +1500,14 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		.column_attno = column_attno,
 		.index_name = std::string{index_name},
 	};
-	auto source_proof = derive_minimizer_generation_catalog_source_proof_pg(
+	auto source_authorization = authorize_minimizer_generation_catalog_source_pg(
 		identity, sequence_rowno, executor_read);
 	const minimizer_generation_source_locator source =
-		source_proof.source_for_diagnostics();
-	const minimizer_generation_catalog_source_proof_counters source_counters =
-		source_proof.counters_for_diagnostics();
+		source_authorization.source_for_diagnostics();
+	const minimizer_generation_catalog_source_stats source_stats =
+		source_authorization.stats_for_diagnostics();
 	const std::uint64_t source_content_checksum =
-		source_proof.source_content_checksum_for_diagnostics();
+		source_authorization.source_content_checksum_for_diagnostics();
 	if (source.sequence_rowno != sequence_rowno
 		|| source.locator.logical_length != target_bp_size
 		|| source.alphabet_code != alphabet_code
@@ -1523,30 +1525,23 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		switch (opened_hash_major.relation_failure.kind) {
 			case minimizer_generation_relation_kind::missing:
 				unavailable(fmt::format(
-					"revision-3 generation relation {} is absent",
+					"generation relation {} is absent",
 					identity.table_name));
-				return;
-			case minimizer_generation_relation_kind::legacy_exact:
-				unavailable(fmt::format(
-					"relation {} is the exact legacy {} schema and has no "
-					"revision-3 READY generation",
-					identity.table_name, index_name));
 				return;
 			case minimizer_generation_relation_kind::malformed:
 				fail(fmt::format(
-					"generation relation {} is neither the canonical revision-3 "
-					"schema nor the exact legacy {} schema; revision3_schema_error={}",
-					identity.table_name, index_name,
+					"generation relation {} does not match the current schema; schema_error={}",
+					identity.table_name,
 					minimizer_generation_schema_error_name(
-						opened_hash_major.relation_failure.revision3_error)));
+						opened_hash_major.relation_failure.schema_error)));
 				return;
-			case minimizer_generation_relation_kind::revision3_exact:
+			case minimizer_generation_relation_kind::current_exact:
 				fail("hash-major relation binder returned an invalid success classification");
 				return;
 			}
 	}
 	if (opened_hash_major.session && opened_hash_major.head_absent) {
-		fail("hash-major binder returned both a session and an absence proof");
+		fail("hash-major binder returned both a session and an absence result");
 		return;
 	}
 	bool hash_major_profile_applicable = false;
@@ -1562,26 +1557,26 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					sketch_backend);
 		const auto hash_major_candidate_manifest =
 			hash_major_session.manifest();
-		const auto compatibility =
-			hash_major_candidate_manifest.compatibility;
-		if (!bioseq::indexing::is_valid_hash_major_minimizer_compatibility(
-				compatibility, hash_major_candidate_manifest.target_length)) {
-			fail("hash-major READY head names an invalid compatibility profile");
+		const auto storage_profile =
+			hash_major_candidate_manifest.storage_profile;
+		if (!bioseq::indexing::is_valid_hash_major_minimizer_storage_profile(
+				storage_profile, hash_major_candidate_manifest.target_length)) {
+			fail("hash-major READY head names an invalid storage profile");
 			return;
 		}
 		hash_major_profile_applicable =
-			compatibility.hash_scheme_id == scheme.id
-			&& compatibility.hash_scheme_version == scheme.version
-			&& compatibility.alphabet_code == alphabet_code
-			&& compatibility.kmer_size == 15u
-			&& compatibility.window_size == 10u
-			&& compatibility.hash_width_bytes == sizeof(std::uint32_t)
-			&& compatibility.producer_backend_id
+			storage_profile.hash_scheme_identity == scheme.id
+			&& storage_profile.hash_scheme_revision == scheme.revision
+			&& storage_profile.alphabet_code == alphabet_code
+			&& storage_profile.kmer_size == 15u
+			&& storage_profile.window_size == 10u
+			&& storage_profile.hash_width_bytes == sizeof(std::uint32_t)
+			&& storage_profile.producer_backend_identity
 				== static_cast<std::uint16_t>(producer.id)
-			&& compatibility.producer_backend_version == producer.version;
+			&& storage_profile.producer_backend_revision == producer.revision;
 		if (!hash_major_profile_applicable) {
 			/* A self-authenticated but route-inapplicable hash-major profile is
-			 * the only present-head fallback case.  No source proof has been
+			 * the only present-head fallback case. No source authorization has been
 			 * consumed and no directory/control/posting callback has run, so
 			 * the independent READY grouped-SoA sentinel may still be opened. */
 			hash_major_session.close_metadata_read();
@@ -1589,15 +1584,15 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		} else {
 			const bioseq::indexing::expected_hash_major_minimizer_generation
 				hash_major_expected =
-					hash_major_session.validate_source_attestation(
-						std::move(source_proof));
+					hash_major_session.consume_source_authorization(
+						std::move(source_authorization));
 			if (hash_major_expected.generation_id == 0u
 			|| hash_major_expected.query_key != sequence_rowno
 			|| hash_major_expected.source_epoch != source.locator.source_epoch
 			|| hash_major_expected.source_content_crc64
 				!= source_content_checksum
 			|| hash_major_expected.target_length != target_bp_size
-			|| hash_major_expected.compatibility != compatibility) {
+			|| hash_major_expected.storage_profile != storage_profile) {
 				fail("hash-major authenticated source binding disagrees with the active CPU route");
 				return;
 			}
@@ -1613,7 +1608,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				query_ordinals,
 				base_params,
 				/*include_persisted_parameter_group=*/true,
-				CpuQueryUnionStorage::canonical_u32,
+				cpu_query_union_storage::canonical_u32,
 				typmod_ops,
 				prepared_target);
 			if (!prepared_target.unions_ready
@@ -1621,7 +1616,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				fail("hash-major canonical query preparation did not yield one group");
 				return;
 			}
-			CpuPreparedIndexGroup& hash_major_group =
+			cpu_prepared_index_group& hash_major_group =
 				prepared_target.groups.front();
 			if (hash_major_group.kmer_size != 15
 				|| hash_major_group.window_size != 10
@@ -1642,10 +1637,10 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					hash_major_group.canonical_query_hash_union_u32},
 				.width_bytes = sizeof(std::uint32_t),
 				.storage_width_bytes = sizeof(std::uint32_t),
-				.compatibility_digest =
+				.storage_profile_digest =
 					bioseq::indexing::
-						hash_major_minimizer_compatibility_digest(
-							compatibility),
+						hash_major_minimizer_storage_profile_digest(
+							storage_profile),
 			};
 			const std::uint64_t hash_major_load_started_ns =
 				static_cast<std::uint64_t>(
@@ -1696,27 +1691,27 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					hash_major_reader->memory_stats()
 						.retained_position_count),
 				static_cast<unsigned>(
-					hash_major_manifest.compatibility
+					hash_major_manifest.storage_profile
 						.stored_posting_width_bytes));
 			const auto& memory_stats =
 				hash_major_reader->memory_stats();
 		const std::uint64_t peak_admitted_bytes = std::max({
-			memory_stats.directory_phase_peak_admitted_bytes,
-			memory_stats.control_phase_peak_admitted_bytes,
-			memory_stats.posting_phase_peak_admitted_bytes,
+			memory_stats.directory_stage_peak_admitted_bytes,
+			memory_stats.control_stage_peak_admitted_bytes,
+			memory_stats.posting_stage_peak_admitted_bytes,
 		});
 		const std::uint64_t admitted_bytes =
 			hash_major_reader->admitted_bytes();
 		const std::uint64_t authorized_posting_bytes =
 			bioseq::parallelism::saturating_mul(
 				memory_stats.retained_position_count,
-				hash_major_manifest.compatibility
+				hash_major_manifest.storage_profile
 					.stored_posting_width_bytes);
 		if (hash_major_reader->target_length() != target_bp_size
 			|| hash_major_head.generation_id != hash_major_expected.generation_id
 			|| hash_major_head.source_identity
 				!= hash_major_manifest.source_identity
-			|| hash_major_manifest.compatibility != compatibility
+			|| hash_major_manifest.storage_profile != storage_profile
 			|| read_stats.relation_opens != 1u
 			|| read_stats.head_scans != 1u
 			|| read_stats.source_parent_rows_read != 1u
@@ -1724,8 +1719,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			|| read_stats.source_catalog_index_scans != 1u
 			|| read_stats.source_fragment_rows_read != 0u
 			|| read_stats.source_decoded_bp != 0u
-			|| read_stats.hash_major.format_revision
-				!= bioseq::indexing::k_hash_major_minimizer_format_revision
+			|| read_stats.hash_major.layout_revision
+				!= bioseq::indexing::k_hash_major_minimizer_layout_revision
 			|| read_stats.hash_major.sessions != 1u
 			|| read_stats.hash_major.generation_id
 				!= hash_major_head.generation_id
@@ -1733,8 +1728,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				!= hash_major_head.source_identity
 			|| read_stats.hash_major.source_content_crc64
 				!= hash_major_head.source_content_crc64
-			|| read_stats.hash_major.compatibility_digest
-				!= hash_major_head.compatibility_digest
+			|| read_stats.hash_major.storage_contract_digest
+				!= hash_major_head.storage_profile_digest
 			|| memory_stats.directory_stream_crc_receipts != 1u
 			|| memory_stats.control_block_crc_receipts
 				!= memory_stats.selected_block_count
@@ -1760,21 +1755,21 @@ void batch_processor::prepare_cpu_persisted_native_target(
 				!= memory_stats.posting_ranges_delivered
 			|| memory_stats.posting_range_crc_receipts
 				> memory_stats.posting_ranges_delivered
-			|| !source_counters.timed_equation_holds()) {
-			fail("hash-major READY identity/profile/read-work proof disagrees");
+			|| !source_stats.timed_equation_holds()) {
+			fail("hash-major READY identity/profile/read-work validation disagrees");
 			return;
 		}
 		auto& hash_major_stats = read_stats.hash_major;
-		hash_major_stats.format_revision =
-			bioseq::indexing::k_hash_major_minimizer_format_revision;
+		hash_major_stats.layout_revision =
+			bioseq::indexing::k_hash_major_minimizer_layout_revision;
 		hash_major_stats.sessions = 1u;
 		hash_major_stats.generation_id = hash_major_head.generation_id;
 		hash_major_stats.source_identity =
 			hash_major_head.source_identity;
 		hash_major_stats.source_content_crc64 =
 			hash_major_head.source_content_crc64;
-		hash_major_stats.compatibility_digest =
-			hash_major_head.compatibility_digest;
+		hash_major_stats.storage_contract_digest =
+			hash_major_head.storage_profile_digest;
 		hash_major_stats.directory_stream_crc_receipts =
 			memory_stats.directory_stream_crc_receipts;
 		hash_major_stats.control_block_crc_receipts =
@@ -1794,11 +1789,11 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		hash_major_stats.retained_position_count =
 			memory_stats.retained_position_count;
 		hash_major_stats.directory_stage_peak_bytes =
-			memory_stats.directory_phase_peak_admitted_bytes;
+			memory_stats.directory_stage_peak_admitted_bytes;
 		hash_major_stats.control_stage_peak_bytes =
-			memory_stats.control_phase_peak_admitted_bytes;
+			memory_stats.control_stage_peak_admitted_bytes;
 		hash_major_stats.posting_stage_peak_bytes =
-			memory_stats.posting_phase_peak_admitted_bytes;
+			memory_stats.posting_stage_peak_admitted_bytes;
 		hash_major_stats.peak_admitted_bytes =
 			memory_stats.peak_admitted_bytes;
 		hash_major_stats.retained_owner_bytes =
@@ -1817,7 +1812,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		hash_major_group.persisted_hash_major_source_identity =
 			hash_major_head.source_identity;
 		hash_major_group.persisted_hash_major_source_identity_present = true;
-		/* The legacy u64 pipeline correlation value is deliberately not used
+		/* The diagnostic u64 pipeline correlation value is deliberately not used
 		 * to authenticate hash-major; correctness above is bound to all 128
 		 * source-identity bits. */
 		hash_major_group.persisted_source_identity =
@@ -1854,14 +1849,14 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			10u,
 			bioseq::indexing::k_grouped_soa_default_max_occurrence_cap);
 	if (!expected) {
-		fail(fmt::format("grouped-SoA compatibility rejected wire_error={}",
+		fail(fmt::format("grouped-SoA storage contract rejected storage_error={}",
 			static_cast<unsigned>(expected.error())));
 		return;
 	}
-	const auto configured_mpf_grouped_soa_lookup_route =
+	const auto configured_minimizer_fragment_grouped_soa_lookup_route =
 		bioseq::aligner::settings::fragment_minimizer::lookup_route.get_value();
 	const bool compact_h32_direct_configured =
-		configured_mpf_grouped_soa_lookup_route
+		configured_minimizer_fragment_grouped_soa_lookup_route
 		== bioseq::aligner::fragment_minimizer_lookup_route::
 			direct_compact_hash_lookup;
 	const bool compact_h32_direct_requested =
@@ -1875,24 +1870,17 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		switch (opened.failure.kind) {
 			case minimizer_generation_relation_kind::missing:
 				unavailable(fmt::format(
-					"revision-3 generation relation {} is absent",
+					"generation relation {} is absent",
 					identity.table_name));
-				return;
-			case minimizer_generation_relation_kind::legacy_exact:
-				unavailable(fmt::format(
-					"relation {} is the exact legacy {} schema and has no "
-					"revision-3 READY generation",
-					identity.table_name, index_name));
 				return;
 			case minimizer_generation_relation_kind::malformed:
 				fail(fmt::format(
-					"generation relation {} is neither the canonical revision-3 "
-					"schema nor the exact legacy {} schema; revision3_schema_error={}",
-					identity.table_name, index_name,
+					"generation relation {} does not match the current schema; schema_error={}",
+					identity.table_name,
 					minimizer_generation_schema_error_name(
-						opened.failure.revision3_error)));
+						opened.failure.schema_error)));
 				return;
-			case minimizer_generation_relation_kind::revision3_exact:
+			case minimizer_generation_relation_kind::current_exact:
 				fail("generation relation binder returned an invalid success classification");
 				return;
 		}
@@ -1916,25 +1904,27 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		fail("READY generation is not the current grouped-SoA layout");
 		return;
 	}
-	const bool mapped_mpf_grouped_soa = index_name
+	const bool mapped_minimizer_fragment_grouped_soa = index_name
 			== bioseq::indexing::k_minimizers_per_fragment_index_name;
-	const bool full_mps_grouped_soa = index_name
+	const bool full_minimizer_sequence_grouped_soa = index_name
 			== bioseq::indexing::k_minimizers_per_sequence_index_name;
-	if (!mapped_mpf_grouped_soa && !full_mps_grouped_soa) {
+	if (!mapped_minimizer_fragment_grouped_soa
+		&& !full_minimizer_sequence_grouped_soa) {
 		fail("grouped-SoA READY generation is bound to an unsupported logical index");
 		return;
 	}
-	if (compact_h32_direct_requested && !mapped_mpf_grouped_soa) {
-		fail("compact-H32 direct lookup requires an MPF grouped-SoA READY generation");
+	if (compact_h32_direct_requested
+		&& !mapped_minimizer_fragment_grouped_soa) {
+		fail("compact-H32 direct lookup requires a minimizer-fragment grouped-SoA READY generation");
 		return;
 	}
 	const auto& selected_expected = *expected;
-	session.validate_source_attestation(std::move(source_proof));
+	session.consume_source_authorization(std::move(source_authorization));
 	auto& query_prep_pool = bioseq::parallelism::global_pool::instance();
 	/* This is the exact eligibility boundary of the typed full-batch native
-	 * route.  Outside it, preserve the synchronous canonical-u32 proof because
-	 * no later complete QueryHashPlan stream is guaranteed to exist. */
-	const bool defer_compact_direct_query_set_proof =
+	 * route. Outside it, preserve the synchronous canonical-u32 validation because
+	 * no later complete query_hash_plan stream is guaranteed to exist. */
+	const bool defer_compact_direct_query_set_validation =
 		compact_h32_direct_requested
 		&& base_params.max_occ > 0
 		&& !base_params.enable_profiling
@@ -1958,11 +1948,11 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		query_ordinals,
 		base_params,
 		/*include_persisted_parameter_group=*/true,
-		mapped_mpf_grouped_soa
-			? (defer_compact_direct_query_set_proof
-				? CpuQueryUnionStorage::retained_sketch_only
-				: CpuQueryUnionStorage::canonical_u32)
-			: CpuQueryUnionStorage::minimizer_sketch,
+		mapped_minimizer_fragment_grouped_soa
+			? (defer_compact_direct_query_set_validation
+				? cpu_query_union_storage::retained_sketch_only
+				: cpu_query_union_storage::canonical_u32)
+			: cpu_query_union_storage::minimizer_sketch,
 		typmod_ops,
 		prepared_target);
 	if (!prepared_target.unions_ready
@@ -1970,16 +1960,16 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		fail("grouped-SoA query preparation did not yield one group");
 		return;
 	}
-	CpuPreparedIndexGroup& group = prepared_target.groups.front();
+	cpu_prepared_index_group& group = prepared_target.groups.front();
 	if (group.kmer_size != 15 || group.window_size != 10
 		|| group.max_occ < 0
 		|| group.sketch_backend != sketch_backend
-		|| (group.compact_direct_query_set_proof_pending
-			&& (!defer_compact_direct_query_set_proof
+		|| (group.compact_direct_query_set_validation_pending
+			&& (!defer_compact_direct_query_set_validation
 				|| group.max_occ <= 0
 				|| !group.canonical_query_hash_union_u32.empty()
 				|| group.canonical_query_hash_union_u32.capacity() != 0u))
-		|| (mapped_mpf_grouped_soa
+		|| (mapped_minimizer_fragment_grouped_soa
 			? (!group.query_hash_union.empty()
 				|| group.query_hash_union.capacity() != 0u)
 			: (!group.canonical_query_hash_union_u32.empty()
@@ -1992,13 +1982,13 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		fail("grouped-SoA parameter group is not the pinned exclusive cold-read shape");
 		return;
 	}
-	// MPF Format 5 remains a collection of independent physical-fragment
+	// Minimizer-fragment storage remains a collection of independent physical-fragment
 	// indexes. The mmap image is the byte-exact artifact produced by the
 	// writer's complete authenticated READY reread, fsync, and durable rename.
 	// Cold open checks the exact generation identity and prepares only fragment
 	// address plans. Query-wave max-occ reduction is fused into the parallel
 	// fragment probe; no target-wide posting/count owner is constructed.
-	if (mapped_mpf_grouped_soa) {
+	if (mapped_minimizer_fragment_grouped_soa) {
 		using fragment_reader_type =
 			bioseq::indexing::prepared_minimizer_fragment_reader;
 		const std::uint64_t fragment_load_started_ns =
@@ -2053,8 +2043,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					.expected_identity = bioseq::indexing::direct_index_identity{
 						.generation_id = head.generation_id,
 						.source_identity = head.source_identity,
-						.compatibility_checksum =
-							head.compatibility_checksum,
+						.storage_contract_checksum =
+							head.storage_contract_checksum,
 						.target_length = manifest.target_length,
 					},
 					.expected_max_occ_cap = static_cast<std::uint32_t>(
@@ -2072,13 +2062,13 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					std::move(mapped_owner), direct_section,
 					direct_open_options);
 			if (!bounded_direct
-				|| bounded_direct->evidence().direct_section_bytes
+				|| bounded_direct->stats().direct_section_bytes
 					!= direct_section.size()
-				|| bounded_direct->evidence().header_bytes_examined
+				|| bounded_direct->stats().header_bytes_examined
 					!= bioseq::indexing::
-						kCompactH32DirectIndexHeaderBytes
-				|| bounded_direct->evidence().payload_bytes_examined != 0u
-				|| !bounded_direct->evidence().
+						k_compact_hash32_direct_index_header_bytes
+				|| bounded_direct->stats().payload_bytes_examined != 0u
+				|| !bounded_direct->stats().
 					expected_direct_header_crc64_checked) {
 				fail(fmt::format(
 					"compact-H32 bounded open rejected direct_error={}",
@@ -2090,7 +2080,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			// The nested fixed header and its outer CRC receipt are now
 			// authenticated. Start fail-open metadata readahead now; selected
 			// posting pages are advised by the existing descriptor-layout pass.
-			// The unrelated outer MPF payload remains demand-paged.
+			// The unrelated outer minimizer-fragment payload remains demand-paged.
 			mapped_image.advise_compact_h32_direct_metadata_readahead(
 				bounded_direct->view());
 			const auto selected_page_adviser =
@@ -2166,7 +2156,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			+ bioseq::indexing::minimizer_manifest_encoded_bytes(
 				manifest.layout)
 			+ read_stats.directory_bytes_read;
-		const bool route_read_proof_matches =
+		const bool route_read_validation_matches =
 			compact_h32_direct_requested
 			? fragment_reader->compact_direct_ready()
 				&& fragment_reader->compact_direct_only()
@@ -2181,18 +2171,18 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					== manifest.directory_chunk_count
 				&& read_stats.directory_bytes_read
 					== manifest.directory_bytes;
-		const bool read_proof_matches =
+		const bool read_validation_matches =
 			fragment_reader->ready()
-			&& route_read_proof_matches
+			&& route_read_validation_matches
 			&& fragment_reader->target_length()
 				== prepared_target.target_bp_size
 			&& manifest.kmer_size == group.kmer_size
 			&& manifest.window_size == group.window_size
 			&& manifest.minimizer_scheme_id == scheme.id
-			&& manifest.minimizer_scheme_revision == scheme.version
+			&& manifest.minimizer_scheme_revision == scheme.revision
 			&& manifest.producer_backend_id == producer_backend.id
 			&& manifest.producer_identity_revision
-				== producer_backend.version
+				== producer_backend.revision
 			&& manifest.max_occ_cap
 				== bioseq::indexing::k_grouped_soa_default_max_occurrence_cap
 			&& head.generation_id != 0
@@ -2228,9 +2218,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			&& read_stats.source_catalog_index_scans == 1
 			&& read_stats.source_fragment_rows_read == 0
 			&& read_stats.source_decoded_bp == 0
-			&& source_counters.timed_equation_holds();
-		if (!read_proof_matches) {
-			fail("grouped-SoA READY identity/backend/scheme/read-work proof disagrees");
+			&& source_stats.timed_equation_holds();
+		if (!read_validation_matches) {
+			fail("grouped-SoA READY identity/backend/scheme/read-work validation disagrees");
 			return;
 		}
 
@@ -2254,29 +2244,29 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		group.persisted_source_identity = head.source_identity;
 		group.persisted_read_stats = read_stats;
 		group.persisted_reader_loads = 1;
-		if (!group.compact_direct_query_set_proof_pending) {
+		if (!group.compact_direct_query_set_validation_pending) {
 			group.build_set_checksum_present = true;
 			group.build_set_checksum = group.key_set_checksum;
 		} else if (!compact_h32_direct_requested
 			|| group.key_set_checksum != 0u
 			|| group.build_set_checksum_present
 			|| group.build_set_checksum != 0u) {
-			fail("compact-H32 deferred query-set proof crossed reader publication");
+			fail("compact-H32 deferred query-set validation crossed reader publication");
 			return;
 		}
 		++prepared_target.physical_target_index_reads;
 		return;
 	}
 
-	/* MPS grouped-SoA remains a sequence-wide persisted index.  Unlike the MPF
-	 * route above, it has no authority to open the MPF-only mmap sidecar: read
+	/* Minimizer-sequence grouped-SoA remains a sequence-wide persisted index. Unlike the
+	 * minimizer-fragment route above, it cannot open the minimizer-fragment mmap sidecar: read
 	 * and authenticate the complete PostgreSQL payload into the established
-	 * query-selected Shape-v5 reader. */
-	if (full_mps_grouped_soa) {
+	 * query-selected grouped-SoA reader. */
+	if (full_minimizer_sequence_grouped_soa) {
 		using grouped_soa_reader_type =
 			bioseq::indexing::prepared_grouped_soa_query_reader;
 		if (!authenticated_grouped_soa_directory) {
-			fail("MPS grouped-SoA route has no authenticated directory");
+			fail("minimizer-sequence grouped-SoA route has no authenticated directory");
 			return;
 		}
 		const std::uint64_t grouped_soa_load_started_ns =
@@ -2288,7 +2278,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {
 			fail(fmt::format(
-				"MPS grouped-SoA reader begin rejected wire_error={}",
+				"minimizer-sequence grouped-SoA reader begin rejected storage_error={}",
 				static_cast<unsigned>(made.error())));
 			return;
 		}
@@ -2297,7 +2287,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		/* The reader owns the exact compact query-hash image from this point.
 		 * Release the scheduler copy before allocating retained payload state. */
 		if (!prepared_target.release_group_query_hash_union_noexcept(group)) {
-			fail("MPS grouped-SoA canonical query-union release disagrees with admission ownership");
+			fail("minimizer-sequence grouped-SoA canonical query-union release disagrees with admission ownership");
 			return;
 		}
 
@@ -2322,13 +2312,13 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		}
 		if (callback_error) {
 			fail(fmt::format(
-				"MPS grouped-SoA payload ingest rejected wire_error={}",
+				"minimizer-sequence grouped-SoA payload ingest rejected storage_error={}",
 				static_cast<unsigned>(*callback_error)));
 			return;
 		}
 		if (auto finished = grouped_soa_reader->finish(); !finished) {
 			fail(fmt::format(
-				"MPS grouped-SoA reader final validation rejected wire_error={}",
+				"minimizer-sequence grouped-SoA reader final validation rejected storage_error={}",
 				static_cast<unsigned>(finished.error())));
 			return;
 		}
@@ -2348,17 +2338,17 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		const auto producer_backend =
 			bioseq::indexing::minimizer_producer_backend_identity_for_backend(
 				group.sketch_backend);
-		const bool read_proof_matches =
+		const bool read_validation_matches =
 			grouped_soa_reader->ready()
 			&& grouped_soa_reader->target_length()
 				== prepared_target.target_bp_size
 			&& manifest.kmer_size == group.kmer_size
 			&& manifest.window_size == group.window_size
 			&& manifest.minimizer_scheme_id == scheme.id
-			&& manifest.minimizer_scheme_revision == scheme.version
+			&& manifest.minimizer_scheme_revision == scheme.revision
 			&& manifest.producer_backend_id == producer_backend.id
 			&& manifest.producer_identity_revision
-				== producer_backend.version
+				== producer_backend.revision
 			&& manifest.max_occ_cap
 				== bioseq::indexing::k_grouped_soa_default_max_occurrence_cap
 			&& head.generation_id != 0
@@ -2382,9 +2372,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			&& read_stats.source_catalog_index_scans == 1
 			&& read_stats.source_fragment_rows_read == 0
 			&& read_stats.source_decoded_bp == 0
-			&& source_counters.timed_equation_holds();
-		if (!read_proof_matches) {
-			fail("MPS grouped-SoA READY identity/backend/scheme/read-work proof disagrees");
+			&& source_stats.timed_equation_holds();
+		if (!read_validation_matches) {
+			fail("minimizer-sequence grouped-SoA READY identity/backend/scheme/read-work validation disagrees");
 			return;
 		}
 
@@ -2430,7 +2420,7 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 				 errmsg("required persisted GPU grouped-SoA target is unavailable"),
 				 errdetail("%s", message.c_str()),
 				 errhint("Publish a matching grouped-SoA READY generation; "
-					"GPU preparation has no CPU, SIMD, recompute, or legacy-index fallback.")));
+					"GPU preparation has no CPU, SIMD, recompute, or alternate-index fallback.")));
 		});
 	};
 	prepared_target = gpu_prepared_grouped_soa_target{};
@@ -2467,17 +2457,17 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 		.column_attno = column_attno,
 		.index_name = std::string{index_name},
 	};
-	auto source_proof = derive_minimizer_generation_catalog_source_proof_pg(
+	auto source_authorization = authorize_minimizer_generation_catalog_source_pg(
 		identity, sequence_rowno, executor_read);
 	const minimizer_generation_source_locator source =
-		source_proof.source_for_diagnostics();
-	const minimizer_generation_catalog_source_proof_counters source_counters =
-		source_proof.counters_for_diagnostics();
+		source_authorization.source_for_diagnostics();
+	const minimizer_generation_catalog_source_stats source_stats =
+		source_authorization.stats_for_diagnostics();
 	if (source.alphabet_code != alphabet_code
 		|| source.storage_unit_byte_width != storage_unit_byte_width
 		|| source.locator.logical_length != target_bp_size) {
 		fail(ERRCODE_DATA_CORRUPTED,
-			"authoritative source identity disagrees with the BatchJoin target typmod or length");
+			"authoritative source identity disagrees with the batch join target typmod or length");
 		return;
 	}
 	identity.table_name = format_seqidx_name(
@@ -2492,7 +2482,7 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 			bioseq::indexing::k_grouped_soa_default_max_occurrence_cap);
 	if (!expected) {
 		fail(ERRCODE_DATA_CORRUPTED, fmt::format(
-			"GPU grouped-SoA compatibility rejected wire_error={}",
+			"GPU grouped-SoA storage contract rejected storage_error={}",
 			static_cast<unsigned>(expected.error())));
 		return;
 	}
@@ -2502,22 +2492,20 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 	if (!opened) {
 		const int sqlstate = opened.failure.kind
 			== minimizer_generation_relation_kind::missing
-			|| opened.failure.kind
-				== minimizer_generation_relation_kind::legacy_exact
 			? ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 			: ERRCODE_DATA_CORRUPTED;
 		fail(sqlstate, fmt::format(
 			"generation relation {} rejected kind={} schema_error={}",
 			identity.table_name,
 			static_cast<unsigned>(opened.failure.kind),
-			static_cast<unsigned>(opened.failure.revision3_error)));
+			static_cast<unsigned>(opened.failure.schema_error)));
 		return;
 	}
 	index_storage_fragment_generation_read_session& session = *opened.session;
 	const auto head = session.read_active_head_once();
 	const auto& metadata = session.read_manifest_directory_once(head);
 	const auto manifest = metadata.manifest;
-	session.validate_source_attestation(std::move(source_proof));
+	session.consume_source_authorization(std::move(source_authorization));
 
 	auto& runtime = bioseq::postgres::scheduler::ensure_pg_vulkan_runtime_ready();
 	std::uint64_t cold_load_identity = 14695981039346656037ull;
@@ -2579,7 +2567,7 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 		resident = std::move(*finished);
 	const minimizer_generation_read_stats read_stats = session.finish();
 	const auto& resident_identity = resident->identity();
-	const bool proof_matches = resident->validated()
+	const bool validation_matches = resident->validated()
 		&& resident_identity.generation_id == head.generation_id
 		&& resident_identity.source_identity == head.source_identity
 		&& resident_identity.source_content_checksum
@@ -2616,10 +2604,10 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
 		&& read_stats.source_catalog_index_scans == 1
 		&& read_stats.source_fragment_rows_read == 0
 		&& read_stats.source_decoded_bp == 0
-		&& source_counters.timed_equation_holds();
-	if (!proof_matches) {
+		&& source_stats.timed_equation_holds();
+	if (!validation_matches) {
 		fail(ERRCODE_DATA_CORRUPTED,
-			"GPU grouped-SoA READY identity, read-work, upload, or source proof disagrees");
+			"GPU grouped-SoA READY identity, read-work, upload, or source authorization disagrees");
 		return;
 	}
 

@@ -18,21 +18,21 @@ function(bioseq_register_generated_api_client)
 
   set(_module "${_client_CLIENT_ROOT}/client/index.cppm")
   set(_test
-    "${_client_CLIENT_ROOT}/integration_tests/test_${_client_CLIENT_NAME}_client.cpp")
+    "${_client_CLIENT_ROOT}/tests/integration/${_client_CLIENT_NAME}_client_test.cpp")
   set_source_files_properties("${_module}" "${_test}" PROPERTIES GENERATED TRUE)
 
-  if(NOT TARGET bioseq_external_integration_tests_exec)
+  if(NOT TARGET bioseq_external_api_integration_tests)
     if(NOT DEFINED BIOSEQ_EXTERNAL_TEST_RUNTIME_OUTPUT_DIRECTORY)
       set(BIOSEQ_EXTERNAL_TEST_RUNTIME_OUTPUT_DIRECTORY
         "${CMAKE_CURRENT_BINARY_DIR}")
     endif()
     find_package(Catch2 3 REQUIRED)
-    add_executable(bioseq_external_integration_tests_exec)
+    add_executable(bioseq_external_api_integration_tests)
     if(TARGET bioseq_external_codegen)
-      add_dependencies(bioseq_external_integration_tests_exec
+      add_dependencies(bioseq_external_api_integration_tests
         bioseq_external_codegen)
     endif()
-    set_target_properties(bioseq_external_integration_tests_exec PROPERTIES
+    set_target_properties(bioseq_external_api_integration_tests PROPERTIES
       CXX_STANDARD 26
       CXX_STANDARD_REQUIRED ON
       CXX_EXTENSIONS ON
@@ -40,9 +40,9 @@ function(bioseq_register_generated_api_client)
       INTERPROCEDURAL_OPTIMIZATION FALSE
       RUNTIME_OUTPUT_DIRECTORY
         "${BIOSEQ_EXTERNAL_TEST_RUNTIME_OUTPUT_DIRECTORY}")
-    target_compile_definitions(bioseq_external_integration_tests_exec PRIVATE
+    target_compile_definitions(bioseq_external_api_integration_tests PRIVATE
       NO_POSTGRES=1)
-    target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
+    target_link_libraries(bioseq_external_api_integration_tests PRIVATE
       Catch2::Catch2WithMain)
   endif()
 
@@ -69,19 +69,28 @@ function(bioseq_register_generated_api_client)
     OpenSSL::Crypto
     TBB::tbb)
 
-  target_sources(bioseq_external_integration_tests_exec PRIVATE "${_test}")
-  target_link_libraries(bioseq_external_integration_tests_exec PRIVATE "${_target}")
+  target_sources(bioseq_external_api_integration_tests PRIVATE "${_test}")
+  target_link_libraries(bioseq_external_api_integration_tests PRIVATE "${_target}")
+  set_property(
+    TARGET bioseq_external_api_integration_tests
+    APPEND PROPERTY BIOSEQ_GENERATED_CATCH_TEST_SOURCES "${_test}")
 
-  if(BUILD_TESTING)
-    set(_test_name "bioseq_external_${_client_CLIENT_NAME}_integration")
+  get_property(
+    _bioseq_external_ctest_registered
+    GLOBAL PROPERTY BIOSEQ_EXTERNAL_API_CTEST_REGISTERED)
+  if(BUILD_TESTING AND NOT _bioseq_external_ctest_registered)
     add_test(
-      NAME "${_test_name}"
-      COMMAND "$<TARGET_FILE:bioseq_external_integration_tests_exec>"
-        "[external][${_client_CLIENT_NAME}][integration]"
+      NAME bioseq_external_api_integration_tests
+      COMMAND "$<TARGET_FILE:bioseq_external_api_integration_tests>"
+        "[component:external_api][feature:external_source]"
         --reporter "console::out=-::colour-mode=ansi")
-    set_tests_properties("${_test_name}" PROPERTIES
-      LABELS "external;${_client_CLIENT_NAME};integration"
-      TIMEOUT 180
-      WORKING_DIRECTORY "${_client_CLIENT_ROOT}")
+    set_tests_properties(
+      bioseq_external_api_integration_tests
+      PROPERTIES
+        LABELS
+          "component:external_api;layer:unit;layer:contract;layer:integration;feature:external_source;resource:filesystem;resource:network"
+        TIMEOUT 1800)
+    set_property(
+      GLOBAL PROPERTY BIOSEQ_EXTERNAL_API_CTEST_REGISTERED TRUE)
   endif()
 endfunction()

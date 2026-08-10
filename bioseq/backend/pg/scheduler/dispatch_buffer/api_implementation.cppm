@@ -2,7 +2,7 @@
  *
  * scheduler/dispatch_buffer/api_implementation.cppm
  *
- * Implementation of the narrow TupleDispatchBuffer API declared in
+ * Implementation of the narrow tuple_dispatch_buffer API declared in
  * dispatch_buffer/api.cppm.  This is the only custom-scan-side translation
  * unit that imports bioseq.postgres.scheduler.dispatch_buffer.
  *
@@ -33,41 +33,41 @@ import bioseq.postgres.storage.scanner;
 namespace bioseq::scheduler {
 
 bioseq::simd_dispatch::highway_dispatch_plan
-highway_dispatch_info_for_plan() noexcept {
-    return bioseq::simd_dispatch::registered_highway_dispatch_info();
+highway_dispatch_plan_for_plan() noexcept {
+    return bioseq::simd_dispatch::registered_highway_dispatch_plan();
 }
 
 namespace {
 
-using BufferImpl = TupleDispatchBuffer;
+using buffer_implementation = tuple_dispatch_buffer;
 
-[[nodiscard]] BufferImpl* as_buffer(void* ptr) noexcept {
-    return static_cast<BufferImpl*>(ptr);
+[[nodiscard]] buffer_implementation* as_buffer(void* ptr) noexcept {
+    return static_cast<buffer_implementation*>(ptr);
 }
 
-[[nodiscard]] const BufferImpl* as_buffer(const void* ptr) noexcept {
-    return static_cast<const BufferImpl*>(ptr);
+[[nodiscard]] const buffer_implementation* as_buffer(const void* ptr) noexcept {
+    return static_cast<const buffer_implementation*>(ptr);
 }
 
 } // namespace
 
-DispatchBufferRuntime::DispatchBufferRuntime(
+dispatch_buffer_runtime::dispatch_buffer_runtime(
     const std::size_t estimated_tuple_count)
-    : impl(new BufferImpl(estimated_tuple_count)) {}
+    : impl(new buffer_implementation(estimated_tuple_count)) {}
 
-DispatchBufferRuntime::~DispatchBufferRuntime() {
+dispatch_buffer_runtime::~dispatch_buffer_runtime() {
     delete as_buffer(impl);
     impl = nullptr;
 }
 
-DispatchBufferRuntime::DispatchBufferRuntime(
-    DispatchBufferRuntime&& rhs) noexcept
+dispatch_buffer_runtime::dispatch_buffer_runtime(
+    dispatch_buffer_runtime&& rhs) noexcept
     : impl(rhs.impl) {
     rhs.impl = nullptr;
 }
 
-DispatchBufferRuntime& DispatchBufferRuntime::operator=(
-    DispatchBufferRuntime&& rhs) noexcept {
+dispatch_buffer_runtime& dispatch_buffer_runtime::operator=(
+    dispatch_buffer_runtime&& rhs) noexcept {
     if (this != &rhs) {
         delete as_buffer(impl);
         impl = rhs.impl;
@@ -76,7 +76,7 @@ DispatchBufferRuntime& DispatchBufferRuntime::operator=(
     return *this;
 }
 
-void DispatchBufferRuntime::configure_params(
+void dispatch_buffer_runtime::configure_params(
     const bioseq::simd::minimap2_parameters& params,
     const bioseq::indexing::index_read_requirement index_read_requirement,
     const bool read_sequence_index,
@@ -100,41 +100,41 @@ void DispatchBufferRuntime::configure_params(
         executor_query_context);
 }
 
-void DispatchBufferRuntime::replace_executor_snapshot(
+void dispatch_buffer_runtime::replace_executor_snapshot(
     Snapshot executor_snapshot) {
     as_buffer(impl)->replace_executor_snapshot(executor_snapshot);
 }
 
-void DispatchBufferRuntime::bind_sequence_source_provider(
+void dispatch_buffer_runtime::bind_sequence_source_provider(
         bioseq::storage::pg_sequence_source_provider* provider) {
     as_buffer(impl)->bind_sequence_source_provider(provider);
 }
 
-void DispatchBufferRuntime::clear_sequence_source_provider_binding() noexcept {
+void dispatch_buffer_runtime::clear_sequence_source_provider_binding() noexcept {
     if (impl != nullptr) {
         as_buffer(impl)->clear_sequence_source_provider_binding();
     }
 }
 
-void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
+void dispatch_buffer_runtime::bind_persisted_gpu_operation_evidence_sink(
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink) {
     as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
 }
 
-void DispatchBufferRuntime::bind_slice_async_owner(
+void dispatch_buffer_runtime::bind_slice_async_owner(
     slice_async_owner_guard* owner) {
     as_buffer(impl)->bind_slice_async_owner(owner);
 }
 
-void DispatchBufferRuntime::release_per_row_slice_async_owner_after_drain() {
+void dispatch_buffer_runtime::release_per_row_slice_async_owner_after_drain() {
     as_buffer(impl)->release_per_row_slice_async_owner_after_drain();
 }
 
-void DispatchBufferRuntime::release_join_slice_async_owner_after_drain() {
+void dispatch_buffer_runtime::release_join_slice_async_owner_after_drain() {
 	as_buffer(impl)->release_join_slice_async_owner_after_drain();
 }
 
-void DispatchBufferRuntime::configure_mmsearch(
+void dispatch_buffer_runtime::configure_mmsearch(
     const AttrNumber seq_attno,
     std::string column_name,
     std::vector<char> query_varlena_bytes,
@@ -150,7 +150,7 @@ void DispatchBufferRuntime::configure_mmsearch(
         primary_key_attno);
 }
 
-void DispatchBufferRuntime::configure_mmsearch_per_row(
+void dispatch_buffer_runtime::configure_mmsearch_per_row(
     const AttrNumber seq_attno,
     std::string column_name,
     const AttrNumber per_row_query_attno,
@@ -172,7 +172,7 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
         primary_key_attno);
 }
 
-void DispatchBufferRuntime::configure_mmsearch_per_row_evaluated(
+void dispatch_buffer_runtime::configure_mmsearch_per_row_evaluated(
     const AttrNumber seq_attno,
     std::string column_name,
     const std::uint8_t alphabet_code,
@@ -190,21 +190,21 @@ void DispatchBufferRuntime::configure_mmsearch_per_row_evaluated(
         primary_key_attno);
 }
 
-void DispatchBufferRuntime::apply_typmod_coalesce(
+void dispatch_buffer_runtime::apply_typmod_coalesce(
     std::vector<char> coalesced_bytes) {
     as_buffer(impl)->apply_typmod_coalesce(std::move(coalesced_bytes));
 }
 
-void DispatchBufferRuntime::clear_mmsearch_context(const bool clear_extras) {
+void dispatch_buffer_runtime::clear_mmsearch_context(const bool clear_extras) {
     as_buffer(impl)->clear_mmsearch_context(clear_extras);
 }
 
-void DispatchBufferRuntime::add_extra_const_query(
+void dispatch_buffer_runtime::add_extra_const_query(
     std::vector<char> query_varlena_bytes) {
     as_buffer(impl)->add_extra_const_query(std::move(query_varlena_bytes));
 }
 
-void DispatchBufferRuntime::configure_mmsearch_join(
+void dispatch_buffer_runtime::configure_mmsearch_join(
     const Oid target_relation_oid,
     const AttrNumber target_storage_seq_attno,
     const AttrNumber target_slot_seq_resno,
@@ -228,19 +228,19 @@ void DispatchBufferRuntime::configure_mmsearch_join(
         query_storage_unit_byte_width);
 }
 
-void DispatchBufferRuntime::begin_join_target(
+void dispatch_buffer_runtime::begin_join_target(
     TupleTableSlot* locator_passthrough_target) {
     as_buffer(impl)->begin_join_target(locator_passthrough_target);
 }
 
 namespace {
 
-[[nodiscard]] std::vector<BufferImpl::JoinQueryRef> translate_join_queries(
-    const std::span<const DispatchJoinQueryRef> queries) {
-    std::vector<BufferImpl::JoinQueryRef> translated;
+[[nodiscard]] std::vector<buffer_implementation::join_query_ref> translate_join_queries(
+    const std::span<const dispatch_join_query_ref> queries) {
+    std::vector<buffer_implementation::join_query_ref> translated;
     translated.reserve(queries.size());
-    for (const DispatchJoinQueryRef& query : queries) {
-        translated.push_back(BufferImpl::JoinQueryRef{
+    for (const dispatch_join_query_ref& query : queries) {
+        translated.push_back(buffer_implementation::join_query_ref{
             query.ordinal, query.query_slot});
     }
     return translated;
@@ -248,42 +248,42 @@ namespace {
 
 } // namespace
 
-void DispatchBufferRuntime::prepare_join_target_queries(
-    const std::span<const DispatchJoinQueryRef> all_queries) {
+void dispatch_buffer_runtime::prepare_join_target_queries(
+    const std::span<const dispatch_join_query_ref> all_queries) {
     const auto translated = translate_join_queries(all_queries);
     as_buffer(impl)->prepare_join_target_queries(translated);
 }
 
-void DispatchBufferRuntime::set_join_query_batch(
-    const std::span<const DispatchJoinQueryRef> queries) {
+void dispatch_buffer_runtime::set_join_query_batch(
+    const std::span<const dispatch_join_query_ref> queries) {
     const auto translated = translate_join_queries(queries);
     as_buffer(impl)->set_join_query_batch(translated);
 }
 
-bool DispatchBufferRuntime::run_join_query_batch_and_build_cursors() {
+bool dispatch_buffer_runtime::run_join_query_batch_and_build_cursors() {
     return as_buffer(impl)->run_join_query_batch_and_build_cursors();
 }
 
-void DispatchBufferRuntime::finish_join_target() {
+void dispatch_buffer_runtime::finish_join_target() {
     as_buffer(impl)->finish_join_target();
 }
 
-void DispatchBufferRuntime::reset_join_runtime_for_rescan() {
+void dispatch_buffer_runtime::reset_join_runtime_for_rescan() {
     as_buffer(impl)->reset_join_runtime_for_rescan();
 }
 
-void DispatchBufferRuntime::abandon_join_runtime_after_pg_error_noexcept()
+void dispatch_buffer_runtime::abandon_join_runtime_after_pg_error_noexcept()
     noexcept {
     if (impl != nullptr) {
         as_buffer(impl)->abandon_join_runtime_after_pg_error_noexcept();
     }
 }
 
-void DispatchBufferRuntime::submit_scan(TupleTableSlot* scan_slot) {
+void dispatch_buffer_runtime::submit_scan(TupleTableSlot* scan_slot) {
     as_buffer(impl)->submit_scan(scan_slot);
 }
 
-void DispatchBufferRuntime::submit_scan_evaluated(
+void dispatch_buffer_runtime::submit_scan_evaluated(
     TupleTableSlot* scan_slot,
     const Datum target,
     const bool target_is_null,
@@ -299,24 +299,24 @@ void DispatchBufferRuntime::submit_scan_evaluated(
         query_is_null);
 }
 
-bool DispatchBufferRuntime::ready_to_dispatch() const {
+bool dispatch_buffer_runtime::ready_to_dispatch() const {
     return as_buffer(impl)->ready_to_dispatch();
 }
 
-bool DispatchBufferRuntime::run_batch_and_build_cursors() {
+bool dispatch_buffer_runtime::run_batch_and_build_cursors() {
     return as_buffer(impl)->run_batch_and_build_cursors();
 }
 
-void DispatchBufferRuntime::clear_slots() {
+void dispatch_buffer_runtime::clear_slots() {
     as_buffer(impl)->clear_slots();
 }
 
-std::optional<DispatchNextOutput> DispatchBufferRuntime::read_next_output() {
+std::optional<dispatch_next_output> dispatch_buffer_runtime::read_next_output() {
     auto next = as_buffer(impl)->read_next_output();
     if (!next.has_value()) {
         return std::nullopt;
     }
-    return DispatchNextOutput{
+    return dispatch_next_output{
         next->entry->scan_slot_copy,
         next->entry->sequence_rowno,
         next->query_ordinal,
@@ -325,44 +325,44 @@ std::optional<DispatchNextOutput> DispatchBufferRuntime::read_next_output() {
 }
 
 bioseq::pipeline_stats::pipeline_execution_stats
-DispatchBufferRuntime::execution_stats() const {
+dispatch_buffer_runtime::execution_stats() const {
     return as_buffer(impl)->execution_stats();
 }
 
-std::size_t DispatchBufferRuntime::extra_query_count() const {
+std::size_t dispatch_buffer_runtime::extra_query_count() const {
     return as_buffer(impl)->extra_query_count();
 }
 
-bool DispatchBufferRuntime::has_finished_writing() const {
+bool dispatch_buffer_runtime::has_finished_writing() const {
     return as_buffer(impl)->has_finished_writing();
 }
 
-bool DispatchBufferRuntime::mmsearch_active() const {
+bool dispatch_buffer_runtime::mmsearch_active() const {
     return as_buffer(impl)->mmsearch_active();
 }
 
-bool DispatchBufferRuntime::per_row_self_alignment() const {
+bool dispatch_buffer_runtime::per_row_self_alignment() const {
     return as_buffer(impl)->per_row_self_alignment();
 }
 
-bool DispatchBufferRuntime::coalesce_active() const {
+bool dispatch_buffer_runtime::coalesce_active() const {
     return as_buffer(impl)->coalesce_active();
 }
 
-std::uint8_t DispatchBufferRuntime::mmsearch_alphabet_code() const {
+std::uint8_t dispatch_buffer_runtime::mmsearch_alphabet_code() const {
     return as_buffer(impl)->mmsearch_alphabet_code();
 }
 
-std::uint8_t DispatchBufferRuntime::mmsearch_storage_unit_byte_width() const {
+std::uint8_t dispatch_buffer_runtime::mmsearch_storage_unit_byte_width() const {
     return as_buffer(impl)->mmsearch_storage_unit_byte_width();
 }
 
-AttrNumber DispatchBufferRuntime::target_sequence_attno() const noexcept {
+AttrNumber dispatch_buffer_runtime::target_sequence_attno() const noexcept {
     return impl == nullptr
         ? InvalidAttrNumber : as_buffer(impl)->target_sequence_attno();
 }
 
-AttrNumber DispatchBufferRuntime::per_row_query_sequence_attno() const noexcept {
+AttrNumber dispatch_buffer_runtime::per_row_query_sequence_attno() const noexcept {
     return impl == nullptr
         ? InvalidAttrNumber
         : as_buffer(impl)->per_row_query_sequence_attno();

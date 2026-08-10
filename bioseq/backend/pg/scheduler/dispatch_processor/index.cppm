@@ -12,10 +12,11 @@
  *
  * There are two separate policy concepts in this file:
  *
- * 1. The active minimizer policy (`ScannerPgContext::active_index`).
+ * 1. The active minimizer policy (`scanner_pg_context::active_index`).
  *    - Resolved once for the target column when a user relation is known.
- *      `bioseq.read_sequence_index` controls whether stored chunks are read;
- *      recompute paths still use this policy to choose transient MPF vs MPS.
+ *      `bioseq.index.sequence_read.enabled` controls whether stored chunks are read;
+ *      recompute paths still use this policy to choose transient
+ *      minimizer-fragment vs minimizer-sequence storage.
  *    - Default when no enabled active row is found is
  *      `minimizers_per_fragment`.
  *    - The SQL schema has a unique partial index on
@@ -27,8 +28,8 @@
  *
  * 2. The deferred recompute persistence choice.
  *    - Used only when `can_defer_recompute_minimizer_persist()` is true:
- *      `bioseq.recompute_async_persist = on`,
- *      `bioseq.index_async_persist = on`, a user relation is known, and the
+ *      `bioseq.index.recompute_async_persistence.enabled = on`,
+ *      `bioseq.index.async_persistence.enabled = on`, a user relation is known, and the
  *      effective minimizer parameters are the persisted-index pair `k=15,w=10`.
  *    - It ignores `active_index` and scans `k_minimizer_index_names` in persistence
  *      preference order: `minimizers_per_fragment`, then
@@ -39,24 +40,24 @@
  *
  * GUC meanings in this dispatch path:
  *
- * - `bioseq.update_index_on_insert`: write/load-time policy gate. When off,
+ * - `bioseq.index.insert_maintenance.enabled`: write/load-time policy gate. When off,
  *   INSERT/load does not build UPDATE_ON_INSERT indexes. It does not by itself
  *   change the read path except by making stored indexes absent.
  *
- * - `bioseq.read_sequence_index`: read-time gate for stored-index reuse. When
+ * - `bioseq.index.sequence_read.enabled`: read-time gate for stored-index reuse. When
  *   on, each row tries to assemble the active stored index if chunks exist.
  *   When off, no stored minimizer index is read even if chunks are present;
- *   rows go to recompute/transient paths that still honor the active MPF/MPS
- *   policy shape.
+ *   rows go to recompute/transient paths that still honor the active
+ *   minimizer-fragment/minimizer-sequence policy shape.
  *
- * - `bioseq.index_async_persist`: global async persistence gate. If off, async
+ * - `bioseq.index.async_persistence.enabled`: global async persistence gate. If off, async
  *   staging functions refuse to enqueue/write opportunistically built indexes.
  *   It does not pick an index by itself.
  *
- * - `bioseq.recompute_async_persist`: no-index recompute gate. It allows a
+ * - `bioseq.index.recompute_async_persistence.enabled`: no-index recompute gate. It allows a
  *   recompute path to consult UPDATE_ON_INSERT minimizer policy and stage or
  *   otherwise handle a deferred minimizer target, but only together with
- *   `bioseq.index_async_persist` and only for persisted parameters `k=15,w=10`.
+ *   `bioseq.index.async_persistence.enabled` and only for persisted parameters `k=15,w=10`.
  *
  * - `bioseq.index_memory_cap_mb`: memory-admission cap for resident targets,
  *   assembled indexes, sorted runs, and opportunistic RAM-first builds. `0`
@@ -78,14 +79,15 @@
  *   If chunks are missing, fall through to recompute.
  *
  * - Active read index = `minimizers_per_sequence`.
- *   If the row has MPS chunks, assemble a query-specific index from the stored
- *   MPS representation and search with it. Legacy logical-fragment-backed MPS
- *   chunks are also supported. No new persistence is staged. If chunks are
+ *   If the row has minimizer-sequence chunks, assemble a query-specific index
+ *   from the stored minimizer-sequence representation and search with it.
+ *   Logical-fragment-backed minimizer-sequence chunks remain supported. No new
+ *   persistence is staged. If chunks are
  *   missing, fall through to recompute.
  *
  * - No active read row.
  *   The resolver defaults to `minimizers_per_fragment` when reads are enabled.
- *   If `bioseq.read_sequence_index` is off, no stored index is read; the
+ *   If `bioseq.index.sequence_read.enabled` is off, no stored index is read; the
  *   resolved policy still chooses the transient recompute shape.
  *
  * Stored-index missing or reads disabled:
@@ -93,24 +95,24 @@
  * - Active read index = `minimizers_per_fragment`.
  *   Recompute the search index. If RAM-first opportunistic build is admitted,
  *   the computed fragment chunks may be staged under
- *   `minimizers_per_fragment` when `bioseq.index_async_persist` is on.
+ *   `minimizers_per_fragment` when `bioseq.index.async_persistence.enabled` is on.
  *   In later resident recompute paths, if deferred choice also selects
  *   `minimizers_per_fragment`, the recomputed fragment index is written to a
  *   temp payload and staged for async persistence.
  *
  * - Active read index = `minimizers_per_sequence`.
  *   First, the RAM-first opportunistic branch may build fragment-shaped chunks
- *   and stage them under the MPS name if memory admission succeeds and
- *   `bioseq.index_async_persist` is on. If that is not admitted, the DOC0301
- *   fast no-index MPS branch can run when the deferred recompute gates are on
- *   and the UPDATE_ON_INSERT minimizer choice is MPS. That branch materializes
+ *   and stage them under the minimizer-sequence name if memory admission succeeds and
+ *   `bioseq.index.async_persistence.enabled` is on. If that is not admitted, the transient
+ *   no-index minimizer-sequence branch can run when the deferred recompute gates are on
+ *   and the UPDATE_ON_INSERT minimizer choice is minimizer-sequence. That branch materializes
  *   the target in memory when admitted, builds query-filtered transient segment
  *   indexes, searches, and logs `persisted=false`. This is an intentional
  *   semantic exception: the GUCs are used as eligibility gates, but no durable
- *   MPS rows are staged by that fast path.
+ *   minimizer-sequence rows are staged by that fast path.
  *
  * - No UPDATE_ON_INSERT minimizer choice.
- *   Recompute and search normally. If `bioseq.recompute_async_persist` was on
+ *   Recompute and search normally. If `bioseq.index.recompute_async_persistence.enabled` was on
  *   but no eligible minimizer policy exists, the code logs that async-persist
  *   was skipped.
  *
@@ -181,10 +183,10 @@ import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
 namespace bioseq::simd {
 
-export constexpr size_t kDispatchBatchCapacity = 8192;
+export constexpr size_t dispatch_batch_capacity = 8192;
 
 /**
- * Existing pipeline evidence has a frozen u64 source field, while hash-major
+ * Existing pipeline stats have a frozen u64 source field, while hash-major
  * authenticates a 128-bit source identity.  This domain-separated token is
  * diagnostic only: every hash-major correctness decision retains and compares
  * all 128 authenticated bits.
@@ -206,38 +208,38 @@ hash_major_source_diagnostic_token(
 }
 
 namespace {
-constexpr std::array<std::byte, 16> k_hash_major_diagnostic_identity_a{
+constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_a{
 	std::byte{1}};
-constexpr std::array<std::byte, 16> k_hash_major_diagnostic_identity_b{
+constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_b{
 	std::byte{2}};
 static_assert(hash_major_source_diagnostic_token(
 	std::array<std::byte, 16>{}) != 0u);
 static_assert(hash_major_source_diagnostic_token(
-	k_hash_major_diagnostic_identity_a)
+	hash_major_diagnostic_identity_a)
 	!= 0u);
 static_assert(hash_major_source_diagnostic_token(
-	k_hash_major_diagnostic_identity_a)
+	hash_major_diagnostic_identity_a)
 	== hash_major_source_diagnostic_token(
-		k_hash_major_diagnostic_identity_a));
+		hash_major_diagnostic_identity_a));
 static_assert(hash_major_source_diagnostic_token(
-	k_hash_major_diagnostic_identity_a)
+	hash_major_diagnostic_identity_a)
 	!= hash_major_source_diagnostic_token(
-		k_hash_major_diagnostic_identity_b));
+		hash_major_diagnostic_identity_b));
 } // namespace
 /*
  * batch_processor drives minimap_port across a batch of (query, target)
  * pairs that all share the same (alphabet_code, storage_unit_byte_width) typmod. The
  * caller hands us the already-detoasted query varlena (captured at
  * BeginCustomScan — see columnar_customscan.cppm) and an array of per-row
- * target varlenas (captured at submit_scan — see TupleDispatchBuffer).
+ * target varlenas (captured at submit_scan — see tuple_dispatch_buffer).
  *
  * Dispatch: we branch on (alphabet_code, storage_unit_byte_width) exactly once, then
- * inside the matching arm all eight compact_sequence_range<Dst>
+ * inside the matching arm all eight compact_sequence_range<p_sequence>
  * specialisations compile down to their own minimap_port instantiation.
  * No std::variant, no runtime type erasure on the hot path.
  */
 /*
- * Execution proof is owned by the target-independent canonical value in
+ * Execution validation is owned by the target-independent canonical value in
  * bioseq::pipeline_stats. Do not reintroduce a Highway-local stats owner.
  */
 export enum class batch_invocation_role : std::uint8_t {
@@ -247,14 +249,14 @@ export enum class batch_invocation_role : std::uint8_t {
 
 export class batch_processor {
 public:
-		enum class CpuQueryUnionStorage : std::uint8_t {
+		enum class cpu_query_union_storage : std::uint8_t {
 			minimizer_sketch,
 			canonical_u32,
 			canonical_u32_sequential_fallback,
 			retained_sketch_only,
 		};
 
-	struct CpuPreparedQuerySketch {
+	struct cpu_prepared_query_sketch {
 		std::uint64_t query_ordinal = 0;
 		std::uint64_t query_bp_size = 0;
 		/* During parallel preparation each query owns an independent permit.
@@ -264,37 +266,37 @@ public:
 		std::optional<bioseq::parallelism::memory_permit>
 			parallel_preparation_permit{};
 		std::vector<minimap_sketch_data> minimizers{};
-		pipe::minimizer_range_execution_stats proof{};
+		pipe::minimizer_range_execution_stats execution_stats{};
 	};
 
-	enum class CpuPreparationStatus : std::uint8_t {
+	enum class cpu_preparation_status : std::uint8_t {
 		pending,
 		ready,
 		query_length_unsupported,
 		admission_unavailable,
 		collector_growth_failed,
 		capacity_mismatch,
-		proof_invalid,
+		validation_failed,
 		unsupported_typmod,
 	};
 
-	template <class Destination>
-	using CpuAppendHeaderFn = void (*)(
+	template <class p_destination>
+	using cpu_append_header_function = void (*)(
 		const bioseq::pg_types::seq&,
 		std::uint64_t,
 		std::int32_t,
 		std::int32_t,
 		minimizer_sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table*,
-		std::vector<Destination>&,
+		std::vector<p_destination>&,
 		bioseq::parallelism::memory_permit&,
 		std::uint64_t&,
-		std::vector<CpuPreparedQuerySketch>*,
+		std::vector<cpu_prepared_query_sketch>*,
 		bioseq::parallelism::memory_permit*,
 		std::uint64_t*);
 
-	template <class Destination>
-	using CpuAppendRecipeFn = void (*)(
+	template <class p_destination>
+	using cpu_append_recipe_function = void (*)(
 		Datum,
 		const pg_sequence_descriptor&,
 		pg_sequence_read_session&,
@@ -304,30 +306,30 @@ public:
 		std::int32_t,
 		minimizer_sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table*,
-		std::vector<Destination>&,
+		std::vector<p_destination>&,
 		bioseq::parallelism::memory_permit&,
 		std::uint64_t&,
-		std::vector<CpuPreparedQuerySketch>*,
+		std::vector<cpu_prepared_query_sketch>*,
 		bioseq::parallelism::memory_permit*,
 		std::uint64_t*);
 
-	using CpuPrepareIndependentFn = CpuPreparationStatus (*)(
+	using cpu_prepare_independent_function = cpu_preparation_status (*)(
 		const bioseq::pg_types::seq&,
 		std::uint64_t,
 		std::int32_t,
 		std::int32_t,
 		minimizer_sketch_backend,
 		const ::bioseq::simd_dispatch::highway_kernel_table*,
-		CpuPreparedQuerySketch&);
+		cpu_prepared_query_sketch&);
 
-	struct CpuPreparationTypmodOps final {
+	struct cpu_preparation_typmod_operations final {
 		std::uint8_t alphabet_code = 0;
 		std::uint8_t storage_unit_byte_width = 0;
-		CpuAppendHeaderFn<minimap_sketch_data> append_header_sketch = nullptr;
-		CpuAppendHeaderFn<std::uint32_t> append_header_u32 = nullptr;
-		CpuAppendRecipeFn<minimap_sketch_data> append_recipe_sketch = nullptr;
-		CpuAppendRecipeFn<std::uint32_t> append_recipe_u32 = nullptr;
-		CpuPrepareIndependentFn prepare_independent = nullptr;
+		cpu_append_header_function<minimap_sketch_data> append_header_sketch = nullptr;
+		cpu_append_header_function<std::uint32_t> append_header_u32 = nullptr;
+		cpu_append_recipe_function<minimap_sketch_data> append_recipe_sketch = nullptr;
+		cpu_append_recipe_function<std::uint32_t> append_recipe_u32 = nullptr;
+		cpu_prepare_independent_function prepare_independent = nullptr;
 
 		[[nodiscard]] constexpr bool complete() const noexcept {
 			return std::has_single_bit(storage_unit_byte_width)
@@ -347,10 +349,10 @@ public:
 		}
 	};
 
-	static_assert(std::is_standard_layout_v<CpuPreparationTypmodOps>);
-	static_assert(std::is_trivially_copyable_v<CpuPreparationTypmodOps>);
+	static_assert(std::is_standard_layout_v<cpu_preparation_typmod_operations>);
+	static_assert(std::is_trivially_copyable_v<cpu_preparation_typmod_operations>);
 
-	struct CpuPreparedIndexGroup {
+	struct cpu_prepared_index_group {
 		std::int32_t kmer_size = 0;
 		std::int32_t window_size = 0;
 		std::int32_t max_occ = 0;
@@ -368,13 +370,13 @@ public:
 		 * while filling canonical_query_hash_union_u32.  Missing ordinals are
 		 * intentional admission fallbacks and are sketched by ensure_q in the
 		 * typed row path. */
-		std::vector<CpuPreparedQuerySketch> retained_query_sketches{};
+		std::vector<cpu_prepared_query_sketch> retained_query_sketches{};
 		/* Declared before target_index so destruction releases the owned
 		 * index storage before returning its admission reservation. */
 		std::optional<bioseq::parallelism::memory_permit> target_index_permit{};
 		std::shared_ptr<bioseq::indexing::minimizer_hashmap_fragment_index>
 			target_index{};
-		/* Production MPF grouped-SoA keeps every physical-fragment index
+		/* Production minimizer-fragment grouped-SoA keeps every physical-fragment index
 		 * independent. Its only target-wide state is query-specific global
 		 * occurrence counts required by max-occ pruning; no posting owner,
 		 * span federation, or hash-to-fragment lookup index is retained. */
@@ -393,10 +395,10 @@ public:
 		bioseq::indexing::minimizer_fragment_lookup_route
 			persisted_fragment_lookup_route = bioseq::indexing::
 				minimizer_fragment_lookup_route::grouped_soa_control_scans;
-		/* MPS grouped-SoA retains its sequence-wide query-selected image.  It is
-		 * deliberately separate from the MPF mmap reader above: MPS consumes
+		/* Minimizer-sequence grouped-SoA retains its sequence-wide query-selected image.
+		 * It is separate from the minimizer-fragment mmap reader above: minimizer-sequence consumes
 		 * the authenticated PostgreSQL payload scan and must never borrow the
-		 * MPF-only sidecar or fragment-native ownership proof. */
+		 * minimizer-fragment-only sidecar or fragment-native ownership validation. */
 		std::optional<bioseq::indexing::prepared_grouped_soa_query_reader>
 			persisted_grouped_soa_reader{};
 		std::optional<bioseq::indexing::hash_major_minimizer_selective_reader>
@@ -411,8 +413,8 @@ public:
 		std::uint64_t persisted_reader_queries = 0;
 		std::uint64_t persisted_reader_load_host_wall_ns = 0;
 		std::uint64_t persisted_generation_id = 0;
-		/* Correctness authority for hash-major.  The legacy u64 field below is
-		 * retained only for the existing pipeline evidence ABI and must never
+		/* Correctness authority for hash-major. The diagnostic u64 field below
+		 * is retained only for the existing pipeline stats ABI and must never
 		 * be used to authenticate a hash-major source. */
 		std::array<std::byte, 16> persisted_hash_major_source_identity{};
 		bool persisted_hash_major_source_identity_present = false;
@@ -423,19 +425,19 @@ public:
 			std::uint64_t build_set_checksum = 0;
 			/* Compact-direct full-batch preparation already constructs the exact
 			 * sorted unique query set needed by the reader.  While this is true the
-			 * historical prepared/build checksum is deliberately unpublished; the
+			 * prepared/build checksum is deliberately unpublished; the
 			 * backend thread must resolve it exactly once before worker fanout or
 			 * materialize the admitted slow fallback before row execution. */
-			bool compact_direct_query_set_proof_pending = false;
+			bool compact_direct_query_set_validation_pending = false;
 
-		[[nodiscard]] const CpuPreparedQuerySketch*
+		[[nodiscard]] const cpu_prepared_query_sketch*
 		find_retained_query_sketch(
 				const std::uint64_t query_ordinal) const noexcept {
 			const auto found = std::lower_bound(
 				retained_query_sketches.begin(),
 				retained_query_sketches.end(),
 				query_ordinal,
-				[](const CpuPreparedQuerySketch& sketch,
+				[](const cpu_prepared_query_sketch& sketch,
 				   const std::uint64_t ordinal) noexcept {
 					return sketch.query_ordinal < ordinal;
 				});
@@ -447,9 +449,9 @@ public:
 	};
 
 	/* One object per physical target row.  It survives every 8192-query wave
-	 * in TupleDispatchBuffer and may contain one parameter group per effective
+	 * in tuple_dispatch_buffer and may contain one parameter group per effective
 	 * (k,w,max_occ) shape.  GPU locator execution never consumes this object. */
-	struct CpuPreparedTarget {
+	struct cpu_prepared_target {
 		std::int64_t target_rowno = -1;
 		std::uint64_t target_bp_size = 0;
 		std::uint64_t query_count = 0;
@@ -462,7 +464,7 @@ public:
 			nullptr;
 		::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
 		std::int64_t highway_executed_target = 0;
-		std::vector<CpuPreparedIndexGroup> groups{};
+		std::vector<cpu_prepared_index_group> groups{};
 		std::uint64_t physical_target_index_reads = 0;
 		std::uint64_t total_unique_keys = 0;
 		std::uint64_t key_set_checksum = 0;
@@ -481,11 +483,11 @@ public:
 		std::optional<bioseq::parallelism::memory_permit>
 			query_sketch_cache_permit{};
 
-		CpuPreparedTarget() = default;
-		CpuPreparedTarget(const CpuPreparedTarget&) = delete;
-		CpuPreparedTarget& operator=(const CpuPreparedTarget&) = delete;
-		CpuPreparedTarget(CpuPreparedTarget&&) noexcept = default;
-		CpuPreparedTarget& operator=(CpuPreparedTarget&&) noexcept = default;
+		cpu_prepared_target() = default;
+		cpu_prepared_target(const cpu_prepared_target&) = delete;
+		cpu_prepared_target& operator=(const cpu_prepared_target&) = delete;
+		cpu_prepared_target(cpu_prepared_target&&) noexcept = default;
+		cpu_prepared_target& operator=(cpu_prepared_target&&) noexcept = default;
 
 		[[nodiscard]] static constexpr bool same_highway_dispatch_identity(
 				const ::bioseq::simd_dispatch::highway_dispatch_plan& lhs,
@@ -539,14 +541,14 @@ public:
 		}
 
 		void release_query_union_state_noexcept() noexcept {
-			std::vector<CpuPreparedIndexGroup>{}.swap(groups);
+			std::vector<cpu_prepared_index_group>{}.swap(groups);
 			query_union_admission_bytes = 0;
 			query_union_permit.reset();
 			query_sketch_cache_admission_bytes = 0;
 			query_sketch_cache_permit.reset();
 		}
 		[[nodiscard]] bool release_group_query_hash_union_noexcept(
-				CpuPreparedIndexGroup& group) noexcept {
+				cpu_prepared_index_group& group) noexcept {
 			const std::uint64_t released_bytes =
 				bioseq::parallelism::saturating_mul(
 					group.query_hash_union.capacity(),
@@ -568,26 +570,26 @@ public:
 			query_union_permit->shrink_to(query_union_admission_bytes);
 			return true;
 		}
-		~CpuPreparedTarget() noexcept {
+		~cpu_prepared_target() noexcept {
 			release_query_union_state_noexcept();
 		}
 
-		[[nodiscard]] CpuPreparedIndexGroup* find_group(
+		[[nodiscard]] cpu_prepared_index_group* find_group(
 			std::int32_t kmer_size,
 			std::int32_t window_size,
 			std::int32_t max_occ,
 			minimizer_sketch_backend sketch_backend) noexcept;
 
-		[[nodiscard]] bool query_set_proof_ready() const noexcept {
+		[[nodiscard]] bool query_set_validation_ready() const noexcept {
 			return std::ranges::none_of(
 				groups,
-				[](const CpuPreparedIndexGroup& group) noexcept {
-					return group.compact_direct_query_set_proof_pending;
+				[](const cpu_prepared_index_group& group) noexcept {
+					return group.compact_direct_query_set_validation_pending;
 				});
 		}
 	};
 	/* One restart-cold, PostgreSQL-authenticated grouped-SoA generation retained
-	 * for the complete BatchJoin target lifecycle.  The resident owns the three
+	 * for the complete batch join target lifecycle.  The resident owns the three
 	 * Vulkan buffers; resident_view contains only stable pointers into that
 	 * shared object and is never a publication/cache authority of its own. */
 	struct gpu_prepared_grouped_soa_target {
@@ -644,7 +646,7 @@ public:
 
 	/**
 	 * Narrow SQL-test seam for the deallocate-before-permit reprepare contract.
-	 * It deliberately populates one CpuPreparedTarget object twice instead of
+	 * It deliberately populates one cpu_prepared_target object twice instead of
 	 * constructing a later scan object, so stale outer or nested capacity is
 	 * observable.  No PostgreSQL state is touched.
 	 */
@@ -654,7 +656,7 @@ public:
 		 * lifetime: moving the target must transfer the group allocation
 		 * without moving or duplicating its canonical u32 image. */
 		{
-			CpuPreparedTarget source;
+			cpu_prepared_target source;
 			source.groups.emplace_back();
 			auto& canonical =
 				source.groups.front().canonical_query_hash_union_u32;
@@ -665,7 +667,7 @@ public:
 				.width_bytes = sizeof(std::uint32_t),
 				.storage_width_bytes = sizeof(std::uint32_t),
 			};
-			CpuPreparedTarget moved{std::move(source)};
+			cpu_prepared_target moved{std::move(source)};
 			if (moved.groups.size() != 1u
 				|| !moved.groups.front().query_hash_union.empty()
 				|| moved.groups.front().query_hash_union.capacity() != 0u
@@ -680,21 +682,21 @@ public:
 		}
 		/* The retained-sketch receipt is fail-closed, one-shot, and leaves no
 		 * canonical owner behind.  Exercise both direct publication and the
-		 * admitted historical sort/dedup fallback through the existing SQL seam. */
+			 * admitted sort/dedup fallback through the existing SQL seam. */
 		{
-			CpuPreparedTarget proof_target;
-			proof_target.unions_ready = true;
-			proof_target.query_count = 0u;
-			proof_target.key_set_checksum =
+			cpu_prepared_target validation_target;
+			validation_target.unions_ready = true;
+			validation_target.query_count = 0u;
+			validation_target.key_set_checksum =
 				bioseq::indexing::k_compact_direct_query_set_fnv_offset;
-			proof_target.groups.emplace_back();
-			auto& group = proof_target.groups.front();
+			validation_target.groups.emplace_back();
+			auto& group = validation_target.groups.front();
 			group.kmer_size = 15;
 			group.window_size = 10;
 			group.max_occ = 500;
 			group.sketch_backend = minimizer_sketch_backend::scalar;
-			group.compact_direct_query_set_proof_pending = true;
-			const bioseq::indexing::compact_direct_query_set_stats proof{
+			group.compact_direct_query_set_validation_pending = true;
+			const bioseq::indexing::compact_direct_query_set_stats query_set_stats{
 				.query_count = 0u,
 				.query_occurrence_count = 0u,
 				.unique_hash_count = 0u,
@@ -702,27 +704,27 @@ public:
 					compact_direct_query_set_checksum_prefix(15u, 10u, 500u),
 				.present = true,
 			};
-			auto rejected = proof;
+			auto rejected = query_set_stats;
 			rejected.query_count = 1u;
-			if (proof_target.query_set_proof_ready()
+			if (validation_target.query_set_validation_ready()
 				|| group.canonical_query_hash_union_u32.capacity() != 0u
-				|| publish_compact_direct_query_set_proof(
-					proof_target, group, rejected)
-				|| !group.compact_direct_query_set_proof_pending
-				|| !publish_compact_direct_query_set_proof(
-					proof_target, group, proof)
-				|| publish_compact_direct_query_set_proof(
-					proof_target, group, proof)
-				|| !proof_target.query_set_proof_ready()
+				|| publish_compact_direct_query_set_stats(
+					validation_target, group, rejected)
+				|| !group.compact_direct_query_set_validation_pending
+				|| !publish_compact_direct_query_set_stats(
+					validation_target, group, query_set_stats)
+				|| publish_compact_direct_query_set_stats(
+					validation_target, group, query_set_stats)
+				|| !validation_target.query_set_validation_ready()
 				|| group.canonical_query_hash_union_u32.capacity() != 0u
-				|| proof_target.total_unique_keys != 0u
-				|| group.key_set_checksum != proof.group_key_set_checksum
+				|| validation_target.total_unique_keys != 0u
+				|| group.key_set_checksum != query_set_stats.group_key_set_checksum
 				|| !group.build_set_checksum_present
 				|| group.build_set_checksum != group.key_set_checksum) {
 				return false;
 			}
 
-			CpuPreparedTarget fallback_target;
+			cpu_prepared_target fallback_target;
 			fallback_target.unions_ready = true;
 			fallback_target.query_count = 0u;
 			fallback_target.key_set_checksum =
@@ -733,26 +735,26 @@ public:
 			fallback_group.window_size = 10;
 			fallback_group.max_occ = 500;
 			fallback_group.sketch_backend = minimizer_sketch_backend::scalar;
-			fallback_group.compact_direct_query_set_proof_pending = true;
+			fallback_group.compact_direct_query_set_validation_pending = true;
 			try {
-				finalize_pending_compact_direct_query_set_proof_fallback(
+				finalize_pending_compact_direct_query_set_validation_fallback(
 					fallback_target);
 			} catch (...) {
 				return false;
 			}
-			if (!fallback_target.query_set_proof_ready()
+			if (!fallback_target.query_set_validation_ready()
 				|| fallback_group.canonical_query_hash_union_u32.capacity()
 					!= 0u
 				|| fallback_target.total_unique_keys != 0u
 				|| fallback_group.key_set_checksum
-					!= proof.group_key_set_checksum
+					!= query_set_stats.group_key_set_checksum
 				|| fallback_target.key_set_checksum
-					!= proof_target.key_set_checksum) {
+					!= validation_target.key_set_checksum) {
 				return false;
 			}
 		}
 		bioseq::parallelism::memory_admission_controller admission;
-		CpuPreparedTarget target;
+		cpu_prepared_target target;
 		auto populate = [&](const std::size_t sketch_capacity) -> bool {
 			target.release_query_union_state_noexcept();
 			auto permit = admission.try_reserve(0u);
@@ -761,7 +763,7 @@ public:
 
 			const std::uint64_t outer_headroom =
 				bioseq::parallelism::saturating_mul(
-					sizeof(CpuPreparedIndexGroup),
+					sizeof(cpu_prepared_index_group),
 					bioseq::parallelism::
 						k_vector_preallocation_headroom_factor);
 			if (outer_headroom
@@ -773,7 +775,7 @@ public:
 			const std::uint64_t outer_bytes =
 				bioseq::parallelism::saturating_mul(
 					target.groups.capacity(),
-					sizeof(CpuPreparedIndexGroup));
+					sizeof(cpu_prepared_index_group));
 			if (outer_bytes > outer_headroom) return false;
 			target.query_union_admission_bytes = outer_bytes;
 			target.query_union_permit->shrink_to(outer_bytes);
@@ -818,7 +820,7 @@ public:
 			bioseq::parallelism::saturating_mul(
 				target.groups.capacity(),
 				static_cast<std::uint64_t>(
-					sizeof(CpuPreparedIndexGroup)));
+					sizeof(cpu_prepared_index_group)));
 		if (!target.release_group_query_hash_union_noexcept(
 				target.groups.front())
 			|| !target.groups.front().query_hash_union.empty()
@@ -883,9 +885,9 @@ public:
 		std::span<const std::uint64_t> query_ordinals,
 		const minimap2_parameters& base_params,
 		bool include_persisted_parameter_group,
-		CpuQueryUnionStorage union_storage,
-		const CpuPreparationTypmodOps& typmod_ops,
-		CpuPreparedTarget& prepared_target);
+		cpu_query_union_storage union_storage,
+		const cpu_preparation_typmod_operations& typmod_ops,
+		cpu_prepared_target& prepared_target);
 
 	void prepare_cpu_persisted_native_target(
 		Oid database_oid,
@@ -908,16 +910,16 @@ public:
 		const minimap2_parameters& base_params,
 		const bioseq::storage::indexing::borrowed_executor_read_context&
 			executor_read,
-		const CpuPreparationTypmodOps& typmod_ops,
-		CpuPreparedTarget& prepared_target);
+		const cpu_preparation_typmod_operations& typmod_ops,
+		cpu_prepared_target& prepared_target);
 
-		[[nodiscard]] static bool publish_compact_direct_query_set_proof(
-			CpuPreparedTarget& prepared_target,
-			CpuPreparedIndexGroup& group,
-			const bioseq::indexing::compact_direct_query_set_stats& proof) noexcept;
+		[[nodiscard]] static bool publish_compact_direct_query_set_stats(
+			cpu_prepared_target& prepared_target,
+			cpu_prepared_index_group& group,
+			const bioseq::indexing::compact_direct_query_set_stats& query_set_stats) noexcept;
 
-		static void finalize_pending_compact_direct_query_set_proof_fallback(
-			CpuPreparedTarget& prepared_target);
+		static void finalize_pending_compact_direct_query_set_validation_fallback(
+			cpu_prepared_target& prepared_target);
 
 	void prepare_gpu_persisted_grouped_soa_target(
 		Oid database_oid,
@@ -937,25 +939,25 @@ public:
 		gpu_prepared_grouped_soa_target& prepared_target);
 
     /*
-     * DOC0264 / DOC0274 — context required to wire the PostgreSQL facade
+     * Context required to wire the PostgreSQL facade
      * adapter into per-row pipeline dispatch. When non-null, stub-backed
      * targets stay source-backed while query literals use resident facades.
-     * When null, the loop uses the Phase B in-memory baseline.
+     * When null, the loop uses the in-memory baseline stage.
      */
-	struct ScannerPgContext {
+	struct scanner_pg_context {
 		/* Optional synchronous, one-shot cold preparation.  process_sequences
 		 * consumes this record immediately after selecting dispatched_params and
 		 * before entering profiling or typed execution.  It is deliberately a
 		 * neutral callback: only the scheduler root may install it, and the
 		 * callback receives the already-selected immutable Highway table and
 		 * typmod operations. */
-		struct HighwayPreparationHook final {
-			using Function = void (*)(
-				void*, ScannerPgContext&, const minimap2_parameters&,
-				const CpuPreparationTypmodOps&);
+		struct highway_preparation_hook final {
+			using callback_function = void (*)(
+				void*, scanner_pg_context&, const minimap2_parameters&,
+				const cpu_preparation_typmod_operations&);
 
 			void* state = nullptr;
-			Function function = nullptr;
+			callback_function function = nullptr;
 
 			[[nodiscard]] constexpr bool empty() const noexcept {
 				return state == nullptr && function == nullptr;
@@ -966,14 +968,14 @@ public:
 			}
 		};
 
-		HighwayPreparationHook highway_preparation{};
+		highway_preparation_hook highway_preparation{};
 		/* Optional statement-root async ownership observer.  It is generic at
          * the pipeline boundary; the PostgreSQL trace owner supplies the
          * concrete enrollment/state-machine adapter. */
         bioseq::parallelism::tracked_job_observer async_job_observer{};
         /* Stable for the complete process_sequences call. Views copy only a
          * pointer to these records; every tracked task joins/drains before
-         * ScannerPgContext leaves its owning dispatch frame. */
+         * scanner_pg_context leaves its owning dispatch frame. */
         bioseq::storage::sequence_payload_allocation_observer
             mmsearch_target_payload_observer{};
         bioseq::storage::sequence_payload_allocation_observer
@@ -994,49 +996,49 @@ public:
         // The facade adapter validates registered MVCC state and never
         // changes its registration count.
         Snapshot                                         snapshot             = nullptr;
-        // Borrowed from the BioseqScan that owns this dispatch. Locator-backed
+        // Borrowed from the bioseq scan that owns this dispatch. Locator-backed
         // targets must be promoted through this exact statement provider;
-        // ScannerPgContext never closes or retains it independently.
+        // scanner_pg_context never closes or retains it independently.
         bioseq::storage::pg_sequence_source_provider*    source_provider      = nullptr;
         // Borrowed statement-root sink. It is required only by the accepted
-        // persisted Shape-V5 Vulkan route and never owns through hot stats.
+        // persisted grouped-SoA Vulkan route and never owns through hot stats.
         ::bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
-            persisted_gpu_operation_evidence_sink = nullptr;
+            persisted_gpu_operation_stats_sink = nullptr;
         // Per-row optional locator. nullopt means "use the inline bioseq::pg_types::seq at
         // target_hdrs[i]" — the target then uses an in-memory facade.
         std::array<std::optional<bioseq::storage::sequence_locator>,
-            kDispatchBatchCapacity>                       target_locators{};
+            dispatch_batch_capacity>                       target_locators{};
         // Same-relation per-row query locators. These use the target scan's
         // exact provider but retain their own physical attno and storage width.
         std::array<std::optional<bioseq::storage::sequence_locator>,
-            kDispatchBatchCapacity>                       query_locators{};
+            dispatch_batch_capacity>                       query_locators{};
         /* Borrowed, batch-arena-owned expanded wrappers captured by
-         * TupleDispatchBuffer.  A nonzero Datum is always paired with its
+         * tuple_dispatch_buffer.  A nonzero Datum is always paired with its
          * validated descriptor.  Typed dispatch adapts these through the same
          * alphabet-only lazy_sequence_view ABI as locator and flat
          * inputs; it never owns or flattens the wrappers on CPU/SIMD paths. */
-        std::array<Datum, kDispatchBatchCapacity>          target_recipe_datums{};
-        std::array<Datum, kDispatchBatchCapacity>          query_recipe_datums{};
+        std::array<Datum, dispatch_batch_capacity>          target_recipe_datums{};
+        std::array<Datum, dispatch_batch_capacity>          query_recipe_datums{};
         std::array<pg_sequence_descriptor,
-            kDispatchBatchCapacity>                       target_recipe_descriptors{};
+            dispatch_batch_capacity>                       target_recipe_descriptors{};
         std::array<pg_sequence_descriptor,
-            kDispatchBatchCapacity>                       query_recipe_descriptors{};
-        // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
+            dispatch_batch_capacity>                       query_recipe_descriptors{};
+        // Per-row columnar rowno (== index query_key) and the
         // user relation oid, so the stored per-fragment index can be assembled.
-        std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};
-        std::array<std::uint64_t, kDispatchBatchCapacity> query_ordinals{};
+        std::array<std::int64_t, dispatch_batch_capacity>  target_rownos{};
+        std::array<std::uint64_t, dispatch_batch_capacity> query_ordinals{};
         bool                                              explicit_query_ordinals = false;
         bool                                              shared_target_batch = false;
         bool                                              record_target_operational_outcomes = true;
-		CpuPreparedTarget*                                cpu_prepared_target = nullptr;
+		cpu_prepared_target*                                cpu_prepared_target = nullptr;
 		gpu_prepared_grouped_soa_target*                 gpu_prepared_grouped_soa_target = nullptr;
         // Explicit per-row outcome written by the scanner helper. Match
         // production and index-source accounting must never infer one another.
 		std::array<::bioseq::pipeline_stats::target_index_source,
-			kDispatchBatchCapacity>                       target_index_sources{};
-		std::array<std::uint64_t, kDispatchBatchCapacity>
+			dispatch_batch_capacity>                       target_index_sources{};
+		std::array<std::uint64_t, dispatch_batch_capacity>
 			persisted_generation_ids{};
-		std::array<std::uint64_t, kDispatchBatchCapacity>
+		std::array<std::uint64_t, dispatch_batch_capacity>
 			persisted_source_identities{};
         Oid                                               user_relid           = InvalidOid;
         bioseq::indexing::index_read_requirement            index_read_requirement =
@@ -1044,7 +1046,7 @@ public:
         bool                                              read_index_active    = false;
         bool                                              index_async_persist_active = false;
         bool                                              recompute_async_persist_active = false;
-        // DOC0279 §11.3/§12.3 — the table's ACTIVE read index for the target
+        // The table's ACTIVE read index for the target
 		// column. The source is retained separately so a configured catalog row
 		// can never be laundered into an indistinguishable no-row default.
         std::string                                       active_index;
@@ -1053,14 +1055,14 @@ public:
 				active_read_policy_source::unresolved;
     };
     /*
-     * Run the minimap2 pipeline across a batch. DOC0279 §11.3 — per target
+     * Run the minimap2 pipeline across a batch. Per target
      * row, the loop ASSEMBLES the table's active per-sequence minimizer index
      * from its chunked storage (gated by read_index_active + per-row presence)
      * or RECOMPUTES it; the two are mixed freely within one batch.
      *
-     * DOC0264 / DOC0274 — production dispatch posture.
+     * Production dispatch posture:
      *
-     * The Phase C PostgreSQL facade adapter is now wired into the dispatch
+     * The PostgreSQL facade adapter is wired into the dispatch
      * loop. `scanner_pg_ctx` carries the per-batch identity (db/spc/relfilenode/
      * attno/seq_caches/parent_mctx) plus the per-row optional locator the
      * caller decoded at submit_scan time. When `scanner_pg_ctx` is non-null
@@ -1072,7 +1074,7 @@ public:
      * Consumer algorithms see only the alphabet-specialized erased view.
      *
      * NOTE on parameter passing: `target_hdrs` and `query_ids` are full-size
-     * `kDispatchBatchCapacity`-element arrays passed by const-ref so the call
+     * `dispatch_batch_capacity`-element arrays passed by const-ref so the call
      * does not copy them. The result map is RVO'd / moved on return.
      */
     /*
@@ -1086,14 +1088,14 @@ public:
         uint8_t alphabet_code,
         uint8_t storage_unit_byte_width,
         const bioseq::pg_types::seq* query_hdr,
-        const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
-        const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
-        const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
+        const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
+        const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
+        const std::array<int32_t, dispatch_batch_capacity>& query_ids,
         const minimap2_parameters& base_params,
         batch_invocation_role invocation_role,
         std::uint64_t broadcast_query_ordinal,
         ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
-        ScannerPgContext* scanner_pg_ctx = nullptr);
+        scanner_pg_context* scanner_pg_ctx = nullptr);
 
 };
 

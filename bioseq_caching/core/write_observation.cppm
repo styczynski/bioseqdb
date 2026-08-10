@@ -14,17 +14,17 @@ export module bioseq.cache.core:write_observation;
 
 export namespace bioseq::cache {
 
-enum class WriteObservationResultV1 : std::uint8_t {
-  Recorded = 0,
-  Duplicate = 1,
-  CoarseFallback = 2,
+enum class write_observation_result : std::uint8_t {
+    recorded = 0,
+    duplicate = 1,
+    coarse_fallback = 2,
 };
 
-enum class WriteSubtransactionResultV1 : std::uint8_t {
-  NoFrame = 0,
-  Committed = 1,
-  Aborted = 2,
-  CoarseFallback = 3,
+enum class write_subtransaction_result : std::uint8_t {
+    no_frame = 0,
+    committed = 1,
+    aborted = 2,
+    coarse_fallback = 3,
 };
 
 /**
@@ -36,221 +36,225 @@ enum class WriteSubtransactionResultV1 : std::uint8_t {
  * the subtransaction which observed the failure later aborts.  This permits
  * false invalidation but never a missed committed write.
  */
-template <class Key, std::size_t KeyCapacity,
-          std::size_t FrameCapacity = 64>
-  requires(std::is_trivially_copyable_v<Key> && KeyCapacity > 0 &&
-           FrameCapacity > 0)
-class TransactionWriteLedgerV1 {
-public:
-  using SubtransactionId = std::uint32_t;
+template <class p_key_type, std::size_t p_key_capacity, std::size_t p_frame_capacity = 64>
+    requires(std::is_trivially_copyable_v<p_key_type> && p_key_capacity > 0 &&
+             p_frame_capacity > 0)
+class transaction_write_ledger {
+  public:
+    using subtransaction_id = std::uint32_t;
 
-  [[nodiscard]] WriteObservationResultV1 observe(
-      SubtransactionId subtransaction_id, const Key &key) noexcept {
-    if (sticky_coarse_) {
-      return WriteObservationResultV1::CoarseFallback;
-    }
-    if (subtransaction_id == 0) {
-      make_coarse();
-      return WriteObservationResultV1::CoarseFallback;
-    }
-    Frame *frame = find_or_create_frame(subtransaction_id);
-    if (frame == nullptr) {
-      make_coarse();
-      return WriteObservationResultV1::CoarseFallback;
-    }
-    frame->dirty = true;
-    for (const Observation &observation : observations_) {
-      if (observation.active && observation.owner == subtransaction_id &&
-          observation.key == key) {
-        return WriteObservationResultV1::Duplicate;
-      }
-    }
-    for (Observation &observation : observations_) {
-      if (!observation.active) {
-        observation = Observation{
-            .key = key,
-            .owner = subtransaction_id,
-            .active = true,
-        };
-        ++observation_count_;
-        return WriteObservationResultV1::Recorded;
-      }
-    }
-    make_coarse();
-    return WriteObservationResultV1::CoarseFallback;
-  }
-
-  void observe_coarse(SubtransactionId subtransaction_id) noexcept {
-    if (sticky_coarse_) {
-      return;
-    }
-    if (subtransaction_id != 0) {
-      if (Frame *frame = find_or_create_frame(subtransaction_id);
-          frame != nullptr) {
-        frame->dirty = true;
-      }
-    }
-    make_coarse();
-  }
-
-  [[nodiscard]] WriteSubtransactionResultV1 finish_subtransaction(
-      SubtransactionId child_id, SubtransactionId parent_id,
-      bool committed) noexcept {
-    Frame *child = find_frame(child_id);
-    if (child == nullptr) {
-      return WriteSubtransactionResultV1::NoFrame;
-    }
-    if (!committed) {
-      remove_owned_observations(child_id);
-      *child = {};
-      return WriteSubtransactionResultV1::Aborted;
-    }
-    Frame *parent = parent_id == 0 ? nullptr : find_or_create_frame(parent_id);
-    if (parent == nullptr) {
-      remove_owned_observations(child_id);
-      *child = {};
-      make_coarse();
-      return WriteSubtransactionResultV1::CoarseFallback;
-    }
-    parent->dirty = parent->dirty || child->dirty;
-    for (Observation &candidate : observations_) {
-      if (!candidate.active || candidate.owner != child_id) {
-        continue;
-      }
-      bool duplicate = false;
-      for (const Observation &existing : observations_) {
-        if (&existing != &candidate && existing.active &&
-            existing.owner == parent_id && existing.key == candidate.key) {
-          duplicate = true;
-          break;
+    [[nodiscard]] write_observation_result observe(subtransaction_id transaction_id,
+                                                   const p_key_type& key) noexcept {
+        if (sticky_coarse_) {
+            return write_observation_result::coarse_fallback;
         }
-      }
-      if (duplicate) {
-        candidate = {};
-        --observation_count_;
-      } else {
-        candidate.owner = parent_id;
-      }
-    }
-    *child = {};
-    return WriteSubtransactionResultV1::Committed;
-  }
-
-  [[nodiscard]] bool transaction_dirty() const noexcept {
-    if (sticky_coarse_) {
-      return true;
-    }
-    for (const Frame &frame : frames_) {
-      if (frame.active && frame.dirty) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  [[nodiscard]] bool coarse() const noexcept { return sticky_coarse_; }
-
-  [[nodiscard]] bool touches(const Key &key) const noexcept {
-    if (sticky_coarse_) {
-      return true;
-    }
-    for (const Observation &observation : observations_) {
-      if (observation.active && observation.key == key) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Copy each distinct surviving key once, preserving bounded behavior. */
-  [[nodiscard]] std::size_t copy_unique(std::span<Key> output) const noexcept {
-    std::size_t copied = 0;
-    for (const Observation &candidate : observations_) {
-      if (!candidate.active) {
-        continue;
-      }
-      bool duplicate = false;
-      for (std::size_t index = 0; index < copied; ++index) {
-        if (output[index] == candidate.key) {
-          duplicate = true;
-          break;
+        if (transaction_id == 0) {
+            make_coarse();
+            return write_observation_result::coarse_fallback;
         }
-      }
-      if (duplicate) {
-        continue;
-      }
-      if (copied >= output.size()) {
+        frame* transaction_frame = find_or_create_frame(transaction_id);
+        if (transaction_frame == nullptr) {
+            make_coarse();
+            return write_observation_result::coarse_fallback;
+        }
+        transaction_frame->dirty = true;
+        for (const observation& entry : observations_) {
+            if (entry.active && entry.owner == transaction_id && entry.key == key) {
+                return write_observation_result::duplicate;
+            }
+        }
+        for (observation& entry : observations_) {
+            if (!entry.active) {
+                entry = observation{
+                    .key = key,
+                    .owner = transaction_id,
+                    .active = true,
+                };
+                ++observation_count_;
+                return write_observation_result::recorded;
+            }
+        }
+        make_coarse();
+        return write_observation_result::coarse_fallback;
+    }
+
+    void observe_coarse(subtransaction_id transaction_id) noexcept {
+        if (sticky_coarse_) {
+            return;
+        }
+        if (transaction_id != 0) {
+            if (frame* transaction_frame = find_or_create_frame(transaction_id);
+                transaction_frame != nullptr) {
+                transaction_frame->dirty = true;
+            }
+        }
+        make_coarse();
+    }
+
+    [[nodiscard]] write_subtransaction_result finish_subtransaction(subtransaction_id child_id,
+                                                                    subtransaction_id parent_id,
+                                                                    bool committed) noexcept {
+        frame* child = find_frame(child_id);
+        if (child == nullptr) {
+            return write_subtransaction_result::no_frame;
+        }
+        if (!committed) {
+            remove_owned_observations(child_id);
+            *child = {};
+            return write_subtransaction_result::aborted;
+        }
+        frame* parent = parent_id == 0 ? nullptr : find_or_create_frame(parent_id);
+        if (parent == nullptr) {
+            remove_owned_observations(child_id);
+            *child = {};
+            make_coarse();
+            return write_subtransaction_result::coarse_fallback;
+        }
+        parent->dirty = parent->dirty || child->dirty;
+        for (observation& candidate : observations_) {
+            if (!candidate.active || candidate.owner != child_id) {
+                continue;
+            }
+            bool duplicate = false;
+            for (const observation& existing : observations_) {
+                if (&existing != &candidate && existing.active && existing.owner == parent_id &&
+                    existing.key == candidate.key) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                candidate = {};
+                --observation_count_;
+            } else {
+                candidate.owner = parent_id;
+            }
+        }
+        *child = {};
+        return write_subtransaction_result::committed;
+    }
+
+    [[nodiscard]] bool transaction_dirty() const noexcept {
+        if (sticky_coarse_) {
+            return true;
+        }
+        for (const frame& transaction_frame : frames_) {
+            if (transaction_frame.active && transaction_frame.dirty) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool coarse() const noexcept {
+        return sticky_coarse_;
+    }
+
+    [[nodiscard]] bool touches(const p_key_type& key) const noexcept {
+        if (sticky_coarse_) {
+            return true;
+        }
+        for (const observation& entry : observations_) {
+            if (entry.active && entry.key == key) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Copy each distinct surviving key once, preserving bounded behavior. */
+    [[nodiscard]] std::size_t copy_unique(std::span<p_key_type> output) const noexcept {
+        std::size_t copied = 0;
+        for (const observation& candidate : observations_) {
+            if (!candidate.active) {
+                continue;
+            }
+            bool duplicate = false;
+            for (std::size_t index = 0; index < copied; ++index) {
+                if (output[index] == candidate.key) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+            if (copied >= output.size()) {
+                return copied;
+            }
+            output[copied++] = candidate.key;
+        }
         return copied;
-      }
-      output[copied++] = candidate.key;
     }
-    return copied;
-  }
 
-  [[nodiscard]] std::size_t observation_count() const noexcept {
-    return observation_count_;
-  }
-
-  [[nodiscard]] std::size_t frame_count() const noexcept {
-    std::size_t count = 0;
-    for (const Frame &frame : frames_) {
-      count += frame.active ? 1U : 0U;
+    [[nodiscard]] std::size_t observation_count() const noexcept {
+        return observation_count_;
     }
-    return count;
-  }
 
-  void reset() noexcept { *this = {}; }
-
-private:
-  struct Frame {
-    SubtransactionId id = 0;
-    bool active = false;
-    bool dirty = false;
-  };
-
-  struct Observation {
-    Key key{};
-    SubtransactionId owner = 0;
-    bool active = false;
-  };
-
-  [[nodiscard]] Frame *find_frame(SubtransactionId id) noexcept {
-    for (Frame &frame : frames_) {
-      if (frame.active && frame.id == id) {
-        return &frame;
-      }
+    [[nodiscard]] std::size_t frame_count() const noexcept {
+        std::size_t count = 0;
+        for (const frame& transaction_frame : frames_) {
+            count += transaction_frame.active ? 1U : 0U;
+        }
+        return count;
     }
-    return nullptr;
-  }
 
-  [[nodiscard]] Frame *find_or_create_frame(SubtransactionId id) noexcept {
-    if (Frame *frame = find_frame(id); frame != nullptr) {
-      return frame;
+    void reset() noexcept {
+        *this = {};
     }
-    for (Frame &frame : frames_) {
-      if (!frame.active) {
-        frame = Frame{.id = id, .active = true, .dirty = false};
-        return &frame;
-      }
+
+  private:
+    struct frame {
+        subtransaction_id id = 0;
+        bool active = false;
+        bool dirty = false;
+    };
+
+    struct observation {
+        p_key_type key{};
+        subtransaction_id owner = 0;
+        bool active = false;
+    };
+
+    [[nodiscard]] frame* find_frame(subtransaction_id id) noexcept {
+        for (frame& transaction_frame : frames_) {
+            if (transaction_frame.active && transaction_frame.id == id) {
+                return &transaction_frame;
+            }
+        }
+        return nullptr;
     }
-    return nullptr;
-  }
 
-  void remove_owned_observations(SubtransactionId owner) noexcept {
-    for (Observation &observation : observations_) {
-      if (observation.active && observation.owner == owner) {
-        observation = {};
-        --observation_count_;
-      }
+    [[nodiscard]] frame* find_or_create_frame(subtransaction_id id) noexcept {
+        if (frame* transaction_frame = find_frame(id); transaction_frame != nullptr) {
+            return transaction_frame;
+        }
+        for (frame& transaction_frame : frames_) {
+            if (!transaction_frame.active) {
+                transaction_frame = frame{.id = id, .active = true, .dirty = false};
+                return &transaction_frame;
+            }
+        }
+        return nullptr;
     }
-  }
 
-  void make_coarse() noexcept { sticky_coarse_ = true; }
+    void remove_owned_observations(subtransaction_id owner) noexcept {
+        for (observation& entry : observations_) {
+            if (entry.active && entry.owner == owner) {
+                entry = {};
+                --observation_count_;
+            }
+        }
+    }
 
-  std::array<Frame, FrameCapacity> frames_{};
-  std::array<Observation, KeyCapacity> observations_{};
-  std::size_t observation_count_ = 0;
-  bool sticky_coarse_ = false;
+    void make_coarse() noexcept {
+        sticky_coarse_ = true;
+    }
+
+    std::array<frame, p_frame_capacity> frames_{};
+    std::array<observation, p_key_capacity> observations_{};
+    std::size_t observation_count_ = 0;
+    bool sticky_coarse_ = false;
 };
 
 } // namespace bioseq::cache

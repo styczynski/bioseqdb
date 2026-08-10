@@ -141,13 +141,22 @@ parse_source_authority(
             "postgresql_rejected_header_roots",
             "profile",
             "schema",
+            "schema_revision",
             "source_list",
             "source_list_sha256",
             "translation_units",
         },
         "runtime inventory compile graph");
+    const std::size_t schema_revision =
+        serialization_detail::size_value(
+            json_field(
+                root,
+                "schema_revision",
+                "runtime inventory compile graph"),
+            "runtime inventory compile graph.schema_revision");
     if (compile_graph_string(root, "schema")
-            != "bioseq_safety_compile_graph/v1"
+            != "bioseq_safety_compile_graph"
+        || schema_revision != 1
         || compile_graph_string(root, "profile")
             != profile_name(facts.profile)
         || compile_graph_string(root, "clang_version")
@@ -424,7 +433,7 @@ using owned_call_index =
 
 }  // namespace runtime_inventory_detail
 
-/// Returns the deterministic ABI-v2 identity for a SQL/fault probe pair.
+/// Returns the deterministic revision 2 identity for a SQL/fault probe pair.
 [[nodiscard]] inline std::string runtime_probe_site_id(
     std::string_view sql_identity,
     std::string_view fault_key) {
@@ -433,9 +442,10 @@ using owned_call_index =
             "site id",
             "SQL identity and fault key must be nonempty");
     }
-    return "probe:v2:"
+    return "probe:"
         + bioseq::common::sha256_hex(
-            "bioseq.safety_runtime_probe.site.v2\n"
+            "bioseq.safety_runtime_probe.site\n"
+            "revision=2\n"
             + std::string{sql_identity} + "\n"
             + std::string{fault_key} + "\n");
 }
@@ -453,7 +463,7 @@ inline void validate_runtime_probe_inventory(
                 entry.fault_key)) {
             runtime_inventory_detail::inventory_failure(
                 entry.sql_identity,
-                "site id differs from the canonical v2 digest");
+                "site id differs from the canonical revision 2 digest");
         }
     }
 }
@@ -469,8 +479,8 @@ build_runtime_probe_inventory(
     std::string_view sql_manifest_json,
     std::string_view inventory_producer_executable_bytes) {
     using namespace runtime_inventory_detail;
-    if (ledger.schema_version != 2
-        || facts.schema_version != 2
+    if (ledger.schema_revision != 2
+        || facts.schema_revision != 2
         || ledger.profile != facts.profile
         || facts.compiler_profile != profile_name(facts.profile)
         || ledger.parents.empty()
@@ -550,9 +560,9 @@ build_runtime_probe_inventory(
     }
 
     runtime_probe_inventory result{
-        .schema_version = 1,
+        .schema_revision = 1,
         .profile = facts.profile,
-        .probe_abi_version = 2,
+        .probe_abi_revision = 2,
         .ledger_sha256 = ledger_sha256,
         .compiler_facts_sha256 =
             compiler_facts_sha256,
@@ -688,6 +698,7 @@ build_runtime_probe_inventory(
                 .site_id = runtime_probe_site_id(
                     parent.sql_identity,
                     probe.fault_key),
+                .site_revision = 2,
                 .relation = probe.relation,
                 .ledger_site_sha256 =
                     bioseq::common::sha256_hex(

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-import hashlib
 from pathlib import Path, PurePosixPath
 import shutil
 import tarfile
 
+from ..artifacts import sha256_file
 from ..model import (
     BindMount,
     CellContext,
@@ -299,14 +299,6 @@ def repository_plan(
     )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _database_fields(database: Path) -> dict[str, tuple[str, ...]]:
     try:
         with tarfile.open(database, "r:*") as archive:
@@ -368,7 +360,7 @@ def _verify_database_binding(
         "VERSION": f"{cell.package_version}-1",
         "ARCH": _pacman_architecture(cell),
         "CSIZE": str(package_path.stat().st_size),
-        "SHA256SUM": _sha256(package_path),
+        "SHA256SUM": sha256_file(package_path),
     }
     for field, value in expected.items():
         if _single_field(fields, field) != value:
@@ -425,9 +417,9 @@ def _repository_result(cell: CellContext, package_path: Path) -> RepositoryBuild
         (files_signature, aliases[3]),
     )
     for canonical, alias in alias_pairs:
-        if canonical.stat().st_size != alias.stat().st_size or _sha256(
+        if canonical.stat().st_size != alias.stat().st_size or sha256_file(
             canonical
-        ) != _sha256(alias):
+        ) != sha256_file(alias):
             raise RepositoryBuildError(
                 f"PACMAN alias does not match canonical bytes: {alias.name}"
             )
@@ -492,7 +484,7 @@ def build_repository(
     shutil.copy2(source_artifact, package_path)
     if (
         package_path.stat().st_size != source_artifact.stat().st_size
-        or _sha256(package_path) != _sha256(source_artifact)
+        or sha256_file(package_path) != sha256_file(source_artifact)
     ):
         raise RepositoryBuildError("PACMAN repository copy changed the artifact bytes")
 

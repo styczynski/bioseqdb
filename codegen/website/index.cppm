@@ -9,7 +9,7 @@ module;
 export module bioseq.codegen.website;
 
 import :build_pipeline;
-import :contract_tests;
+import :tests.contract;
 
 export namespace bioseq::codegen::website {
 
@@ -25,9 +25,9 @@ inline int self_test() {
     }
 }
 
-/// @brief Dispatches a `website` subcommand to its phase handler.
+/// @brief Dispatches a `website` subcommand to its stage handler.
 /// @param args Arguments after the leading `website` token.
-/// @return The phase exit code, or one on an unexpected exception.
+/// @return The stage exit code, or one on an unexpected exception.
 inline int run(std::span<std::string_view const> args) {
     try {
         return dispatch_website_command(args);

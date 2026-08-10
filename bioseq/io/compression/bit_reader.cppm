@@ -4,8 +4,8 @@
  *
  * Span-input, non-templated. DEFLATE is the only consumer; templating on
  * `<LsbFirst, BufferT>` is YAGNI for this PR. Buffer is hardcoded
- * `std::uint64_t`. `peek<N>()` and `read<N>()` static_assert on N at
- * compile time. The variable-N `peek_bits(n)` is the Huffman fast loop's
+ * `std::uint64_t`. `peek<p_bit_count>()` and `read<p_bit_count>()` static_assert on p_bit_count at
+ * compile time. The variable-p_bit_count `peek_bits(n)` is the Huffman fast loop's
  * entry point.
  *
  * The bit buffer holds up to 64 bits LSB-first. `refill()` fills the
@@ -50,29 +50,29 @@ public:
     bit_reader& operator=(const bit_reader&) = default;
     bit_reader& operator=(bit_reader&&) = default;
 
-    /// Peek N bits from the current position WITHOUT advancing. N is a
+    /// Peek p_bit_count bits from the current position WITHOUT advancing. p_bit_count is a
     /// compile-time constant in [1, maximum_peek_bits].
-    template <std::size_t N>
+    template <std::size_t p_bit_count>
     [[nodiscard]] std::uint64_t peek() noexcept {
-        static_assert(N >= 1 && N <= maximum_peek_bits,
-                      "bit_reader::peek<N>: N must be in [1, maximum_peek_bits].");
-        if (_bits_buffered < N) [[unlikely]] refill();
-        return _bit_buffer & ((std::uint64_t{1} << N) - 1);
+        static_assert(p_bit_count >= 1 && p_bit_count <= maximum_peek_bits,
+                      "bit_reader::peek<p_bit_count>: p_bit_count must be in [1, maximum_peek_bits].");
+        if (_bits_buffered < p_bit_count) [[unlikely]] refill();
+        return _bit_buffer & ((std::uint64_t{1} << p_bit_count) - 1);
     }
 
-    /// Peek + advance. Same N constraints as `peek<N>()`.
-    template <std::size_t N>
+    /// Peek + advance. Same p_bit_count constraints as `peek<p_bit_count>()`.
+    template <std::size_t p_bit_count>
     [[nodiscard]] std::uint64_t read() noexcept {
-        static_assert(N >= 1 && N <= maximum_peek_bits,
-                      "bit_reader::read<N>: N must be in [1, maximum_peek_bits].");
-        if (_bits_buffered < N) [[unlikely]] refill();
-        const std::uint64_t result = _bit_buffer & ((std::uint64_t{1} << N) - 1);
-        _bit_buffer  >>= N;
-        _bits_buffered -= N;
+        static_assert(p_bit_count >= 1 && p_bit_count <= maximum_peek_bits,
+                      "bit_reader::read<p_bit_count>: p_bit_count must be in [1, maximum_peek_bits].");
+        if (_bits_buffered < p_bit_count) [[unlikely]] refill();
+        const std::uint64_t result = _bit_buffer & ((std::uint64_t{1} << p_bit_count) - 1);
+        _bit_buffer  >>= p_bit_count;
+        _bits_buffered -= p_bit_count;
         return result;
     }
 
-    /// Variable-N peek. The Huffman fast loop calls this to extract a
+    /// Variable-p_bit_count peek. The Huffman fast loop calls this to extract a
     /// 45-bit window of the bit buffer in a single op. Caller is
     /// responsible for ensuring `_bits_buffered >= n`.
     [[nodiscard]] std::uint64_t peek_bits(std::size_t n) noexcept {
@@ -81,7 +81,7 @@ public:
         return _bit_buffer & ((std::uint64_t{1} << n) - 1);
     }
 
-    /// Variable-N read.
+    /// Variable-p_bit_count read.
     [[nodiscard]] std::uint64_t read_bits(std::size_t n) noexcept {
         if (_bits_buffered < n) [[unlikely]] refill();
         std::uint64_t mask = (n >= 64) ? ~std::uint64_t{0}

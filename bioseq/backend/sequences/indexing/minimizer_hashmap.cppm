@@ -5,7 +5,7 @@
  * NO_POSTGRES. Corruption guards log an error and abort through
  * `index_corruption_panic`,
  * never elog/bioseq_log_pg(no-ops here). Storage-side validation goes through
- * `storage.validate_minimizer_*`/`storage.index_error` (duck-typed on S).
+ * `storage.validate_minimizer_*`/`storage.index_error` (duck-typed on p_storage).
  */
 module;
 #include <libassert/assert.hpp>
@@ -35,7 +35,7 @@ module;
 #include <utility>
 export module bioseq.indexing.minimizer_hashmap;
 import bioseq.common.logging;
-import bioseq.common.seqan_adapter;                                // nucleotide alphabet dispatch for the non-HWY ExactSimd bridge contract
+import bioseq.common.seqan_adapter;                                // nucleotide alphabet dispatch for the non-HWY exact_simd bridge contract
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
@@ -134,7 +134,7 @@ public:
             std::string_view operation)
         : std::runtime_error(
               std::string{operation}
-              + ": ExactSimd minimizer execution rejected: "
+              + ": exact_simd minimizer execution rejected: "
               + std::string{exact_simd_index_status_name(status)}),
           status_(status) {}
 
@@ -168,7 +168,7 @@ struct exact_simd_index_bridge_request {
     exact_simd_index_append_records append_records = nullptr;
     exact_simd_index_append_raw append_raw = nullptr;
     std::uint8_t alphabet_code =
-        bioseq::minimizers::unbound_packed_alphabet_code;
+        bioseq::minimizers::k_unbound_packed_alphabet_code;
     std::uint8_t bits_per_symbol = 0u;
     std::size_t storage_unit_bytes = 0;
     std::size_t letters_per_unit = 0;
@@ -264,11 +264,11 @@ struct exact_simd_index_bridge_result {
 [[nodiscard]] exact_simd_index_bridge_result
 collect_exact_simd_index_erased(const exact_simd_index_bridge_request& request);
 
-template<class Collector, sequence_alphabet Alphabet>
+template <class p_collector, sequence_alphabet p_alphabet>
 [[nodiscard]] inline exact_simd_index_execution_stats
 collect_exact_simd_index_range_or_throw(
-        Collector& collector,
-        bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+        p_collector& collector,
+        bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
         std::uint8_t alphabet_code,
         sequence_size_t lo_bp,
         sequence_size_t hi_bp,
@@ -280,8 +280,8 @@ collect_exact_simd_index_range_or_throw(
     static_assert(std::same_as<
         typename minimap_sketch_data::storage_type, std::uint64_t>);
 
-    if constexpr (!std::same_as<Alphabet, seq::dna4>
-                  && !std::same_as<Alphabet, seq::dna5>) {
+    if constexpr (!std::same_as<p_alphabet, seq::dna4>
+                  && !std::same_as<p_alphabet, seq::dna5>) {
         throw exact_simd_index_runtime_error{
             exact_simd_index_status::unsupported_alphabet, operation};
     } else {
@@ -304,8 +304,8 @@ collect_exact_simd_index_range_or_throw(
             lo_bp,
             hi_bp,
             packed_width);
-        std::optional<bioseq::storage::admitted_packed_sequence<Alphabet>> owner;
-        typename bioseq::storage::lazy_sequence_view<Alphabet>::
+        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::
             resident_packed_sequence descriptor{};
         if (access.route
                 == bioseq::storage::sequence_access_route::borrow_resident
@@ -328,11 +328,11 @@ collect_exact_simd_index_range_or_throw(
                 != static_cast<std::size_t>(hi_bp - lo_bp)
             || descriptor.storage_unit_width != packed_width
             || descriptor.bits_per_symbol
-                != bioseq::storage::lazy_sequence_traits<Alphabet>::
+                != bioseq::storage::lazy_sequence_traits<p_alphabet>::
                     logical_bits_per_symbol
             || descriptor.leading_symbol_offset != 0u
             || descriptor.bit_order
-                != bioseq::storage::lazy_sequence_view<Alphabet>::
+                != bioseq::storage::lazy_sequence_view<p_alphabet>::
                     packed_symbol_order::least_significant_symbol_first
             || (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
             throw exact_simd_index_runtime_error{
@@ -359,7 +359,7 @@ collect_exact_simd_index_range_or_throw(
         const auto append_records = +[](void* opaque,
                                         const minimap_sketch_data* records,
                                         std::size_t count) {
-            auto& collector = *static_cast<Collector*>(opaque);
+            auto& collector = *static_cast<p_collector*>(opaque);
             if constexpr (requires {
                 { collector.append_records(
                     std::span<const minimap_sketch_data>{records, count}) }
@@ -387,7 +387,7 @@ collect_exact_simd_index_range_or_throw(
         const auto append_raw = +[](void* opaque,
                                     const std::uint64_t* raw,
                                     std::size_t count) {
-            auto& collector = *static_cast<Collector*>(opaque);
+            auto& collector = *static_cast<p_collector*>(opaque);
             if constexpr (requires {
                 { collector.append_raw_storage(raw, count) }
                     -> std::convertible_to<bool>;
@@ -426,7 +426,7 @@ collect_exact_simd_index_range_or_throw(
                 .bits_per_symbol = descriptor.bits_per_symbol,
                 .storage_unit_bytes = packed_width,
                 .letters_per_unit = packed_width * 8u
-                    / bioseq::storage::lazy_sequence_traits<Alphabet>::
+                    / bioseq::storage::lazy_sequence_traits<p_alphabet>::
                         logical_bits_per_symbol,
                 .total_units = descriptor.unit_count,
                 .total_bp = static_cast<std::size_t>(hi_bp - lo_bp),
@@ -554,7 +554,7 @@ inline constexpr std::uint32_t k_packed_bounded_nthash_kernel_scheme_id =
     0x504E5431u;
 inline constexpr std::size_t k_packed_bounded_nthash_maximum_window = 64u;
 
-/** Full non-Highway copy of the real checked kernel's execution stats. */
+/** Complete non-Highway mirror of the checked kernel execution stats. */
 struct packed_bounded_nthash_index_execution_stats {
     std::uint32_t scheme_id = 0;
     std::uint32_t kmer_size = 0;
@@ -754,10 +754,10 @@ collect_packed_bounded_nthash_index_erased(
 /// descriptor. Only the selected logical-rank interval is materialized when the source
 /// cannot expose stable resident u32 storage; a stable resident interval is
 /// borrowed synchronously without allocating or copying it.
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] packed_bounded_nthash_index_bridge_result
 collect_packed_bounded_nthash_index_lazy(
-        bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+        bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
         std::uint8_t alphabet_code,
         sequence_size_t lo_bp,
         sequence_size_t hi_bp,
@@ -770,7 +770,7 @@ collect_packed_bounded_nthash_index_lazy(
     if (materialized_window_bp_out != nullptr) {
         *materialized_window_bp_out = 0u;
     }
-    if constexpr (!std::same_as<Alphabet, seq::dna4>) {
+    if constexpr (!std::same_as<p_alphabet, seq::dna4>) {
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::unsupported_alphabet);
     } else {
@@ -805,8 +805,8 @@ collect_packed_bounded_nthash_index_lazy(
             lo_bp,
             hi_bp,
             packed_width);
-        std::optional<bioseq::storage::admitted_packed_sequence<Alphabet>> owner;
-        typename bioseq::storage::lazy_sequence_view<Alphabet>::
+        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::
             resident_packed_sequence descriptor{};
         if (access.route
                 == bioseq::storage::sequence_access_route::borrow_resident
@@ -828,11 +828,11 @@ collect_packed_bounded_nthash_index_lazy(
         if (descriptor.logical_length != local_bp_size
             || descriptor.storage_unit_width != packed_width
             || descriptor.bits_per_symbol
-                != bioseq::storage::lazy_sequence_traits<Alphabet>::
+                != bioseq::storage::lazy_sequence_traits<p_alphabet>::
                     logical_bits_per_symbol
             || descriptor.leading_symbol_offset != 0u
             || descriptor.bit_order
-                != bioseq::storage::lazy_sequence_view<Alphabet>::
+                != bioseq::storage::lazy_sequence_view<p_alphabet>::
                     packed_symbol_order::least_significant_symbol_first
             || (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
             return rejected_packed_bounded_nthash_index_result(
@@ -868,7 +868,7 @@ collect_packed_bounded_nthash_index_lazy(
                 .collector_context = std::addressof(collector),
                 .storage_unit_bytes = packed_width,
                 .letters_per_unit = descriptor.storage_unit_width * 8u
-                    / bioseq::storage::lazy_sequence_traits<Alphabet>::
+                    / bioseq::storage::lazy_sequence_traits<p_alphabet>::
                         logical_bits_per_symbol,
                 .storage_units = descriptor.unit_count,
                 .local_bp_size = static_cast<std::size_t>(local_bp_size),
@@ -878,11 +878,11 @@ collect_packed_bounded_nthash_index_lazy(
     }
 }
 
-// Current persisted minimizer codecs stay in this wire owner. Their shared
-// CRC implementation is imported from the lower chunk-storage module so row,
-// manifest, fake, and future PostgreSQL paths cannot drift.
+// Persisted minimizer codecs stay in this storage owner. Their shared CRC
+// implementation is imported from the lower chunk-storage module so row,
+// manifest, fake, and PostgreSQL paths cannot drift.
 
-/// Canonical minimap-style hash/tie/strand semantics encoded by current.
+/// Canonical minimap-style hash/tie/strand semantics used by persisted indexes.
 inline constexpr std::uint32_t k_minimizer_hash_semantics_revision = 1u;
 
 /// Segment-local `(local_bp << 1) | strand` persisted encoding semantics.
@@ -890,18 +890,18 @@ inline constexpr std::uint32_t k_minimizer_segment_local_position_encoding_revis
 inline constexpr std::uint16_t k_grouped_soa_payload_layout_abi_revision = 1u;
 inline constexpr std::uint32_t k_grouped_soa_gpu_abi_revision = 3u;
 inline constexpr std::uint32_t k_grouped_soa_extension_magic = 0x42494f53u;
-inline constexpr std::uint16_t k_grouped_soa_extension_format_revision = 1u;
+inline constexpr std::uint16_t k_grouped_soa_extension_layout_revision = 1u;
 inline constexpr std::uint16_t k_grouped_soa_extension_bytes = 32u;
 /// Persisted supported_alphabets pack index for DNA4. This is an on-wire code,
 /// not the alphabet cardinality.
 inline constexpr std::uint16_t k_minimizer_persisted_dna4_alphabet_code = 0u;
-inline constexpr std::uint32_t k_legacy_minimap_k15_max_hash = 0x3fffffffu;
+inline constexpr std::uint32_t k_minimap_k15_max_hash = 0x3fffffffu;
 
-// Persisted minimizer scheme identities are frozen wire values. The minimap
-// original minimap scheme remains the all-zero pair, independently of the mandatory
-// producer identity now stored in bytes 126/127.
-inline constexpr std::uint16_t k_legacy_minimap_scheme_id = 0u;
-inline constexpr std::uint16_t k_legacy_minimap_scheme_revision = 0u;
+// Persisted minimizer scheme identities are fixed storage values. The minimap
+// scheme uses the all-zero pair independently of the producer identity stored
+// in bytes 126/127.
+inline constexpr std::uint16_t k_minimap_scheme_id = 0u;
+inline constexpr std::uint16_t k_minimap_scheme_revision = 0u;
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_id = 1u;
 inline constexpr std::uint16_t k_bounded_nthash_u32_r7_sum_scheme_revision = 1u;
 inline constexpr std::uint16_t k_invalid_minimizer_scheme_id =
@@ -917,7 +917,7 @@ struct minimizer_scheme_identity {
     [[nodiscard]] bool operator==(const minimizer_scheme_identity&) const = default;
 };
 
-/// Storage-issued incarnation of one MPS canonical replay set.  The token
+/// Storage-issued incarnation of one minimizer-sequence canonical replay set.  The token
 /// changes on every begin operation; the revision changes whenever a caller can
 /// alter the qualified logical replay (including rerouting or physical-run
 /// injection). Internal compaction that preserves the exact canonical replay
@@ -935,9 +935,9 @@ struct direct_minimizer_spill_storage_binding {
         const direct_minimizer_spill_storage_binding&) const noexcept = default;
 };
 
-inline constexpr minimizer_scheme_identity k_legacy_minimap_scheme_identity{
-    .id = k_legacy_minimap_scheme_id,
-    .revision = k_legacy_minimap_scheme_revision,
+inline constexpr minimizer_scheme_identity k_minimap_scheme_identity{
+    .id = k_minimap_scheme_id,
+    .revision = k_minimap_scheme_revision,
 };
 inline constexpr minimizer_scheme_identity k_bounded_nthash_u32_r7_sum_scheme_identity{
     .id = k_bounded_nthash_u32_r7_sum_scheme_id,
@@ -947,13 +947,11 @@ inline constexpr minimizer_scheme_identity k_bounded_nthash_u32_r7_sum_scheme_id
 /// Frozen physical producer identifiers persisted in manifest byte 126.
 /// These values identify the implementation that actually produced the
 /// canonical event stream; they are intentionally independent of biological
-/// scheme identity because persisted Scalar, chronological Exact SIMD, and
-/// Vulkan currently share the minimap scheme. The full-resident
-/// vector_stream ExactSimd route is not compatible with chronological/B8
-/// selection and must never be persisted or consumed under this identity.
-/// Giving that optional resident route a wire identity would require a format
-/// revision; until then pipeline provenance confines it to paired transient
-/// no-index work and persisted consumers require chronological stats.
+/// scheme identity because `scalar`, `exact_simd`, and `vulkan_segment` share
+/// the minimap scheme. The full-resident `vector_stream` exact-SIMD
+/// route has distinct selection semantics and must never be persisted or
+/// consumed under this identity. It remains confined to paired transient
+/// no-index work; persisted consumers require continuation/index route stats.
 enum class minimizer_producer_backend : std::uint8_t {
     invalid = 0u,
     scalar = 1u,
@@ -999,7 +997,7 @@ minimizer_producer_backend_identity_for_backend(
         switch (backend) {
             case minimizer_sketch_backend::scalar:
                 return minimizer_producer_backend::scalar;
-            case minimizer_sketch_backend::two_stack_nthash:
+            case minimizer_sketch_backend::exact_simd:
                 return minimizer_producer_backend::exact_simd;
             case minimizer_sketch_backend::bounded_nthash_simd:
                 return minimizer_producer_backend::bounded_nthash_simd;
@@ -1016,19 +1014,19 @@ minimizer_producer_backend_identity_for_backend(
         };
 }
 
-/// Return whether an id/revision pair names one frozen current scheme.
+/// Return whether an id/revision pair names a supported persisted scheme.
 [[nodiscard]] constexpr bool is_supported_minimizer_scheme_identity(
         std::uint16_t scheme_id,
         std::uint16_t scheme_revision) noexcept {
-    return (scheme_id == k_legacy_minimap_scheme_id
-            && scheme_revision == k_legacy_minimap_scheme_revision)
+    return (scheme_id == k_minimap_scheme_id
+            && scheme_revision == k_minimap_scheme_revision)
         || (scheme_id == k_bounded_nthash_u32_r7_sum_scheme_id
             && scheme_revision == k_bounded_nthash_u32_r7_sum_scheme_revision);
 }
 
-/// Bind every persistable sketch producer to its persisted semantics. ExactSimd
-/// here means its chronological continuation/index producer, not the optional
-/// paired-resident vector_stream sub-route. Adding a backend without extending
+/// Bind every persistable sketch producer to its persisted semantics. `exact_simd`
+/// names its continuation/index producer, not the optional paired-resident
+/// `vector_stream` sub-route. Adding a backend without extending
 /// this switch is a fail-closed operation.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_backend(
@@ -1036,8 +1034,8 @@ minimizer_scheme_identity_for_backend(
     switch (backend) {
         case minimizer_sketch_backend::scalar:
         case minimizer_sketch_backend::vulkan_segment:
-        case minimizer_sketch_backend::two_stack_nthash:
-            return k_legacy_minimap_scheme_identity;
+        case minimizer_sketch_backend::exact_simd:
+            return k_minimap_scheme_identity;
         case minimizer_sketch_backend::bounded_nthash_simd:
             return k_bounded_nthash_u32_r7_sum_scheme_identity;
     }
@@ -1045,7 +1043,7 @@ minimizer_scheme_identity_for_backend(
 }
 
 /// Biological scheme implied by one frozen physical producer identity. This
-/// preserves the existing scheme mapping while preventing shared-scheme
+/// retains the scheme mapping while preventing shared-scheme
 /// backends from relabelling one another.
 [[nodiscard]] constexpr minimizer_scheme_identity
 minimizer_scheme_identity_for_producer_backend(
@@ -1057,7 +1055,7 @@ minimizer_scheme_identity_for_producer_backend(
         case minimizer_producer_backend::scalar:
         case minimizer_producer_backend::exact_simd:
         case minimizer_producer_backend::vulkan_segment:
-            return k_legacy_minimap_scheme_identity;
+            return k_minimap_scheme_identity;
         case minimizer_producer_backend::bounded_nthash_simd:
             return k_bounded_nthash_u32_r7_sum_scheme_identity;
         case minimizer_producer_backend::invalid:
@@ -1067,13 +1065,13 @@ minimizer_scheme_identity_for_producer_backend(
 }
 
 /// Uniform fixed-core segment geometry plus disjoint control/position extent
-/// namespaces encoded in current manifests.
+/// namespaces encoded in persisted manifests.
 inline constexpr std::uint16_t k_minimizer_segment_geometry_revision = 2u;
 
 /// Preferred immutable core span; overflow retries halve this power of two.
 inline constexpr std::uint64_t k_minimizer_preferred_segment_span_bp = 8u * 1024u * 1024u;
 
-/// Deterministic hash-partition payload target used by the initial encoder POC.
+/// Deterministic hash-partition payload target used by the grouped-SoA encoder.
 inline constexpr std::uint64_t k_minimizer_partition_target_bytes = 256u * 1024u;
 
 /// PostgreSQL S1 page-dense quantum selected by grouped-SoA storage.
@@ -1100,11 +1098,11 @@ inline constexpr std::uint64_t k_grouped_soa_default_max_occurrence_cap = 65'534
         (std::numeric_limits<std::int32_t>::max)());
 }
 
-/// Fail-closed error classes reported by current fixed-wire codecs and geometry.
+/// Error classes reported by fixed-width storage codecs and geometry checks.
 enum class minimizer_generation_encoding_error : std::uint8_t {
     encoded_size,
     magic,
-    format_revision,
+    unsupported_storage_layout,
     declared_size,
     reserved_nonzero,
     generation_id,
@@ -1126,7 +1124,7 @@ enum class minimizer_generation_encoding_error : std::uint8_t {
     byte_count,
     checksum,
     identity_mismatch,
-    compatibility_mismatch,
+    storage_contract_mismatch,
     control_order,
     control_range,
     position_range,
@@ -1143,8 +1141,8 @@ enum class minimizer_generation_layout : std::uint16_t {
     grouped_soa_segment_local = 5u,
 };
 
-/// Return the immutable physical row quantum selected by the wire revision.
-/// The value preserves the current 8,064-byte physical row quantum.
+/// Return the immutable physical row quantum selected by the storage layout.
+/// The value selects the fixed 8,064-byte physical row quantum.
 [[nodiscard]] constexpr std::uint32_t minimizer_extent_payload_bytes(
         minimizer_generation_layout layout) noexcept {
     return layout == minimizer_generation_layout::grouped_soa_segment_local
@@ -1154,7 +1152,7 @@ enum class minimizer_generation_layout : std::uint16_t {
 static_assert(minimizer_extent_payload_bytes(
     minimizer_generation_layout::grouped_soa_segment_local) == 8064u);
 
-/// Return whether a persisted format selector has a canonical local profile.
+/// Return whether a persisted layout selector has a canonical local profile.
 [[nodiscard]] constexpr bool is_supported_minimizer_generation_layout(
         minimizer_generation_layout layout) noexcept {
     return layout
@@ -1187,7 +1185,7 @@ enum class grouped_soa_position_semantics : std::uint8_t {
 /**
  * Complete grouped-SoA payload contract derived from persisted identity.
  * Required scalar widths and semantics live directly in this profile; there
- * is no optional shape wrapper or alternate prior-layout profile.
+ * is no optional shape wrapper or alternate layout profile.
  */
 struct grouped_soa_minimizer_profile {
     minimizer_generation_layout layout =
@@ -1249,18 +1247,18 @@ select_grouped_soa_hash_width(
     if (alphabet_code != k_minimizer_persisted_dna4_alphabet_code
         || kmer_size == 0u) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (scheme == k_bounded_nthash_u32_r7_sum_scheme_identity) {
         if (kmer_size != 15u) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         return minimizer_scalar_width::u32;
     }
-    if (scheme != k_legacy_minimap_scheme_identity || kmer_size > 28u) {
+    if (scheme != k_minimap_scheme_identity || kmer_size > 28u) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (kmer_size <= 8u) return minimizer_scalar_width::u16;
     if (kmer_size <= 16u) return minimizer_scalar_width::u32;
@@ -1281,7 +1279,7 @@ derive_grouped_soa_minimizer_profile(
     if (!hash_width || position_segment_span_bp == 0u
         || max_occ_cap == (std::numeric_limits<std::uint64_t>::max)()) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const minimizer_scalar_width position_width =
         position_segment_span_bp <= (std::uint64_t{1u} << 15u)
@@ -1349,7 +1347,7 @@ validate_grouped_soa_minimizer_profile(
         || profile.gpu_abi_revision != k_grouped_soa_gpu_abi_revision
         || !profile.segment_local_positions) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     return {};
 }
@@ -1402,7 +1400,7 @@ plan_grouped_soa_control_plane(
         || !is_minimizer_scalar_width(offset_width)
         || !is_minimizer_scalar_width(count_width)) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto checked_mul = [](std::uint64_t lhs, std::uint64_t rhs)
             -> std::optional<std::uint64_t> {
@@ -1508,7 +1506,7 @@ struct minimizer_generation_head {
         minimizer_generation_layout::invalid;
     std::uint64_t generation_id = 0;
     std::uint64_t source_identity = 0;
-    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
     std::uint64_t manifest_checksum = 0;
     std::uint64_t source_content_checksum = 0;
 
@@ -1545,8 +1543,8 @@ struct minimizer_generation_manifest {
     std::uint32_t gpu_abi_revision = 0;
     std::uint64_t position_segment_span_bp = 0;
     std::uint16_t segment_geometry_revision = 0;
-    std::uint16_t minimizer_scheme_id = k_legacy_minimap_scheme_id;
-    std::uint16_t minimizer_scheme_revision = k_legacy_minimap_scheme_revision;
+    std::uint16_t minimizer_scheme_id = k_minimap_scheme_id;
+    std::uint16_t minimizer_scheme_revision = k_minimap_scheme_revision;
     minimizer_producer_backend producer_backend_id =
         minimizer_producer_backend::invalid;
     std::uint8_t producer_identity_revision = 0u;
@@ -1567,7 +1565,7 @@ struct minimizer_generation_manifest {
     [[nodiscard]] bool operator==(const minimizer_generation_manifest&) const = default;
 };
 
-/// Caller-owned compatibility contract checked before consuming one generation.
+/// Caller-owned storage contract checked before consuming one generation.
 struct expected_minimizer_generation_identity {
     minimizer_generation_layout layout =
         minimizer_generation_layout::invalid;
@@ -1615,7 +1613,7 @@ expected_grouped_soa_generation_identity_for_backend(
         || layout != minimizer_generation_layout::grouped_soa_segment_local
         || !max_occ_cap) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     return expected_minimizer_generation_identity{
         .layout = layout,
@@ -1632,10 +1630,10 @@ expected_grouped_soa_generation_identity_for_backend(
     };
 }
 
-/// Logical current directory entry; persistence always uses the fixed codec.
+/// Logical directory entry; persistence always uses the fixed codec.
 /// `sub_key` is the logical/control key. Position rows use the checked derived
 /// key k_position_extent_sub_key_base + sub_key. Both extent-local chunk sequences start
-/// at zero, while the 96-byte directory ABI remains unchanged.
+/// at zero and use the fixed 96-byte directory ABI.
 struct grouped_soa_bucket_directory_entry {
     static constexpr std::size_t header_bytes = 96u;
     static constexpr std::size_t encoded_bytes = 128u;
@@ -1663,9 +1661,9 @@ struct grouped_soa_bucket_directory_entry {
 /// Variable-size fixed-record wrapper. Its unused suffix is always zero; the
 /// byte_count is the only exposed range so stored checksums and golden bytes remain
 /// exactly 128/96 bytes.
-template <std::size_t MaximumBytes>
+template <std::size_t p_maximum_bytes>
 struct encoded_minimizer_fixed_record {
-    std::array<std::byte, MaximumBytes> storage{};
+    std::array<std::byte, p_maximum_bytes> storage{};
     std::size_t byte_count = 0;
 
     [[nodiscard]] constexpr const std::byte* data() const noexcept {
@@ -1701,20 +1699,20 @@ struct encoded_minimizer_fixed_record {
     [[nodiscard]] constexpr bool operator==(
         const encoded_minimizer_fixed_record&) const = default;
 
-    template <std::size_t N>
+    template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool operator==(
             const encoded_minimizer_fixed_record& lhs,
-            const std::array<std::byte, N>& rhs) noexcept {
-        if (lhs.byte_count != N) return false;
-        for (std::size_t i = 0; i < N; ++i) {
+            const std::array<std::byte, p_size>& rhs) noexcept {
+        if (lhs.byte_count != p_size) return false;
+        for (std::size_t i = 0; i < p_size; ++i) {
             if (lhs.storage[i] != rhs[i]) return false;
         }
         return true;
     }
 
-    template <std::size_t N>
+    template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool operator==(
-            const std::array<std::byte, N>& lhs,
+            const std::array<std::byte, p_size>& lhs,
             const encoded_minimizer_fixed_record& rhs) noexcept {
         return rhs == lhs;
     }
@@ -1737,7 +1735,7 @@ derive_grouped_soa_minimizer_profile(
     if (manifest.layout
             != minimizer_generation_layout::grouped_soa_segment_local) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto profile = derive_grouped_soa_minimizer_profile(
         scheme,
@@ -1756,7 +1754,7 @@ derive_grouped_soa_minimizer_profile(
         || profile->position_semantics != manifest.position_semantics
         || profile->max_hash != manifest.max_hash) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     return profile;
 }
@@ -1774,26 +1772,26 @@ struct minimizer_position_segment_range {
 
 namespace bioseq::indexing::minimizer_generation_wire_detail {
 
-template <class UInt>
-requires (std::is_unsigned_v<UInt>)
+template <class p_uint>
+requires (std::is_unsigned_v<p_uint>)
 constexpr void write_le(
         std::span<std::byte> output,
         std::size_t offset,
-        UInt value) noexcept {
-    for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
-        output[offset + byte] = static_cast<std::byte>(value & UInt{0xff});
+        p_uint value) noexcept {
+    for (std::size_t byte = 0; byte < sizeof(p_uint); ++byte) {
+        output[offset + byte] = static_cast<std::byte>(value & p_uint{0xff});
         value >>= 8u;
     }
 }
 
-template <class UInt>
-requires (std::is_unsigned_v<UInt>)
-[[nodiscard]] constexpr UInt read_le(
+template <class p_uint>
+requires (std::is_unsigned_v<p_uint>)
+[[nodiscard]] constexpr p_uint read_le(
         std::span<const std::byte> input,
         std::size_t offset) noexcept {
-    UInt value = 0;
-    for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
-        value |= static_cast<UInt>(
+    p_uint value = 0;
+    for (std::size_t byte = 0; byte < sizeof(p_uint); ++byte) {
+        value |= static_cast<p_uint>(
             std::to_integer<std::uint8_t>(input[offset + byte])) << (byte * 8u);
     }
     return value;
@@ -1847,10 +1845,10 @@ requires (std::is_unsigned_v<UInt>)
     return true;
 }
 
-// Standalone wire decoding validates only invariants available in the fixed
+// Standalone storage decoding validates only invariants available in the fixed
 // manifest itself. Head/manifest identity plus payload/directory byte counts,
-// checksums, extents, and compatibility relationships require the referenced
-// objects and deliberately belong to generation publication/load validation.
+// checksums, extents, and cross-object relationships require the referenced
+// objects and belong to generation publication/load validation.
 [[nodiscard]] constexpr std::optional<minimizer_generation_encoding_error>
 validate_manifest_standalone(const minimizer_generation_manifest& manifest) noexcept {
     const minimizer_producer_identity producer_backend{
@@ -1858,21 +1856,21 @@ validate_manifest_standalone(const minimizer_generation_manifest& manifest) noex
         .revision = manifest.producer_identity_revision,
     };
     if (!is_supported_minimizer_producer_backend_identity(producer_backend)) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     const auto profile = derive_grouped_soa_minimizer_profile(manifest);
     if (!profile) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     if (minimizer_scheme_identity_for_producer_backend(producer_backend)
             != profile->minimizer_scheme) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     if (manifest.layout
             == minimizer_generation_layout::
                 grouped_soa_segment_local
         && manifest.gpu_abi_revision != profile->gpu_abi_revision) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     if (manifest.segment_geometry_revision
         != minimizer_generation_manifest::uniform_segment_geometry_revision) {
@@ -1914,7 +1912,7 @@ export namespace bioseq::indexing {
 encode_minimizer_generation_head(const minimizer_generation_head& head) noexcept {
     using namespace minimizer_generation_wire_detail;
     if (!is_supported_minimizer_generation_layout(head.layout)) {
-        return std::unexpected(minimizer_generation_encoding_error::format_revision);
+        return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     if (head.generation_id == 0 || !sql_bigint_can_represent(head.generation_id)) {
         return std::unexpected(minimizer_generation_encoding_error::generation_id);
@@ -1928,7 +1926,7 @@ encode_minimizer_generation_head(const minimizer_generation_head& head) noexcept
         static_cast<std::uint16_t>(minimizer_generation_head::encoded_bytes));
     write_le<std::uint64_t>(bytes, 8, head.generation_id);
     write_le<std::uint64_t>(bytes, 16, head.source_identity);
-    write_le<std::uint64_t>(bytes, 24, head.compatibility_checksum);
+    write_le<std::uint64_t>(bytes, 24, head.storage_contract_checksum);
     write_le<std::uint64_t>(bytes, 32, head.manifest_checksum);
     write_le<std::uint64_t>(bytes, 40, head.source_content_checksum);
     return output;
@@ -1949,7 +1947,7 @@ decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
     const auto layout = static_cast<minimizer_generation_layout>(
         read_le<std::uint16_t>(input, 4));
     if (!is_supported_minimizer_generation_layout(layout)) {
-        return std::unexpected(minimizer_generation_encoding_error::format_revision);
+        return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     if (read_le<std::uint16_t>(input, 6) != minimizer_generation_head::encoded_bytes) {
         return std::unexpected(minimizer_generation_encoding_error::declared_size);
@@ -1961,7 +1959,7 @@ decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
         .layout = layout,
         .generation_id = read_le<std::uint64_t>(input, 8),
         .source_identity = read_le<std::uint64_t>(input, 16),
-        .compatibility_checksum = read_le<std::uint64_t>(input, 24),
+        .storage_contract_checksum = read_le<std::uint64_t>(input, 24),
         .manifest_checksum = read_le<std::uint64_t>(input, 32),
         .source_content_checksum = read_le<std::uint64_t>(input, 40),
     };
@@ -2023,7 +2021,7 @@ encode_minimizer_generation_manifest_record(
         manifest.producer_identity_revision);
     write_le<std::uint32_t>(bytes, 128, k_grouped_soa_extension_magic);
     write_le<std::uint16_t>(
-        bytes, 132, k_grouped_soa_extension_format_revision);
+        bytes, 132, k_grouped_soa_extension_layout_revision);
     write_le<std::uint16_t>(bytes, 134, k_grouped_soa_extension_bytes);
     write_le<std::uint8_t>(
         bytes, 136, static_cast<std::uint8_t>(manifest.hash_width));
@@ -2053,7 +2051,7 @@ encode_minimizer_generation_manifest(
             != minimizer_generation_layout::
                 grouped_soa_segment_local) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto encoded = encode_minimizer_generation_manifest_record(manifest);
     if (!encoded
@@ -2080,7 +2078,7 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
     const auto layout = static_cast<minimizer_generation_layout>(
         read_le<std::uint16_t>(input, 4));
     if (!is_supported_minimizer_generation_layout(layout)) {
-        return std::unexpected(minimizer_generation_encoding_error::format_revision);
+        return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     const std::size_t expected_size = minimizer_manifest_encoded_bytes(
         layout);
@@ -2120,11 +2118,11 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
     if (read_le<std::uint32_t>(input, 128)
                 != k_grouped_soa_extension_magic
             || read_le<std::uint16_t>(input, 132)
-                != k_grouped_soa_extension_format_revision
+                != k_grouped_soa_extension_layout_revision
             || read_le<std::uint16_t>(input, 134)
                 != k_grouped_soa_extension_bytes) {
         return std::unexpected(
-            minimizer_generation_encoding_error::format_revision);
+            minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     if (input[143] != std::byte{0}) {
         return std::unexpected(
@@ -2176,8 +2174,8 @@ using tagged_minimizer_generation_head = std::variant<
 using tagged_minimizer_generation_manifest = std::variant<
     minimizer_generation_manifest, hash_major_minimizer_manifest>;
 
-/** Exact-length grouped-SoA/hash-major dispatch; older 128-byte manifests are not
- * part of this tagged publication branch and cannot be widened implicitly. */
+/** Exact-length grouped-SoA/hash-major dispatch. Only the declared storage
+ * layouts participate in this tagged publication branch. */
 [[nodiscard]] inline std::expected<
     tagged_minimizer_generation_head, tagged_minimizer_generation_encoding_error>
 decode_tagged_minimizer_generation_head(
@@ -2233,14 +2231,14 @@ decode_tagged_minimizer_generation_manifest(
     return std::unexpected(tagged_minimizer_generation_encoding_error::encoded_size);
 }
 
-/// Translate the frozen runtime producer identity into the exact registered
-/// hash-major compatibility profile.  Keeping this bridge beside the existing
+/// Translate the fixed runtime producer identity into the registered
+/// hash-major storage profile. Keeping this bridge beside the
 /// grouped-SoA producer/scheme registry prevents PostgreSQL publication and
 /// reopen code from independently reconstructing (or silently defaulting)
 /// persisted biological semantics.
 [[nodiscard]] constexpr std::expected<
-    hash_major_minimizer_compatibility, hash_major_minimizer_error>
-hash_major_minimizer_compatibility_for_backend(
+    hash_major_minimizer_storage_profile, hash_major_minimizer_error>
+hash_major_minimizer_profile_for_backend(
         minimizer_sketch_backend backend,
         std::uint16_t alphabet_code,
         std::uint16_t kmer_size,
@@ -2256,9 +2254,9 @@ hash_major_minimizer_compatibility_for_backend(
         || alphabet_code != 0u
         || kmer_size != 15u
         || window_size != 10u) {
-        return std::unexpected(hash_major_minimizer_error::compatibility);
+        return std::unexpected(hash_major_minimizer_error::storage_contract_mismatch);
     }
-    const hash_major_minimizer_compatibility compatibility{
+    const hash_major_minimizer_storage_profile profile{
         .hash_scheme_identity = scheme.id,
         .hash_scheme_revision = scheme.revision,
         .alphabet_code = alphabet_code,
@@ -2276,20 +2274,20 @@ hash_major_minimizer_compatibility_for_backend(
         .controls_per_block = k_hash_major_minimizer_controls_per_block,
         .hash_seed = 0u,
     };
-    if (!is_valid_hash_major_minimizer_compatibility(
-            compatibility, target_length)) {
-        return std::unexpected(hash_major_minimizer_error::compatibility);
+    if (!is_valid_hash_major_minimizer_storage_profile(
+            profile, target_length)) {
+        return std::unexpected(hash_major_minimizer_error::storage_contract_mismatch);
     }
-    return compatibility;
+    return profile;
 }
 
-/// Validate invariants intrinsic to one decoded current directory entry.
+/// Validate invariants intrinsic to one decoded directory entry.
 [[nodiscard]] constexpr std::optional<minimizer_generation_encoding_error>
 validate_minimizer_bucket_dir_entry(
         const grouped_soa_bucket_directory_entry& entry,
         const grouped_soa_minimizer_profile& profile) noexcept {
     if (!validate_grouped_soa_minimizer_profile(profile)) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     if (entry.position_segment < 0) {
         return minimizer_generation_encoding_error::position_segment;
@@ -2318,7 +2316,7 @@ validate_minimizer_bucket_dir_entry(
     if (entry.shape_offset_width
                 != select_grouped_soa_offset_width(
                     entry.position_element_count)) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     const auto control_layout = plan_grouped_soa_control_plane(
         entry.control_element_count,
@@ -2412,7 +2410,7 @@ encode_grouped_soa_bucket_directory_entry(
             != minimizer_generation_layout::
                 grouped_soa_segment_local) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto encoded = encode_minimizer_bucket_dir_entry_record(
         entry, profile);
@@ -2474,7 +2472,7 @@ decode_minimizer_bucket_dir_entry(
             return std::unexpected(
                 !all_zero(input, 104, 128)
                     ? minimizer_generation_encoding_error::reserved_nonzero
-                    : minimizer_generation_encoding_error::compatibility_mismatch);
+                    : minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     entry.shape_offset_width = static_cast<minimizer_scalar_width>(
         read_le<std::uint8_t>(input, 97));
@@ -2490,7 +2488,7 @@ validate_minimizer_bucket_directory_entries(
         std::span<const grouped_soa_bucket_directory_entry> entries,
         const grouped_soa_minimizer_profile& profile) noexcept {
     if (!validate_grouped_soa_minimizer_profile(profile)) {
-        return minimizer_generation_encoding_error::compatibility_mismatch;
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
     for (std::size_t index = 0; index < entries.size(); ++index) {
         const grouped_soa_bucket_directory_entry& entry = entries[index];
@@ -2557,7 +2555,7 @@ public:
             const grouped_soa_minimizer_profile& profile) {
         if (!validate_grouped_soa_minimizer_profile(profile)) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::size_t entry_bytes =
             minimizer_directory_entry_encoded_bytes(profile);
@@ -2589,7 +2587,7 @@ public:
         return view;
     }
 
-    /// Decode under an existing logical reservation. Both vectors reserve
+    /// Decode under a caller-held logical reservation. Both vectors reserve
     /// first, then their actual capacities are reconciled before any persisted
     /// byte or decoded entry is written. The caller's permit may include other
     /// simultaneously-live allocations; only the directory capacity delta is
@@ -2603,7 +2601,7 @@ public:
                 admission_failure = nullptr) {
         if (!validate_grouped_soa_minimizer_profile(profile)) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::size_t entry_bytes =
             minimizer_directory_entry_encoded_bytes(profile);
@@ -2819,9 +2817,9 @@ minimizer_position_segments_for_bp_range(
         static_cast<std::uint32_t>(last + 1u)};
 }
 
-/// Compute the compatibility identity from every named semantic/ABI axis.
+/// Compute the storage-contract identity from every named semantic/ABI axis.
 [[nodiscard]] constexpr std::uint64_t
-minimizer_generation_compatibility_checksum(
+compute_minimizer_generation_storage_contract_checksum(
         const minimizer_generation_manifest& manifest) noexcept {
     const auto profile = derive_grouped_soa_minimizer_profile(manifest);
     crc64_ecma182_accumulator crc;
@@ -2843,9 +2841,9 @@ minimizer_generation_compatibility_checksum(
     crc.update_little_endian(manifest.producer_identity_revision);
     // Named schemes extend the checksum with their frozen wire
     // identity so otherwise identical indexes cannot cross scheme boundaries.
-    if (manifest.minimizer_scheme_id != k_legacy_minimap_scheme_id
+    if (manifest.minimizer_scheme_id != k_minimap_scheme_id
         || manifest.minimizer_scheme_revision
-            != k_legacy_minimap_scheme_revision) {
+            != k_minimap_scheme_revision) {
         crc.update_little_endian(manifest.minimizer_scheme_id);
         crc.update_little_endian(manifest.minimizer_scheme_revision);
     }
@@ -2869,7 +2867,7 @@ minimizer_generation_compatibility_checksum(
 /// Reject a persisted generation that does not match the caller's biological
 /// minimizer scheme or the fixed representation axes used to consume it.
 [[nodiscard]] constexpr std::expected<void, minimizer_generation_encoding_error>
-validate_minimizer_generation_compatibility(
+validate_minimizer_generation_storage_contract(
         const minimizer_generation_manifest& manifest,
         const expected_minimizer_generation_identity& expected) noexcept {
     if (auto error = minimizer_generation_wire_detail::validate_manifest_standalone(
@@ -2905,7 +2903,7 @@ validate_minimizer_generation_compatibility(
             != expected.producer_identity_revision
         || !expected.max_occ_cap
         || *expected.max_occ_cap != manifest_profile->max_occ_cap) {
-        return std::unexpected(minimizer_generation_encoding_error::compatibility_mismatch);
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     return {};
 }
@@ -2923,11 +2921,11 @@ validate_minimizer_generation_metadata(
     const auto profile = derive_grouped_soa_minimizer_profile(manifest);
     if (!profile || directory.profile() != *profile) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (head.layout != manifest.layout) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (head.generation_id != manifest.generation_id
         || head.source_identity != manifest.source_identity
@@ -2942,9 +2940,9 @@ validate_minimizer_generation_metadata(
         return std::unexpected(minimizer_generation_encoding_error::checksum);
     }
     if (manifest.gpu_abi_revision != profile->gpu_abi_revision
-        || head.compatibility_checksum
-            != minimizer_generation_compatibility_checksum(manifest)) {
-        return std::unexpected(minimizer_generation_encoding_error::compatibility_mismatch);
+        || head.storage_contract_checksum
+            != compute_minimizer_generation_storage_contract_checksum(manifest)) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (manifest.directory_bytes != directory.encoded_bytes().size()
         || manifest.directory_checksum
@@ -2954,7 +2952,7 @@ validate_minimizer_generation_metadata(
     const std::uint32_t extent_payload_bytes =
         minimizer_extent_payload_bytes(manifest.layout);
     if (extent_payload_bytes == 0) {
-        return std::unexpected(minimizer_generation_encoding_error::format_revision);
+        return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     const std::uint64_t expected_directory_chunks =
         manifest.directory_bytes / extent_payload_bytes
@@ -3075,7 +3073,7 @@ minimizer_hashmap_table_allocation_plan(
     };
 }
 
-// (1) the lookup structure — the old TargetIndex, renamed & relocated, storage-free
+// Transient, storage-free minimizer lookup structure.
 struct minimizer_hashmap_fragment_index {
 private:
     std::unique_ptr<detail::minimizer_hashmap_fragment_index_table> table_;
@@ -3140,10 +3138,10 @@ private:
         positions.resize(total);
         if (reserve_full_table_once) {
             // The admitted Vulkan route reserves for the worst-case D=N once.
-            // This removes the former half-size allocation/rehash overlap.
+            // A single allocation avoids half-size allocation/rehash overlap.
             reserve_table_for_distinct_upper_bound(total);
         } else {
-            // Preserve the established policy for every unrelated CPU caller.
+            // Apply the CPU allocation policy for every non-Vulkan caller.
             reserve_table(total / 2u + 16u);
         }
         std::size_t i = 0;
@@ -3185,13 +3183,13 @@ public:
     minimizer_hashmap_fragment_index(minimizer_hashmap_fragment_index&& other) noexcept;
     minimizer_hashmap_fragment_index& operator=(minimizer_hashmap_fragment_index&& other) noexcept;
 
-    static constexpr std::uint32_t k_encoded_magic   = 0xB1000001u;   // unchanged wire format
-    static constexpr std::uint32_t k_encoded_format_revision = 2u;
+    static constexpr std::uint32_t k_encoded_magic = 0xB1000001u;
+    static constexpr std::uint32_t k_encoded_layout_revision = 2u;
     static constexpr std::string_view index_name     = k_minimizers_per_fragment_index_name;
 
     struct encoded_header {
         std::uint32_t magic;
-        std::uint32_t revision;
+        std::uint32_t layout_revision;
         std::uint64_t target_len;       ///< Full 64-bit target length.
         std::uint32_t bucket_count;
         std::uint32_t reserved;         ///< pad; written as 0
@@ -3206,8 +3204,10 @@ public:
     static constexpr std::size_t k_encoded_bucket_bytes = sizeof(encoded_bucket);
     static_assert(k_encoded_header_bytes == 32, "wire header layout pinned");
     static_assert(k_encoded_bucket_bytes == 16, "wire bucket layout pinned");
-    static_assert(std::endian::native == std::endian::little, "wire format requires little-endian host");
-    static_assert(sizeof(std::size_t) >= 8, "wire format requires 64-bit size_t");
+    static_assert(std::endian::native == std::endian::little,
+        "serialized index requires a little-endian host");
+    static_assert(sizeof(std::size_t) >= 8,
+        "serialized index requires 64-bit size_t");
 
     [[nodiscard]] std::size_t table_size() const noexcept;
     [[nodiscard]] bool table_empty() const noexcept;
@@ -3217,9 +3217,9 @@ public:
         void* ctx,
         void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
 
-    template <class F>
-    void for_each_table_entry(F&& emit) const {
-        using fn = std::remove_reference_t<F>;
+    template <class p_function>
+    void for_each_table_entry(p_function&& emit) const {
+        using fn = std::remove_reference_t<p_function>;
         for_each_table_entry_erased(
             &emit,
             [](void* ctx, std::uint64_t hash, std::uint64_t packed) {
@@ -3230,9 +3230,8 @@ public:
     template <class p_minimizer_type>
     void build(const std::vector<p_minimizer_type>& target_minimizers,
                sequence_size_t target_length) {
-        // A call-local copy is intentional.  The old static thread_local
-        // scratch retained an XXL target-sized allocation for the lifetime of
-        // the worker thread, making unrelated later GPU stages pay its RSS.
+        // A call-local copy bounds scratch lifetime to this operation so later
+        // GPU stages do not retain the target-sized allocation in worker RSS.
         std::vector<p_minimizer_type> sorted_minimizers{
             target_minimizers.begin(), target_minimizers.end()};
         build_sorted_in_place(sorted_minimizers, target_length);
@@ -3474,7 +3473,7 @@ struct grouped_soa_position_image_plan {
 };
 
 /// Exact cached ownership ledger for the trait-driven prepared-reader
-/// protocol. This is accounting state for the existing memory_permit, not a
+/// protocol. This is accounting state for the active memory_permit, not a
 /// second admission system. Every field names one live allocation owner and
 /// `total_bytes` is updated in O(1) whenever that owner changes.
 struct protocol_owned_bytes_ledger {
@@ -3528,7 +3527,7 @@ struct protocol_owned_bytes_ledger {
         return true;
     }
 
-    /// Check a temporary coexistence peak before asking the existing permit
+    /// Check a temporary coexistence peak before asking the active permit
     /// to grow. No ownership is published by this helper.
     [[nodiscard]] bool add_temporary_peak_checked(
             std::uint64_t peak_bytes) const noexcept {
@@ -3605,7 +3604,7 @@ plan_grouped_soa_position_image(
 }
 
 namespace minimizer_prepared_reader_detail {
-template <class traits>
+template <class p_traits>
 class trait_driven_prepared_query_core;
 }
 
@@ -3668,14 +3667,14 @@ private:
         minimizer_generation_encoding_error>
     validate_minimizer_generation_row_receipt(
         const minimizer_generation_row_view&) noexcept;
-    template <class traits>
+    template <class p_traits>
     friend class minimizer_prepared_reader_detail::
         trait_driven_prepared_query_core;
-    template <class Visitor>
+    template <class p_visitor>
     friend bool visit_validated_minimizer_generation_row(
         const validated_minimizer_generation_row_receipt&,
-        Visitor&&) noexcept(std::is_nothrow_invocable_v<
-            Visitor&, const index_chunk_address&,
+        p_visitor&&) noexcept(std::is_nothrow_invocable_v<
+            p_visitor&, const index_chunk_address&,
             std::span<const std::byte>, std::uint64_t>);
 
 public:
@@ -3722,15 +3721,15 @@ private:
 /// Visit an authenticated row without exporting the receipt's representation.
 /// The byte span remains callback-scoped; callers cannot retain authority or
 /// mutate the receipt, and an invalid/moved-from receipt is never visited.
-template <class Visitor>
+template <class p_visitor>
 [[nodiscard]] bool visit_validated_minimizer_generation_row(
     const validated_minimizer_generation_row_receipt& receipt,
-    Visitor&& visitor) noexcept(std::is_nothrow_invocable_v<
-        Visitor&, const index_chunk_address&,
+    p_visitor&& visitor) noexcept(std::is_nothrow_invocable_v<
+        p_visitor&, const index_chunk_address&,
         std::span<const std::byte>, std::uint64_t>)
 {
     if (!receipt.has_valid_authority()) return false;
-    std::forward<Visitor>(visitor)(
+    std::forward<p_visitor>(visitor)(
         receipt.address_, receipt.bytes_, receipt.row_checksum_);
     return true;
 }
@@ -3797,9 +3796,9 @@ struct codec_traits<
 };
 
 /// Shared move-only admitted identity/directory owner used by both prepared
-/// grouped readers. codec_traits is the format authority; callers cannot decode
-/// a directory under a different wire and then relabel the facade.
-template <class traits>
+/// grouped readers. codec_traits is the storage-layout authority; callers
+/// cannot decode a directory under a different layout and relabel the facade.
+template <class p_traits>
 class admitted_prepared_reader_core {
 protected:
     bioseq::parallelism::memory_permit permit_{};
@@ -3844,17 +3843,17 @@ protected:
         if (!destination_is_fresh) {
             return std::unexpected(minimizer_generation_encoding_error::row_order);
         }
-        if (head.layout != traits::layout
-            || manifest.layout != traits::layout
-            || expected.layout != traits::layout
-            || profile.layout != traits::layout
+        if (head.layout != p_traits::layout
+            || manifest.layout != p_traits::layout
+            || expected.layout != p_traits::layout
+            || profile.layout != p_traits::layout
             || !validate_grouped_soa_minimizer_profile(profile)) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if (auto compatible = validate_minimizer_generation_compatibility(
-                manifest, expected); !compatible) {
-            return std::unexpected(compatible.error());
+        if (auto validated = validate_minimizer_generation_storage_contract(
+                manifest, expected); !validated) {
+            return std::unexpected(validated.error());
         }
         const std::size_t stride =
             minimizer_directory_entry_encoded_bytes(profile);
@@ -3924,7 +3923,7 @@ decode_grouped_soa_controls(
                 grouped_soa_segment_local
         || entry.control_encoded_bytes != input.size()) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto layout = plan_grouped_soa_control_plane(
         entry.control_element_count,
@@ -4088,25 +4087,25 @@ decode_grouped_soa_positions(
 
 namespace minimizer_prepared_reader_detail {
 
-template <class traits>
+template <class p_traits>
 struct prepared_query_wire_ops;
 
 /// grouped-SoA stores retained positions in one flat image and therefore does
 /// not allocate an empty vector per query hash.
-template <class Hash, bool FlatPositionImage>
+template <class p_hash, bool p_flat_position_image>
 struct prepared_query_record;
 
-template <class Hash>
-struct prepared_query_record<Hash, true> {
+template <class p_hash>
+struct prepared_query_record<p_hash, true> {
     std::uint64_t global_occurrence_count = 0;
     std::uint64_t global_position_offset = 0;
     std::uint64_t global_positions_written = 0;
     bool positions_complete = true;
 };
 
-template <class Hash>
-struct prepared_query_record<Hash, false> {
-    Hash hash = 0;
+template <class p_hash>
+struct prepared_query_record<p_hash, false> {
+    p_hash hash = 0;
     std::uint64_t global_occurrence_count = 0;
     std::uint64_t global_position_offset = 0;
     std::uint64_t global_positions_written = 0;
@@ -4117,7 +4116,7 @@ struct prepared_query_record<Hash, false> {
 static_assert(sizeof(prepared_query_record<std::uint64_t, true>) == 32u);
 static_assert(sizeof(prepared_query_record<std::uint64_t, false>) == 64u);
 
-/// Exact scalar owner used by the grouped-SoA prepared reader.  Width is chosen
+/// Exact scalar owner used by the grouped-SoA prepared reader.  p_width is chosen
 /// from authenticated generation/query bounds; no biological count is ever
 /// capped to the runtime max-occ threshold.
 enum class prepared_query_scalar_width : std::uint8_t {
@@ -4323,19 +4322,19 @@ struct prepared_query_wire_ops<codec_traits<
 /// The admitted grouped-SoA query protocol owns query routing, physical cursor,
 /// authenticated extent session, target-global occurrence policy, retained
 /// positions, and the permit covering those allocations.
-template <class traits>
+template <class p_traits>
 class trait_driven_prepared_query_core
-    : protected admitted_prepared_reader_core<traits> {
+    : protected admitted_prepared_reader_core<p_traits> {
 protected:
-    using identity_core = admitted_prepared_reader_core<traits>;
-    using wire_ops = prepared_query_wire_ops<traits>;
-    using hash_type = typename traits::hash_type;
+    using identity_core = admitted_prepared_reader_core<p_traits>;
+    using wire_ops = prepared_query_wire_ops<p_traits>;
+    using hash_type = typename p_traits::hash_type;
 
     static constexpr std::size_t no_route =
         (std::numeric_limits<std::size_t>::max)();
 
     using query_record = prepared_query_record<
-        hash_type, traits::global_controls_then_positions>;
+        hash_type, p_traits::global_controls_then_positions>;
 
     struct dense_selected_control {
         std::size_t query_index = no_route;
@@ -4344,7 +4343,7 @@ protected:
 
     // Retain every authenticated control boundary but only query routes.
     using selected_control = std::conditional_t<
-        traits::global_controls_then_positions,
+        p_traits::global_controls_then_positions,
         std::uint64_t,
         dense_selected_control>;
 
@@ -4352,15 +4351,15 @@ protected:
         std::vector<dense_selected_control> controls;
     };
     struct exact_selected_control_state {
-        // MPF grouped-SoA extents remain independent.  Retain each fragment's
-        // authenticated control boundaries at the narrowest width proven by
+        // minimizer-fragment grouped-SoA extents remain independent.  Retain each fragment's
+        // authenticated control boundaries at the narrowest width selected by
         // that fragment's position count instead of globalising every local
         // boundary into a target-wide u64 image.
         prepared_query_scalar_array position_ends;
         std::size_t control_count = 0;
     };
     using selected_control_state = std::conditional_t<
-        traits::global_controls_then_positions,
+        p_traits::global_controls_then_positions,
         exact_selected_control_state,
         dense_selected_control_state>;
 
@@ -4382,7 +4381,7 @@ protected:
         bool uses_sparse = false;
     };
     using selected_route_state = std::conditional_t<
-        traits::global_controls_then_positions,
+        p_traits::global_controls_then_positions,
         adaptive_selected_routes,
         no_selected_routes>;
 
@@ -4423,8 +4422,8 @@ protected:
     std::uint32_t protocol_query_radix_bits_ = 0u;
     std::uint32_t protocol_query_hash_bits_ = 0u;
     std::uint32_t protocol_query_suffix_bits_ = 0u;
-    // grouped-SoA keeps exact target-global counts at the narrowest width proven
-    // by the authenticated manifest position_count. Runtime max-occ is not
+    // grouped-SoA keeps exact target-global counts at the narrowest width
+    // selected by the authenticated manifest position_count. Runtime max-occ is not
     // applied until every control extent has contributed. Dense offsets make
     // the hot positive lookup one direct load; UINT64_MAX means pruned.
     prepared_query_scalar_array protocol_query_exact_counts_;
@@ -4479,7 +4478,7 @@ protected:
 
     [[nodiscard]] static std::size_t selected_control_count_(
             const selected_extent& extent) noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return extent.control_state.control_count;
         } else {
             return extent.control_state.controls.size();
@@ -4489,7 +4488,7 @@ protected:
     [[nodiscard]] static std::uint64_t selected_position_end_(
             const selected_extent& extent,
             std::size_t control_index) noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return extent.control_state.position_ends.get(control_index);
         } else {
             return extent.control_state.controls[control_index].position_end;
@@ -4502,7 +4501,7 @@ protected:
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
         std::uint64_t bytes = 0u;
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             bytes = extent.control_state.position_ends.capacity_bytes();
             if (extent.route_state.uses_sparse) {
                 bytes = saturating_add(bytes, saturating_mul(
@@ -4525,7 +4524,7 @@ protected:
     }
 
     [[nodiscard]] std::size_t protocol_query_state_count_() const noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_count_;
         }
         return protocol_query_records_.size();
@@ -4533,7 +4532,7 @@ protected:
 
     [[nodiscard]] std::size_t
     protocol_query_state_capacity_() const noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_exact_counts_.count;
         }
         return protocol_query_records_.capacity();
@@ -4541,7 +4540,7 @@ protected:
 
     [[nodiscard]] std::uint64_t
     protocol_query_state_capacity_bytes_() const noexcept {
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             return bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(
                     protocol_query_records_.capacity()),
@@ -4560,7 +4559,7 @@ protected:
 
     [[nodiscard]] std::uint64_t
     protocol_query_hash_capacity_bytes_() const noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_suffixes_.capacity_bytes();
         }
         return bioseq::common::saturating_mul(
@@ -4570,7 +4569,7 @@ protected:
 
     [[nodiscard]] std::uint64_t protocol_query_exact_count_(
             std::size_t query_index) const noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_exact_counts_.get(query_index);
         }
         return query_index < protocol_query_records_.size()
@@ -4582,7 +4581,7 @@ protected:
     add_protocol_query_exact_count_(
             std::size_t query_index,
             std::uint64_t delta) noexcept {
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             return std::unexpected(minimizer_generation_encoding_error::row_order);
         }
         if (delta == 0u
@@ -4631,7 +4630,7 @@ protected:
             bytes = saturating_add(bytes,
                 saturating_mul(static_cast<std::uint64_t>(capacity), width));
         };
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             bytes = saturating_add(
                 bytes, protocol_query_suffixes_.capacity_bytes());
             bytes = saturating_add(
@@ -4714,7 +4713,7 @@ protected:
         ~permit_growth_guard() {
             if (!committed_ && owner_ != nullptr && owner_->permit_) {
                 // A failed allocation/reconciliation cannot leave newly
-                // grown vectors alive under the older, smaller reservation.
+                // grown vectors alive under the reservation already in the ledger.
                 // Every protocol operation is fail-closed, so destroy all
                 // covered storage before releasing the permit.
                 owner_->protocol_ready_ = false;
@@ -4783,8 +4782,8 @@ protected:
         }
     }
 
-    template <class T>
-    [[nodiscard]] std::expected<T, minimizer_generation_encoding_error>
+    template <class p_value>
+    [[nodiscard]] std::expected<p_value, minimizer_generation_encoding_error>
     protocol_poison(minimizer_generation_encoding_error error) noexcept {
         if (!protocol_failed_) {
             protocol_failed_ = true;
@@ -4841,7 +4840,7 @@ protected:
 
     [[nodiscard]] bool inject_admission_failure_(
             grouped_soa_query_admission_stage substage) noexcept {
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             return false;
         }
         if (protocol_test_options_.fail_admission_substage != substage) {
@@ -4861,7 +4860,7 @@ protected:
             const bioseq::parallelism::memory_admission_failure*
                 controller_failure = nullptr,
             bool injected = false) noexcept {
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             return;
         }
         if (protocol_admission_failure_stats_.substage
@@ -4887,11 +4886,11 @@ protected:
             .query_record_capacity = static_cast<std::uint64_t>(
                 protocol_query_state_capacity_()),
             .query_hash_count = static_cast<std::uint64_t>(
-                traits::global_controls_then_positions
+                p_traits::global_controls_then_positions
                     ? protocol_query_suffixes_.count
                     : protocol_query_hashes_.size()),
             .query_hash_capacity = static_cast<std::uint64_t>(
-                traits::global_controls_then_positions
+                p_traits::global_controls_then_positions
                     ? protocol_query_suffixes_.count
                     : protocol_query_hashes_.capacity()),
             .selected_extent_count = static_cast<std::uint64_t>(
@@ -4903,7 +4902,7 @@ protected:
             .control_payload_capacity_bytes =
                 protocol_owned_bytes_.control_scratch_bytes,
             .releasable_protocol_query_hash_bytes =
-                !traits::global_controls_then_positions
+                !p_traits::global_controls_then_positions
                     && protocol_initialized_
                     && protocol_query_records_.size()
                         == protocol_query_hashes_.size()
@@ -4961,7 +4960,7 @@ protected:
     /// allocations, or Q full ownership walks before it can read positions.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     prepare_global_position_storage() {
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             return {};
         }
         if (protocol_global_position_storage_prepared_
@@ -5231,7 +5230,7 @@ protected:
             return no_route;
         }
         const hash_type narrowed = static_cast<hash_type>(hash);
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             if (!protocol_query_radix_offsets_
                 || protocol_query_radix_offset_count_ < 2u
                 || protocol_query_suffixes_.count != protocol_query_count_
@@ -5325,7 +5324,7 @@ protected:
         protocol_segment_begin_ = 0;
         protocol_segment_end_ = 0;
         const auto entries = this->directory_.entries();
-        if constexpr (!traits::global_controls_then_positions) {
+        if constexpr (!p_traits::global_controls_then_positions) {
             if (!entries.empty()) {
                 protocol_segment_end_ = 1u;
                 while (protocol_segment_end_ < entries.size()
@@ -5340,7 +5339,7 @@ protected:
     void advance_physical_cursor() noexcept {
         const auto entries = this->directory_.entries();
         ++protocol_entry_index_;
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             if (protocol_entry_index_ == entries.size()
                 && !protocol_position_stage_) {
                 protocol_position_stage_ = true;
@@ -5398,7 +5397,7 @@ protected:
         return minimizer.kmer();
     }
 
-    template <class QueryValue>
+    template <class p_query_value>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     initialize_query_protocol(
             bioseq::parallelism::memory_admission_controller& admission,
@@ -5407,12 +5406,12 @@ protected:
             const expected_minimizer_generation_identity& expected,
             const grouped_soa_minimizer_profile& profile,
             std::span<const std::byte> encoded_directory,
-            std::span<const QueryValue> query_hashes,
+            std::span<const p_query_value> query_hashes,
             std::uint64_t max_occ,
             grouped_soa_query_reader_options test_options = {},
             bool query_hashes_are_sorted_unique = false) {
         protocol_admission_ = &admission;
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             protocol_test_options_ = test_options;
         }
         if (query_hashes.size()
@@ -5423,7 +5422,7 @@ protected:
         }
         std::uint64_t previous_hash = 0u;
         bool has_previous_hash = false;
-        for (const QueryValue& query_value : query_hashes) {
+        for (const p_query_value& query_value : query_hashes) {
             const std::uint64_t hash = query_hash_value_(query_value);
             if (hash > profile.max_hash
                 || hash > (std::numeric_limits<hash_type>::max)()) {
@@ -5523,7 +5522,7 @@ protected:
         }
         try {
             protocol_query_hashes_.reserve(query_hashes.size());
-            for (const QueryValue& query_value : query_hashes) {
+            for (const p_query_value& query_value : query_hashes) {
                 const std::uint64_t hash = query_hash_value_(query_value);
                 protocol_query_hashes_.push_back(
                     static_cast<hash_type>(hash));
@@ -5535,7 +5534,7 @@ protected:
                         protocol_query_hashes_.end()),
                     protocol_query_hashes_.end());
             }
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 // The caller may provide duplicate hashes. Canonicalize into
                 // a right-sized temporary image used to build suffixes and
                 // select extents; the 2x reservation covers both vectors at
@@ -5582,7 +5581,7 @@ protected:
             return protocol_poison<void>(
                 minimizer_generation_encoding_error::admission);
         }
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             // UINT32_MAX remains the dense no-route sentinel.  A grouped-SoA
             // query image must therefore leave it unavailable as an index.
             if (protocol_query_hashes_.size() >= no_narrow_route) {
@@ -5594,7 +5593,7 @@ protected:
         query_radix_plan query_radix_plan{};
         prepared_query_scalar_width query_count_width =
             prepared_query_scalar_width::u8;
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             const auto planned = plan_query_radix_(
                 protocol_query_hashes_.size(), this->profile_.max_hash);
             if (!planned) return protocol_poison<void>(planned.error());
@@ -5613,7 +5612,7 @@ protected:
             route_vector_bytes,
             bioseq::common::saturating_mul(
                 protocol_query_hashes_.size(),
-                traits::global_controls_then_positions
+                p_traits::global_controls_then_positions
                     ? static_cast<std::size_t>(
                         static_cast<std::uint8_t>(
                             query_radix_plan.suffix_width)
@@ -5628,7 +5627,7 @@ protected:
             bioseq::common::saturating_mul(
                 selected_count, sizeof(selected_extent)));
         const std::uint64_t query_radix_bytes =
-            traits::global_controls_then_positions
+            p_traits::global_controls_then_positions
             ? bioseq::common::saturating_mul(
                 query_radix_plan.offset_count, sizeof(std::uint32_t))
             : 0u;
@@ -5679,7 +5678,7 @@ protected:
         }
         std::uint64_t released_full_query_hash_bytes = 0u;
         try {
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 std::unique_ptr<std::uint32_t[]> radix_offsets;
                 prepared_query_scalar_array suffixes;
                 prepared_query_scalar_array exact_counts;
@@ -5763,7 +5762,7 @@ protected:
                     protocol_max_selected_control_bytes_,
                     entry.control_encoded_bytes);
             }
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 released_full_query_hash_bytes =
                     bioseq::common::saturating_mul(
                         static_cast<std::uint64_t>(
@@ -5958,14 +5957,14 @@ protected:
         const std::uint64_t retained_control_count =
             selected_index == no_route ? 0u : entry.control_element_count;
         const std::uint64_t retained_control_width =
-            traits::global_controls_then_positions
+            p_traits::global_controls_then_positions
             ? static_cast<std::uint8_t>(
                 prepared_query_scalar_width_for_max(
                     entry.position_element_count))
             : sizeof(selected_control);
         std::uint64_t retained = bioseq::common::saturating_mul(
             retained_control_count, retained_control_width);
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             // One dense u32 route image is always built.  Sparse conversion
             // happens only below 50% density, so its peak is bounded by one
             // additional dense-image worth of bytes.
@@ -5984,7 +5983,7 @@ protected:
                 transient,
                 bioseq::parallelism::k_vector_preallocation_headroom_factor);
         const std::uint64_t retained_headroom = [&]() noexcept {
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 // grouped-SoA ends and route images are exact arrays. Their
                 // admitted peak is already represented by retained and must
                 // not receive vector growth headroom a second time.
@@ -6051,7 +6050,7 @@ protected:
                     return std::unexpected(
                         minimizer_generation_encoding_error::row_order);
                 }
-                if constexpr (traits::global_controls_then_positions) {
+                if constexpr (p_traits::global_controls_then_positions) {
                     prepared_query_scalar_array position_ends;
                     std::unique_ptr<std::uint32_t[]> dense_routes;
                     if (decoded->size() != 0u) {
@@ -6081,7 +6080,7 @@ protected:
                 std::size_t control_ordinal = 0u;
                 std::size_t routed_control_count = 0u;
                 std::uint64_t route_hash_probes = 0u;
-                if constexpr (traits::global_controls_then_positions) {
+                if constexpr (p_traits::global_controls_then_positions) {
                     constexpr std::uint64_t max_probes_per_lookup =
                         std::numeric_limits<std::uint32_t>::digits + 1u;
                     if (decoded->size()
@@ -6110,7 +6109,7 @@ protected:
                     expected_position_begin = end;
                     if (query_index != no_route) {
                         const std::uint64_t count = end - begin;
-                        if constexpr (traits::
+                        if constexpr (p_traits::
                                 global_controls_then_positions) {
                             if (auto added =
                                     add_protocol_query_exact_count_(
@@ -6156,7 +6155,7 @@ protected:
                             }
                         }
                     }
-                    if constexpr (traits::global_controls_then_positions) {
+                    if constexpr (p_traits::global_controls_then_positions) {
                         if (!selected.control_state.position_ends.set(
                                 control_ordinal, end)) {
                             return std::unexpected(
@@ -6187,7 +6186,7 @@ protected:
                     return std::unexpected(
                         minimizer_generation_encoding_error::control_range);
                 }
-                if constexpr (traits::global_controls_then_positions) {
+                if constexpr (p_traits::global_controls_then_positions) {
                     const std::size_t control_count =
                         selected.control_state.control_count;
                     if (control_count <= no_narrow_route
@@ -6288,7 +6287,7 @@ protected:
     append_retained_position(
             std::size_t query_index,
             std::uint64_t value) {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             if (query_index >= protocol_query_count_) {
                 return std::unexpected(
                     minimizer_generation_encoding_error::element_count);
@@ -6451,7 +6450,7 @@ protected:
                        && selected->next_position
                             >= selected_position_end_(
                                 *selected, selected->next_control)) {
-                    if constexpr (traits::global_controls_then_positions) {
+                    if constexpr (p_traits::global_controls_then_positions) {
                         auto& routes = selected->route_state;
                         if (routes.uses_sparse
                             && routes.next_sparse_route
@@ -6476,7 +6475,7 @@ protected:
                 if (selected->next_control
                         < selected_control_count_(*selected)) {
                     std::size_t query_index = no_route;
-                    if constexpr (traits::global_controls_then_positions) {
+                    if constexpr (p_traits::global_controls_then_positions) {
                         const auto& routes = selected->route_state;
                         if (routes.uses_sparse) {
                             if (routes.next_sparse_route
@@ -6587,7 +6586,7 @@ protected:
                 minimizer_generation_encoding_error::row_order);
         }
         constexpr std::uint32_t extent_payload_bytes =
-            minimizer_extent_payload_bytes(traits::layout);
+            minimizer_extent_payload_bytes(p_traits::layout);
         static_assert(extent_payload_bytes != 0);
         const std::uint64_t byte_offset =
             static_cast<std::uint64_t>(session.next_chunk)
@@ -6674,7 +6673,7 @@ protected:
                    && extent.next_position
                         >= selected_position_end_(
                             extent, extent.next_control)) {
-                if constexpr (traits::global_controls_then_positions) {
+                if constexpr (p_traits::global_controls_then_positions) {
                     auto& routes = extent.route_state;
                     if (routes.uses_sparse
                         && routes.next_sparse_route
@@ -6695,7 +6694,7 @@ protected:
                 extent.previous_position_valid = false;
             }
             bool routes_complete = true;
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 const auto& routes = extent.route_state;
                 routes_complete = routes.uses_sparse
                     ? !routes.dense_routes
@@ -6713,7 +6712,7 @@ protected:
                     minimizer_generation_encoding_error::element_count);
             }
             extent.positions_complete = true;
-            if constexpr (traits::global_controls_then_positions) {
+            if constexpr (p_traits::global_controls_then_positions) {
                 extent.control_state.position_ends.reset();
                 extent.control_state.control_count = 0u;
                 extent.route_state.dense_routes.reset();
@@ -6732,7 +6731,7 @@ protected:
         }
         protocol_session_.reset();
         advance_physical_cursor();
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             if (protocol_position_stage_
                 && !protocol_global_position_storage_prepared_) {
                 if (!release_control_scratch_noexcept_()) {
@@ -6787,7 +6786,7 @@ protected:
                     minimizer_generation_encoding_error::row_count);
             }
         }
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             for (std::size_t query_index = 0u;
                  query_index < protocol_query_count_; ++query_index) {
                 const std::uint64_t exact_count =
@@ -6856,7 +6855,7 @@ protected:
         if (query_index == no_route
             || query_index >= protocol_query_state_count_()) return {};
         std::span<const std::uint64_t> positions;
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             const std::uint64_t exact_count =
                 protocol_query_exact_count_(query_index);
             const bool retained = protocol_query_retained_(query_index);
@@ -6891,7 +6890,7 @@ protected:
 
     [[nodiscard]] std::size_t
     protocol_retained_position_count() const noexcept {
-        if constexpr (traits::global_controls_then_positions) {
+        if constexpr (p_traits::global_controls_then_positions) {
             return protocol_global_position_count_;
         } else {
             std::size_t count = 0;
@@ -6984,7 +6983,7 @@ struct grouped_soa_query_reader_memory_stats {
 };
 
 /// Backend-independent scalar grouped-SoA reader. The facade consumes the same
-/// grouped_soa_directory_view/address authority as existing prepared readers
+/// grouped_soa_directory_view/address authority as the prepared readers
 /// and accepts only the grouped-SoA layout.
 class prepared_grouped_soa_query_reader : private
     minimizer_prepared_reader_detail::trait_driven_prepared_query_core<
@@ -7036,7 +7035,7 @@ public:
                 != minimizer_generation_layout::
                     grouped_soa_segment_local) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
         if (!profile || !expected.max_occ_cap
@@ -7045,7 +7044,7 @@ public:
                 == (std::numeric_limits<std::uint64_t>::max)()
             || max_occ > profile->max_occ_cap) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         prepared_grouped_soa_query_reader reader;
         if (auto initialized = reader.initialize_query_protocol(
@@ -7094,14 +7093,14 @@ public:
                 != minimizer_generation_layout::
                     grouped_soa_segment_local) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
         if (!profile || !expected.max_occ_cap
             || *expected.max_occ_cap != profile->max_occ_cap
             || max_occ > profile->max_occ_cap) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         prepared_grouped_soa_query_reader reader;
         if (auto initialized = reader.initialize_query_protocol(
@@ -7292,10 +7291,9 @@ struct fragment_seed_query {
     std::int32_t kmer_size = 0;
 };
 
-/// Exact query-set identity already produced by the compact-direct occurrence
-/// planner. The checksum preserves the historical CPU prepared key-set FNV
-/// byte order so deferred publication is numerically identical to the former
-/// canonical-u32 owner/sort path.
+/// Exact query-set stats produced by the compact-direct occurrence planner.
+/// The checksum uses the CPU prepared key-set FNV byte order so deferred
+/// publication and direct planning compute the same numeric identity.
 struct compact_direct_query_set_stats {
     std::uint64_t query_count = 0u;
     std::uint64_t query_occurrence_count = 0u;
@@ -7581,7 +7579,7 @@ public:
             || image_owner.get() != view.image.data()
             || view.header.image_bytes != view.image.size()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         return owned_compact_hash32_direct_index_view{
             std::move(image_owner), view};
@@ -7673,7 +7671,7 @@ struct query_occurrence_reference {
 }
 
 /// Plan the 32-bit packed query/ordinal word without converting a caller's
-/// sizes to 32 bits until every existing query-wave bound is proved.
+/// sizes to 32 bits until every declared query-wave bound is validated.
 [[nodiscard]] constexpr std::expected<
     query_occurrence_packing_layout,
     minimizer_generation_encoding_error>
@@ -8281,9 +8279,9 @@ private:
         permit_.shrink_to(actual);
     }
 
-    template <class T>
+    template <class p_value>
     void ensure_vector_capacity_(
-            std::vector<T>& values,
+            std::vector<p_value>& values,
             std::size_t required_capacity) {
         if (required_capacity <= values.capacity()) return;
         if (required_capacity > values.max_size()) {
@@ -8294,7 +8292,7 @@ private:
         using bioseq::common::saturating_mul;
         const std::uint64_t retained = retained_capacity_bytes_();
         const std::uint64_t requested = saturating_mul(
-            required_capacity, sizeof(T));
+            required_capacity, sizeof(p_value));
         const std::uint64_t headroom = saturating_mul(
             requested,
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
@@ -8833,33 +8831,33 @@ private:
         return elapsed > 0u ? elapsed : 1u;
     }
 
-    template <minimizer_scalar_width Width>
+    template <minimizer_scalar_width p_width>
     using minimizer_wire_uint_t_ = std::conditional_t<
-        Width == minimizer_scalar_width::u16,
+        p_width == minimizer_scalar_width::u16,
         std::uint16_t,
         std::conditional_t<
-            Width == minimizer_scalar_width::u32,
+            p_width == minimizer_scalar_width::u32,
             std::uint32_t,
             std::uint64_t>>;
 
-    /// Read one scalar after open() has proved the containing component and
+    /// Read one scalar after open() has validated the containing component and
     /// extent geometry. The DEBUG_ASSERT documents that stats without
     /// replacing the release-active checks at the plan boundary.
-    template <minimizer_scalar_width Width>
+    template <minimizer_scalar_width p_width>
     [[nodiscard, gnu::always_inline]]
     static std::uint64_t read_fixed_width_le_(
             std::span<const std::byte> validated_extent,
             std::size_t offset) noexcept {
         static_assert(
-            Width == minimizer_scalar_width::u16
-            || Width == minimizer_scalar_width::u32
-            || Width == minimizer_scalar_width::u64);
-        using T = minimizer_wire_uint_t_<Width>;
+            p_width == minimizer_scalar_width::u16
+            || p_width == minimizer_scalar_width::u32
+            || p_width == minimizer_scalar_width::u64);
+        using value_type = minimizer_wire_uint_t_<p_width>;
         DEBUG_ASSERT(
             offset <= validated_extent.size()
-                && sizeof(T) <= validated_extent.size() - offset,
+                && sizeof(value_type) <= validated_extent.size() - offset,
             "fixed-width scalar read stays in its prevalidated extent");
-        return minimizer_generation_wire_detail::read_le<T>(
+        return minimizer_generation_wire_detail::read_le<value_type>(
             validated_extent, offset);
     }
 
@@ -9140,12 +9138,12 @@ private:
     /// Select packed or wide storage once for a complete hash plan. The
     /// visitor receives a route-specific span, so its target-position x query-
     /// occurrence loop contains no representation branch.
-    template <bool Oracle, class Visitor>
+    template <bool p_oracle, class p_visitor>
     [[nodiscard]] static std::optional<minimizer_generation_encoding_error>
     with_query_group_occurrences_(
             const fragment_probe_context& context,
             const query_occurrence_group& group,
-            Visitor&& visitor) noexcept {
+            p_visitor&& visitor) noexcept {
         const std::size_t begin_size = group.occurrence_ref_begin;
         const std::size_t count_size =
             static_cast<std::size_t>(group.occurrence_ref_count);
@@ -9154,7 +9152,7 @@ private:
         const wide_query_occurrence* wide_occurrences = nullptr;
         std::size_t packed_occurrence_count = 0u;
         std::size_t wide_occurrence_count = 0u;
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.scratch != nullptr,
                 "oracle occurrence view is prevalidated");
             occurrence_layout = &context.scratch->occurrence_layout_;
@@ -9180,7 +9178,7 @@ private:
             DEBUG_ASSERT(begin_size <= packed_occurrence_count
                     && count_size <= packed_occurrence_count - begin_size,
                 "packed group range is prevalidated");
-            return std::forward<Visitor>(visitor)(
+            return std::forward<p_visitor>(visitor)(
                 std::span<const packed_query_occurrence>{
                     packed_occurrences + begin_size, count_size},
                 *occurrence_layout);
@@ -9188,7 +9186,7 @@ private:
             DEBUG_ASSERT(begin_size <= wide_occurrence_count
                     && count_size <= wide_occurrence_count - begin_size,
                 "wide group range is prevalidated");
-            return std::forward<Visitor>(visitor)(
+            return std::forward<p_visitor>(visitor)(
                 std::span<const wide_query_occurrence>{
                     wide_occurrences + begin_size, count_size},
                 *occurrence_layout);
@@ -9196,12 +9194,12 @@ private:
         return minimizer_generation_encoding_error::partition_id;
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard, gnu::always_inline]] static std::atomic<std::uint32_t>&
     occurrence_counter_(
             const fragment_probe_context& context,
             std::uint32_t counter_ordinal) noexcept {
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.scratch != nullptr
                     && counter_ordinal
                         < context.scratch->active_occurrence_count_,
@@ -9423,9 +9421,9 @@ private:
         return std::nullopt;
     }
 
-    template <class Context>
+    template <class p_context>
     [[nodiscard]] static bool bind_compact_direct_selection_(
-            Context& context,
+            p_context& context,
             const compact_hash32_selection_posting_spans& selected,
             query_occurrence_group& group) noexcept {
         if (context.error || context.reader == nullptr
@@ -9882,7 +9880,7 @@ private:
     /// A value of max_occ + 1 is the only rejected state. This bounds decoded
     /// candidates for a globally repetitive hash to at most max_occ while
     /// preserving every hit for hashes whose final target-wide count is
-    /// accepted. The counter is query state, never persisted MPF index state.
+    /// accepted. The counter is query state, never persisted minimizer-fragment index state.
     [[nodiscard]] static bool reserve_query_occurrences_(
             std::atomic<std::uint32_t>& global_count,
             std::uint64_t local_count,
@@ -9956,15 +9954,15 @@ private:
                 static_cast<minimizer_generation_encoding_error>(encoded - 1u)};
     }
 
-    template <class Body>
-    static void parallel_entries_(std::size_t count, Body&& body) {
+    template <class p_body>
+    static void parallel_entries_(std::size_t count, p_body&& body) {
         bioseq::parallelism::parallel_for_pipeline(
             0u,
             count,
             1u,
             bioseq::parallelism::task_parallel_minimums::k_fragment_count,
             bioseq::parallelism::task_parallel_region::fragment_build,
-            std::forward<Body>(body));
+            std::forward<p_body>(body));
     }
 
     /// Execute exactly the first (most-significant) byte pass of the ordinary
@@ -10031,13 +10029,13 @@ private:
     /// Count-only control scan over one open-validated entry plan. It
     /// deliberately does not load a prefix scalar or position byte; accepted
     /// plans receive their range validation in passes 2 and 3. All component
-    /// offsets, widths, and byte products were proved once by open().
-    template <class Visitor>
+    /// offsets, widths, and byte products were validated once by open().
+    template <class p_visitor>
     [[nodiscard]] std::expected<void,
         minimizer_generation_encoding_error>
     visit_control_counts_planned_(
             std::size_t entry_ordinal,
-            Visitor&& visitor) const noexcept {
+            p_visitor&& visitor) const noexcept {
         DEBUG_ASSERT(entry_ordinal < entry_count_,
             "block plan entry ordinal is open-validated");
         const grouped_soa_bucket_directory_entry& entry =
@@ -10092,14 +10090,14 @@ private:
         return {};
     }
 
-    template <class Visitor>
+    template <class p_visitor>
     [[nodiscard]] static std::expected<void,
         minimizer_generation_encoding_error>
     visit_controls_(
             std::span<const std::byte> input,
             const grouped_soa_bucket_directory_entry& entry,
             const grouped_soa_minimizer_profile& profile,
-            Visitor&& visitor) {
+            p_visitor&& visitor) {
         using namespace minimizer_generation_wire_detail;
         if (profile.layout
                 != minimizer_generation_layout::
@@ -10225,7 +10223,7 @@ private:
         std::unreachable();
     }
 
-    template <class Visitor>
+    template <class p_visitor>
     [[nodiscard]] static std::expected<void,
         minimizer_generation_encoding_error>
     visit_position_range_(
@@ -10234,7 +10232,7 @@ private:
             const grouped_soa_bucket_directory_entry& entry,
             const minimizer_position_segment_bounds& core,
             const grouped_soa_minimizer_profile& profile,
-            Visitor&& visitor) noexcept {
+            p_visitor&& visitor) noexcept {
         using namespace minimizer_generation_wire_detail;
         if (control.position_end <= control.position_begin
             || control.position_end > entry.position_element_count) {
@@ -10361,14 +10359,14 @@ private:
         };
     }
 
-    template <bool Oracle, class Visitor>
+    template <bool p_oracle, class p_visitor>
     [[nodiscard]] std::expected<void,
         minimizer_generation_encoding_error>
     visit_matched_control_counts_(
             const fragment_block_plan& block,
             fragment_probe_context& context,
-            Visitor&& visitor) const noexcept {
-        if constexpr (Oracle) {
+            p_visitor&& visitor) const noexcept {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.query_plan_radix.size()
                     == static_cast<std::size_t>(
                         query_radix_bucket_count_) + 1u,
@@ -10397,7 +10395,7 @@ private:
                     if (callback_error) return;
                     const std::uint32_t hash32 =
                         static_cast<std::uint32_t>(hash);
-                    const auto matched_group = match_query_group_<Oracle>(
+                    const auto matched_group = match_query_group_<p_oracle>(
                         hash32, context, active_bucket,
                         plan_cursor, plan_end);
                     if (!matched_group) return;
@@ -10412,18 +10410,18 @@ private:
         return {};
     }
 
-    template <bool Oracle, class Visitor>
+    template <bool p_oracle, class p_visitor>
     [[nodiscard]] std::expected<void,
         minimizer_generation_encoding_error>
     visit_matched_controls_(
             const fragment_block_plan& block,
             fragment_probe_context& context,
-            Visitor&& visitor,
+            p_visitor&& visitor,
             std::uint64_t* accepted_prefix_bytes = nullptr,
             std::uint64_t* rejected_prefix_bytes = nullptr,
             bool validate_rejected_prefixes = true) const noexcept {
         using namespace minimizer_generation_wire_detail;
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.query_plan_radix.size()
                     == static_cast<std::size_t>(
                         query_radix_bucket_count_) + 1u,
@@ -10465,12 +10463,12 @@ private:
                     if (callback_error) return;
                     const std::uint32_t hash32 =
                         static_cast<std::uint32_t>(hash);
-                    const auto matched_group = match_query_group_<Oracle>(
+                    const auto matched_group = match_query_group_<p_oracle>(
                         hash32, context, active_bucket,
                         plan_cursor, plan_end);
                     if (!matched_group) return;
                     const std::uint32_t global_count =
-                        occurrence_counter_<Oracle>(
+                        occurrence_counter_<p_oracle>(
                             context,
                             matched_group->counter_ordinal).load(
                             std::memory_order_relaxed);
@@ -10479,7 +10477,7 @@ private:
                             minimizer_generation_encoding_error::partition_id;
                         return;
                     }
-                    // Pass 3 suppresses a rejected control before either O
+                    // Pass 3 suppresses a rejected control before either offset
                     // endpoint is read. Rejected endpoints were authenticated
                     // exactly once by Pass 2 (or the rejected-only rescan).
                     if (global_count > context.max_occ
@@ -10569,7 +10567,7 @@ private:
         return {};
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard, gnu::always_inline]]
     std::optional<query_occurrence_group>
     match_query_group_(
@@ -10579,7 +10577,7 @@ private:
             std::uint32_t& plan_cursor,
             std::uint32_t& plan_end) const noexcept {
         const std::uint32_t bucket = query_bucket_(hash);
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.scratch != nullptr
                     && context.query_plan_radix.size()
                         == static_cast<std::size_t>(
@@ -10686,7 +10684,7 @@ private:
         }
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] static std::optional<minimizer_generation_encoding_error>
     accumulate_orientation_for_group_(
             const fragment_probe_context& context,
@@ -10707,7 +10705,7 @@ private:
             .target_strand_zero = target_strand_zero,
             .target_strand_one = target_strand_one,
         };
-        return with_query_group_occurrences_<Oracle>(
+        return with_query_group_occurrences_<p_oracle>(
             context,
             group,
             [&occurrence_context](
@@ -10727,7 +10725,7 @@ private:
             });
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] std::optional<minimizer_generation_encoding_error>
     process_fixed_orientation_control_(
             fragment_probe_context& context,
@@ -10760,14 +10758,14 @@ private:
                 observed * sizeof(std::uint16_t))) {
             return minimizer_generation_encoding_error::arithmetic_overflow;
         }
-        return accumulate_orientation_for_group_<Oracle>(
+        return accumulate_orientation_for_group_<p_oracle>(
             context,
             group,
             target_strand_zero,
             target_strand_one);
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] std::optional<minimizer_generation_encoding_error>
     process_fixed_emission_control_(
             fragment_probe_context& context,
@@ -10792,7 +10790,7 @@ private:
             .batch = context.batch,
         };
 
-        const auto occurrence_error = with_query_group_occurrences_<Oracle>(
+        const auto occurrence_error = with_query_group_occurrences_<p_oracle>(
             context,
             group,
             [this, &cursor, &occurrence_context](
@@ -10836,7 +10834,7 @@ private:
         return std::nullopt;
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_count_(
             fragment_probe_context& context,
@@ -10845,7 +10843,7 @@ private:
                 && entry_ordinal < entry_count_
                 && context.pass == fragment_probe_pass::control_count,
             "fixed count context is prevalidated");
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.query_plan_radix.size()
                     == static_cast<std::size_t>(
                         query_radix_bucket_count_) + 1u,
@@ -10907,11 +10905,11 @@ private:
             last_hash = hash;
             previous_hash = hash;
 
-            const auto matched_group = match_query_group_<Oracle>(
+            const auto matched_group = match_query_group_<p_oracle>(
                 hash, context, active_bucket, plan_cursor, plan_end);
             if (!matched_group) continue;
             (void)reserve_query_occurrences_(
-                occurrence_counter_<Oracle>(
+                occurrence_counter_<p_oracle>(
                     context, matched_group->counter_ordinal),
                 local_count,
                 context.max_occ);
@@ -10924,21 +10922,21 @@ private:
         return {};
     }
 
-    template <bool Oracle, minimizer_scalar_width O>
+    template <bool p_oracle, minimizer_scalar_width p_offset_width>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_p16_matched_(
             fragment_probe_context& context,
             std::size_t entry_ordinal) const noexcept {
         static_assert(
-            O == minimizer_scalar_width::u16
-            || O == minimizer_scalar_width::u32
-            || O == minimizer_scalar_width::u64);
+            p_offset_width == minimizer_scalar_width::u16
+            || p_offset_width == minimizer_scalar_width::u32
+            || p_offset_width == minimizer_scalar_width::u64);
         DEBUG_ASSERT(context.scratch != nullptr
                 && entry_ordinal < entry_count_
                 && context.pass != fragment_probe_pass::control_count
                 && context.matched_count_bytes != nullptr,
             "fixed matched context is prevalidated");
-        if constexpr (Oracle) {
+        if constexpr (p_oracle) {
             DEBUG_ASSERT(context.query_plan_radix.size()
                     == static_cast<std::size_t>(
                         query_radix_bucket_count_) + 1u,
@@ -10948,7 +10946,7 @@ private:
                 "production matcher view is prevalidated");
         }
         const entry_plan& entry = entry_plans_[entry_ordinal];
-        DEBUG_ASSERT(entry.shape_offset_width == O
+        DEBUG_ASSERT(entry.shape_offset_width == p_offset_width
                 && entry.hash_width == minimizer_scalar_width::u32
                 && entry.count_width == minimizer_scalar_width::u16
                 && entry.position_width == minimizer_scalar_width::u16
@@ -10986,11 +10984,11 @@ private:
                     mapped_payload_,
                     static_cast<std::size_t>(entry.hash_begin)
                         + control_ordinal * sizeof(std::uint32_t)));
-            const auto matched_group = match_query_group_<Oracle>(
+            const auto matched_group = match_query_group_<p_oracle>(
                 hash, context, active_bucket, plan_cursor, plan_end);
             if (!matched_group) continue;
             const std::uint32_t global_count =
-                occurrence_counter_<Oracle>(
+                occurrence_counter_<p_oracle>(
                     context, matched_group->counter_ordinal).load(
                     std::memory_order_relaxed);
             if (global_count == 0u) {
@@ -11019,19 +11017,19 @@ private:
             if (prefix_stats != nullptr
                 && !add_checked_(
                     *prefix_stats,
-                    2u * sizeof(minimizer_wire_uint_t_<O>))) {
+                    2u * sizeof(minimizer_wire_uint_t_<p_offset_width>))) {
                 return std::unexpected(
                     minimizer_generation_encoding_error::arithmetic_overflow);
             }
             const std::size_t prefix_offset =
                 static_cast<std::size_t>(entry.prefix_begin)
-                + control_ordinal * sizeof(minimizer_wire_uint_t_<O>);
+                + control_ordinal * sizeof(minimizer_wire_uint_t_<p_offset_width>);
             const std::uint64_t position_begin =
-                read_fixed_width_le_<O>(mapped_payload_, prefix_offset);
+                read_fixed_width_le_<p_offset_width>(mapped_payload_, prefix_offset);
             const std::uint64_t position_end =
-                read_fixed_width_le_<O>(
+                read_fixed_width_le_<p_offset_width>(
                     mapped_payload_,
-                    prefix_offset + sizeof(minimizer_wire_uint_t_<O>));
+                    prefix_offset + sizeof(minimizer_wire_uint_t_<p_offset_width>));
             if (position_end <= position_begin
                 || position_end > entry.position_element_count
                 || (control_ordinal == 0u && position_begin != 0u)
@@ -11068,40 +11066,40 @@ private:
                 .saturated_count = local_count,
             };
             const auto error = context.pass == fragment_probe_pass::orientation
-                ? process_fixed_orientation_control_<Oracle>(
+                ? process_fixed_orientation_control_<p_oracle>(
                     context, entry, *matched_group, control)
-                : process_fixed_emission_control_<Oracle>(
+                : process_fixed_emission_control_<p_oracle>(
                     context, entry, *matched_group, control);
             if (error) return std::unexpected(*error);
         }
         return {};
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_p16_dispatch_(
             fragment_probe_context& context,
             std::size_t entry_ordinal) const noexcept {
         if (context.pass == fragment_probe_pass::control_count) {
-            return probe_entry_h32_c16_count_<Oracle>(
+            return probe_entry_h32_c16_count_<p_oracle>(
                 context, entry_ordinal);
         }
         switch (entry_plans_[entry_ordinal].shape_offset_width) {
         case minimizer_scalar_width::u16:
             return probe_entry_h32_c16_p16_matched_<
-                Oracle, minimizer_scalar_width::u16>(context, entry_ordinal);
+                p_oracle, minimizer_scalar_width::u16>(context, entry_ordinal);
         case minimizer_scalar_width::u32:
             return probe_entry_h32_c16_p16_matched_<
-                Oracle, minimizer_scalar_width::u32>(context, entry_ordinal);
+                p_oracle, minimizer_scalar_width::u32>(context, entry_ordinal);
         case minimizer_scalar_width::u64:
             return probe_entry_h32_c16_p16_matched_<
-                Oracle, minimizer_scalar_width::u64>(context, entry_ordinal);
+                p_oracle, minimizer_scalar_width::u64>(context, entry_ordinal);
         }
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
 
-    template <bool Oracle>
+    template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_block_h32_c16_p16_(
             fragment_probe_context& context) const noexcept {
@@ -11114,7 +11112,7 @@ private:
         for (std::size_t entry_ordinal = context.block->entry_begin;
              entry_ordinal < context.block->entry_end;
              ++entry_ordinal) {
-            const auto probed = probe_entry_h32_c16_p16_dispatch_<Oracle>(
+            const auto probed = probe_entry_h32_c16_p16_dispatch_<p_oracle>(
                 context, entry_ordinal);
             if (!probed) return probed;
         }
@@ -11155,11 +11153,11 @@ private:
             || max_occ > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::int32_t>::max)())) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if (auto compatible = validate_minimizer_generation_compatibility(
-                manifest, expected); !compatible) {
-            return std::unexpected(compatible.error());
+        if (auto validated = validate_minimizer_generation_storage_contract(
+                manifest, expected); !validated) {
+            return std::unexpected(validated.error());
         }
 
         const std::uint32_t profile_max_hash =
@@ -11175,7 +11173,7 @@ private:
                 > (std::numeric_limits<std::uint8_t>::max)()
             || profile->max_hash != expected_profile_max_hash) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
 
         if (head.generation_id != manifest.generation_id
@@ -11196,10 +11194,10 @@ private:
                 minimizer_generation_encoding_error::checksum);
         }
         if (manifest.gpu_abi_revision != profile->gpu_abi_revision
-            || head.compatibility_checksum
-                != minimizer_generation_compatibility_checksum(manifest)) {
+            || head.storage_contract_checksum
+                != compute_minimizer_generation_storage_contract_checksum(manifest)) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
 
         const compact_hash32_header& direct_header =
@@ -11207,7 +11205,7 @@ private:
         const direct_index_identity expected_identity{
             .generation_id = head.generation_id,
             .source_identity = head.source_identity,
-            .compatibility_checksum = head.compatibility_checksum,
+            .storage_contract_checksum = head.storage_contract_checksum,
             .target_length = manifest.target_length,
         };
         if (direct_header.identity != expected_identity
@@ -11222,7 +11220,7 @@ private:
             || compact_direct.image_owner_.get()
                 != compact_direct.view_.image.data()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         return direct_open_contract{
             .profile = *profile,
@@ -12079,7 +12077,7 @@ public:
         if (!selected_page_adviser.empty()
             && !selected_page_adviser.valid()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const auto contract = validate_direct_open_contract_(
             head, manifest, expected, max_occ, compact_direct);
@@ -12168,11 +12166,11 @@ public:
             || mapped_payload.size() != manifest.payload_bytes
             || encoded_directory.size() != manifest.directory_bytes) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if (auto compatible = validate_minimizer_generation_compatibility(
-                manifest, expected); !compatible) {
-            return std::unexpected(compatible.error());
+        if (auto validated = validate_minimizer_generation_storage_contract(
+                manifest, expected); !validated) {
+            return std::unexpected(validated.error());
         }
         const std::uint32_t profile_max_hash =
             static_cast<std::uint32_t>(profile->max_hash);
@@ -12185,7 +12183,7 @@ public:
         if (profile_hash_bits == 0u
             || profile->max_hash != expected_profile_max_hash) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         if (compact_direct) {
             const compact_hash32_header& direct_header =
@@ -12193,8 +12191,8 @@ public:
             const direct_index_identity expected_identity{
                 .generation_id = head.generation_id,
                 .source_identity = head.source_identity,
-                .compatibility_checksum =
-                    head.compatibility_checksum,
+                .storage_contract_checksum =
+                    head.storage_contract_checksum,
                 .target_length = manifest.target_length,
             };
             if (direct_header.identity != expected_identity
@@ -12209,7 +12207,7 @@ public:
                 || compact_direct->image_owner_.get()
                     != compact_direct->view_.image.data()) {
                 return std::unexpected(
-                    minimizer_generation_encoding_error::compatibility_mismatch);
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             }
         }
 
@@ -12316,7 +12314,7 @@ public:
                     entry.shape_offset_width)
                 || entry.control_element_count == 0u) {
                 return std::unexpected(
-                    minimizer_generation_encoding_error::compatibility_mismatch);
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             }
             const auto layout = plan_grouped_soa_control_plane(
                 entry.control_element_count,
@@ -12645,7 +12643,7 @@ public:
         // rename. Its exact generation header was checked before this call.
         // Trust those immutable fragment payloads here. Reader open owns only
         // directory/address plans; max-occ reduction is fused into the later
-        // fragment-parallel query wave so MPF has no target-wide open scan.
+        // fragment-parallel query wave so minimizer-fragment has no target-wide open scan.
 
         reader.owned_bytes_ = reader.final_owned_bytes_();
         if (reader.owned_bytes_
@@ -12715,7 +12713,7 @@ public:
             verify_compositional_order_for_testing);
     }
 
-    template <bool Oracle, bool CompactDirect>
+    template <bool p_oracle, bool p_compact_direct>
     [[nodiscard]] prepared_fragment_anchor_batch
     prepare_fragment_anchor_batch_impl_(
             bioseq::parallelism::memory_admission_controller& admission,
@@ -12731,7 +12729,7 @@ public:
             throw persisted_minimizer_lookup_error(
                 "fragment-native grouped-SoA reader is not ready");
         }
-        if constexpr (CompactDirect) {
+        if constexpr (p_compact_direct) {
             if (!compact_direct_) {
                 throw persisted_minimizer_lookup_error(
                     "compact-H32 direct route was explicitly selected "
@@ -12770,12 +12768,12 @@ public:
                 "fragment-native grouped-SoA query policy is inconsistent");
         }
         // Freeze the manifest-selected wire route once for the complete wave.
-        // O remains an entry-local dispatch inside the fixed leaf family.
+        // Offset width remains an entry-local dispatch inside the fixed leaf family.
         [[maybe_unused]] const bool use_fixed_h32_c16_p16 = wire_dispatch_
             == fragment_encoding_dispatch::h32_c16_p16;
-        static_assert(!(Oracle && CompactDirect));
+        static_assert(!(p_oracle && p_compact_direct));
         constexpr bool use_bucket_direct_matcher =
-            !Oracle && !CompactDirect;
+            !p_oracle && !p_compact_direct;
 
         // Acquire the reusable scratch before reading or mutating any of its
         // non-atomic owners. The busy state remains published through the
@@ -12799,10 +12797,10 @@ public:
                     "fragment-native grouped-SoA query scratch identity is inconsistent");
             }
             scratch.clear_wave_storage_noexcept_();
-            if constexpr (CompactDirect) {
+            if constexpr (p_compact_direct) {
                 // This route never probes grouped-SoA controls.  Retained Bloom,
                 // radix, group-directory, and atomic-counter owners from a
-                // prior control-scan wave are released before direct planning
+                // preceding control-scan wave are released before direct planning
                 // so they cannot overlap the accepted-only direct plan.
                 {
                     std::vector<std::uint32_t> no_group_offsets;
@@ -12949,7 +12947,7 @@ public:
                 destination.kmer_size = source.kmer_size;
             }
 
-            if constexpr (CompactDirect) {
+            if constexpr (p_compact_direct) {
                 // Ordinary seed lookup treats max_occ==0 as selecting no
                 // postings.  Preserve that policy without calling the compact
                 // codec's positive-cap query API and without touching either
@@ -13072,7 +13070,7 @@ public:
                                 .query_and_ordinal = encoded,
                             };
                 };
-                if constexpr (Oracle || CompactDirect) {
+                if constexpr (p_oracle || p_compact_direct) {
                     for (std::size_t query_ordinal = 0u;
                          query_ordinal < queries.size();
                          ++query_ordinal) {
@@ -13137,7 +13135,7 @@ public:
                                     minimizer_ordinal),
                             };
                 };
-                if constexpr (Oracle || CompactDirect) {
+                if constexpr (p_oracle || p_compact_direct) {
                     for (std::size_t query_ordinal = 0u;
                          query_ordinal < queries.size();
                          ++query_ordinal) {
@@ -13197,14 +13195,14 @@ public:
 
             const std::uint64_t occurrence_radix_started_ns =
                 stage_now_ns_();
-            if constexpr (Oracle || CompactDirect) {
+            if constexpr (p_oracle || p_compact_direct) {
                 if (occurrence_count >= 2u) {
                     scratch.occurrence_radix_invoked_ = true;
                     const auto key = [](const auto& occurrence) noexcept
                             -> std::uint32_t {
                         return occurrence.hash;
                     };
-                    if constexpr (CompactDirect) {
+                    if constexpr (p_compact_direct) {
                         if (occurrence_layout->packed()
                             && occurrence_count >=
                                 k_compact_direct_parallel_packed_occurrence_radix_min_count) {
@@ -13358,7 +13356,7 @@ public:
                             static_cast<std::uint32_t>(end - begin),
                         .global_occurrence_count = 0u,
                     });
-                    if constexpr (CompactDirect) {
+                    if constexpr (p_compact_direct) {
                         compact_direct_group_key_set_checksum =
                             compact_direct_query_set_fnv_mix_u64(
                                 compact_direct_group_key_set_checksum,
@@ -13389,7 +13387,7 @@ public:
                 scratch.query_group_offsets_.capacity();
             const std::size_t old_query_membership_filter_word_capacity =
                 scratch.query_membership_filter_word_capacity_;
-            if constexpr (Oracle || CompactDirect) {
+            if constexpr (p_oracle || p_compact_direct) {
                 if (occurrence_layout->packed()) {
                     build_query_plans(scratch.packed_occurrences_);
                 } else {
@@ -13397,7 +13395,7 @@ public:
                 }
                 unique_occurrence_group_count =
                     scratch.query_plans_.size();
-                if constexpr (CompactDirect) {
+                if constexpr (p_compact_direct) {
                     batch.compact_direct_query_set_stats_ =
                         compact_direct_query_set_stats{
                             .query_count = queries.size(),
@@ -13499,12 +13497,12 @@ public:
                 }
             }
             batch.stats_.query_plan_allocations =
-                ((Oracle || CompactDirect)
+                ((p_oracle || p_compact_direct)
                     && scratch.query_plans_.capacity()
                         > old_query_plan_capacity)
                 ? 1u : 0u;
             batch.stats_.peak_query_plan_capacity_bytes =
-                (Oracle || CompactDirect)
+                (p_oracle || p_compact_direct)
                 ? saturating_mul(
                     scratch.query_plans_.capacity(),
                     sizeof(query_hash_plan))
@@ -13536,7 +13534,7 @@ public:
             batch.stats_.unique_plan_build_ns = elapsed_stage_ns_(
                 unique_plan_started_ns);
 
-            if constexpr (CompactDirect) {
+            if constexpr (p_compact_direct) {
                 prepare_compact_direct_anchors_(
                     admission,
                     queries,
@@ -13547,7 +13545,7 @@ public:
                 const std::size_t radix_size =
                     static_cast<std::size_t>(
                         query_radix_bucket_count_) + 1u;
-                if constexpr (Oracle) {
+                if constexpr (p_oracle) {
                     const std::uint64_t query_radix_fill_started_ns =
                         stage_now_ns_();
                     const std::size_t old_query_radix_capacity =
@@ -13585,7 +13583,7 @@ public:
                 const std::size_t old_occurrence_count_capacity =
                     scratch.occurrence_count_capacity_;
                 scratch.ensure_occurrence_count_capacity_(
-                    Oracle
+                    p_oracle
                     ? scratch.query_plans_.size()
                     : unique_occurrence_group_count);
                 batch.stats_.occurrence_count_allocations =
@@ -13602,7 +13600,7 @@ public:
                 bucket_direct_matcher_view bucket_direct_matcher_storage{};
                 const bucket_direct_matcher_view*
                     bucket_direct_matcher = nullptr;
-                if constexpr (!Oracle) {
+                if constexpr (!p_oracle) {
                     const bool route_storage_matches =
                         occurrence_layout->packed()
                         ? scratch.packed_occurrences_.size()
@@ -13713,11 +13711,11 @@ public:
                                 .max_occ = max_occ_u32,
                             };
                             if (use_fixed_h32_c16_p16) {
-                                counted = probe_block_h32_c16_p16_<Oracle>(
+                                counted = probe_block_h32_c16_p16_<p_oracle>(
                                     context);
                             } else {
                                 counted =
-                                    visit_matched_control_counts_<Oracle>(
+                                    visit_matched_control_counts_<p_oracle>(
                                     block_plans_[block_ordinal],
                                     context,
                                     [&context, max_occ_u32](
@@ -13727,7 +13725,7 @@ public:
                                             -> std::optional<
                                                 minimizer_generation_encoding_error> {
                                         (void)reserve_query_occurrences_(
-                                            occurrence_counter_<Oracle>(
+                                            occurrence_counter_<p_oracle>(
                                                 context,
                                                 group.counter_ordinal),
                                             local_count,
@@ -13762,7 +13760,7 @@ public:
                         &have_matched_controls](
                             const query_occurrence_group& group) {
                     const std::uint32_t global_count =
-                        occurrence_counter_<Oracle>(
+                        occurrence_counter_<p_oracle>(
                             counted_group_context,
                             group.counter_ordinal).load(
                                 std::memory_order_relaxed);
@@ -13773,7 +13771,7 @@ public:
                         return;
                     }
                     const auto occurrence_error =
-                        with_query_group_occurrences_<Oracle>(
+                        with_query_group_occurrences_<p_oracle>(
                             counted_group_context,
                             group,
                             [this, &batch, queries, global_count](
@@ -13802,7 +13800,7 @@ public:
                             "fragment-native expected anchor count overflow");
                     }
                 };
-                if constexpr (Oracle) {
+                if constexpr (p_oracle) {
                     for (std::size_t plan_ordinal = 0u;
                          plan_ordinal < scratch.query_plans_.size();
                          ++plan_ordinal) {
@@ -13818,7 +13816,7 @@ public:
                                 static_cast<std::uint32_t>(plan_ordinal),
                         };
                         plan.global_occurrence_count =
-                            occurrence_counter_<Oracle>(
+                            occurrence_counter_<p_oracle>(
                                 counted_group_context,
                                 static_cast<std::uint32_t>(
                                     plan_ordinal)).load(
@@ -13928,11 +13926,11 @@ public:
                                 };
                                 if (use_fixed_h32_c16_p16) {
                                     validated =
-                                        probe_block_h32_c16_p16_<Oracle>(
+                                        probe_block_h32_c16_p16_<p_oracle>(
                                             context);
                                 } else {
                                     validated =
-                                        visit_matched_controls_<Oracle>(
+                                        visit_matched_controls_<p_oracle>(
                                         block_plans_[block_ordinal],
                                         context,
                                         [](std::size_t,
@@ -13997,7 +13995,7 @@ public:
                     }
                 } else {
 
-                // Layout state is activated only after Pass 1 has proved the
+                // Layout state is activated only after Pass 1 establishes the
                 // exact accepted anchor counts. This keeps failed count waves
                 // from publishing/zeroing partially active layout owners.
                 const std::uint64_t orientation_layout_started_ns =
@@ -14092,10 +14090,10 @@ public:
                                 .position_bytes = &block_position_bytes,
                             };
                             if (use_fixed_h32_c16_p16) {
-                                counted = probe_block_h32_c16_p16_<Oracle>(
+                                counted = probe_block_h32_c16_p16_<p_oracle>(
                                     context);
                             } else {
-                                counted = visit_matched_controls_<Oracle>(
+                                counted = visit_matched_controls_<p_oracle>(
                                     block_plans_[block_ordinal],
                                     context,
                                     [this, queries,
@@ -14178,7 +14176,7 @@ public:
                                                     target_strand_one,
                                             };
                                         return with_query_group_occurrences_<
-                                            Oracle>(
+                                            p_oracle>(
                                             context,
                                             group,
                                             [&occurrence_context](
@@ -14395,10 +14393,10 @@ public:
                                     &block_anchors_constructed,
                             };
                             if (use_fixed_h32_c16_p16) {
-                                emitted = probe_block_h32_c16_p16_<Oracle>(
+                                emitted = probe_block_h32_c16_p16_<p_oracle>(
                                     context);
                             } else {
-                                emitted = visit_matched_controls_<Oracle>(
+                                emitted = visit_matched_controls_<p_oracle>(
                                     block,
                                     context,
                                     [this, queries, &batch,
@@ -14431,7 +14429,7 @@ public:
                                         };
                                         const auto occurrence_error =
                                             with_query_group_occurrences_<
-                                                Oracle>(
+                                                p_oracle>(
                                                 context,
                                                 group,
                                                 [this, &position_cursor,
@@ -14976,7 +14974,7 @@ static_assert(!minimizer_lookup_index<
     prepared_minimizer_fragment_reader>);
 
 /// Grouped-SoA generation controls.
-/// Fixed-width limits of current controls and PostgreSQL key axes.
+/// Fixed-width limits of persisted controls and PostgreSQL key axes.
 struct grouped_soa_generation_limits {
     std::uint64_t max_segment_control_count =
         (std::numeric_limits<std::uint32_t>::max)();
@@ -14986,7 +14984,7 @@ struct grouped_soa_generation_limits {
         (std::numeric_limits<std::uint32_t>::max)();
 };
 
-/// Immutable compatibility and source identity supplied to both producers.
+/// Immutable storage contract and source identity supplied to both producers.
 struct grouped_soa_generation_options {
     minimizer_generation_layout layout =
         minimizer_generation_layout::invalid;
@@ -14995,9 +14993,9 @@ struct grouped_soa_generation_options {
     std::uint64_t source_content_checksum = 0;
     std::uint64_t target_length = 0;
     /// Requested persisted position geometry. Zero keeps the generic
-    /// sequence-wide producer default. MPF supplies its physical fragment
+    /// sequence-wide producer default. minimizer-fragment supplies its physical fragment
     /// span so one persisted segment remains one independently queryable
-    /// source-fragment index; MPS keeps the larger merge-oriented default.
+    /// source-fragment index; minimizer-sequence keeps the larger merge-oriented default.
     std::uint64_t position_segment_span_bp = 0;
     std::uint16_t alphabet_code = 0;
     std::uint16_t storage_unit_byte_width = 0;
@@ -15018,7 +15016,7 @@ struct canonical_minimizer_event {
     [[nodiscard]] bool operator==(const canonical_minimizer_event&) const = default;
 };
 
-/// Type-erased callback used by independently replayable MPF/MPS producers.
+/// Type-erased callback used by independently replayable minimizer-fragment/minimizer-sequence producers.
 struct canonical_minimizer_event_receiver {
     void* context = nullptr;
     std::expected<void, minimizer_generation_encoding_error> (*emit_fn)(
@@ -15034,9 +15032,9 @@ struct canonical_minimizer_event_receiver {
 };
 
 /// A producer that can replay a bounded/external sorted stream for each pass.
-template <class Producer>
+template <class p_producer>
 concept grouped_soa_event_producer = requires(
-        Producer& producer,
+        p_producer& producer,
         std::uint64_t position_segment_span_bp,
         canonical_minimizer_event_receiver receiver) {
     { producer.minimizer_scheme_identity() }
@@ -15047,9 +15045,9 @@ concept grouped_soa_event_producer = requires(
         -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
 };
 
-template <class Sink>
+template <class p_sink>
 concept minimizer_generation_row_sink = requires(
-        Sink& sink,
+        p_sink& sink,
         const minimizer_generation_row_view& row) {
     { sink.write(row) }
         -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
@@ -15074,9 +15072,9 @@ struct grouped_soa_storage_plan_view {
         const grouped_soa_storage_plan_view&) const noexcept = default;
 };
 
-template <class Sink>
+template <class p_sink>
 concept planned_grouped_soa_generation_sink = requires(
-        Sink& sink,
+        p_sink& sink,
         const grouped_soa_storage_plan_view& storage_plan) {
     { sink.begin_planned_generation(storage_plan) }
         -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
@@ -15097,9 +15095,9 @@ struct minimizer_generation_row_write_receipt {
     std::uint64_t row_checksum = 0;
 };
 
-template <class Sink>
+template <class p_sink>
 concept grouped_soa_minimizer_payload_sink = requires(
-        Sink& sink,
+        p_sink& sink,
         const unchecked_minimizer_generation_row_view& row) {
     { sink.write_grouped_soa_payload(row) }
         -> std::same_as<std::expected<
@@ -15124,8 +15122,8 @@ struct minimizer_generation_row_sink_ref {
     }
 
     /// Let an ownership-aware sink compute the grouped-SoA row CRC exactly once.
-    /// The fallback preserves existing non-PostgreSQL sinks by computing once
-    /// here and forwarding their unchanged checksummed row API.
+    /// Non-PostgreSQL sinks compute the checksum here and receive the same
+    /// checksummed row API.
     [[nodiscard]] std::expected<minimizer_generation_row_write_receipt,
         minimizer_generation_encoding_error>
     write_grouped_soa_payload(
@@ -15190,7 +15188,7 @@ struct minimizer_generation_publication_binding {
     std::uint64_t generation_id = 0;
     std::uint64_t source_identity = 0;
     std::uint64_t source_content_checksum = 0;
-    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
     std::uint64_t manifest_checksum = 0;
 
     [[nodiscard]] constexpr bool valid() const noexcept {
@@ -15211,8 +15209,8 @@ minimizer_generation_publication_binding(
         .source_identity = generation.manifest.source_identity,
         .source_content_checksum =
             generation.manifest.source_content_checksum,
-        .compatibility_checksum =
-            minimizer_generation_compatibility_checksum(generation.manifest),
+        .storage_contract_checksum =
+            compute_minimizer_generation_storage_contract_checksum(generation.manifest),
         .manifest_checksum = generation.head.manifest_checksum,
     };
 }
@@ -15267,7 +15265,7 @@ make_minimizer_generation_storage_plan(
     if (options.layout == minimizer_generation_layout::invalid
         || plan.profile.layout != options.layout) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
 
     std::uint64_t payload_bytes = 0u;
@@ -15391,7 +15389,7 @@ checked_payload_byte_count(
 }
 
 /// grouped-SoA planning keeps the terminal prefix authoritative and derives the
-/// per-entry O width before committing an extent. A hash group is indivisible:
+/// per-entry offset width before committing an extent. A hash group is indivisible:
 /// an ordinary entry is flushed before a widening group, while a heavy group
 /// owns the resulting wider entry by itself.
 struct grouped_soa_plan_pass {
@@ -15611,9 +15609,9 @@ receive_grouped_soa_plan_event(
     return static_cast<grouped_soa_plan_pass*>(context)->accept(event);
 }
 
-template <grouped_soa_event_producer Producer>
+template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline bool producer_identity_matches(
-        const Producer& producer,
+        const p_producer& producer,
         minimizer_scheme_identity scheme,
         minimizer_producer_identity backend) noexcept {
     return producer.minimizer_scheme_identity() == scheme
@@ -15621,18 +15619,18 @@ template <grouped_soa_event_producer Producer>
 }
 
 struct grouped_soa_emit_pass {
-    template <grouped_soa_event_producer Producer>
+    template <grouped_soa_event_producer p_producer>
     [[nodiscard]] static std::expected<std::uint64_t,
         minimizer_generation_encoding_error>
     run(
-            Producer& producer,
+            p_producer& producer,
             const grouped_soa_generation_options& options,
             const grouped_soa_minimizer_profile& profile,
             grouped_soa_generation_plan& plan,
             const minimizer_generation_row_sink_ref& sink) {
         if (plan.profile != profile) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         crc64_ecma182_accumulator payload_row_checksums;
         grouped_soa_control_emit_pass controls{
@@ -15678,7 +15676,7 @@ struct grouped_soa_emit_pass {
         }
         if (producer.minimizer_scheme_identity() != profile.minimizer_scheme) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
 
         grouped_soa_position_emit_pass positions{
@@ -15738,7 +15736,7 @@ plan_grouped_soa_minimizer_generation(
         const grouped_soa_generation_limits& limits) {
     if (!is_grouped_soa_payload_profile(profile)) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (options.target_length == 0) {
         const auto empty_profile = derive_grouped_soa_minimizer_profile(
@@ -15867,7 +15865,7 @@ emit_grouped_soa_minimizer_generation(
     if (!is_grouped_soa_payload_profile(profile)
         || plan.profile != profile) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (!producer_identity_matches(
             producer, profile.minimizer_scheme,
@@ -15931,7 +15929,7 @@ plan_minimizer_generation(
         || producer_scheme.id != options.minimizer_scheme_id
         || producer_scheme.revision != options.minimizer_scheme_revision) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (options.target_length != 0
         && (limits.max_segment_control_count == 0
@@ -15992,7 +15990,7 @@ encode_minimizer_generation(
         || !is_supported_minimizer_scheme_identity(
             options.minimizer_scheme_id,
             options.minimizer_scheme_revision)) {
-        return std::unexpected(minimizer_generation_encoding_error::compatibility_mismatch);
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     static_assert(k_grouped_soa_extent_payload_bytes
         % grouped_soa_bucket_directory_entry::encoded_bytes == 0);
@@ -16012,7 +16010,7 @@ encode_minimizer_generation(
         || producer.producer_backend_identity()
             != plan->producer_backend) {
         return std::unexpected(
-            minimizer_generation_encoding_error::compatibility_mismatch);
+            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     const auto storage_plan = minimizer_generation_stream_detail::
         make_minimizer_generation_storage_plan(options, *plan);
@@ -16064,7 +16062,7 @@ encode_minimizer_generation(
     const std::uint32_t extent_payload_bytes =
         minimizer_extent_payload_bytes(options.layout);
     if (extent_payload_bytes == 0) {
-        return std::unexpected(minimizer_generation_encoding_error::format_revision);
+        return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
     const std::uint64_t directory_chunk_count = directory_bytes->size()
             / extent_payload_bytes
@@ -16142,8 +16140,8 @@ encode_minimizer_generation(
         .layout = options.layout,
         .generation_id = options.generation_id,
         .source_identity = options.source_identity,
-        .compatibility_checksum =
-            minimizer_generation_compatibility_checksum(manifest),
+        .storage_contract_checksum =
+            compute_minimizer_generation_storage_contract_checksum(manifest),
         .manifest_checksum = crc64_ecma182(
             std::span<const std::byte>{*manifest_bytes}),
         .source_content_checksum = options.source_content_checksum,
@@ -16324,7 +16322,7 @@ public:
         const std::uint32_t extent_payload_bytes =
             minimizer_extent_payload_bytes(generation_.manifest.layout);
         if (extent_payload_bytes == 0) {
-            return std::unexpected(minimizer_generation_encoding_error::format_revision);
+            return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
         }
         if (entry_index_ < generation_.directory.entries().size()) {
             const grouped_soa_bucket_directory_entry& entry =
@@ -16524,7 +16522,7 @@ inline void index_corruption_panic(std::string_view msg) {
     std::abort();
 }
 
-/// Caller-owned per-row/per-query assembly scratch (§9.1). Reused across
+/// Caller-owned per-row/per-query assembly scratch. Reused across
 /// segments within one query, destroyed with its IndexReadContext.
 struct minimizer_assembly_scratch {
     std::vector<std::pair<std::uint64_t,std::uint64_t>> pairs;
@@ -16535,17 +16533,17 @@ struct minimizer_assembly_scratch {
     void clear_query() noexcept { pairs.clear(); query_kmers.clear(); bucket_positions.clear(); wanted_sub_keys.clear(); }
 };
 
-// ---- shared wire walkers (§9.4) ------------------------------------------
+// ---- shared serialized-index walkers -------------------------------------
 
 /// Walk one persisted wire blob and emit each key/position pair.
-template <class F>   // F: (uint64 kmer, uint64 encoded_pos) -> void
-void wire_for_each_entry(const char* blob, std::size_t blob_bytes, F&& emit) {
+template <class p_function>   // p_function: (uint64 kmer, uint64 encoded_pos) -> void
+void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& emit) {
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
     if (blob_bytes < sizeof(header)) index_corruption_panic("index chunk: truncated header");
     header header{}; std::memcpy(&header, blob, sizeof(header));
     if (header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
-        header.revision != minimizer_hashmap_fragment_index::k_encoded_format_revision) index_corruption_panic("index chunk: magic/revision");
+        header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
     const std::size_t expect = sizeof(header) + sizeof(bucket_record)*header.bucket_count + sizeof(std::uint64_t)*header.total_positions;
     if (blob_bytes != expect) index_corruption_panic("index chunk: size mismatch (corruption)");
     const char* recs = blob + sizeof(header);
@@ -16563,15 +16561,15 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, F&& emit) {
 }
 
 /// PER-KMER sibling of wire_for_each_entry: cb(kmer, pos_count, gpos).
-template <class F>   // F: (uint64 kmer, uint32 pos_count, const uint64* gpos) -> void
+template <class p_function>   // p_function: (uint64 kmer, uint32 pos_count, const uint64* gpos) -> void
 void wire_for_each_bucket(const char* blob, std::size_t blob_bytes,
-                          std::vector<std::uint64_t>& pos_scratch, F&& cb) {
+                          std::vector<std::uint64_t>& pos_scratch, p_function&& cb) {
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
     if (blob_bytes < sizeof(header)) index_corruption_panic("index chunk: truncated header");
     header header{}; std::memcpy(&header, blob, sizeof(header));
     if (header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
-        header.revision != minimizer_hashmap_fragment_index::k_encoded_format_revision) index_corruption_panic("index chunk: magic/revision");
+        header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
     const std::size_t expect = sizeof(header) + sizeof(bucket_record)*header.bucket_count + sizeof(std::uint64_t)*header.total_positions;
     if (blob_bytes != expect) index_corruption_panic("index chunk: size mismatch (corruption)");
     const char* recs = blob + sizeof(header);
@@ -16589,7 +16587,7 @@ void wire_for_each_bucket(const char* blob, std::size_t blob_bytes,
 
 // GPU batched minimizer-fragment helpers. A GPU window covers as many whole
 // fragments as fit both the run buffer and the 28-bit position field (with halo).
-[[nodiscard]] inline std::size_t gpu_mpf_fragments_per_batch(
+[[nodiscard]] inline std::size_t gpu_minimizer_fragments_per_batch(
     std::size_t nfrag,
     std::size_t frag_bp,
     std::size_t halo_bp,
@@ -16623,8 +16621,8 @@ void wire_for_each_bucket(const char* blob, std::size_t blob_bytes,
 }
 
 // Serialize already (kmer, encoded_pos)-sorted pairs (from the GPU sorted-pair
-// seam: fused GPU minimizer emit + host pair sort) into the existing mpf
-// per-fragment blob format (header + bucket directory + positions). CPU-only
+// seam: fused GPU minimizer emit + host pair sort) into the minimizer-fragment
+// per-fragment serialized layout (header + bucket directory + positions). CPU-only
 // persistence -- no minimizer collection or sort HERE.
 inline void serialize_sorted_pairs_to_fragment_blob(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted_pairs,
@@ -16659,7 +16657,7 @@ inline void serialize_sorted_pairs_to_fragment_blob(
 
     const header header{
         minimizer_hashmap_fragment_index::k_encoded_magic,
-        minimizer_hashmap_fragment_index::k_encoded_format_revision,
+        minimizer_hashmap_fragment_index::k_encoded_layout_revision,
         static_cast<std::uint64_t>(target_len),
         static_cast<std::uint32_t>(buckets.size()),
         0u,
@@ -16685,12 +16683,12 @@ inline void serialize_sorted_pairs_to_fragment_blob(
     }
 }
 
-/// Operation-originated route stats for one complete MPF generation encode.
+/// Operation-originated route stats for one complete minimizer-fragment generation encode.
 /// The common encoder replays its producer at least once for planning and once
 /// for emission; every biological core records the branch it actually entered.
 /// Selected SIMD/GPU routes additionally carry their native checked stats, so a
 /// caller cannot accept a backend merely because its enum was requested.
-class mpf_generation_execution_receipt {
+class minimizer_fragment_generation_execution_receipt {
 public:
     minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
     minimizer_scheme_identity minimizer_scheme{};
@@ -16723,8 +16721,8 @@ public:
                     grouped_soa_segment_local) {
             return 3u;
         }
-        /* An unbound producer can still attest two explicit direct replays.
-         * Publication additionally requires a concrete matching wire format. */
+        /* An unbound producer can still record two explicit direct replays.
+         * Publication additionally requires a concrete matching storage layout. */
         return generation_layout == minimizer_generation_layout::invalid
                 || is_supported_minimizer_generation_layout(
                     generation_layout)
@@ -16733,8 +16731,8 @@ public:
 
     [[nodiscard]] bool is_accepted() const noexcept {
         // A fixed-width geometry retry contributes exactly one additional
-        // planning scan.  The successful-pass count is bound from the wire
-        // format before the first encoder scan.
+        // planning scan. The successful-pass count is bound from the storage
+        // layout before the first encoder scan.
         const std::uint64_t required_scans =
             required_successful_scan_count();
         if (!common_identity_accepted_() || required_scans == 0u
@@ -16748,9 +16746,9 @@ public:
         return selected_route_accepted_(requires_backend_work_());
     }
 
-    /// Accept stats emitted by the direct MPF builder, which is one
+    /// Accept stats emitted by the direct minimizer-fragment builder, which is one
     /// biological construction operation rather than an encoder replay and
-    /// therefore deliberately has no wire-format/publication binding.
+    /// therefore deliberately has no storage-layout/publication binding.
     [[nodiscard]] bool direct_build_accepted() const noexcept {
         return common_identity_accepted_()
             && producer_scan_count == 1u
@@ -16808,7 +16806,7 @@ private:
                     && vulkan_core_runs == 0
                     && no_exact && no_bounded && no_vulkan
                     && (!require_backend_work || scalar_core_runs != 0);
-            case minimizer_sketch_backend::two_stack_nthash:
+            case minimizer_sketch_backend::exact_simd:
                 return scalar_core_runs == 0
                     && bounded_nthash_core_runs == 0
                     && vulkan_core_runs == 0
@@ -16844,9 +16842,9 @@ private:
         }
         return false;
     }
-    template <class>
+    template <class p_storage>
     friend struct minimizers_per_fragment_index;
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     friend class minimizer_fragment_generation_replay_producer;
 
     struct route_snapshot {
@@ -16968,22 +16966,22 @@ private:
     }
 };
 
-/// Concrete MPF current producer. Each replay rescans source fragments with
+/// Concrete minimizer-fragment producer. Each replay rescans source fragments with
 /// the canonical `w+k-2` halo and emits each physical fragment's independently
-/// ordered index.  A compatibility fallback can merge multiple source runs
-/// only when a caller explicitly requests a persisted span wider than one
-/// physical fragment; the production MPF publisher never does so.
-template <sequence_alphabet Alphabet>
+/// ordered index. A multi-run merge route is used only when a caller explicitly
+/// requests a persisted span wider than one
+/// physical fragment; the production minimizer-fragment publisher never does so.
+template <sequence_alphabet p_alphabet>
 class minimizer_fragment_generation_replay_producer {
 private:
-    using sequence_type = bioseq::storage::lazy_sequence_view<Alphabet>;
+    using sequence_type = bioseq::storage::lazy_sequence_view<p_alphabet>;
     using traits = typename sequence_type::traits;
 
     sequence_type sequence_;
     minimizer_sketch_backend backend_ = minimizer_sketch_backend::scalar;
     const bioseq::minimizers::minimizer_kernels* kernels_ = nullptr;
     std::uint8_t alphabet_code_ =
-        bioseq::minimizers::unbound_packed_alphabet_code;
+        bioseq::minimizers::k_unbound_packed_alphabet_code;
     std::uint16_t window_size_ = 10;
     std::uint16_t kmer_size_ = 15;
     std::uint64_t scan_count_ = 0;
@@ -17098,9 +17096,9 @@ private:
                         != packed_bounded_nthash_index_status::ok) {
                     throw packed_bounded_nthash_index_runtime_error{
                         bounded_result.status,
-                        "MPF generation replay"};
+                        "minimizer fragment generation replay"};
                 }
-            } else if (backend_ == minimizer_sketch_backend::two_stack_nthash) {
+            } else if (backend_ == minimizer_sketch_backend::exact_simd) {
                 increment_route_counter_(exact_simd_core_runs_);
                 try {
                     const auto stats = collect_exact_simd_index_range_or_throw(
@@ -17113,14 +17111,14 @@ private:
                         kmer_size_,
                         0u,
                         kernels_,
-                        "MPF generation replay");
+                        "minimizer fragment generation replay");
                     exact_simd_stats_.merge(stats);
                     exact_simd_stats_present_ = true;
                     route_stats_saturated_ = route_stats_saturated_
                         || exact_simd_stats_.saturated;
                 } catch (const exact_simd_index_runtime_error&) {
                     return std::unexpected(
-                        minimizer_generation_encoding_error::compatibility_mismatch);
+                        minimizer_generation_encoding_error::storage_contract_mismatch);
                 }
             } else if (backend_ == minimizer_sketch_backend::scalar) {
                 increment_route_counter_(scalar_core_runs_);
@@ -17130,7 +17128,7 @@ private:
                         window_size_, kmer_size_);
             } else {
                 return std::unexpected(
-                    minimizer_generation_encoding_error::compatibility_mismatch);
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             }
             const auto& sketches = collector.extract_sketches_data();
             run.reserve(sketches.size());
@@ -17223,20 +17221,20 @@ public:
             return std::unexpected(minimizer_generation_encoding_error::segment_span);
         }
         if (backend_ != minimizer_sketch_backend::scalar
-            && backend_ != minimizer_sketch_backend::two_stack_nthash
+            && backend_ != minimizer_sketch_backend::exact_simd
             && backend_ != minimizer_sketch_backend::bounded_nthash_simd
             && backend_ != minimizer_sketch_backend::vulkan_segment) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if ((backend_ == minimizer_sketch_backend::two_stack_nthash
+        if ((backend_ == minimizer_sketch_backend::exact_simd
                 && (kernels_ == nullptr
                     || kernels_->two_stack_nthash == nullptr))
             || (backend_ == minimizer_sketch_backend::bounded_nthash_simd
                 && (kernels_ == nullptr
                     || kernels_->bounded_nthash == nullptr))) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::uint64_t target_length = sequence_.bp_size();
 
@@ -17358,9 +17356,9 @@ public:
     packed_bounded_stats() const noexcept {
         return packed_bounded_stats_;
     }
-    [[nodiscard]] mpf_generation_execution_receipt
+    [[nodiscard]] minimizer_fragment_generation_execution_receipt
     execution_stats() const noexcept {
-        mpf_generation_execution_receipt stats;
+        minimizer_fragment_generation_execution_receipt stats;
         stats.selected_backend = backend_;
         stats.minimizer_scheme = minimizer_scheme_identity();
         stats.target_length =
@@ -17389,62 +17387,62 @@ public:
     }
 };
 
-// (2) the storage-bound CHUNKED_PER_FRAGMENT index template
-template <class S>
+// (2) the storage-bound fragment-chunk index template
+template <class p_storage>
 struct minimizers_per_fragment_index {
-    static_assert(is_index_chunked_storage_for<S, sequence_index_layout::fragment_chunks>);
+    static_assert(is_index_chunked_storage_for<p_storage, sequence_index_layout::fragment_chunks>);
     static constexpr sequence_index_layout index_type = sequence_index_layout::fragment_chunks;
     static constexpr std::string_view  index_name = minimizer_hashmap_fragment_index::index_name;
-    using storage_type = S;
+    using storage_type = p_storage;
 
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     [[nodiscard]] static auto make_generation_replay_producer(
-            bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+            bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
             minimizer_sketch_backend backend,
             const bioseq::minimizers::minimizer_kernels* kernels,
             std::uint8_t alphabet_code =
-                bioseq::minimizers::unbound_packed_alphabet_code) {
-        return minimizer_fragment_generation_replay_producer<Alphabet>{
+                bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        return minimizer_fragment_generation_replay_producer<p_alphabet>{
             sequence, backend, kernels, alphabet_code};
     }
 
-    /// Concrete MPF construction seam. Live routing remains unchanged; this
-    /// records the bounded producer used by the current fragment image.
-    template <sequence_alphabet Alphabet, minimizer_generation_row_sink Sink>
+    /// Concrete minimizer-fragment construction seam. This records the bounded producer used
+    /// by the fragment image without changing live routing.
+    template <sequence_alphabet p_alphabet, minimizer_generation_row_sink p_sink>
     [[nodiscard]] static std::expected<
         encoded_grouped_soa_generation,
         minimizer_generation_encoding_error>
     encode_persisted_generation(
-            bioseq::storage::lazy_sequence_view<Alphabet> sequence,
+            bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
             minimizer_sketch_backend backend,
             const bioseq::minimizers::minimizer_kernels* kernels,
-            Sink& sink,
+            p_sink& sink,
             const grouped_soa_generation_options& options,
             const grouped_soa_generation_limits& limits = {},
-            mpf_generation_execution_receipt* execution_stats_out = nullptr,
+            minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
             std::uint8_t runtime_alphabet_code =
-                bioseq::minimizers::unbound_packed_alphabet_code) {
+                bioseq::minimizers::k_unbound_packed_alphabet_code) {
         if (execution_stats_out != nullptr) {
             *execution_stats_out = {};
         }
         if (options.window_size != 10 || options.kmer_size != 15) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if ((backend == minimizer_sketch_backend::two_stack_nthash
+        if ((backend == minimizer_sketch_backend::exact_simd
                 && (kernels == nullptr
                     || kernels->two_stack_nthash == nullptr))
             || (backend == minimizer_sketch_backend::bounded_nthash_simd
                 && (kernels == nullptr
                     || kernels->bounded_nthash == nullptr))) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         auto producer = make_generation_replay_producer(
             sequence, backend, kernels, runtime_alphabet_code);
         auto encoded = encode_minimizer_generation(
             producer, sink, options, limits);
-        mpf_generation_execution_receipt stats =
+        minimizer_fragment_generation_execution_receipt stats =
             producer.execution_stats();
         const minimizer_producer_identity stats_backend =
             minimizer_producer_backend_identity_for_backend(
@@ -17455,7 +17453,7 @@ struct minimizers_per_fragment_index {
                 || encoded->manifest.producer_identity_revision
                     != stats_backend.revision)) {
             encoded = std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         if (encoded) {
             stats.bind_publication_(*encoded);
@@ -17463,7 +17461,7 @@ struct minimizers_per_fragment_index {
         if (encoded && !stats.publication_accepted(
                 minimizer_generation_publication_binding(*encoded))) {
             encoded = std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         if (execution_stats_out != nullptr) {
             *execution_stats_out = stats;
@@ -17471,23 +17469,23 @@ struct minimizers_per_fragment_index {
         return encoded;
     }
 
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     static void build(
-        S& storage,
-        bioseq::storage::lazy_sequence_view<Alphabet> seq,
+        p_storage& storage,
+        bioseq::storage::lazy_sequence_view<p_alphabet> seq,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
-        mpf_generation_execution_receipt* execution_stats_out = nullptr,
+        minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
         std::uint8_t alphabet_code =
-            bioseq::minimizers::unbound_packed_alphabet_code) {
+            bioseq::minimizers::k_unbound_packed_alphabet_code) {
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
         constexpr std::size_t frag_bp    = 32'768u;
-        constexpr std::size_t W          = w + k;                              // backward context
+        constexpr std::size_t k_context_span          = w + k;                              // backward context
         static_assert(frag_bp < (std::size_t{1} << 28),
             "fragment-core-local positions must fit the 28-bit minimap_sketch_data field");
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
-        if (backend == minimizer_sketch_backend::two_stack_nthash
+        if (backend == minimizer_sketch_backend::exact_simd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
             throw exact_simd_index_runtime_error{
                 exact_simd_index_status::invalid_state,
@@ -17514,11 +17512,11 @@ struct minimizers_per_fragment_index {
         // Batch canonical 32 KiBP fragments into large GPU collection windows,
         // then scatter the one sorted global pair stream back into persisted
         // fragment-local blobs.  One synchronous submission per fragment is a
-        // severe regression and defeats the existing GPU MPF batch geometry.
+        // severe regression and defeats the configured GPU minimizer-fragment batch geometry.
         if (backend == minimizer_sketch_backend::vulkan_segment) {
             const std::size_t fragments_per_batch =
-                gpu_mpf_fragments_per_batch(
-                    nfrag, frag_bp, 2u * W, storage.run_buffer_bytes());
+                gpu_minimizer_fragments_per_batch(
+                    nfrag, frag_bp, 2u * k_context_span, storage.run_buffer_bytes());
             std::vector<std::vector<
                 std::pair<std::uint64_t, std::uint64_t>>> per_fragment(
                     fragments_per_batch);
@@ -17557,9 +17555,9 @@ struct minimizers_per_fragment_index {
                     static_cast<sequence_size_t>(batch_hi_frag) * frag_bp,
                     total_bp);
                 const sequence_size_t coll_lo =
-                    core_lo >= W ? core_lo - W : 0u;
+                    core_lo >= k_context_span ? core_lo - k_context_span : 0u;
                 const sequence_size_t coll_hi = std::min(
-                    core_hi + static_cast<sequence_size_t>(W), total_bp);
+                    core_hi + static_cast<sequence_size_t>(k_context_span), total_bp);
                 bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats stats{};
                 auto batch_pairs = bioseq::gpu::vulkan::
                     collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
@@ -17632,13 +17630,13 @@ struct minimizers_per_fragment_index {
                                      std::vector<char>& out_blob) {
             const sequence_size_t core_lo = (sequence_size_t)fragment_no * frag_bp;
             const sequence_size_t core_hi = std::min(core_lo + (sequence_size_t)frag_bp, total_bp);
-            const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
-            const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)W, total_bp);
+            const sequence_size_t coll_lo = core_lo >= k_context_span ? core_lo - k_context_span : 0;
+            const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)k_context_span, total_bp);
             collector.clear();
             const sequence_size_t emit_base = coll_lo;
             const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             core.clear();
-            if (collect_bp >= (sequence_size_t)W) {
+            if (collect_bp >= (sequence_size_t)k_context_span) {
                 if (backend == minimizer_sketch_backend::vulkan_segment) {
                     auto pairs = bioseq::gpu::vulkan::
                         collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
@@ -17654,7 +17652,7 @@ struct minimizers_per_fragment_index {
                             static_cast<std::uint64_t>(pair.second & 1u)});
                     }
                 } else {
-                    if (backend == minimizer_sketch_backend::two_stack_nthash) {
+                    if (backend == minimizer_sketch_backend::exact_simd) {
                         const auto stats = collect_exact_simd_index_range_or_throw(
                             collector, seq, alphabet_code,
                             coll_lo, coll_hi, w, k, 0u,
@@ -17811,10 +17809,10 @@ struct minimizers_per_fragment_index {
           storage.template write_to_each<std::int64_t>(k_directory_sub_key, [manifest](std::size_t chunk_no, std::int64_t* manifest_buf, std::size_t){ manifest_buf[0]=manifest; return chunk_no; }); }
     }
 
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     static void build(
-        S& storage,
-        bioseq::storage::lazy_sequence_view<Alphabet> seq,
+        p_storage& storage,
+        bioseq::storage::lazy_sequence_view<p_alphabet> seq,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         const std::uint8_t alphabet_code) {
@@ -17822,23 +17820,23 @@ struct minimizers_per_fragment_index {
     }
 
     // The scalar-default overload delegates to the explicit backend.
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     static void build(
-            S& storage,
-            bioseq::storage::lazy_sequence_view<Alphabet> seq) {
+            p_storage& storage,
+            bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
         build(storage, seq, minimizer_sketch_backend::scalar, nullptr);
     }
 
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     static void rebuild(
-        S& storage,
-        bioseq::storage::lazy_sequence_view<Alphabet> seq,
+        p_storage& storage,
+        bioseq::storage::lazy_sequence_view<p_alphabet> seq,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         std::uint8_t alphabet_code =
-            bioseq::minimizers::unbound_packed_alphabet_code)
+            bioseq::minimizers::k_unbound_packed_alphabet_code)
     {
-        if (backend == minimizer_sketch_backend::two_stack_nthash
+        if (backend == minimizer_sketch_backend::exact_simd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
             throw exact_simd_index_runtime_error{
                 exact_simd_index_status::invalid_state,
@@ -17854,16 +17852,16 @@ struct minimizers_per_fragment_index {
         build(storage, seq, backend, kernels, nullptr, alphabet_code);
     }
 
-    template <sequence_alphabet Alphabet>
+    template <sequence_alphabet p_alphabet>
     static void rebuild(
-            S& storage,
-            bioseq::storage::lazy_sequence_view<Alphabet> seq) {
+            p_storage& storage,
+            bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
         rebuild(storage, seq, minimizer_sketch_backend::scalar, nullptr);
     }
 
     /// query-time: materialise the single pipeline IndexT for one target SEGMENT.
     static minimizer_hashmap_fragment_index assemble_segment(
-            S& storage, std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
+            p_storage& storage, std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
             sequence_size_t total_bp, sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,
             minimizer_assembly_scratch& scratch) {
         auto& pairs = scratch.pairs;
@@ -17895,10 +17893,10 @@ struct minimizers_per_fragment_index {
     }
 
     /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
-    /// can be probed by the seed stage, so persisted MPF does not need to
+    /// can be probed by the seed stage, so persisted minimizer-fragment does not need to
     /// materialise unrelated buckets before uploading the segment index.
     static minimizer_hashmap_fragment_index assemble_segment_for_query(
-            S& storage,
+            p_storage& storage,
             std::span<const minimap_sketch_data> query_minimizers,
             std::size_t frag_lo, std::size_t frag_hi, sequence_size_t frag_bp,
             sequence_size_t total_bp, sequence_size_t clip_lo_bp, sequence_size_t clip_hi_bp,

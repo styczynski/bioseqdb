@@ -111,7 +111,7 @@ inline void write_json_string(
         if (first == "main") {
             throw std::runtime_error(
                 "manifest repository path '" + std::string{field}
-                + "' uses the retired main source-root alias: "
+                + "' uses the forbidden main source-root prefix: "
                 + raw);
         }
         return result;
@@ -179,7 +179,7 @@ inline void write_json_string(
                 throw std::runtime_error(
                     "absolute manifest repository path '"
                     + std::string{field}
-                    + "' uses the retired main source-root alias: "
+                    + "' uses the forbidden main source-root prefix: "
                     + path.generic_string());
             }
             repository_source_root = index;
@@ -848,7 +848,7 @@ manifest_statement_owner(
     std::ranges::sort(public_installed_identities);
     std::ostringstream output;
     output << "{\n"
-           << "  \"manifest_version\": 1,\n"
+           << "  \"schema_revision\": 1,\n"
            << "  \"authority_mode\": \"annotated_cpp\",\n"
            << "  \"compiler_profile\": ";
     detail::write_json_string(output, graph.compiler_profile);
@@ -858,7 +858,7 @@ manifest_statement_owner(
     detail::write_json_string(
         output, graph.compilation_signature);
     if (graph.extension_name != "bioseq"
-        || graph.generated_module_prefix != "bioseq.sql.generated"
+        || graph.generated_module_prefix != "bioseq.postgres.sql.generated"
         || graph.fmgr_boundary_module
             != "bioseq.postgres.support.sql_boundary") {
         output << ",\n"
@@ -869,7 +869,7 @@ manifest_statement_owner(
            << "  \"extension_schema\": ";
     detail::write_json_string(output, graph.extension_schema);
     if (graph.extension_name != "bioseq"
-        || graph.generated_module_prefix != "bioseq.sql.generated"
+        || graph.generated_module_prefix != "bioseq.postgres.sql.generated"
         || graph.fmgr_boundary_module
             != "bioseq.postgres.support.sql_boundary") {
         output << ",\n  \"generated_module_prefix\": ";

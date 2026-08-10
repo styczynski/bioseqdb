@@ -702,7 +702,7 @@ void chain_anchors_rmq(
     for (int64_t current_index = 0;
          current_index < anchor_count;
          ++current_index) {
-        forward_instrumentation_scope.tick();
+        forward_instrumentation_scope.record_iteration();
         int32_t best_score =
             static_cast<int32_t>(anchors[current_index].query_span);
         int64_t best_predecessor = -1;

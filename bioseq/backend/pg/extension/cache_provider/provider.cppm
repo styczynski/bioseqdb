@@ -23,29 +23,29 @@ import bioseq.postgres.table;
 namespace bioseq::postgres::extension::cache_provider {
 namespace detail {
 
-inline constexpr std::uint32_t kPostgresMajorVersion =
+inline constexpr std::uint32_t k_postgres_major_version =
     static_cast<std::uint32_t>(PG_VERSION_NUM / 10000);
 
 inline void** g_directory_slot = nullptr;
 inline void** g_cache_api_slot = nullptr;
-inline const BioseqCacheApiV2* g_preflight_cache_api = nullptr;
+inline const bioseq_cache_api* g_preflight_cache_api = nullptr;
 inline bool g_preflight_cache_api_compatible = true;
-inline const BioseqCacheApiV2* g_bound_api = nullptr;
+inline const bioseq_cache_api* g_bound_api = nullptr;
 inline std::uint64_t g_bound_api_cookie = 0;
-inline constexpr std::size_t kProviderDescriptorCount = 2;
-inline constexpr std::size_t kBatchJoinProviderIndex = 1;
-inline std::array<BioseqCacheProviderRegistrationV2,
-                  kProviderDescriptorCount> g_registrations{{
-    BioseqCacheProviderRegistrationV2{
+inline constexpr std::size_t k_provider_descriptor_count = 2;
+inline constexpr std::size_t k_batch_join_provider_index = 1;
+inline std::array<bioseq_cache_provider_registration,
+                  k_provider_descriptor_count> g_registrations{{
+    bioseq_cache_provider_registration{
         .struct_size = static_cast<std::uint32_t>(
-            sizeof(BioseqCacheProviderRegistrationV2)),
+            sizeof(bioseq_cache_provider_registration)),
     },
-    BioseqCacheProviderRegistrationV2{
+    bioseq_cache_provider_registration{
         .struct_size = static_cast<std::uint32_t>(
-            sizeof(BioseqCacheProviderRegistrationV2)),
+            sizeof(bioseq_cache_provider_registration)),
     },
 }};
-inline std::array<bool, kProviderDescriptorCount> g_registered{};
+inline std::array<bool, k_provider_descriptor_count> g_registered{};
 inline bool g_directory_published = false;
 
 [[nodiscard]] std::uint64_t mix_cookie(std::uint64_t value) noexcept {
@@ -57,68 +57,68 @@ inline bool g_directory_published = false;
     return value == 0 ? 1U : value;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_analyze_query(
+[[nodiscard]] bioseq_cache_status unsupported_analyze_query(
         const Query*,
-        BioseqCacheQueryIntentV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        bioseq_cache_query_intent*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_describe_path(
+[[nodiscard]] bioseq_cache_status unsupported_describe_path(
         PlannerInfo*,
         RelOptInfo*,
         Path*,
-        const BioseqCacheQueryIntentV2*,
-        BioseqCachePathDomainV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        const bioseq_cache_query_intent*,
+        bioseq_cache_path_domain*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_map_source(
+[[nodiscard]] bioseq_cache_status unsupported_map_source(
         PlannerInfo*,
-        const BioseqCachePathDomainV2*,
-        const BioseqCacheReusableSourceV2*,
-        BioseqCacheSourceMappingV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        const bioseq_cache_path_domain*,
+        const bioseq_cache_reusable_source*,
+        bioseq_cache_source_mapping*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_decorate_path(
+[[nodiscard]] bioseq_cache_status unsupported_decorate_path(
         PlannerInfo*,
         RelOptInfo*,
         Path*,
-        const BioseqCachePathDomainV2*,
+        const bioseq_cache_path_domain*,
         List*,
-        BioseqCacheDecoratedPathV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        bioseq_cache_decorated_path*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_extract_occurrence(
+[[nodiscard]] bioseq_cache_status unsupported_extract_occurrence(
         List*,
         TupleTableSlot*,
-        BioseqCacheOccurrenceV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        bioseq_cache_occurrence*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] BioseqCacheStatusV2 unsupported_late_fetch(
+[[nodiscard]] bioseq_cache_status unsupported_late_fetch(
         List*,
         EState*,
-        const BioseqCacheOccurrenceV2*,
+        const bioseq_cache_occurrence*,
         std::size_t,
         const std::int16_t*,
         std::size_t,
-        BioseqCacheLateFetchSinkV2*) {
-    return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        bioseq_cache_late_fetch_sink*) {
+    return bioseq_cache_status_unsupported;
 }
 
-[[nodiscard]] const BioseqCacheProviderV2& provider_descriptor() noexcept {
-    static const BioseqCacheProviderV2 provider{
+[[nodiscard]] const bioseq_cache_provider& provider_descriptor() noexcept {
+    static const bioseq_cache_provider provider{
         .struct_size =
-            static_cast<std::uint32_t>(sizeof(BioseqCacheProviderV2)),
-        .abi_version = bioseq::cache::kProviderAbiVersion,
-        .postgres_major = kPostgresMajorVersion,
-        .provider_id = kBioseqScanProviderId,
+            static_cast<std::uint32_t>(sizeof(bioseq_cache_provider)),
+        .abi_revision = bioseq::cache::k_provider_abi_revision,
+        .postgres_major = k_postgres_major_version,
+        .provider_id = k_bioseq_scan_provider_id,
         .provider_flags =
-            BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE,
+            bioseq_cache_provider_exact_source_elision_safe,
         .reserved = 0,
-        .provider_name = kBioseqScanProviderName,
+        .provider_name = k_bioseq_scan_provider_name,
         .provider_scan_methods = bioseq_customscan_methods(),
         .analyze_query = &unsupported_analyze_query,
         .describe_path = &unsupported_describe_path,
@@ -138,18 +138,18 @@ inline bool g_directory_published = false;
     return provider;
 }
 
-[[nodiscard]] const BioseqCacheProviderV2&
+[[nodiscard]] const bioseq_cache_provider&
 batch_join_provider_descriptor() noexcept {
-    static const BioseqCacheProviderV2 provider{
+    static const bioseq_cache_provider provider{
         .struct_size =
-            static_cast<std::uint32_t>(sizeof(BioseqCacheProviderV2)),
-        .abi_version = bioseq::cache::kProviderAbiVersion,
-        .postgres_major = kPostgresMajorVersion,
-        .provider_id = kBioseqBatchJoinProviderId,
+            static_cast<std::uint32_t>(sizeof(bioseq_cache_provider)),
+        .abi_revision = bioseq::cache::k_provider_abi_revision,
+        .postgres_major = k_postgres_major_version,
+        .provider_id = k_bioseq_batch_join_provider_id,
         .provider_flags =
-            BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE,
+            bioseq_cache_provider_exact_source_elision_safe,
         .reserved = 0,
-        .provider_name = kBioseqBatchJoinProviderName,
+        .provider_name = k_bioseq_batch_join_provider_name,
         .provider_scan_methods = bioseq_batch_join_customscan_methods(),
         .analyze_query = &unsupported_analyze_query,
         .describe_path = &unsupported_describe_path,
@@ -170,9 +170,9 @@ batch_join_provider_descriptor() noexcept {
     return provider;
 }
 
-[[nodiscard]] const BioseqCacheProviderV2& provider_descriptor(
+[[nodiscard]] const bioseq_cache_provider& provider_descriptor(
         std::size_t index) noexcept {
-    return index == kBatchJoinProviderIndex
+    return index == k_batch_join_provider_index
         ? batch_join_provider_descriptor()
         : provider_descriptor();
 }
@@ -186,18 +186,18 @@ batch_join_provider_descriptor() noexcept {
 
 void reset_registration(std::size_t index) noexcept {
     g_registered[index] = false;
-    g_registrations[index] = BioseqCacheProviderRegistrationV2{
+    g_registrations[index] = bioseq_cache_provider_registration{
         .struct_size = static_cast<std::uint32_t>(
-            sizeof(BioseqCacheProviderRegistrationV2)),
+            sizeof(bioseq_cache_provider_registration)),
     };
 }
 
 [[nodiscard]] bool cache_api_valid(
-        const BioseqCacheApiV2* api) noexcept {
+        const bioseq_cache_api* api) noexcept {
     return api != nullptr
-        && api->struct_size >= sizeof(BioseqCacheApiV2)
-        && api->abi_version == bioseq::cache::kProviderAbiVersion
-        && api->postgres_major == kPostgresMajorVersion
+        && api->struct_size >= sizeof(bioseq_cache_api)
+        && api->abi_revision == bioseq::cache::k_provider_abi_revision
+        && api->postgres_major == k_postgres_major_version
         && api->reserved == 0
         && api->instance_cookie != 0
         && api->register_provider != nullptr
@@ -205,31 +205,31 @@ void reset_registration(std::size_t index) noexcept {
         && api->record_relation_write != nullptr
         && api->planner_bridge != nullptr
         && api->planner_bridge->struct_size
-            >= sizeof(BioseqCachePlannerBridgeV2)
-        && api->planner_bridge->abi_version
-            == bioseq::cache::kProviderAbiVersion
+            >= sizeof(bioseq_cache_planner_bridge)
+        && api->planner_bridge->abi_revision
+            == bioseq::cache::k_provider_abi_revision
         && api->planner_bridge->postgres_major
-            == kPostgresMajorVersion
+            == k_postgres_major_version
         && api->planner_bridge->after_provider_rel_paths != nullptr
         && api->planner_bridge->after_planned_statement != nullptr;
 }
 
 [[nodiscard]] bool registration_valid(
-        const BioseqCacheProviderRegistrationV2& registration,
+        const bioseq_cache_provider_registration& registration,
         std::uint32_t provider_id) noexcept {
     return registration.struct_size
-            >= sizeof(BioseqCacheProviderRegistrationV2)
+            >= sizeof(bioseq_cache_provider_registration)
         && registration.provider_id == provider_id
         && registration.registry_generation != 0
         && registration.owner_cookie != 0;
 }
 
-void rollback_registrations(const BioseqCacheApiV2* api) {
+void rollback_registrations(const bioseq_cache_api* api) {
     for (std::size_t offset = 0;
-         offset < kProviderDescriptorCount;
+         offset < k_provider_descriptor_count;
          ++offset) {
         const std::size_t index =
-            kProviderDescriptorCount - offset - 1U;
+            k_provider_descriptor_count - offset - 1U;
         if (!g_registered[index]) continue;
         const bool removed = bioseq::postgres::support::invoke_pg_as_cpp(
             [api, index] {
@@ -239,14 +239,14 @@ void rollback_registrations(const BioseqCacheApiV2* api) {
     }
 }
 
-extern "C" BioseqCacheStatusV2 bind_cache_api(
-        const BioseqCacheApiV2* api) noexcept {
+extern "C" bioseq_cache_status bind_cache_api(
+        const bioseq_cache_api* api) noexcept {
     if (!cache_api_valid(api)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     if (all_providers_registered() && g_bound_api == api
         && g_bound_api_cookie == api->instance_cookie) {
-        return BIOSEQ_CACHE_STATUS_OK;
+        return bioseq_cache_status_ok;
     }
     try {
         if (g_bound_api_cookie != 0
@@ -254,15 +254,15 @@ extern "C" BioseqCacheStatusV2 bind_cache_api(
                 || g_bound_api_cookie != api->instance_cookie)) {
             /*
              * A cache DSO replacement retires this process-local logical
-             * binding.  Production scan hooks remain installed for backend
-             * lifetime, so deliberately do not call the old unregister slot.
+             * binding. Production scan hooks remain installed for backend
+             * lifetime, so provider unregistration is deliberately omitted.
              */
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [] { ResetPlanCache(); });
             g_bound_api = nullptr;
             g_bound_api_cookie = 0;
             for (std::size_t index = 0;
-                 index < kProviderDescriptorCount;
+                 index < k_provider_descriptor_count;
                  ++index) {
                 reset_registration(index);
             }
@@ -271,21 +271,21 @@ extern "C" BioseqCacheStatusV2 bind_cache_api(
         g_bound_api = api;
         g_bound_api_cookie = api->instance_cookie;
         for (std::size_t index = 0;
-             index < kProviderDescriptorCount;
+             index < k_provider_descriptor_count;
              ++index) {
-            BioseqCacheProviderRegistrationV2 candidate{
+            bioseq_cache_provider_registration candidate{
                 .struct_size = static_cast<std::uint32_t>(
-                    sizeof(BioseqCacheProviderRegistrationV2)),
+                    sizeof(bioseq_cache_provider_registration)),
             };
-            const BioseqCacheProviderV2& descriptor =
+            const bioseq_cache_provider& descriptor =
                 provider_descriptor(index);
-            const BioseqCacheStatusV2 status =
+            const bioseq_cache_status status =
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [api, &candidate, &descriptor] {
                         return api->register_provider(
                             &descriptor, &candidate);
                     });
-            if (status != BIOSEQ_CACHE_STATUS_OK
+            if (status != bioseq_cache_status_ok
                 || !registration_valid(
                     candidate, descriptor.provider_id)) {
                 rollback_registrations(api);
@@ -299,25 +299,25 @@ extern "C" BioseqCacheStatusV2 bind_cache_api(
                         g_bound_api_cookie = 0;
                     }
                 }
-                return status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                    ? BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                    : BIOSEQ_CACHE_STATUS_ERROR;
+                return status == bioseq_cache_status_unsupported
+                    ? bioseq_cache_status_unsupported
+                    : bioseq_cache_status_error;
             }
             g_registrations[index] = candidate;
             g_registered[index] = true;
         }
-        return BIOSEQ_CACHE_STATUS_OK;
+        return bioseq_cache_status_ok;
     } catch (...) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
 }
 
-inline BioseqCacheProviderDirectoryV2 g_directory{
+inline bioseq_cache_provider_directory g_directory{
     .struct_size =
         static_cast<std::uint32_t>(
-            sizeof(BioseqCacheProviderDirectoryV2)),
-    .abi_version = bioseq::cache::kProviderAbiVersion,
-    .postgres_major = kPostgresMajorVersion,
+            sizeof(bioseq_cache_provider_directory)),
+    .abi_revision = bioseq::cache::k_provider_abi_revision,
+    .postgres_major = k_postgres_major_version,
     .reserved = 0,
     .instance_cookie = 0,
     .bind_cache_api = &bind_cache_api,
@@ -327,7 +327,7 @@ inline BioseqCacheProviderDirectoryV2 g_directory{
 
 export void bioseq_cache_provider_preflight() {
     void** const directory_slot = find_rendezvous_variable(
-        bioseq::cache::kProviderDirectoryRendezvousName);
+        bioseq::cache::k_provider_directory_rendezvous_name);
     if (directory_slot == nullptr) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
@@ -339,24 +339,24 @@ export void bioseq_cache_provider_preflight() {
             (errcode(ERRCODE_DUPLICATE_OBJECT),
              errmsg("Bioseq cache-provider rendezvous is already owned"),
              errdetail("Rendezvous name: %s",
-                bioseq::cache::kProviderDirectoryRendezvousName)));
+                bioseq::cache::k_provider_directory_rendezvous_name)));
     }
     void** const api_slot = find_rendezvous_variable(
-        bioseq::cache::kCacheApiRendezvousName);
+        bioseq::cache::k_cache_api_rendezvous_name);
     if (api_slot == nullptr) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
              errmsg("Bioseq cache API rendezvous allocation failed")));
     }
     const auto* const cache_api =
-        static_cast<const BioseqCacheApiV2*>(*api_slot);
+        static_cast<const bioseq_cache_api*>(*api_slot);
     const bool cache_api_compatible =
         cache_api == nullptr || detail::cache_api_valid(cache_api);
     if (!cache_api_compatible) {
         ereport(WARNING,
             (errmsg("Bioseq ignored an incompatible cache API rendezvous"),
              errdetail("Rendezvous name: %s",
-                bioseq::cache::kCacheApiRendezvousName)));
+                bioseq::cache::k_cache_api_rendezvous_name)));
     }
     detail::g_directory_slot = directory_slot;
     detail::g_cache_api_slot = api_slot;
@@ -392,7 +392,7 @@ export void bioseq_cache_provider_publish_directory() {
 
     if (*detail::g_cache_api_slot == nullptr) return;
     const auto* api =
-        static_cast<const BioseqCacheApiV2*>(
+        static_cast<const bioseq_cache_api*>(
             *detail::g_cache_api_slot);
     if (api == detail::g_preflight_cache_api
         && !detail::g_preflight_cache_api_compatible) {
@@ -407,7 +407,7 @@ export void bioseq_cache_provider_publish_directory() {
         ereport(WARNING,
             (errmsg("Bioseq cache provider ignored an incompatible cache API"),
              errdetail("Rendezvous name: %s",
-                bioseq::cache::kCacheApiRendezvousName)));
+                bioseq::cache::k_cache_api_rendezvous_name)));
         return;
     }
     if (detail::g_preflight_cache_api != nullptr
@@ -415,9 +415,9 @@ export void bioseq_cache_provider_publish_directory() {
         ereport(WARNING,
             (errmsg("Bioseq cache API rendezvous changed during initialization")));
     }
-    const BioseqCacheStatusV2 status =
+    const bioseq_cache_status status =
         detail::bind_cache_api(api);
-    if (status != BIOSEQ_CACHE_STATUS_OK) {
+    if (status != bioseq_cache_status_ok) {
         ereport(WARNING,
             (errmsg("Bioseq exact cache provider registration failed"),
              errdetail("Provider status: %u",
@@ -438,7 +438,7 @@ export bool bioseq_cache_provider_is_bound() noexcept {
  */
 export void bioseq_cache_provider_after_planned_statement(
         PlannedStmt* statement) noexcept {
-    const BioseqCacheApiV2* const api = detail::g_bound_api;
+    const bioseq_cache_api* const api = detail::g_bound_api;
     if (statement == nullptr || !detail::all_providers_registered()
         || !detail::cache_api_valid(api)
         || api->instance_cookie != detail::g_bound_api_cookie) {

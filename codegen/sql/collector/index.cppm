@@ -1868,9 +1868,8 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     }
 }
 
-/// Source-only compatibility fixture for contract tests that intentionally
-/// exercise the transitional lexical collector. Production generation never
-/// calls this entry point.
+/// Source-only fixture for contract tests that exercise lexical collection.
+/// Production generation never calls this entry point.
 [[nodiscard]] inline collected_program collect_fixture_sources(
     const std::vector<std::filesystem::path>& source_paths) {
     std::vector<structural_analysis::translation_unit> units;
@@ -1938,7 +1937,7 @@ collect_provenance_checked_fixture(
             unit, "relation_entity_handle");
     const bool uses_guc_access =
         contains_structural_terminal_identifier(
-            unit, "guc_registration_access");
+            unit, "postgres_enum_registration_access");
     const bool uses_guc_registration =
         contains_structural_terminal_identifier(
             unit, "postgres_enum_registration");

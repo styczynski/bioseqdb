@@ -310,9 +310,9 @@ struct provenance_record {
     bool user_code_callback_free{};
 };
 
-/// Versioned provenance authority for a PostgreSQL source revision.
+/// Revision-pinned provenance authority for a PostgreSQL source revision.
 struct provenance_bundle {
-    std::uint32_t schema_version{2};
+    std::uint32_t schema_revision{2};
     std::uint32_t postgresql_major{17};
     std::string postgresql_tag;
     std::string postgresql_revision;
@@ -359,8 +359,8 @@ struct analysis_completeness {
     std::vector<std::string> control_flow_assembly_sites;
 };
 
-/// Compiler and provenance evidence for one active bridge transition.
-struct bridge_transition_proof {
+/// Validated compiler and provenance contract for one active bridge transition.
+struct bridge_transition_validation {
     provenance_reference primitive;
     std::string target_usr;
     std::string target_qualified_name;
@@ -393,7 +393,7 @@ struct error_site {
     std::vector<crossing_type> crossing_types;
     std::vector<crossing_type> bridge_callable_crossing_types;
     std::optional<provenance_reference> no_longjmp_allowlist_evidence;
-    std::optional<bridge_transition_proof>
+    std::optional<bridge_transition_validation>
         bridge_evidence;
     bool analyzer_entered_bridge_callable{};
     bool generated_boundary_tail{};
@@ -445,9 +445,17 @@ struct symbol_group {
     std::vector<std::string> sql_identities;
 };
 
+/// Semantic identity for the current Clang CFG/lifetime analyzer contract.
+[[nodiscard]] inline std::string clang_cfg_lifetime_identity(
+    std::string_view clang_version) {
+    return "bioseq-clang-cfg-lifetime\n"
+        "revision=2\n"
+        "clang_version=" + std::string{clang_version};
+}
+
 /// Canonical static ERROR-safety ledger for one compilation profile.
 struct safety_ledger {
-    std::uint32_t schema_version{2};
+    std::uint32_t schema_revision{2};
     compilation_profile profile{compilation_profile::production};
     std::uint32_t postgresql_major{17};
     std::string postgresql_revision;
@@ -481,34 +489,34 @@ struct runtime_source_anchor {
 
 /// Exact visit/trigger counts and ordering required by a runtime relation.
 struct runtime_probe_contract {
-    std::uint32_t abi_version{2};
+    std::uint32_t abi_revision{2};
     std::size_t expected_visit_count{1};
     std::size_t expected_trigger_count{};
     runtime_probe_ordering ordering{
         runtime_probe_ordering::visit_only};
 };
 
-/// Returns the ABI-v2 runtime probe contract for a relation.
+/// Returns the ABI revision 2 runtime probe contract for a relation.
 [[nodiscard]] inline runtime_probe_contract
 runtime_probe_contract_for(runtime_relation relation) {
     switch (relation) {
         case runtime_relation::natural_at_site:
             return {
-                .abi_version = 2,
+                .abi_revision = 2,
                 .expected_visit_count = 1,
                 .expected_trigger_count = 0,
                 .ordering = runtime_probe_ordering::visit_only,
             };
         case runtime_relation::injected_routes_to_site:
             return {
-                .abi_version = 2,
+                .abi_revision = 2,
                 .expected_visit_count = 1,
                 .expected_trigger_count = 1,
                 .ordering = runtime_probe_ordering::trigger_before_visit,
             };
         case runtime_relation::injected_after_site_success:
             return {
-                .abi_version = 2,
+                .abi_revision = 2,
                 .expected_visit_count = 1,
                 .expected_trigger_count = 1,
                 .ordering = runtime_probe_ordering::visit_before_trigger,
@@ -522,6 +530,7 @@ struct runtime_probe_inventory_entry {
     std::string sql_identity;
     std::string fault_key;
     std::string site_id;
+    std::uint32_t site_revision{2};
     runtime_relation relation{runtime_relation::natural_at_site};
     std::string ledger_site_sha256;
     runtime_source_anchor site_anchor;
@@ -534,9 +543,9 @@ struct runtime_probe_inventory_entry {
 
 /// Canonical runtime-probe inventory for one compiler-fact authority.
 struct runtime_probe_inventory {
-    std::uint32_t schema_version{1};
+    std::uint32_t schema_revision{1};
     compilation_profile profile{compilation_profile::production};
-    std::uint32_t probe_abi_version{2};
+    std::uint32_t probe_abi_revision{2};
     std::string ledger_sha256;
     std::string compiler_facts_sha256;
     std::string sql_manifest_sha256;
@@ -592,7 +601,7 @@ struct runtime_case {
 
 /// Complete runtime evidence matrix covering both compilation profiles.
 struct runtime_matrix {
-    std::uint32_t schema_version{2};
+    std::uint32_t schema_revision{2};
     std::string production_ledger_sha256;
     std::string test_indexes_ledger_sha256;
     std::string production_sql_manifest_sha256;

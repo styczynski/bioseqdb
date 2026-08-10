@@ -133,22 +133,23 @@ inline std::atomic<std::uint64_t> next_allocation_id{1u};
     return allocation_id;
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct lazy_sequence_traits {
-    using alphabet_type = Alphabet;
+    using alphabet_type = p_alphabet;
     using storage_unit = std::uint8_t;
     using packed_alphabet_range = compact_sequence_range<sequence_custom_alphabet<
-        Alphabet,
+        p_alphabet,
         std::uint8_t,
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>)>>;
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>)>>;
     using packed_traits = typename packed_alphabet_range::traits;
 
-    static constexpr std::size_t logical_bits_per_symbol =
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>);
-    static constexpr std::size_t rank_stream_bytes_per_symbol = 1;
-    static constexpr std::size_t alphabet_size = seqan3::alphabet_size<Alphabet>;
-    static_assert(logical_bits_per_symbol > 0
-                  && logical_bits_per_symbol <= CHAR_BIT);
+    static constexpr std::size_t k_logical_bits_per_symbol =
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
+    static constexpr std::size_t k_rank_stream_bytes_per_symbol = 1;
+    static constexpr std::size_t k_alphabet_size =
+        seqan3::alphabet_size<p_alphabet>;
+    static_assert(k_logical_bits_per_symbol > 0
+                  && k_logical_bits_per_symbol <= CHAR_BIT);
 
     [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
         return static_cast<storage_unit>(packed_traits::letter_complement(rank));
@@ -179,11 +180,11 @@ struct lazy_sequence_traits {
         / bits_per_symbol;
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 class lazy_sequence_view {
 public:
-    using alphabet_type = Alphabet;
-    using traits = lazy_sequence_traits<Alphabet>;
+    using alphabet_type = p_alphabet;
+    using traits = lazy_sequence_traits<p_alphabet>;
     using slice_tag = lazy_sequence_slice_tag;
 
     using read_at_fn = std::uint8_t const* (*)(
@@ -275,16 +276,17 @@ public:
         }
 
         const sequence_size_t length = to - from;
-        constexpr std::uint8_t bits = static_cast<std::uint8_t>(
-            traits::logical_bits_per_symbol);
+        constexpr std::uint8_t k_bits_per_symbol =
+            static_cast<std::uint8_t>(traits::k_logical_bits_per_symbol);
         const sequence_size_t letters_per_unit =
             static_cast<sequence_size_t>(
-                packed_letters_per_unit(requested_width, bits));
+                packed_letters_per_unit(
+                    requested_width, k_bits_per_symbol));
         const resident_packed_sequence& region = *result;
 
         if (letters_per_unit == 0u || region.logical_length != length
             || region.storage_unit_width != requested_width
-            || region.bits_per_symbol != bits
+            || region.bits_per_symbol != k_bits_per_symbol
             || region.bit_order
                 != packed_symbol_order::least_significant_symbol_first) {
             return std::nullopt;
@@ -358,7 +360,7 @@ public:
             state_, destination.data(), unit_count, requested_width);
     }
 
-    template <bool IsReversed, bool WriteReversed = false>
+    template <bool p_is_reversed, bool p_write_reversed = false>
     void copy_ranks(std::span<std::uint8_t> output,
                          std::size_t from,
                          std::size_t to) const {
@@ -368,7 +370,8 @@ public:
         if (from == to) {
             return;
         }
-        auto cursor = rank_reader<IsReversed, WriteReversed, std::uint8_t, 2>();
+        auto cursor = rank_reader<
+            p_is_reversed, p_write_reversed, std::uint8_t, 2>();
         const std::size_t length = to - from;
         const std::uint8_t* source = cursor.read_at(
             static_cast<sequence_size_t>(from), length, output);
@@ -377,28 +380,29 @@ public:
         }
     }
 
-    template <bool IsReversed,
-              bool WriteReversed,
-              typename StoredType,
-              std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              typename p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     struct rank_window_reader {
         lazy_sequence_view const* parent{};
 
-        [[nodiscard]] StoredType const* read_at(
+        [[nodiscard]] p_stored_type const* read_at(
                 sequence_size_t bp_from,
                 std::size_t required_length,
-                std::span<StoredType> scratch) const {
-            static_assert(std::same_as<StoredType, std::uint8_t>);
-            static_assert(MaxLoadedSlots == 2,
+                std::span<p_stored_type> scratch) const {
+            static_assert(std::same_as<p_stored_type, std::uint8_t>);
+            static_assert(p_max_loaded_slots == 2,
                           "facade backends implement the two-slot API");
             if (bp_from > parent->bp_size()
                 || required_length > parent->bp_size() - bp_from
                 || scratch.size() < required_length) {
                 abort_lazy_sequence_access("lazy sequence read_at range is invalid");
             }
-            constexpr std::size_t orientation =
-                (IsReversed ? 2u : 0u) | (WriteReversed ? 1u : 0u);
-            const std::uint8_t* result = parent->ops_->read_at[orientation](
+            constexpr std::size_t k_orientation =
+                (p_is_reversed ? 2u : 0u)
+                | (p_write_reversed ? 1u : 0u);
+            const std::uint8_t* result = parent->ops_->read_at[k_orientation](
                 parent->state_, bp_from, required_length, scratch);
             if (required_length != 0u && result == nullptr) {
                 abort_lazy_sequence_access("lazy sequence backend returned null");
@@ -407,23 +411,26 @@ public:
         }
     };
 
-    template <bool IsReversed,
-              bool WriteReversed,
-              typename StoredType,
-              std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              typename p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     [[nodiscard]] auto rank_reader() const noexcept {
-        return rank_window_reader<IsReversed, WriteReversed,
-                                StoredType, MaxLoadedSlots>{this};
+        return rank_window_reader<
+            p_is_reversed,
+            p_write_reversed,
+            p_stored_type,
+            p_max_loaded_slots>{this};
     }
 
     class rank_iterator {
-        static constexpr std::size_t chunk_size = 256;
+        static constexpr std::size_t k_chunk_size = 256;
 
         lazy_sequence_view const* parent_{};
         sequence_size_t position_{};
         mutable sequence_size_t loaded_from_{};
         mutable std::size_t loaded_count_{};
-        mutable std::array<std::uint8_t, chunk_size> scratch_{};
+        mutable std::array<std::uint8_t, k_chunk_size> scratch_{};
         mutable std::uint8_t const* loaded_{};
 
         void ensure_loaded() const {
@@ -438,7 +445,7 @@ public:
             loaded_from_ = position_;
             loaded_count_ = static_cast<std::size_t>(
                 std::min<sequence_size_t>(
-                    chunk_size, parent_->bp_size() - position_));
+                    k_chunk_size, parent_->bp_size() - position_));
             loaded_ = parent_->ops_->read_at[0](
                 parent_->state_, loaded_from_, loaded_count_, scratch_);
             if (loaded_count_ != 0u && loaded_ == nullptr) {
@@ -524,16 +531,16 @@ public:
     [[nodiscard]] rank_iterator begin() const noexcept { return {this, 0u}; }
     [[nodiscard]] rank_iterator end() const noexcept { return {this, bp_size()}; }
 
-    template <iterator_mode Mode>
+    template <iterator_mode p_mode>
     [[nodiscard]] rank_iterator iter(rank_iterator value) const noexcept {
-        static_assert(Mode == iterator_mode::logical_rank,
+        static_assert(p_mode == iterator_mode::logical_rank,
                       "facade iter supports logical iterator_mode::logical_rank coordinates only");
         return value;
     }
 
-    template <iterator_mode Mode>
+    template <iterator_mode p_mode>
     [[nodiscard]] auto iterable() const noexcept {
-        static_assert(Mode == iterator_mode::logical_rank,
+        static_assert(p_mode == iterator_mode::logical_rank,
                       "facade iteration is a logical-rank iterator_mode::logical_rank range");
         return std::ranges::subrange(begin(), end());
     }
@@ -544,9 +551,9 @@ private:
     sequence_payload_allocation_observer const* payload_observer_{};
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline bool is_worker_shareable(
-        lazy_sequence_view<Alphabet> value) noexcept {
+        lazy_sequence_view<p_alphabet> value) noexcept {
     return value.worker_shareable();
 }
 
@@ -555,12 +562,12 @@ static_assert(lazy_sequence_slice<
 static_assert(resident_packed_sequence_view<
               lazy_sequence_view<seq::dna4>>);
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 class retained_lazy_sequence_view {
 public:
     using release_fn = void (*)(void*) noexcept;
 
-    retained_lazy_sequence_view(lazy_sequence_view<Alphabet> view,
+    retained_lazy_sequence_view(lazy_sequence_view<p_alphabet> view,
                              void* lifetime_state,
                              release_fn release) noexcept
         : view_(view), lifetime_state_(lifetime_state), release_(release) {
@@ -582,7 +589,7 @@ public:
 
     ~retained_lazy_sequence_view() noexcept { release_noexcept(); }
 
-    [[nodiscard]] lazy_sequence_view<Alphabet> view() const noexcept {
+    [[nodiscard]] lazy_sequence_view<p_alphabet> view() const noexcept {
         return view_;
     }
 
@@ -598,76 +605,102 @@ public:
     }
 
 private:
-    lazy_sequence_view<Alphabet> view_;
+    lazy_sequence_view<p_alphabet> view_;
     void* lifetime_state_{};
     release_fn release_{};
 };
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 struct lazy_sequence;
 
 /** Pointer-sized owner adapter for an already-resident compact range. */
 
-template <class R, class Scanner>
-    requires (!Scanner::is_fragmented())
-struct lazy_sequence<R, Scanner> {
-    using range_type   = R;
-    using scanner_type = Scanner;
-    using traits       = typename compact_sequence_range<R>::traits;
+template <class p_sequence_range, class p_scanner>
+    requires (!p_scanner::is_fragmented())
+struct lazy_sequence<p_sequence_range, p_scanner> {
+    using range_type = p_sequence_range;
+    using scanner_type = p_scanner;
+    using traits = typename compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename traits::storage_unit;
 
-    static constexpr std::size_t fragment_cache_capacity = 1u;
-    static constexpr std::size_t retained_fragment_limit = 1u;
+    static constexpr std::size_t k_fragment_cache_capacity = 1u;
+    static constexpr std::size_t k_retained_fragment_limit = 1u;
 
-    const compact_sequence_range<R>* range_ = nullptr;
+    const compact_sequence_range<p_sequence_range>* range_ = nullptr;
 
     [[nodiscard]] [[gnu::always_inline]]
-    explicit constexpr lazy_sequence(const compact_sequence_range<R>& ref) noexcept
-        : range_(&ref) {}
+    explicit constexpr lazy_sequence(
+            const compact_sequence_range<p_sequence_range>& range) noexcept
+        : range_(&range) {}
 
     /// The underlying range. Algorithm code that has an all-in-RAM fast path
     /// (e.g. the SIMD minimizer kernel) calls this under
-    /// `if constexpr (!Scanner::is_fragmented())`.
+    /// `if constexpr (!p_scanner::is_fragmented())`.
     [[nodiscard]] [[gnu::always_inline]]
-    const compact_sequence_range<R>& underlying() const noexcept { return *range_; }
+    const compact_sequence_range<p_sequence_range>& underlying() const noexcept {
+        return *range_;
+    }
 
     // ---- size / shape forwarders --------------------------------------
     [[nodiscard]] [[gnu::always_inline]]
-    sequence_size_t bp_size()   const noexcept { return static_cast<sequence_size_t>(range_->bp_size()); }
+    sequence_size_t bp_size() const noexcept {
+        return static_cast<sequence_size_t>(range_->bp_size());
+    }
     [[nodiscard]] [[gnu::always_inline]]
-    sequence_size_t size()      const noexcept { return static_cast<sequence_size_t>(range_->size()); }
+    sequence_size_t size() const noexcept {
+        return static_cast<sequence_size_t>(range_->size());
+    }
     [[nodiscard]] [[gnu::always_inline]]
-    sequence_size_t byte_size() const noexcept { return static_cast<sequence_size_t>(range_->byte_size()); }
+    sequence_size_t byte_size() const noexcept {
+        return static_cast<sequence_size_t>(range_->byte_size());
+    }
     [[nodiscard]] [[gnu::always_inline]]
-    std::uint16_t   padding()   const noexcept { return static_cast<std::uint16_t>(range_->padding()); }
+    std::uint16_t padding() const noexcept {
+        return static_cast<std::uint16_t>(range_->padding());
+    }
     [[nodiscard]] [[gnu::always_inline]]
     std::size_t fragment_count() const noexcept { return 1; }
 
     // ---- iterator (the underlying range's iterator) -------------------
-    using iterator_impl = typename compact_sequence_range<R>::iterator;
-    [[nodiscard]] [[gnu::always_inline]] iterator_impl cbegin() const noexcept { return range_->cbegin(); }
-    [[nodiscard]] [[gnu::always_inline]] iterator_impl cend()   const noexcept { return range_->cend();   }
-    [[nodiscard]] [[gnu::always_inline]] iterator_impl begin()  const noexcept { return range_->cbegin(); }
-    [[nodiscard]] [[gnu::always_inline]] iterator_impl end()    const noexcept { return range_->cend();   }
+    using iterator_impl =
+        typename compact_sequence_range<p_sequence_range>::iterator;
+    [[nodiscard]] [[gnu::always_inline]] iterator_impl cbegin() const noexcept {
+        return range_->cbegin();
+    }
+    [[nodiscard]] [[gnu::always_inline]] iterator_impl cend() const noexcept {
+        return range_->cend();
+    }
+    [[nodiscard]] [[gnu::always_inline]] iterator_impl begin() const noexcept {
+        return range_->cbegin();
+    }
+    [[nodiscard]] [[gnu::always_inline]] iterator_impl end() const noexcept {
+        return range_->cend();
+    }
 
-    template <iterator_mode M, class I>
-    [[nodiscard]] [[gnu::always_inline]] auto iter(const I& it) const noexcept
-        { return range_->template iter<M>(it); }
-    template <iterator_mode M>
+    template <iterator_mode p_mode, class p_iterator>
+    [[nodiscard]] [[gnu::always_inline]] auto iter(
+            const p_iterator& iterator) const noexcept {
+        return range_->template iter<p_mode>(iterator);
+    }
+    template <iterator_mode p_mode>
     [[nodiscard]] [[gnu::always_inline]] auto iterable() const noexcept
-        { return range_->template iterable<M>(); }
+        { return range_->template iterable<p_mode>(); }
 
-    template <class I>
-    [[nodiscard]] [[gnu::always_inline]] std::string to_string(I b, I e, bool split_units = false) const
-        { return range_->to_string(b, e, split_units); }
+    template <class p_iterator>
+    [[nodiscard]] [[gnu::always_inline]] std::string to_string(
+            p_iterator begin,
+            p_iterator end,
+            bool split_units = false) const {
+        return range_->to_string(begin, end, split_units);
+    }
 
     // ---- bit-cast view (exposed on the no-fragment side only) ---------
-    template <class U>
+    template <class p_storage_unit>
     [[nodiscard]] [[gnu::always_inline]] auto bit_cast_to_storage_unit() const noexcept
-        { return range_->template bit_cast_to_storage_unit<U>(); }
+        { return range_->template bit_cast_to_storage_unit<p_storage_unit>(); }
 
     // ---- encode forwarders (the aligner-facing API) -------------------
-    template <bool is_reversed, bool write_reversed = false>
+    template <bool p_is_reversed, bool p_write_reversed = false>
     [[gnu::always_inline]]
     void copy_ranks(
         std::span<std::uint8_t> destination,
@@ -680,18 +713,23 @@ struct lazy_sequence<R, Scanner> {
         if (from == to) {
             return;
         }
-        range_->template to_encoded_into<is_reversed, write_reversed>(
+        range_->template to_encoded_into<
+            p_is_reversed, p_write_reversed>(
             destination, from, to);
     }
 
     /** Rank-window reader that writes resident ranks into caller scratch. */
-    template <bool is_reversed, bool write_reversed, class stored_type_t, std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              class p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     struct rank_window_reader {
         const lazy_sequence* parent_ = nullptr;
         explicit rank_window_reader(const lazy_sequence* parent) noexcept : parent_(parent) {}
-        [[nodiscard]] const stored_type_t* read_at(sequence_size_t bp_from,
-                                                  std::size_t required_length,
-                                                  std::span<stored_type_t> scratch) const {
+        [[nodiscard]] const p_stored_type* read_at(
+                sequence_size_t bp_from,
+                std::size_t required_length,
+                std::span<p_stored_type> scratch) const {
             if (bp_from > parent_->bp_size()
                 || required_length > parent_->bp_size() - bp_from
                 || scratch.size() < required_length
@@ -702,58 +740,69 @@ struct lazy_sequence<R, Scanner> {
             if (required_length == 0u) {
                 return scratch.data();
             }
-            static_assert(sizeof(stored_type_t) == 1,
+            static_assert(sizeof(p_stored_type) == 1,
                 "no-fragment rank_reader::read_at expects a 1-byte encoded type");
-            parent_->range_->template to_encoded_into<is_reversed, write_reversed>(
-                std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(scratch.data()), required_length),
+            parent_->range_->template to_encoded_into<
+                p_is_reversed, p_write_reversed>(
+                std::span<std::uint8_t>(
+                    reinterpret_cast<std::uint8_t*>(scratch.data()),
+                    required_length),
                 static_cast<std::size_t>(bp_from),
                 static_cast<std::size_t>(bp_from) + required_length);
             return scratch.data();
         }
     };
-    template <bool is_reversed, bool write_reversed, class stored_type_t, std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              class p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     [[nodiscard]] auto rank_reader() const noexcept {
-        return rank_window_reader<is_reversed, write_reversed, stored_type_t, MaxLoadedSlots>(this);
+        return rank_window_reader<
+            p_is_reversed,
+            p_write_reversed,
+            p_stored_type,
+            p_max_loaded_slots>(this);
     }
 
     // ---- read_cptr — both overloads forward to the resident bytes -----
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it) const noexcept {
-        return compact_sequence_range<R>::read_cptr(it);
+        return compact_sequence_range<p_sequence_range>::read_cptr(it);
     }
     [[nodiscard]] [[gnu::always_inline]]
     const storage_unit* read_cptr(const iterator_impl& it,
                                   std::span<storage_unit> /*scratch unused*/,
                                   std::size_t /*required_length unused*/) const noexcept {
-        return compact_sequence_range<R>::read_cptr(it);
+        return compact_sequence_range<p_sequence_range>::read_cptr(it);
     }
 };
 /** Bounded-cache owner adapter for a fragmented scanner. */
 
-template <class R, class Scanner>
-    requires (Scanner::is_fragmented())
-struct lazy_sequence<R, Scanner> {
-    using range_type   = R;
-    using scanner_type = Scanner;
-    using traits       = typename compact_sequence_range<R>::traits;
+template <class p_sequence_range, class p_scanner>
+    requires (p_scanner::is_fragmented())
+struct lazy_sequence<p_sequence_range, p_scanner> {
+    using range_type = p_sequence_range;
+    using scanner_type = p_scanner;
+    using traits = typename compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename traits::storage_unit;
-    using fragment_type     = sequence_fragment<R>;
+    using fragment_type = sequence_fragment<p_sequence_range>;
 
-    static constexpr std::size_t fragment_storage_units =
-        Scanner::fragment_storage_units;
-    static constexpr std::size_t fragment_cache_capacity = 16u;
-    static constexpr std::size_t retained_fragment_limit = 1u;
-    static_assert(fragment_cache_capacity > retained_fragment_limit,
+    static constexpr std::size_t k_fragment_storage_units =
+        p_scanner::fragment_storage_units;
+    static constexpr std::size_t k_fragment_cache_capacity = 16u;
+    static constexpr std::size_t k_retained_fragment_limit = 1u;
+    static_assert(k_fragment_cache_capacity > k_retained_fragment_limit,
                   "buffer capacity must exceed the post-eviction target count");
 
-    static constexpr std::size_t letters_per_unit = traits::letters_per_unit;
-    static constexpr std::size_t bits_per_symbol = traits::bits_per_char;
+    static constexpr std::size_t k_letters_per_unit =
+        traits::letters_per_unit;
+    static constexpr std::size_t k_bits_per_symbol = traits::bits_per_char;
     static_assert(
-        fragment_storage_units
-        <= (std::numeric_limits<std::size_t>::max)() / letters_per_unit,
+        k_fragment_storage_units
+        <= (std::numeric_limits<std::size_t>::max)() / k_letters_per_unit,
         "fragment rank capacity must fit size_t");
-    static constexpr std::size_t fragment_logical_capacity =
-        fragment_storage_units * letters_per_unit;
+    static constexpr std::size_t k_fragment_logical_capacity =
+        k_fragment_storage_units * k_letters_per_unit;
 
     // Iterators and rank readers may retain cache-slot references, so the
     // scanner owner has a stable address for its complete lifetime.
@@ -762,7 +811,7 @@ struct lazy_sequence<R, Scanner> {
     lazy_sequence(lazy_sequence&&)                 = delete;
     lazy_sequence& operator=(lazy_sequence&&)      = delete;
 
-    explicit lazy_sequence(Scanner&& scanner) noexcept
+    explicit lazy_sequence(p_scanner&& scanner) noexcept
         : scanner_(std::move(scanner)) {}
     ~lazy_sequence() = default;
 
@@ -779,7 +828,9 @@ struct lazy_sequence<R, Scanner> {
     }
     [[nodiscard]] [[gnu::always_inline]]
     std::size_t fragment_count() const noexcept { return scanner_.fragment_count(); }
-    [[nodiscard]] const Scanner& scanner() const noexcept { return scanner_; }
+    [[nodiscard]] const p_scanner& scanner() const noexcept {
+        return scanner_;
+    }
 
     /** Packed-unit iterator carrying an owner-qualified global unit index. */
     struct iterator_impl {
@@ -803,25 +854,30 @@ struct lazy_sequence<R, Scanner> {
 
         [[nodiscard]] [[gnu::always_inline]]
         sequence_size_t current_fragment_index() const noexcept {
-            return global_unit_ / fragment_storage_units;
+            return global_unit_ / k_fragment_storage_units;
         }
         [[nodiscard]] [[gnu::always_inline]]
         sequence_size_t current_fragment_unit_offset() const noexcept {
-            return global_unit_ % fragment_storage_units;
+            return global_unit_ % k_fragment_storage_units;
         }
         [[nodiscard]] [[gnu::always_inline]]
         sequence_size_t global_unit_index() const noexcept { return global_unit_; }
 
         [[nodiscard]] [[gnu::always_inline]]
-        friend bool operator==(const iterator_impl& a, const iterator_impl& b) noexcept {
-            return a.parent_ == b.parent_ && a.global_unit_ == b.global_unit_;
+        friend bool operator==(
+                const iterator_impl& left,
+                const iterator_impl& right) noexcept {
+            return left.parent_ == right.parent_
+                && left.global_unit_ == right.global_unit_;
         }
         [[nodiscard]] [[gnu::always_inline]]
-        friend std::strong_ordering operator<=>(const iterator_impl& a, const iterator_impl& b) noexcept {
-            if (a.parent_ != b.parent_) {
+        friend std::strong_ordering operator<=> (
+                const iterator_impl& left,
+                const iterator_impl& right) noexcept {
+            if (left.parent_ != right.parent_) {
                 abort_lazy_sequence_access("lazy iterator: cross-parent comparison");
             }
-            return a.global_unit_ <=> b.global_unit_;
+            return left.global_unit_ <=> right.global_unit_;
         }
     };
 
@@ -831,24 +887,28 @@ struct lazy_sequence<R, Scanner> {
     [[nodiscard]] iterator_impl end()    const noexcept { return cend(); }
 
     // ---- fragment management ------------------------------------------
-    [[nodiscard]] const fragment_type& ensure_fragment(std::size_t n) const {
-        if (n >= scanner_.fragment_count()) {
+    [[nodiscard]] const fragment_type& ensure_fragment(
+            std::size_t fragment_number) const {
+        if (fragment_number >= scanner_.fragment_count()) {
             abort_lazy_sequence_access("fragment index is out of range");
         }
-        auto key_of = [](const fragment_type& h) noexcept { return h.fragment_index; };
-        if (auto found = fragments_.find(n, key_of); found.has_value()) {
+        auto key_of = [](const fragment_type& fragment) noexcept {
+            return fragment.fragment_index;
+        };
+        if (auto found = fragments_.find(fragment_number, key_of);
+            found.has_value()) {
             return fragments_.slot_at(found->first);
         }
-        load_fragment(n);
-        auto found2 = fragments_.find(n, key_of);
-        if (!found2.has_value()) {
+        load_fragment(fragment_number);
+        auto loaded_fragment = fragments_.find(fragment_number, key_of);
+        if (!loaded_fragment.has_value()) {
             abort_lazy_sequence_access("lazy: ensure_fragment failed to load fragment");
         }
-        return fragments_.slot_at(found2->first);
+        return fragments_.slot_at(loaded_fragment->first);
     }
 
     void evict_old_fragments() const {
-        while (fragments_.valid_count() > retained_fragment_limit) {
+        while (fragments_.valid_count() > k_retained_fragment_limit) {
             fragments_.evict_oldest([this](fragment_type& evicted) noexcept {
                 scanner_.release_fragment(evicted.fragment_index);
             });
@@ -872,36 +932,47 @@ struct lazy_sequence<R, Scanner> {
             return scratch.data();
         }
         const sequence_size_t fragment_index =
-            it.global_unit_ / fragment_storage_units;
+            it.global_unit_ / k_fragment_storage_units;
         if (fragment_index > static_cast<sequence_size_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
             abort_lazy_sequence_access(
                 "packed sequence fragment index is unsupported");
         }
-        const std::size_t cur_frag = static_cast<std::size_t>(fragment_index);
-        const std::size_t in_frag_offset = static_cast<std::size_t>(it.global_unit_ % fragment_storage_units);
+        const std::size_t starting_fragment_number =
+            static_cast<std::size_t>(fragment_index);
+        const std::size_t in_frag_offset = static_cast<std::size_t>(
+            it.global_unit_ % k_fragment_storage_units);
 
-        const fragment_type& h = ensure_fragment(cur_frag);
+        const fragment_type& starting_fragment =
+            ensure_fragment(starting_fragment_number);
         // FAST PATH — request fits inside the current fragment. One compare.
-        if (in_frag_offset <= h.data.size()
-            && required_length <= h.data.size() - in_frag_offset) {
-            return h.data.data() + in_frag_offset;
+        if (in_frag_offset <= starting_fragment.data.size()
+            && required_length
+                <= starting_fragment.data.size() - in_frag_offset) {
+            return starting_fragment.data.data() + in_frag_offset;
         }
         // SLOW PATH — stitch into the caller's scratch span.
         std::size_t copied        = 0;
-        std::size_t cur_unit      = in_frag_offset;
-        std::size_t cur_frag_no   = cur_frag;
+        std::size_t current_unit_offset = in_frag_offset;
+        std::size_t current_fragment_number = starting_fragment_number;
         while (copied < required_length) {
-            const fragment_type& cur_h  = ensure_fragment(cur_frag_no);
-            const std::size_t avail   = cur_h.data.size() - cur_unit;
-            const std::size_t to_copy = std::min(avail, required_length - copied);
-            std::memcpy(scratch.data() + copied, cur_h.data.data() + cur_unit,
+            const fragment_type& current_fragment =
+                ensure_fragment(current_fragment_number);
+            const std::size_t available_units =
+                current_fragment.data.size() - current_unit_offset;
+            const std::size_t to_copy = std::min(
+                available_units, required_length - copied);
+            std::memcpy(
+                        scratch.data() + copied,
+                        current_fragment.data.data() + current_unit_offset,
                         to_copy * sizeof(storage_unit));
             copied += to_copy;
-            cur_frag_no += 1;
-            cur_unit = 0;
-            if (cur_frag_no >= scanner_.fragment_count() && copied < required_length) {
-                abort_lazy_sequence_access("read_cptr: required_length extends past end of sequence");
+            current_fragment_number += 1;
+            current_unit_offset = 0;
+            if (current_fragment_number >= scanner_.fragment_count()
+                && copied < required_length) {
+                abort_lazy_sequence_access(
+                    "packed read extends past the sequence end");
             }
         }
         evict_old_fragments();
@@ -915,21 +986,23 @@ struct lazy_sequence<R, Scanner> {
             abort_lazy_sequence_access("packed sequence iterator is out of range");
         }
         const sequence_size_t fragment_index =
-            it.global_unit_ / fragment_storage_units;
+            it.global_unit_ / k_fragment_storage_units;
         if (fragment_index > static_cast<sequence_size_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
             abort_lazy_sequence_access(
                 "packed sequence fragment index is unsupported");
         }
-        const std::size_t cur_frag = static_cast<std::size_t>(fragment_index);
-        const std::size_t in_frag_offset = static_cast<std::size_t>(it.global_unit_ % fragment_storage_units);
-        const fragment_type& h = ensure_fragment(cur_frag);
-        return h.data.data() + in_frag_offset;
+        const std::size_t fragment_number =
+            static_cast<std::size_t>(fragment_index);
+        const std::size_t in_frag_offset = static_cast<std::size_t>(
+            it.global_unit_ % k_fragment_storage_units);
+        const fragment_type& fragment = ensure_fragment(fragment_number);
+        return fragment.data.data() + in_frag_offset;
     }
 
     // ---- forward iterator_mode::logical_rank iterator (drives the scalar minimizer kernel) -----
-    // Streams letters across fragments in global order; iterates exactly
-    // bp_size() letters (matching compact_sequence_range's iter<iterator_mode::logical_rank> end, which
+    // Processes letters across fragments in global order; iterates exactly
+    // bp_size() letters, matching the compact range's logical-rank end, which
     // excludes trailing padding — sequences.cppm:1034). letter 0 sits at the
     // LSB of each storage unit (LSB-first, matching bp_scalar_iter).
     struct logical_rank_iterator_impl {
@@ -942,7 +1015,7 @@ struct lazy_sequence<R, Scanner> {
                     "logical-rank iterator dereferenced at end");
             }
             const sequence_size_t fragment_index =
-                global_rank_ / fragment_logical_capacity;
+                global_rank_ / k_fragment_logical_capacity;
             if (fragment_index
                 > static_cast<sequence_size_t>(
                     (std::numeric_limits<std::size_t>::max)())) {
@@ -951,13 +1024,18 @@ struct lazy_sequence<R, Scanner> {
             }
             const std::size_t frag =
                 static_cast<std::size_t>(fragment_index);
-            const fragment_type& h = parent_->ensure_fragment(frag);
-            const std::size_t bp_in_frag    = static_cast<std::size_t>(global_rank_ % fragment_logical_capacity);
-            const std::size_t unit_in_frag = bp_in_frag / letters_per_unit;
-            const std::size_t letter_in_unit = bp_in_frag % letters_per_unit;
-            const storage_unit u = h.data[unit_in_frag];
+            const fragment_type& fragment =
+                parent_->ensure_fragment(frag);
+            const std::size_t bp_in_frag = static_cast<std::size_t>(
+                global_rank_ % k_fragment_logical_capacity);
+            const std::size_t unit_in_frag =
+                bp_in_frag / k_letters_per_unit;
+            const std::size_t letter_in_unit =
+                bp_in_frag % k_letters_per_unit;
+            const storage_unit packed_unit = fragment.data[unit_in_frag];
             return static_cast<storage_unit>(
-                (u >> (letter_in_unit * bits_per_symbol)) & traits::char_mask);
+                (packed_unit >> (letter_in_unit * k_bits_per_symbol))
+                & traits::char_mask);
         }
         [[gnu::always_inline]] logical_rank_iterator_impl& operator++() noexcept {
             if (parent_ == nullptr || global_rank_ >= parent_->bp_size()) {
@@ -968,28 +1046,36 @@ struct lazy_sequence<R, Scanner> {
             return *this;
         }
         [[nodiscard]] [[gnu::always_inline]]
-        friend bool operator==(const logical_rank_iterator_impl& a, const logical_rank_iterator_impl& b) noexcept {
-            return a.parent_ == b.parent_ && a.global_rank_ == b.global_rank_;
+        friend bool operator==(
+                const logical_rank_iterator_impl& left,
+                const logical_rank_iterator_impl& right) noexcept {
+            return left.parent_ == right.parent_
+                && left.global_rank_ == right.global_rank_;
         }
     };
 
-    [[nodiscard]] logical_rank_iterator_impl rank_begin() const noexcept { return logical_rank_iterator_impl{this, 0}; }
-    [[nodiscard]] logical_rank_iterator_impl rank_end()   const noexcept { return logical_rank_iterator_impl{this, bp_size()}; }
+    [[nodiscard]] logical_rank_iterator_impl rank_begin() const noexcept {
+        return logical_rank_iterator_impl{this, 0};
+    }
+    [[nodiscard]] logical_rank_iterator_impl rank_end() const noexcept {
+        return logical_rank_iterator_impl{this, bp_size()};
+    }
 
-    // iter<iterator_mode::logical_rank> / iterable<iterator_mode::logical_rank> — mirror compact_sequence_range_base's surface so
+    // Mirror the compact range's logical-rank iteration surface so
     // the scalar minimizer kernel can run over the fragmented wrapper unchanged.
-    template <iterator_mode M, class I>
-    [[nodiscard]] logical_rank_iterator_impl iter(const I& it) const noexcept {
-        static_assert(M == iterator_mode::logical_rank,
-                      "fragmented lazy iter<M>: only iterator_mode::logical_rank iteration is supported "
-                      "(the minimizer kernel consumes ranks). iterator_mode::alphabet_symbol is not "
+    template <iterator_mode p_mode, class p_iterator>
+    [[nodiscard]] logical_rank_iterator_impl iter(
+            const p_iterator& iterator) const noexcept {
+        static_assert(p_mode == iterator_mode::logical_rank,
+                      "fragmented lazy iter: only logical-rank iteration is supported "
+                      "the minimizer kernel can consume ranks; alphabet-symbol mode is not "
                       "exercised on the fragmented path.");
-        if (it.global_unit_ >= size()) {
+        if (iterator.global_unit_ >= size()) {
             return logical_rank_iterator_impl{this, bp_size()};
         }
         const auto logical_rank = bioseq::common::checked_mul(
-            it.global_unit_,
-            static_cast<sequence_size_t>(letters_per_unit));
+            iterator.global_unit_,
+            static_cast<sequence_size_t>(k_letters_per_unit));
         if (!logical_rank.has_value() || *logical_rank > bp_size()) {
             abort_lazy_sequence_access(
                 "packed iterator cannot be mapped to a logical rank");
@@ -1007,14 +1093,16 @@ struct lazy_sequence<R, Scanner> {
             return end_;
         }
     };
-    template <iterator_mode M>
+    template <iterator_mode p_mode>
     [[nodiscard]] logical_rank_range_view iterable() const noexcept {
-        static_assert(M == iterator_mode::logical_rank, "fragmented lazy iterable<M>: only iterator_mode::logical_rank supported");
+        static_assert(
+            p_mode == iterator_mode::logical_rank,
+            "fragmented lazy iterable supports logical-rank mode only");
         return logical_rank_range_view{rank_begin(), rank_end()};
     }
 
     /** Copy a logical rank interval without materializing the full sequence. */
-    template <bool is_reversed, bool write_reversed = false>
+    template <bool p_is_reversed, bool p_write_reversed = false>
     void copy_ranks(
         std::span<std::uint8_t> destination,
         std::size_t from,
@@ -1028,7 +1116,7 @@ struct lazy_sequence<R, Scanner> {
         }
         const std::size_t length = to - from;
         auto reader = rank_reader<
-            is_reversed, write_reversed, std::uint8_t, 2>();
+            p_is_reversed, p_write_reversed, std::uint8_t, 2>();
         const std::uint8_t* ranks = reader.read_at(
             static_cast<sequence_size_t>(from), length, destination);
         if (ranks != destination.data()) {
@@ -1037,12 +1125,12 @@ struct lazy_sequence<R, Scanner> {
     }
 
     /** Reject lane reinterpretation because lanes may span fragments. */
-    template <class U>
+    template <class p_storage_unit>
     auto bit_cast_to_storage_unit() const noexcept {
-        static_assert(sizeof(U) == 0,
+        static_assert(sizeof(p_storage_unit) == 0,
             "lazy_sequence::bit_cast_to_storage_unit is unavailable on the "
             "fragmented specialisation (lanes spread across fragments). Gate the "
-            "bit-cast path via `if constexpr (Scanner::is_fragmented())` and "
+            "bit-cast path via `if constexpr (p_scanner::is_fragmented())` and "
             "take the fragmented path.");
     }
 
@@ -1052,17 +1140,21 @@ struct lazy_sequence<R, Scanner> {
      * cross-fragment reads stream into caller scratch and never allocate in
      * proportion to the complete logical sequence.
      */
-    template <bool is_reversed, bool write_reversed, class stored_type_t, std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              class p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     struct rank_window_reader {
-        static_assert(MaxLoadedSlots >= 1u);
+        static_assert(p_max_loaded_slots >= 1u);
         struct encoded_slot {
-            stored_type_t* bytes       = nullptr;          // malloc'd: raw forward ranks
+            p_stored_type* bytes = nullptr; // malloc'd: raw forward ranks
             std::size_t    fragment_no = std::numeric_limits<std::size_t>::max();
             std::size_t    bp_count    = 0;
         };
 
         const lazy_sequence* parent_ = nullptr;
-        mutable bioseq::common::fragment_cache<encoded_slot, MaxLoadedSlots + 1> slots_{};
+        mutable bioseq::common::fragment_cache<
+            encoded_slot, p_max_loaded_slots + 1> slots_{};
 
         explicit rank_window_reader(const lazy_sequence* parent) noexcept : parent_(parent) {}
         rank_window_reader(const rank_window_reader&)            = delete;
@@ -1071,8 +1163,15 @@ struct lazy_sequence<R, Scanner> {
         rank_window_reader& operator=(rank_window_reader&&)      = delete;
         ~rank_window_reader() {
             // Free every resident slot's bytes.
-            for (std::size_t i = 0; i < slots_.capacity; ++i) {
-                slots_.evict_at(i, [](encoded_slot& s) noexcept { std::free(s.bytes); s.bytes = nullptr; });
+            for (std::size_t slot_index = 0;
+                 slot_index < slots_.capacity;
+                 ++slot_index) {
+                slots_.evict_at(
+                    slot_index,
+                    [](encoded_slot& slot) noexcept {
+                        std::free(slot.bytes);
+                        slot.bytes = nullptr;
+                    });
             }
         }
 
@@ -1080,40 +1179,51 @@ struct lazy_sequence<R, Scanner> {
         // reorder) so a resident slot is reusable across (is_reversed,
         // write_reversed); the orientation transform is applied by read_at.
         encoded_slot& ensure_rank_slot(std::size_t frag) const {
-            auto key_of = [](const encoded_slot& s) noexcept { return s.fragment_no; };
+            auto key_of = [](const encoded_slot& slot) noexcept {
+                return slot.fragment_no;
+            };
             if (auto found = slots_.find(frag, key_of); found.has_value()) {
                 return slots_.slot_at(found->first);
             }
-            const fragment_type& h = parent_->ensure_fragment(frag);
-            const std::size_t bp_count = static_cast<std::size_t>(h.logical_length);
+            const fragment_type& fragment =
+                parent_->ensure_fragment(frag);
+            const std::size_t bp_count =
+                static_cast<std::size_t>(fragment.logical_length);
             const auto allocation_bytes = bioseq::common::checked_mul(
-                bp_count, sizeof(stored_type_t));
+                bp_count, sizeof(p_stored_type));
             if (!allocation_bytes.has_value()) {
                 abort_lazy_sequence_access(
                     "rank-window allocation size is unsupported");
             }
-            stored_type_t* bytes = static_cast<stored_type_t*>(
+            p_stored_type* bytes = static_cast<p_stored_type*>(
                 std::malloc(*allocation_bytes));
-            if (bytes == nullptr) { abort_lazy_sequence_access("rank_window_reader: slot malloc failed"); }
-            for (std::size_t bp = 0; bp < bp_count; ++bp) {
-                const std::size_t unit_in_frag = bp / letters_per_unit;
-                const std::size_t letter_in_unit = bp % letters_per_unit;
-                const storage_unit u = h.data[unit_in_frag];
-                const storage_unit rank = static_cast<storage_unit>(
-                    (u >> (letter_in_unit * bits_per_symbol))
-                    & traits::char_mask);
-                bytes[bp] = static_cast<stored_type_t>(rank);
+            if (bytes == nullptr) {
+                abort_lazy_sequence_access(
+                    "rank-window slot allocation failed");
             }
-            auto [idx, gen] = slots_.push(encoded_slot{bytes, frag, bp_count},
-                [](encoded_slot& evicted) noexcept { std::free(evicted.bytes); evicted.bytes = nullptr; });
-            (void)gen;
-            // Aggressive eviction: keep at most MaxLoadedSlots resident.
-            while (slots_.valid_count() > MaxLoadedSlots) {
+            for (std::size_t bp = 0; bp < bp_count; ++bp) {
+                const std::size_t unit_in_frag = bp / k_letters_per_unit;
+                const std::size_t letter_in_unit = bp % k_letters_per_unit;
+                const storage_unit packed_unit = fragment.data[unit_in_frag];
+                const storage_unit rank = static_cast<storage_unit>(
+                    (packed_unit >> (letter_in_unit * k_bits_per_symbol))
+                    & traits::char_mask);
+                bytes[bp] = static_cast<p_stored_type>(rank);
+            }
+            auto [slot_index, generation] = slots_.push(
+                encoded_slot{bytes, frag, bp_count},
+                [](encoded_slot& evicted) noexcept {
+                    std::free(evicted.bytes);
+                    evicted.bytes = nullptr;
+                });
+            (void)generation;
+            // Aggressive eviction: keep at most p_max_loaded_slots resident.
+            while (slots_.valid_count() > p_max_loaded_slots) {
                 slots_.evict_oldest([](encoded_slot& evicted) noexcept {
                     std::free(evicted.bytes); evicted.bytes = nullptr;
                 });
             }
-            return slots_.slot_at(idx);
+            return slots_.slot_at(slot_index);
         }
 
         // read_at(bp_from, len, scratch): `bp_from` is in the SAME coordinate
@@ -1122,8 +1232,10 @@ struct lazy_sequence<R, Scanner> {
         // pointer to `len` encoded bytes: a resident slot (zero-copy) for the
         // plain-forward fast path, else `scratch.data()`.
         [[nodiscard]]
-        const stored_type_t* read_at(sequence_size_t bp_from, std::size_t required_length,
-                                    std::span<stored_type_t> scratch) const {
+        const p_stored_type* read_at(
+                sequence_size_t bp_from,
+                std::size_t required_length,
+                std::span<p_stored_type> scratch) const {
             if (bp_from > parent_->bp_size()
                 || required_length > parent_->bp_size() - bp_from
                 || scratch.size() < required_length) {
@@ -1143,97 +1255,119 @@ struct lazy_sequence<R, Scanner> {
             // Reverse strand: output region [bp_from, bp_from+len) maps to the
             // FORWARD source coords [total-(bp_from+len), total-bp_from)
             // (sequences.cppm:1341). Forward strand reads in place.
-            const std::size_t fwd_from = is_reversed
+            const std::size_t forward_from = p_is_reversed
                 ? (total - (static_cast<std::size_t>(bp_from) + required_length))
                 : static_cast<std::size_t>(bp_from);
-            constexpr bool descending_write =
-                (is_reversed && !write_reversed) || (!is_reversed && write_reversed);
+            constexpr bool k_is_descending_write =
+                (p_is_reversed && !p_write_reversed)
+                || (!p_is_reversed && p_write_reversed);
 
             // §5 zero-copy fast path: plain-forward encode fitting one slot.
-            if constexpr (!is_reversed && !write_reversed) {
-                const std::size_t fragment_bp = static_cast<std::size_t>(parent_->fragment_logical_capacity);
-                const std::size_t cur_frag    = fwd_from / fragment_bp;
-                const std::size_t in_frag_bp  = fwd_from % fragment_bp;
+            if constexpr (!p_is_reversed && !p_write_reversed) {
+                const std::size_t fragment_bp = static_cast<std::size_t>(
+                    parent_->k_fragment_logical_capacity);
+                const std::size_t cur_frag = forward_from / fragment_bp;
+                const std::size_t in_frag_bp = forward_from % fragment_bp;
                 const encoded_slot& slot = ensure_rank_slot(cur_frag);
                 if (in_frag_bp + required_length <= slot.bp_count) {
                     return slot.bytes + in_frag_bp;
                 }
             }
             // Forward-sequential per-fragment gather of raw ranks for
-            // [fwd_from, fwd_from+len); apply emit_letter (complement iff
-            // is_reversed; descending output iff descending_write).
-            const std::size_t fragment_bp = static_cast<std::size_t>(parent_->fragment_logical_capacity);
+            // [forward_from, forward_from+len); complement and output order
+            // follow the two orientation template parameters.
+            const std::size_t fragment_bp = static_cast<std::size_t>(
+                parent_->k_fragment_logical_capacity);
             std::size_t gathered = 0;
-            std::size_t src_bp   = fwd_from;
+            std::size_t source_bp = forward_from;
             while (gathered < required_length) {
-                const std::size_t frag    = src_bp / fragment_bp;
-                const std::size_t in_frag = src_bp % fragment_bp;
-                const encoded_slot& s = ensure_rank_slot(frag);
-                const std::size_t avail   = s.bp_count - in_frag;
-                const std::size_t to_copy = std::min(avail, required_length - gathered);
-                for (std::size_t i = 0; i < to_copy; ++i) {
-                    const stored_type_t raw = s.bytes[in_frag + i];
-                    const stored_type_t letter = is_reversed
-                        ? static_cast<stored_type_t>(
-                              traits::letter_complement(static_cast<storage_unit>(raw)))
-                        : raw;
-                    const std::size_t out_idx = gathered + i;
-                    scratch[descending_write ? (required_length - 1 - out_idx) : out_idx] = letter;
+                const std::size_t frag = source_bp / fragment_bp;
+                const std::size_t in_frag = source_bp % fragment_bp;
+                const encoded_slot& slot = ensure_rank_slot(frag);
+                const std::size_t available_ranks = slot.bp_count - in_frag;
+                const std::size_t to_copy = std::min(
+                    available_ranks, required_length - gathered);
+                for (std::size_t rank_index = 0;
+                     rank_index < to_copy;
+                     ++rank_index) {
+                    const p_stored_type raw_rank =
+                        slot.bytes[in_frag + rank_index];
+                    const p_stored_type letter = p_is_reversed
+                        ? static_cast<p_stored_type>(
+                              traits::letter_complement(
+                                  static_cast<storage_unit>(raw_rank)))
+                        : raw_rank;
+                    const std::size_t output_index =
+                        gathered + rank_index;
+                    scratch[k_is_descending_write
+                                ? (required_length - 1 - output_index)
+                                : output_index] = letter;
                 }
                 gathered += to_copy;
-                src_bp   += to_copy;
-                if (gathered < required_length && src_bp >= total) {
-                    abort_lazy_sequence_access("read_at: required_length extends past end of sequence");
+                source_bp += to_copy;
+                if (gathered < required_length && source_bp >= total) {
+                    abort_lazy_sequence_access(
+                        "rank read extends past the sequence end");
                 }
             }
             return scratch.data();
         }
 
-        [[nodiscard]] stored_type_t operator[](sequence_size_t bp_idx) const {
-            stored_type_t one{};
-            std::span<stored_type_t> sc(&one, 1);
-            const stored_type_t* p = read_at(bp_idx, 1, sc);
-            return p[0];
+        [[nodiscard]] p_stored_type operator[](
+                sequence_size_t bp_index) const {
+            p_stored_type rank{};
+            std::span<p_stored_type> rank_span(&rank, 1);
+            const p_stored_type* ranks = read_at(bp_index, 1, rank_span);
+            return ranks[0];
         }
     };
 
-    template <bool is_reversed, bool write_reversed, class stored_type_t, std::size_t MaxLoadedSlots = 2>
+    template <bool p_is_reversed,
+              bool p_write_reversed,
+              class p_stored_type,
+              std::size_t p_max_loaded_slots = 2>
     [[nodiscard]] auto rank_reader() const noexcept {
-        return rank_window_reader<is_reversed, write_reversed, stored_type_t, MaxLoadedSlots>(this);
+        return rank_window_reader<
+            p_is_reversed,
+            p_write_reversed,
+            p_stored_type,
+            p_max_loaded_slots>(this);
     }
 
 private:
-    mutable Scanner scanner_;
-    mutable bioseq::common::fragment_cache<fragment_type, fragment_cache_capacity> fragments_{};
+    mutable p_scanner scanner_;
+    mutable bioseq::common::fragment_cache<
+        fragment_type, k_fragment_cache_capacity> fragments_{};
 
-    void load_fragment(std::size_t n) const {
+    void load_fragment(std::size_t fragment_number) const {
         const auto logical_offset = bioseq::common::checked_mul(
-            static_cast<std::uint64_t>(n),
-            static_cast<std::uint64_t>(fragment_logical_capacity));
+            static_cast<std::uint64_t>(fragment_number),
+            static_cast<std::uint64_t>(k_fragment_logical_capacity));
         if (!logical_offset.has_value()
             || *logical_offset > scanner_.bp_size()) {
             abort_lazy_sequence_access("fragment logical offset is invalid");
         }
         fragment_type fragment;
-        fragment.data = scanner_.load_fragment(n);
-        fragment.fragment_index = n;
+        fragment.data = scanner_.load_fragment(fragment_number);
+        fragment.fragment_index = fragment_number;
         fragment.logical_offset = *logical_offset;
-        const bool is_last = n == scanner_.fragment_count() - 1u;
+        const bool is_last =
+            fragment_number == scanner_.fragment_count() - 1u;
         fragment.logical_length = is_last
             ? (scanner_.bp_size() - fragment.logical_offset)
-            : static_cast<sequence_size_t>(fragment_logical_capacity);
+            : static_cast<sequence_size_t>(k_fragment_logical_capacity);
         fragment.trailing_padding = is_last
             ? static_cast<std::uint16_t>(scanner_.trailing_padding())
             : std::uint16_t{0};
         const auto fragment_capacity = bioseq::common::checked_mul(
             static_cast<std::uint64_t>(fragment.data.size()),
-            static_cast<std::uint64_t>(letters_per_unit));
+            static_cast<std::uint64_t>(k_letters_per_unit));
         if (!fragment_capacity.has_value()
             || fragment.data.empty()
-            || fragment.data.size() > fragment_storage_units
+            || fragment.data.size() > k_fragment_storage_units
             || (!is_last
-                && fragment.data.size() != fragment_storage_units)
-            || fragment.trailing_padding >= letters_per_unit
+                && fragment.data.size() != k_fragment_storage_units)
+            || fragment.trailing_padding >= k_letters_per_unit
             || fragment.logical_length > *fragment_capacity
             || *fragment_capacity - fragment.logical_length
                 != fragment.trailing_padding) {
@@ -1249,30 +1383,37 @@ private:
 /** Factory and callback dispatch helpers for stable-address lazy owners. */
 
 /// Wrap an in-memory range in the zero-overhead no-fragment lazy wrapper.
-template <class R>
+template <class p_sequence_range>
 [[nodiscard]] [[gnu::always_inline]]
-inline lazy_sequence<R, resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>>
-make_resident_lazy_sequence(const compact_sequence_range<R>& range) noexcept {
-    return lazy_sequence<R, resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>>{range};
+inline lazy_sequence<p_sequence_range, resident_sequence_scanner<
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>>
+make_resident_lazy_sequence(
+        const compact_sequence_range<p_sequence_range>& range) noexcept {
+    return lazy_sequence<p_sequence_range, resident_sequence_scanner<
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>>{range};
 }
 
 /// Construct an in-memory lazy wrapper around `range` and invoke `fn(lazy)`.
 /// Zero-cost: the wrapper is a thin reference.
-template <class R, class Fn>
+template <class p_sequence_range, class p_callback>
 [[gnu::always_inline]]
-inline void with_resident_lazy_sequence(const compact_sequence_range<R>& range, Fn&& fn) {
-    lazy_sequence<R, resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>> lazy{range};
-    std::forward<Fn>(fn)(lazy);
+inline void with_resident_lazy_sequence(
+        const compact_sequence_range<p_sequence_range>& range,
+        p_callback&& callback) {
+    lazy_sequence<p_sequence_range, resident_sequence_scanner<
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>> lazy_sequence_owner{
+                range};
+    std::forward<p_callback>(callback)(lazy_sequence_owner);
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool has_resident_sequence_bytes(
-        const lazy_sequence<R, Scanner>& sequence) noexcept {
-    if constexpr (Scanner::is_fragmented()) {
-        if constexpr (requires (const Scanner& scanner) {
+        const lazy_sequence<p_sequence_range, p_scanner>& sequence) noexcept {
+    if constexpr (p_scanner::is_fragmented()) {
+        if constexpr (requires (const p_scanner& scanner) {
                 { scanner.is_in_memory_mode() } -> std::convertible_to<bool>;
             }) {
             return sequence.scanner().is_in_memory_mode();
@@ -1284,16 +1425,16 @@ template <class R, class Scanner>
     }
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool is_worker_shareable(
-        const lazy_sequence<R, Scanner>&) noexcept {
-    return !Scanner::is_fragmented();
+        const lazy_sequence<p_sequence_range, p_scanner>&) noexcept {
+    return !p_scanner::is_fragmented();
 }
 
 namespace lazy_sequence_detail {
 
-template <class Alphabet>
-concept complementable_sequence_alphabet = requires (Alphabet value) {
+template <class p_alphabet>
+concept complementable_sequence_alphabet = requires (p_alphabet value) {
     seqan3::complement(std::move(value));
 };
 
@@ -1301,14 +1442,18 @@ static_assert(complementable_sequence_alphabet<seq::dna4>);
 static_assert(complementable_sequence_alphabet<seq::dna5>);
 static_assert(!complementable_sequence_alphabet<seq::aa27>);
 
-template <bool IsReversed, bool WriteReversed, class R, class Scanner>
+template <bool p_is_reversed,
+          bool p_write_reversed,
+          class p_sequence_range,
+          class p_scanner>
 [[nodiscard]] const std::uint8_t* owned_sequence_read_at(
         void const* state,
         sequence_size_t bp_from,
         std::size_t required_length,
         std::span<std::uint8_t> scratch) {
     const auto& sequence =
-        *static_cast<const lazy_sequence<R, Scanner>*>(state);
+        *static_cast<const lazy_sequence<
+            p_sequence_range, p_scanner>*>(state);
     if (bp_from > sequence.bp_size()
         || required_length > sequence.bp_size() - bp_from
         || scratch.size() < required_length) {
@@ -1319,14 +1464,15 @@ template <bool IsReversed, bool WriteReversed, class R, class Scanner>
         return scratch.data();
     }
     using alphabet_type =
-        typename compact_sequence_range<R>::traits::alphabet_type;
-    if constexpr (IsReversed
+        typename compact_sequence_range<
+            p_sequence_range>::traits::alphabet_type;
+    if constexpr (p_is_reversed
                   && !complementable_sequence_alphabet<alphabet_type>) {
         throw std::invalid_argument(
             "reverse-complement encoding requires a complementable alphabet");
     } else {
         auto cursor = sequence.template rank_reader<
-            IsReversed, WriteReversed, std::uint8_t, 2>();
+            p_is_reversed, p_write_reversed, std::uint8_t, 2>();
         const std::uint8_t* result = cursor.read_at(
             bp_from, required_length, scratch);
         // A fragmented encoded iterator owns its resident slot ring. The named
@@ -1338,36 +1484,40 @@ template <bool IsReversed, bool WriteReversed, class R, class Scanner>
     }
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] sequence_size_t owned_sequence_bp_size(
         void const* state) noexcept {
-    return static_cast<const lazy_sequence<R, Scanner>*>(state)
+    return static_cast<const lazy_sequence<
+        p_sequence_range, p_scanner>*>(state)
         ->bp_size();
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] bool owned_sequence_worker_shareable(
         void const* state) noexcept {
     const auto& sequence =
-        *static_cast<const lazy_sequence<R, Scanner>*>(state);
+        *static_cast<const lazy_sequence<
+            p_sequence_range, p_scanner>*>(state);
     return is_worker_shareable(sequence);
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] auto owned_sequence_resident_probe(
         void const* state,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width) noexcept
     -> typename lazy_sequence_view<
-        typename compact_sequence_range<R>::traits::alphabet_type>::
+        typename compact_sequence_range<
+            p_sequence_range>::traits::alphabet_type>::
         resident_packed_result {
-    using range_traits = typename compact_sequence_range<R>::traits;
+    using range_traits =
+        typename compact_sequence_range<p_sequence_range>::traits;
     using alphabet_type = typename range_traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
     using descriptor_type = typename view_type::resident_packed_sequence;
 
-    if constexpr (Scanner::is_fragmented()) {
+    if constexpr (p_scanner::is_fragmented()) {
         // Fragment-cache slots can be evicted by later reads and therefore do
         // not meet the facade-lifetime stability contract.
         (void)state;
@@ -1376,12 +1526,12 @@ template <class R, class Scanner>
         (void)requested_width;
         return std::nullopt;
     } else {
-        constexpr std::uint8_t physical_width =
+        constexpr std::uint8_t k_physical_width =
             static_cast<std::uint8_t>(sizeof(typename range_traits::storage_unit));
-        constexpr std::uint8_t logical_bits = static_cast<std::uint8_t>(
-            lazy_sequence_traits<alphabet_type>::logical_bits_per_symbol);
-        if (requested_width != physical_width
-            || range_traits::bits_per_char != logical_bits) {
+        constexpr std::uint8_t k_logical_bits = static_cast<std::uint8_t>(
+            lazy_sequence_traits<alphabet_type>::k_logical_bits_per_symbol);
+        if (requested_width != k_physical_width
+            || range_traits::bits_per_char != k_logical_bits) {
             return std::nullopt;
         }
 
@@ -1391,8 +1541,8 @@ template <class R, class Scanner>
                 .units = nullptr,
                 .unit_count = 0u,
                 .logical_length = 0u,
-                .storage_unit_width = physical_width,
-                .bits_per_symbol = logical_bits,
+                .storage_unit_width = k_physical_width,
+                .bits_per_symbol = k_logical_bits,
                 .leading_symbol_offset = 0u,
                 .trailing_padding = 0u,
                 .bit_order = view_type::packed_symbol_order::
@@ -1400,18 +1550,18 @@ template <class R, class Scanner>
             };
         }
 
-        constexpr sequence_size_t letters_per_unit =
+        constexpr sequence_size_t k_letters_per_unit =
             range_traits::letters_per_unit;
-        const sequence_size_t first_unit = from / letters_per_unit;
-        const sequence_size_t leading = from % letters_per_unit;
+        const sequence_size_t first_unit = from / k_letters_per_unit;
+        const sequence_size_t leading = from % k_letters_per_unit;
         const auto occupied = bioseq::common::checked_add(leading, length);
         if (!occupied.has_value()) {
             return std::nullopt;
         }
         const sequence_size_t unit_count = bioseq::common::ceil_div(
-            *occupied, letters_per_unit);
+            *occupied, k_letters_per_unit);
         const auto represented_symbols = bioseq::common::checked_mul(
-            unit_count, letters_per_unit);
+            unit_count, k_letters_per_unit);
         if (!represented_symbols.has_value()) {
             return std::nullopt;
         }
@@ -1419,7 +1569,8 @@ template <class R, class Scanner>
             *represented_symbols - *occupied;
 
         const auto& sequence =
-            *static_cast<const lazy_sequence<R, Scanner>*>(state);
+            *static_cast<const lazy_sequence<
+                p_sequence_range, p_scanner>*>(state);
         const auto& range = sequence.underlying();
         if (first_unit > range.size()
             || unit_count > range.size() - first_unit
@@ -1433,8 +1584,8 @@ template <class R, class Scanner>
             .units = base + static_cast<std::size_t>(first_unit),
             .unit_count = static_cast<std::size_t>(unit_count),
             .logical_length = length,
-            .storage_unit_width = physical_width,
-            .bits_per_symbol = logical_bits,
+            .storage_unit_width = k_physical_width,
+            .bits_per_symbol = k_logical_bits,
             .leading_symbol_offset = static_cast<std::uint16_t>(leading),
             .trailing_padding = static_cast<std::uint16_t>(trailing),
             .bit_order = view_type::packed_symbol_order::
@@ -1443,32 +1594,35 @@ template <class R, class Scanner>
     }
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] bool owned_sequence_copy_packed(
         void const* state,
         void* destination,
         std::size_t unit_count,
         std::uint8_t requested_width) {
-    using range_traits = typename compact_sequence_range<R>::traits;
+    using range_traits =
+        typename compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename range_traits::storage_unit;
     using alphabet_type = typename range_traits::alphabet_type;
     if constexpr (requires (
-            const Scanner& scanner,
+            const p_scanner& scanner,
             std::span<storage_unit> output) {
                 { scanner.copy_packed_to(output) } -> std::same_as<void>;
             }) {
-        constexpr std::uint8_t physical_width =
+        constexpr std::uint8_t k_physical_width =
             static_cast<std::uint8_t>(sizeof(storage_unit));
-        constexpr std::size_t logical_bits =
-            lazy_sequence_traits<alphabet_type>::logical_bits_per_symbol;
-        constexpr std::size_t letters_per_unit = range_traits::letters_per_unit;
+        constexpr std::size_t k_logical_bits =
+            lazy_sequence_traits<alphabet_type>::k_logical_bits_per_symbol;
+        constexpr std::size_t k_letters_per_unit =
+            range_traits::letters_per_unit;
         const auto& sequence =
-            *static_cast<const lazy_sequence<R, Scanner>*>(state);
+            *static_cast<const lazy_sequence<
+                p_sequence_range, p_scanner>*>(state);
         const sequence_size_t expected_units = bioseq::common::ceil_div(
             sequence.bp_size(),
-            static_cast<sequence_size_t>(letters_per_unit));
-        if (requested_width != physical_width
-            || range_traits::bits_per_char != logical_bits
+            static_cast<sequence_size_t>(k_letters_per_unit));
+        if (requested_width != k_physical_width
+            || range_traits::bits_per_char != k_logical_bits
             || expected_units
                     > static_cast<sequence_size_t>(
                         (std::numeric_limits<std::size_t>::max)())
@@ -1493,23 +1647,31 @@ template <class R, class Scanner>
     }
 }
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 struct owned_sequence_adapter {
     using alphabet_type =
-        typename compact_sequence_range<R>::traits::alphabet_type;
+        typename compact_sequence_range<
+            p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
 
-    static inline const typename view_type::backend_ops ops{
-        .bp_size = &owned_sequence_bp_size<R, Scanner>,
+    static inline const typename view_type::backend_ops k_ops{
+        .bp_size = &owned_sequence_bp_size<p_sequence_range, p_scanner>,
         .read_at = {
-            &owned_sequence_read_at<false, false, R, Scanner>,
-            &owned_sequence_read_at<false, true, R, Scanner>,
-            &owned_sequence_read_at<true, false, R, Scanner>,
-            &owned_sequence_read_at<true, true, R, Scanner>,
+            &owned_sequence_read_at<
+                false, false, p_sequence_range, p_scanner>,
+            &owned_sequence_read_at<
+                false, true, p_sequence_range, p_scanner>,
+            &owned_sequence_read_at<
+                true, false, p_sequence_range, p_scanner>,
+            &owned_sequence_read_at<
+                true, true, p_sequence_range, p_scanner>,
         },
-        .try_resident_packed = &owned_sequence_resident_probe<R, Scanner>,
-        .copy_packed_sequence = &owned_sequence_copy_packed<R, Scanner>,
-        .worker_shareable = &owned_sequence_worker_shareable<R, Scanner>,
+        .try_resident_packed = &owned_sequence_resident_probe<
+            p_sequence_range, p_scanner>,
+        .copy_packed_sequence = &owned_sequence_copy_packed<
+            p_sequence_range, p_scanner>,
+        .worker_shareable = &owned_sequence_worker_shareable<
+            p_sequence_range, p_scanner>,
     };
 };
 
@@ -1519,88 +1681,106 @@ struct owned_sequence_adapter {
 // creates the pointer-sized wrapper locally; encoded bytes are copied into the
 // caller scratch before it returns, while a resident probe points into the
 // range's own storage.
-template <bool IsReversed, bool WriteReversed, class R>
+template <bool p_is_reversed,
+          bool p_write_reversed,
+          class p_sequence_range>
 [[nodiscard]] const std::uint8_t* compact_range_read_at(
         void const* state,
         sequence_size_t bp_from,
         std::size_t required_length,
         std::span<std::uint8_t> scratch) {
     using scanner_type = resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>;
-    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
-    const lazy_sequence<R, scanner_type> owner{range};
-    return owned_sequence_read_at<IsReversed, WriteReversed, R, scanner_type>(
-        std::addressof(owner), bp_from, required_length, scratch);
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<
+        p_sequence_range>*>(state);
+    const lazy_sequence<p_sequence_range, scanner_type> owner{range};
+    return owned_sequence_read_at<
+        p_is_reversed,
+        p_write_reversed,
+        p_sequence_range,
+        scanner_type>(
+            std::addressof(owner), bp_from, required_length, scratch);
 }
 
-template <class R>
+template <class p_sequence_range>
 [[nodiscard]] sequence_size_t compact_range_bp_size(
         void const* state) noexcept {
     using scanner_type = resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>;
-    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
-    const lazy_sequence<R, scanner_type> owner{range};
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<
+        p_sequence_range>*>(state);
+    const lazy_sequence<p_sequence_range, scanner_type> owner{range};
     return owner.bp_size();
 }
 
-template <class R>
+template <class p_sequence_range>
 [[nodiscard]] bool compact_range_worker_shareable(void const*) noexcept {
     return true;
 }
 
-template <class R>
+template <class p_sequence_range>
 [[nodiscard]] auto compact_range_resident_probe(
         void const* state,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width) noexcept
     -> typename lazy_sequence_view<
-        typename compact_sequence_range<R>::traits::alphabet_type>::
+        typename compact_sequence_range<
+            p_sequence_range>::traits::alphabet_type>::
         resident_packed_result {
     using scanner_type = resident_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit>;
-    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
-    const lazy_sequence<R, scanner_type> owner{range};
-    return owned_sequence_resident_probe<R, scanner_type>(
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<
+        p_sequence_range>*>(state);
+    const lazy_sequence<p_sequence_range, scanner_type> owner{range};
+    return owned_sequence_resident_probe<p_sequence_range, scanner_type>(
         std::addressof(owner), from, to, requested_width);
 }
 
-template <class R>
+template <class p_sequence_range>
 struct compact_range_adapter {
     using alphabet_type =
-        typename compact_sequence_range<R>::traits::alphabet_type;
+        typename compact_sequence_range<
+            p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
 
-    static inline const typename view_type::backend_ops ops{
-        .bp_size = &compact_range_bp_size<R>,
+    static inline const typename view_type::backend_ops k_ops{
+        .bp_size = &compact_range_bp_size<p_sequence_range>,
         .read_at = {
-            &compact_range_read_at<false, false, R>,
-            &compact_range_read_at<false, true, R>,
-            &compact_range_read_at<true, false, R>,
-            &compact_range_read_at<true, true, R>,
+            &compact_range_read_at<false, false, p_sequence_range>,
+            &compact_range_read_at<false, true, p_sequence_range>,
+            &compact_range_read_at<true, false, p_sequence_range>,
+            &compact_range_read_at<true, true, p_sequence_range>,
         },
-        .try_resident_packed = &compact_range_resident_probe<R>,
+        .try_resident_packed = &compact_range_resident_probe<
+            p_sequence_range>,
         .copy_packed_sequence = nullptr,
-        .worker_shareable = &compact_range_worker_shareable<R>,
+        .worker_shareable = &compact_range_worker_shareable<
+            p_sequence_range>,
     };
 };
 
 }  // namespace lazy_sequence_detail
 
-template <class R, class Scanner>
+template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline auto make_lazy_sequence_view(
-        const lazy_sequence<R, Scanner>& owner) noexcept {
-    using adapter = lazy_sequence_detail::owned_sequence_adapter<R, Scanner>;
-    return typename adapter::view_type{
-        std::addressof(owner), std::addressof(adapter::ops)};
+        const lazy_sequence<p_sequence_range, p_scanner>& owner) noexcept {
+    using adapter_type = lazy_sequence_detail::owned_sequence_adapter<
+        p_sequence_range, p_scanner>;
+    return typename adapter_type::view_type{
+        std::addressof(owner), std::addressof(adapter_type::k_ops)};
 }
 
-template <class R>
+template <class p_sequence_range>
 [[nodiscard]] inline auto make_lazy_sequence_view(
-        const compact_sequence_range<R>& owner) noexcept {
-    using adapter = lazy_sequence_detail::compact_range_adapter<R>;
-    return typename adapter::view_type{
-        std::addressof(owner), std::addressof(adapter::ops)};
+        const compact_sequence_range<p_sequence_range>& owner) noexcept {
+    using adapter_type =
+        lazy_sequence_detail::compact_range_adapter<p_sequence_range>;
+    return typename adapter_type::view_type{
+        std::addressof(owner), std::addressof(adapter_type::k_ops)};
 }
 
 /**
@@ -1609,53 +1789,60 @@ template <class R>
  * only the canonical facade by value and cannot accidentally flatten the
  * access route.
  */
-template <std::size_t FragmentStorageUnits =
+template <std::size_t p_fragment_storage_units =
               default_fragment_storage_units,
-          class R, class Fn>
+          class p_sequence_range,
+          class p_callback>
 inline void with_chunked_lazy_sequence(
-        const compact_sequence_range<R>& range,
-        Fn&& fn) {
+        const compact_sequence_range<p_sequence_range>& range,
+        p_callback&& callback) {
     using scanner_type = chunked_span_sequence_scanner<
-        typename compact_sequence_range<R>::traits::storage_unit,
-        FragmentStorageUnits>;
-    lazy_sequence<R, scanner_type> owner{
+        typename compact_sequence_range<
+            p_sequence_range>::traits::storage_unit,
+        p_fragment_storage_units>;
+    lazy_sequence<p_sequence_range, scanner_type> owner{
         scanner_type::from_range(range)};
-    std::forward<Fn>(fn)(make_lazy_sequence_view(owner));
+    std::forward<p_callback>(callback)(make_lazy_sequence_view(owner));
 }
 
 /** Keep two synthetic fragmented owners alive for one facade-only callback. */
-template <std::size_t FragmentStorageUnits =
+template <std::size_t p_fragment_storage_units =
               default_fragment_storage_units,
-          class LeftR, class RightR, class Fn>
+          class p_left_sequence_range,
+          class p_right_sequence_range,
+          class p_callback>
 inline void with_chunked_lazy_sequence(
-        const compact_sequence_range<LeftR>& left_range,
-        const compact_sequence_range<RightR>& right_range,
-        Fn&& fn) {
+        const compact_sequence_range<p_left_sequence_range>& left_range,
+        const compact_sequence_range<p_right_sequence_range>& right_range,
+        p_callback&& callback) {
     using left_alphabet =
-        typename compact_sequence_range<LeftR>::traits::alphabet_type;
+        typename compact_sequence_range<
+            p_left_sequence_range>::traits::alphabet_type;
     using right_alphabet =
-        typename compact_sequence_range<RightR>::traits::alphabet_type;
+        typename compact_sequence_range<
+            p_right_sequence_range>::traits::alphabet_type;
     static_assert(std::is_same_v<left_alphabet, right_alphabet>,
                   "chunked facade pair must share one alphabet");
-    with_chunked_lazy_sequence<FragmentStorageUnits>(
+    with_chunked_lazy_sequence<p_fragment_storage_units>(
         left_range,
-        [&right_range, &fn](auto left_view) {
-            with_chunked_lazy_sequence<FragmentStorageUnits>(
+        [&right_range, &callback](auto left_view) {
+            with_chunked_lazy_sequence<p_fragment_storage_units>(
                 right_range,
-                [left_view, &fn](auto right_view) {
-                    std::forward<Fn>(fn)(left_view, right_view);
+                [left_view, &callback](auto right_view) {
+                    std::forward<p_callback>(callback)(
+                        left_view, right_view);
                 });
         });
 }
 
-template <sequence_transform Transform,
-          sequence_alphabet Alphabet,
-          class OutputWriter>
+template <sequence_transform p_transform,
+          sequence_alphabet p_alphabet,
+          class p_output_writer>
 void stream_transformed_ranks(
-        lazy_sequence_view<Alphabet> view,
+        lazy_sequence_view<p_alphabet> view,
         std::uint64_t from,
         std::uint64_t to,
-        OutputWriter& output) {
+        p_output_writer& output) {
     if (from > to || to > view.bp_size()
         || to > static_cast<std::uint64_t>(
             (std::numeric_limits<std::size_t>::max)())) {
@@ -1678,7 +1865,7 @@ void stream_transformed_ranks(
         }
     };
 
-    if constexpr (is_reversed(Transform)) {
+    if constexpr (is_reversed(p_transform)) {
         std::uint64_t position = to;
         while (position > from) {
             const auto count = static_cast<std::size_t>(
@@ -1688,12 +1875,12 @@ void stream_transformed_ranks(
                 std::span<std::uint8_t>{scratch.data(), count},
                 static_cast<std::size_t>(chunk_from),
                 static_cast<std::size_t>(position));
-            if constexpr (is_complemented(Transform)) {
+            if constexpr (is_complemented(p_transform)) {
                 static_assert(
                     lazy_sequence_detail::complementable_sequence_alphabet<
-                        Alphabet>);
+                        p_alphabet>);
                 for (std::size_t index = 0u; index < count; ++index) {
-                    scratch[index] = lazy_sequence_traits<Alphabet>::
+                    scratch[index] = lazy_sequence_traits<p_alphabet>::
                         letter_complement(scratch[index]);
                 }
             }
@@ -1712,12 +1899,12 @@ void stream_transformed_ranks(
                 std::span<std::uint8_t>{scratch.data(), count},
                 static_cast<std::size_t>(position),
                 static_cast<std::size_t>(position + count));
-            if constexpr (is_complemented(Transform)) {
+            if constexpr (is_complemented(p_transform)) {
                 static_assert(
                     lazy_sequence_detail::complementable_sequence_alphabet<
-                        Alphabet>);
+                        p_alphabet>);
                 for (std::size_t index = 0u; index < count; ++index) {
-                    scratch[index] = lazy_sequence_traits<Alphabet>::
+                    scratch[index] = lazy_sequence_traits<p_alphabet>::
                         letter_complement(scratch[index]);
                 }
             }
@@ -1730,13 +1917,13 @@ void stream_transformed_ranks(
     }
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] int compare_lazy_sequences(
-        lazy_sequence_view<Alphabet> left,
-        lazy_sequence_view<Alphabet> right) {
+        lazy_sequence_view<p_alphabet> left,
+        lazy_sequence_view<p_alphabet> right) {
     struct comparison_writer {
-        typename lazy_sequence_view<Alphabet>::rank_iterator cursor;
-        typename lazy_sequence_view<Alphabet>::rank_iterator end;
+        typename lazy_sequence_view<p_alphabet>::rank_iterator cursor;
+        typename lazy_sequence_view<p_alphabet>::rank_iterator end;
         int result{};
 
         bool append_ranks(std::span<const std::uint8_t> ranks) {
@@ -1773,17 +1960,17 @@ template <sequence_alphabet Alphabet>
 namespace lazy_sequence_detail {
 
 struct logical_hash_writer {
-    static constexpr std::uint64_t fnv_offset_basis =
+    static constexpr std::uint64_t k_fnv_offset_basis =
         14695981039346656037ull;
-    static constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    static constexpr std::uint64_t k_fnv_prime = 1099511628211ull;
 
     explicit logical_hash_writer(std::uint64_t seed) noexcept
-        : hash(fnv_offset_basis ^ seed) {}
+        : hash(k_fnv_offset_basis ^ seed) {}
 
     void append_ranks(std::span<const std::uint8_t> ranks) noexcept {
         for (const std::uint8_t rank : ranks) {
             hash ^= rank;
-            hash *= fnv_prime;
+            hash *= k_fnv_prime;
         }
     }
 
@@ -1791,7 +1978,7 @@ struct logical_hash_writer {
             std::uint64_t logical_length) noexcept {
         for (unsigned shift = 0u; shift < 64u; shift += 8u) {
             hash ^= static_cast<std::uint8_t>(logical_length >> shift);
-            hash *= fnv_prime;
+            hash *= k_fnv_prime;
         }
         hash ^= hash >> 30u;
         hash *= 0xbf58476d1ce4e5b9ull;
@@ -1806,9 +1993,9 @@ struct logical_hash_writer {
 
 }  // namespace lazy_sequence_detail
 
-template <std::ranges::input_range RankRange>
+template <std::ranges::input_range p_rank_range>
 [[nodiscard]] std::uint64_t hash_logical_ranks(
-        RankRange&& ranks,
+        p_rank_range&& ranks,
         std::uint64_t logical_length,
         std::uint64_t seed) {
     lazy_sequence_detail::logical_hash_writer writer{seed};
@@ -1819,9 +2006,9 @@ template <std::ranges::input_range RankRange>
     return writer.finish(logical_length);
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t hash_logical_sequence(
-        lazy_sequence_view<Alphabet> view,
+        lazy_sequence_view<p_alphabet> view,
         std::uint64_t seed) {
     lazy_sequence_detail::logical_hash_writer writer{seed};
     stream_transformed_ranks<sequence_transform::identity>(
@@ -1864,16 +2051,16 @@ private:
     std::size_t size_{};
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct resident_view_ops_context {
     using descriptor_type =
-        typename lazy_sequence_view<Alphabet>::resident_packed_sequence;
+        typename lazy_sequence_view<p_alphabet>::resident_packed_sequence;
     descriptor_type const* descriptor{};
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t load_resident_unit(
-        resident_view_ops_context<Alphabet> const& context,
+        resident_view_ops_context<p_alphabet> const& context,
         std::size_t unit_index) noexcept {
     const auto& descriptor = *context.descriptor;
     const auto* bytes = static_cast<const std::uint8_t*>(descriptor.units)
@@ -1904,9 +2091,9 @@ template <sequence_alphabet Alphabet>
     }
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint8_t resident_rank_at(
-        resident_view_ops_context<Alphabet> const& context,
+        resident_view_ops_context<p_alphabet> const& context,
         sequence_size_t position) noexcept {
     const auto& descriptor = *context.descriptor;
     const sequence_size_t letters_per_unit =
@@ -1924,14 +2111,16 @@ template <sequence_alphabet Alphabet>
         (load_resident_unit(context, unit_index) >> shift) & mask);
 }
 
-template <bool IsReversed, bool WriteReversed, sequence_alphabet Alphabet>
+template <bool p_is_reversed,
+          bool p_write_reversed,
+          sequence_alphabet p_alphabet>
 [[nodiscard]] const std::uint8_t* resident_read_at(
         void const* state,
         sequence_size_t bp_from,
         std::size_t required_length,
         std::span<std::uint8_t> scratch) {
     const auto& context =
-        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+        *static_cast<const resident_view_ops_context<p_alphabet>*>(state);
     const sequence_size_t total = context.descriptor->logical_length;
     if (bp_from > total
         || required_length > total - bp_from
@@ -1942,46 +2131,49 @@ template <bool IsReversed, bool WriteReversed, sequence_alphabet Alphabet>
     if (required_length == 0u) {
         return scratch.data();
     }
-    if constexpr (IsReversed
-                  && !complementable_sequence_alphabet<Alphabet>) {
+    if constexpr (p_is_reversed
+                  && !complementable_sequence_alphabet<p_alphabet>) {
         throw std::invalid_argument(
             "reverse-complement encoding requires a complementable alphabet");
     }
-    const sequence_size_t forward_from = IsReversed
+    const sequence_size_t forward_from = p_is_reversed
         ? total - bp_from - required_length
         : bp_from;
-    constexpr bool descending_write =
-        (IsReversed && !WriteReversed) || (!IsReversed && WriteReversed);
+    constexpr bool k_is_descending_write =
+        (p_is_reversed && !p_write_reversed)
+        || (!p_is_reversed && p_write_reversed);
     for (std::size_t index = 0u; index < required_length; ++index) {
         std::uint8_t rank = resident_rank_at(
             context, forward_from + index);
-        if constexpr (IsReversed
-                      && complementable_sequence_alphabet<Alphabet>) {
-            rank = lazy_sequence_traits<Alphabet>::letter_complement(rank);
+        if constexpr (p_is_reversed
+                      && complementable_sequence_alphabet<p_alphabet>) {
+            rank = lazy_sequence_traits<p_alphabet>::letter_complement(rank);
         }
-        scratch[descending_write ? required_length - 1u - index : index] = rank;
+        scratch[k_is_descending_write
+                    ? required_length - 1u - index
+                    : index] = rank;
     }
     return scratch.data();
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] sequence_size_t resident_bp_size(void const* state) noexcept {
     const auto& context =
-        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+        *static_cast<const resident_view_ops_context<p_alphabet>*>(state);
     return context.descriptor->logical_length;
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] auto resident_probe(
         void const* state,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width) noexcept
-    -> typename lazy_sequence_view<Alphabet>::resident_packed_result {
-    using view_type = lazy_sequence_view<Alphabet>;
+    -> typename lazy_sequence_view<p_alphabet>::resident_packed_result {
+    using view_type = lazy_sequence_view<p_alphabet>;
     using descriptor_type = typename view_type::resident_packed_sequence;
     const auto& context =
-        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+        *static_cast<const resident_view_ops_context<p_alphabet>*>(state);
     const descriptor_type& source = *context.descriptor;
     if (from > to || to > source.logical_length
         || requested_width != source.storage_unit_width) {
@@ -2045,41 +2237,44 @@ template <sequence_alphabet Alphabet>
     return true;
 }
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct resident_adapter {
-    using view_type = lazy_sequence_view<Alphabet>;
-    static inline const typename view_type::backend_ops ops{
-        .bp_size = &resident_bp_size<Alphabet>,
+    using view_type = lazy_sequence_view<p_alphabet>;
+    static inline const typename view_type::backend_ops k_ops{
+        .bp_size = &resident_bp_size<p_alphabet>,
         .read_at = {
-            &resident_read_at<false, false, Alphabet>,
-            &resident_read_at<false, true, Alphabet>,
-            &resident_read_at<true, false, Alphabet>,
-            &resident_read_at<true, true, Alphabet>,
+            &resident_read_at<false, false, p_alphabet>,
+            &resident_read_at<false, true, p_alphabet>,
+            &resident_read_at<true, false, p_alphabet>,
+            &resident_read_at<true, true, p_alphabet>,
         },
-        .try_resident_packed = &resident_probe<Alphabet>,
+        .try_resident_packed = &resident_probe<p_alphabet>,
         .copy_packed_sequence = nullptr,
         .worker_shareable = &resident_worker_shareable,
     };
 };
 
-template <sequence_alphabet Alphabet, class Unit>
+template <sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] bioseq::sequences::rank_pack_result pack_view_region_into(
-        lazy_sequence_view<Alphabet> view,
+        lazy_sequence_view<p_alphabet> view,
         sequence_size_t from,
         sequence_size_t to,
         void* output,
         std::size_t unit_count) {
-    constexpr std::size_t bits =
-        lazy_sequence_traits<Alphabet>::logical_bits_per_symbol;
-    using output_instance = sequence_custom_alphabet<Alphabet, Unit, bits>;
-    using unit_sink = bioseq::sequences::fixed_rank_pack_unit_sink<Unit>;
+    constexpr std::size_t k_bits_per_symbol =
+        lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol;
+    using output_instance = sequence_custom_alphabet<
+        p_alphabet, p_storage_unit, k_bits_per_symbol>;
+    using unit_sink =
+        bioseq::sequences::fixed_rank_pack_unit_sink<p_storage_unit>;
     using packer = bioseq::sequences::checked_rank_pack_sink<
         output_instance,
         bioseq::sequences::invalid_rank_policy::reject,
         bioseq::sequences::pack_capacity_policy::fixed_span,
         unit_sink>;
 
-    auto units = std::span<Unit>(static_cast<Unit*>(output), unit_count);
+    auto units = std::span<p_storage_unit>(
+        static_cast<p_storage_unit*>(output), unit_count);
     packer writer{unit_sink{units}};
     stream_transformed_ranks<sequence_transform::identity>(
         view, from, to, writer);
@@ -2088,26 +2283,26 @@ template <sequence_alphabet Alphabet, class Unit>
 
 }  // namespace lazy_sequence_detail
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 class admitted_packed_sequence;
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t packed_sequence_admission_bytes(
     sequence_size_t logical_length,
     std::uint8_t requested_width);
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] admitted_packed_sequence<Alphabet> materialize_packed_sequence(
-    lazy_sequence_view<Alphabet> view,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] admitted_packed_sequence<p_alphabet> materialize_packed_sequence(
+    lazy_sequence_view<p_alphabet> view,
     sequence_size_t from,
     sequence_size_t to,
     std::uint8_t requested_width,
     bioseq::parallelism::memory_permit&& permit);
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 class admitted_packed_sequence {
 public:
-    using view_type = lazy_sequence_view<Alphabet>;
+    using view_type = lazy_sequence_view<p_alphabet>;
     using descriptor_type = typename view_type::resident_packed_sequence;
 
     admitted_packed_sequence(admitted_packed_sequence&&) noexcept = default;
@@ -2126,9 +2321,10 @@ public:
         if (state_ == nullptr) {
             abort_lazy_sequence_access("view of moved admitted packed region");
         }
-        using adapter = lazy_sequence_detail::resident_adapter<Alphabet>;
+        using adapter_type =
+            lazy_sequence_detail::resident_adapter<p_alphabet>;
         return view_type{std::addressof(state_->view_context_),
-                         std::addressof(adapter::ops)};
+                         std::addressof(adapter_type::k_ops)};
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -2152,7 +2348,8 @@ private:
         bioseq::parallelism::memory_permit permit_;
         lazy_sequence_detail::aligned_packed_storage units_;
         descriptor_type descriptor_;
-        lazy_sequence_detail::resident_view_ops_context<Alphabet> view_context_;
+        lazy_sequence_detail::resident_view_ops_context<
+            p_alphabet> view_context_;
 
         stable_state(bioseq::parallelism::memory_permit&& permit,
                      std::size_t allocation_bytes,
@@ -2169,15 +2366,16 @@ private:
     explicit admitted_packed_sequence(std::unique_ptr<stable_state> state) noexcept
         : state_(std::move(state)) {}
 
-    template <sequence_alphabet OtherAlphabet>
-    friend admitted_packed_sequence<OtherAlphabet> materialize_packed_sequence(
-        lazy_sequence_view<OtherAlphabet>,
+    template <sequence_alphabet p_other_alphabet>
+    friend admitted_packed_sequence<p_other_alphabet>
+    materialize_packed_sequence(
+        lazy_sequence_view<p_other_alphabet>,
         sequence_size_t,
         sequence_size_t,
         std::uint8_t,
         bioseq::parallelism::memory_permit&&);
 
-    template <sequence_alphabet OtherAlphabet>
+    template <sequence_alphabet p_other_alphabet>
     friend std::uint64_t packed_sequence_admission_bytes(
         sequence_size_t,
         std::uint8_t);
@@ -2185,11 +2383,11 @@ private:
     std::unique_ptr<stable_state> state_;
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t packed_sequence_admission_bytes(
         sequence_size_t logical_length,
         std::uint8_t requested_width) {
-    using owner_type = admitted_packed_sequence<Alphabet>;
+    using owner_type = admitted_packed_sequence<p_alphabet>;
     if (!(requested_width == 1u || requested_width == 2u
           || requested_width == 4u || requested_width == 8u)) {
         throw std::invalid_argument("invalid packed storage-unit width");
@@ -2198,7 +2396,8 @@ template <sequence_alphabet Alphabet>
         packed_letters_per_unit(
             requested_width,
             static_cast<std::uint8_t>(
-                lazy_sequence_traits<Alphabet>::logical_bits_per_symbol));
+                lazy_sequence_traits<
+                    p_alphabet>::k_logical_bits_per_symbol));
     const sequence_size_t unit_count = bioseq::common::ceil_div(
         logical_length, letters_per_unit);
     const auto allocation_bytes = bioseq::common::checked_mul(
@@ -2245,9 +2444,9 @@ enum class sequence_resident_borrow_kind : std::uint8_t {
     reinterpreted_bytes,
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct sequence_access_plan {
-    using descriptor_type = typename lazy_sequence_view<Alphabet>::
+    using descriptor_type = typename lazy_sequence_view<p_alphabet>::
         resident_packed_sequence;
 
     sequence_access_requirement requirement{
@@ -2273,43 +2472,47 @@ struct sequence_access_plan {
 /// allocation.  Its `units` member may be copied/read only through
 /// character/byte access (for example a Vulkan buffer upload); dereferencing
 /// it as `uint32_t*` would violate the C++ effective-type/aliasing rules.
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<
-    typename lazy_sequence_view<Alphabet>::resident_packed_sequence>
+    typename lazy_sequence_view<p_alphabet>::resident_packed_sequence>
 try_borrow_reinterpreted_packed_bytes(
-        lazy_sequence_view<Alphabet> view,
+        lazy_sequence_view<p_alphabet> view,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width) noexcept {
-    using view_type = lazy_sequence_view<Alphabet>;
+    using view_type = lazy_sequence_view<p_alphabet>;
     using descriptor_type = typename view_type::resident_packed_sequence;
     if constexpr (std::endian::native != std::endian::little) {
         return std::nullopt;
     } else {
-        constexpr std::uint8_t source_width = sizeof(std::uint64_t);
-        constexpr std::uint8_t target_width = sizeof(std::uint32_t);
-        constexpr std::uint8_t bits = static_cast<std::uint8_t>(
-            lazy_sequence_traits<Alphabet>::logical_bits_per_symbol);
-        if (requested_width != target_width || from > to
+        constexpr std::uint8_t k_source_width = sizeof(std::uint64_t);
+        constexpr std::uint8_t k_target_width = sizeof(std::uint32_t);
+        constexpr std::uint8_t k_bits_per_symbol =
+            static_cast<std::uint8_t>(
+                lazy_sequence_traits<
+                    p_alphabet>::k_logical_bits_per_symbol);
+        if (requested_width != k_target_width || from > to
             || to > view.bp_size()) {
             return std::nullopt;
         }
-        if (bits == 0u
-            || (source_width * CHAR_BIT) % bits != 0u
-            || (target_width * CHAR_BIT) % bits != 0u) {
+        if (k_bits_per_symbol == 0u
+            || (k_source_width * CHAR_BIT) % k_bits_per_symbol != 0u
+            || (k_target_width * CHAR_BIT) % k_bits_per_symbol != 0u) {
             return std::nullopt;
         }
         const sequence_size_t target_letters_per_unit =
-            packed_letters_per_unit(target_width, bits);
+            packed_letters_per_unit(
+                k_target_width, k_bits_per_symbol);
         if (target_letters_per_unit == 0u) {
             return std::nullopt;
         }
-        auto source = view.try_resident_packed(from, to, source_width);
+        auto source = view.try_resident_packed(
+            from, to, k_source_width);
         if (!source.has_value()
             || source->bit_order
                 != view_type::packed_symbol_order::
                     least_significant_symbol_first
-            || source->bits_per_symbol != bits
+            || source->bits_per_symbol != k_bits_per_symbol
             || source->leading_symbol_offset % target_letters_per_unit != 0u) {
             return std::nullopt;
         }
@@ -2319,8 +2522,8 @@ try_borrow_reinterpreted_packed_bytes(
                 .units = nullptr,
                 .unit_count = 0u,
                 .logical_length = 0u,
-                .storage_unit_width = target_width,
-                .bits_per_symbol = bits,
+                .storage_unit_width = k_target_width,
+                .bits_per_symbol = k_bits_per_symbol,
                 .leading_symbol_offset = 0u,
                 .trailing_padding = 0u,
                 .bit_order = view_type::packed_symbol_order::
@@ -2343,13 +2546,13 @@ try_borrow_reinterpreted_packed_bytes(
             static_cast<std::size_t>(target_units_u64);
         const auto source_bytes = bioseq::common::checked_mul(
             source->unit_count,
-            static_cast<std::size_t>(source_width));
+            static_cast<std::size_t>(k_source_width));
         const auto byte_offset = bioseq::common::checked_mul(
             halfword_offset,
-            static_cast<std::size_t>(target_width));
+            static_cast<std::size_t>(k_target_width));
         const auto target_bytes = bioseq::common::checked_mul(
             target_units,
-            static_cast<std::size_t>(target_width));
+            static_cast<std::size_t>(k_target_width));
         if (!source_bytes.has_value()
             || !byte_offset.has_value()
             || !target_bytes.has_value()) {
@@ -2370,15 +2573,15 @@ try_borrow_reinterpreted_packed_bytes(
             source->units);
         const void* target_units_ptr = source_bytes_ptr + *byte_offset;
         if (reinterpret_cast<std::uintptr_t>(target_units_ptr)
-                % target_width != 0u) {
+                % k_target_width != 0u) {
             return std::nullopt;
         }
         return descriptor_type{
             .units = target_units_ptr,
             .unit_count = target_units,
             .logical_length = length,
-            .storage_unit_width = target_width,
-            .bits_per_symbol = bits,
+            .storage_unit_width = k_target_width,
+            .bits_per_symbol = k_bits_per_symbol,
             .leading_symbol_offset = 0u,
             .trailing_padding =
                 static_cast<std::uint16_t>(trailing_u64),
@@ -2388,9 +2591,9 @@ try_borrow_reinterpreted_packed_bytes(
     }
 }
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] sequence_access_plan<Alphabet> plan_sequence_access(
-        lazy_sequence_view<Alphabet> view,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] sequence_access_plan<p_alphabet> plan_sequence_access(
+        lazy_sequence_view<p_alphabet> view,
         sequence_access_requirement requirement,
         sequence_size_t from,
         sequence_size_t to,
@@ -2400,7 +2603,7 @@ template <sequence_alphabet Alphabet>
     if (from > to || to > view.bp_size()) {
         throw std::invalid_argument("invalid sequence access range");
     }
-    sequence_access_plan<Alphabet> plan{
+    sequence_access_plan<p_alphabet> plan{
         .requirement = requirement,
         .route = sequence_access_route::stream_symbols,
         .resident = std::nullopt,
@@ -2442,24 +2645,26 @@ template <sequence_alphabet Alphabet>
         plan.resident_borrow_kind = sequence_resident_borrow_kind::none;
     }
     plan.route = sequence_access_route::materialize_admitted;
-    plan.admission_bytes = packed_sequence_admission_bytes<Alphabet>(
+    plan.admission_bytes = packed_sequence_admission_bytes<p_alphabet>(
         to - from, requested_width);
     return plan;
 }
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] admitted_packed_sequence<Alphabet> materialize_packed_sequence(
-        lazy_sequence_view<Alphabet> view,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] admitted_packed_sequence<p_alphabet> materialize_packed_sequence(
+        lazy_sequence_view<p_alphabet> view,
         sequence_size_t from,
         sequence_size_t to,
         std::uint8_t requested_width,
         bioseq::parallelism::memory_permit&& permit) {
-    using owner_type = admitted_packed_sequence<Alphabet>;
+    using owner_type = admitted_packed_sequence<p_alphabet>;
     using descriptor_type = typename owner_type::descriptor_type;
     using bit_order_type =
-        typename lazy_sequence_view<Alphabet>::packed_symbol_order;
-    constexpr std::uint8_t bits = static_cast<std::uint8_t>(
-        lazy_sequence_traits<Alphabet>::logical_bits_per_symbol);
+        typename lazy_sequence_view<p_alphabet>::packed_symbol_order;
+    constexpr std::uint8_t k_bits_per_symbol =
+        static_cast<std::uint8_t>(
+            lazy_sequence_traits<
+                p_alphabet>::k_logical_bits_per_symbol);
 
     if (from > to || to > view.bp_size()) {
         throw std::invalid_argument("invalid lazy packed materialization range");
@@ -2475,7 +2680,7 @@ template <sequence_alphabet Alphabet>
 
     const sequence_size_t length = to - from;
     const sequence_size_t letters_per_unit =
-        packed_letters_per_unit(requested_width, bits);
+        packed_letters_per_unit(requested_width, k_bits_per_symbol);
     const sequence_size_t unit_count = bioseq::common::ceil_div(
         length, letters_per_unit);
     const auto allocation_bytes_u64 = bioseq::common::checked_mul(
@@ -2492,8 +2697,9 @@ template <sequence_alphabet Alphabet>
     }
     const std::size_t allocation_bytes =
         static_cast<std::size_t>(*allocation_bytes_u64);
-    const std::uint64_t admitted_bytes = packed_sequence_admission_bytes<Alphabet>(
-        length, requested_width);
+    const std::uint64_t admitted_bytes =
+        packed_sequence_admission_bytes<p_alphabet>(
+            length, requested_width);
     if (!permit || permit.bytes() < admitted_bytes) {
         throw std::length_error(
             "packed materialization permit is smaller than retained storage");
@@ -2506,7 +2712,7 @@ template <sequence_alphabet Alphabet>
         .unit_count = static_cast<std::size_t>(unit_count),
         .logical_length = length,
         .storage_unit_width = requested_width,
-        .bits_per_symbol = bits,
+        .bits_per_symbol = k_bits_per_symbol,
         .leading_symbol_offset = 0u,
         .trailing_padding = static_cast<std::uint16_t>(trailing),
         .bit_order = bit_order_type::least_significant_symbol_first,
@@ -2524,25 +2730,25 @@ template <sequence_alphabet Alphabet>
         switch (requested_width) {
             case 1u:
                 packed = lazy_sequence_detail::pack_view_region_into<
-                    Alphabet, std::uint8_t>(
+                    p_alphabet, std::uint8_t>(
                         view, from, to, state->units_.data(),
                         static_cast<std::size_t>(unit_count));
                 break;
             case 2u:
                 packed = lazy_sequence_detail::pack_view_region_into<
-                    Alphabet, std::uint16_t>(
+                    p_alphabet, std::uint16_t>(
                         view, from, to, state->units_.data(),
                         static_cast<std::size_t>(unit_count));
                 break;
             case 4u:
                 packed = lazy_sequence_detail::pack_view_region_into<
-                    Alphabet, std::uint32_t>(
+                    p_alphabet, std::uint32_t>(
                         view, from, to, state->units_.data(),
                         static_cast<std::size_t>(unit_count));
                 break;
             case 8u:
                 packed = lazy_sequence_detail::pack_view_region_into<
-                    Alphabet, std::uint64_t>(
+                    p_alphabet, std::uint64_t>(
                         view, from, to, state->units_.data(),
                         static_cast<std::size_t>(unit_count));
                 break;
@@ -2573,18 +2779,24 @@ static_assert(!std::is_copy_constructible_v<
               admitted_packed_sequence<seq::dna4>>);
 
 /// Construct a fragmented owner at a stable address for one callback.
-template <class R, class ScannerFactory, class Fn>
-inline void with_fragmented_lazy_sequence(ScannerFactory&& scanner_fn, Fn&& fn) {
-    using S = std::invoke_result_t<ScannerFactory>;
-    lazy_sequence<R, S> lazy{std::forward<ScannerFactory>(scanner_fn)()};
-    std::forward<Fn>(fn)(lazy);
+template <class p_sequence_range,
+          class p_scanner_factory,
+          class p_callback>
+inline void with_fragmented_lazy_sequence(
+        p_scanner_factory&& scanner_factory,
+        p_callback&& callback) {
+    using scanner_type = std::invoke_result_t<p_scanner_factory>;
+    lazy_sequence<p_sequence_range, scanner_type> lazy_sequence_owner{
+        std::forward<p_scanner_factory>(scanner_factory)()};
+    std::forward<p_callback>(callback)(lazy_sequence_owner);
 }
 
 /// Copy ranks through the bounded rank-window reader into contiguous output.
-template <bool is_reversed, bool write_reversed = false,
-          sequence_alphabet Alphabet>
+template <bool p_is_reversed,
+          bool p_write_reversed = false,
+          sequence_alphabet p_alphabet>
 [[gnu::always_inline]] inline void copy_sequence_ranks(
-    lazy_sequence_view<Alphabet> sequence,
+    lazy_sequence_view<p_alphabet> sequence,
     std::span<std::uint8_t> destination,
     std::size_t from,
     std::size_t to)
@@ -2598,7 +2810,7 @@ template <bool is_reversed, bool write_reversed = false,
     }
     const std::size_t length = to - from;
     auto reader = sequence.template rank_reader<
-        is_reversed, write_reversed, std::uint8_t, 2>();
+        p_is_reversed, p_write_reversed, std::uint8_t, 2>();
     const std::uint8_t* ranks = reader.read_at(
         static_cast<sequence_size_t>(from), length, destination);
     if (ranks != destination.data()) {

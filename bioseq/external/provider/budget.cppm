@@ -22,7 +22,7 @@ import bioseq.common.checked_arithmetic;
 /// @brief Defines budget, gate, admission, and binding interfaces.
 // Provider core owns the
 // erased types and a concrete in-process gate; the heavy
-// MemoryAdmissionController adapter lives in
+// The memory-admission controller adapter lives in
 // bioseq.external.execution_admission and is not imported here, so there is no
 // controller edge in provider core. Gates are cancellation-aware RAII leases
 // over checked atomic counters.
@@ -491,7 +491,7 @@ public:
   ~external_execution_admission() { release_noexcept(); }
 
   [[nodiscard]] external_budget_allocation allocation() const noexcept {
-    return allocation_.has_value() ? allocation_->view()
+    return allocation_.has_value() ? allocation_->make_view()
                                    : external_budget_allocation{};
   }
   [[nodiscard]] const external_execution_binding &binding() const noexcept {

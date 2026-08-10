@@ -1,0 +1,19 @@
+{
+  "name": "cppast",
+  "version": "0.1.0",
+  "description": "Library for parsing and working with C++ source",
+  "homepage": "https://github.com/standardese/cppast",
+  "license": "MIT",
+  "supports": "!uwp",
+  "dependencies": [
+    "type-safe",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

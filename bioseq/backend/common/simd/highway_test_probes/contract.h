@@ -8,7 +8,7 @@
 // implementation units of the configured fixed-target primary. No Highway
 // tag, vector, mask, iterator, or target namespace crosses this boundary.
 
-struct BioseqHighwaySimdUtilsProbeReceipt final {
+struct bioseq_highway_simd_utils_probe_receipt final {
     std::int64_t target{};
     std::uint64_t passed_properties{};
     std::uint32_t cases_run{};
@@ -19,21 +19,21 @@ struct BioseqHighwaySimdUtilsProbeReceipt final {
     std::uint32_t u64_lanes{};
 };
 
-struct BioseqHighwaySequenceOpsProbeReceipt final {
+struct bioseq_highway_sequence_ops_probe_receipt final {
     std::int64_t target{};
     std::uint64_t passed_properties{};
     std::uint32_t cases_run{};
     std::uint32_t cases_passed{};
 };
 
-struct BioseqHighwayHashersProbeReceipt final {
+struct bioseq_highway_hashers_probe_receipt final {
     std::int64_t target{};
     std::uint64_t passed_properties{};
     std::uint32_t cases_run{};
     std::uint32_t cases_passed{};
 };
 
-struct BioseqHighwayTwoStackProbeReceipt final {
+struct bioseq_highway_two_stack_probe_receipt final {
     std::int64_t target{};
     std::uint64_t passed_properties{};
     std::uint32_t cases_run{};
@@ -46,51 +46,55 @@ struct BioseqHighwayTwoStackProbeReceipt final {
 };
 
 inline constexpr std::size_t
-    BIOSEQ_HIGHWAY_TWO_STACK_LEGACY_OUTPUT_CAPACITY = 64u;
+    k_bioseq_highway_two_stack_reference_output_capacity = 64u;
 
-struct BioseqHighwayTwoStackLegacyOutputPair final {
-    std::uint64_t last_pos{};
+struct bioseq_highway_two_stack_reference_output_pair final {
+    std::uint64_t last_position{};
     std::uint64_t kmer{};
 };
 
-struct BioseqHighwayTwoStackLegacyOutputReceipt final {
+struct bioseq_highway_two_stack_reference_output_receipt final {
     std::int64_t target{};
     std::uint64_t pair_count{};
     std::uint32_t input_storage_unit_bytes{};
     std::uint32_t window{};
     std::uint32_t kmer{};
-    BioseqHighwayTwoStackLegacyOutputPair
-        pairs[BIOSEQ_HIGHWAY_TWO_STACK_LEGACY_OUTPUT_CAPACITY]{};
+    bioseq_highway_two_stack_reference_output_pair
+        pairs[k_bioseq_highway_two_stack_reference_output_capacity]{};
 };
 
-static_assert(std::is_standard_layout_v<BioseqHighwaySimdUtilsProbeReceipt>);
-static_assert(std::is_standard_layout_v<BioseqHighwaySequenceOpsProbeReceipt>);
-static_assert(std::is_standard_layout_v<BioseqHighwayHashersProbeReceipt>);
-static_assert(std::is_standard_layout_v<BioseqHighwayTwoStackProbeReceipt>);
 static_assert(std::is_standard_layout_v<
-    BioseqHighwayTwoStackLegacyOutputPair>);
+              bioseq_highway_simd_utils_probe_receipt>);
 static_assert(std::is_standard_layout_v<
-    BioseqHighwayTwoStackLegacyOutputReceipt>);
+              bioseq_highway_sequence_ops_probe_receipt>);
+static_assert(std::is_standard_layout_v<
+              bioseq_highway_hashers_probe_receipt>);
+static_assert(std::is_standard_layout_v<
+              bioseq_highway_two_stack_probe_receipt>);
+static_assert(std::is_standard_layout_v<
+              bioseq_highway_two_stack_reference_output_pair>);
+static_assert(std::is_standard_layout_v<
+              bioseq_highway_two_stack_reference_output_receipt>);
 static_assert(std::is_trivially_copyable_v<
-    BioseqHighwayTwoStackLegacyOutputPair>);
+              bioseq_highway_two_stack_reference_output_pair>);
 static_assert(std::is_trivially_copyable_v<
-    BioseqHighwayTwoStackLegacyOutputReceipt>);
+              bioseq_highway_two_stack_reference_output_receipt>);
 
-extern "C" bool bioseq_highway_probe_simd_utils(
-    BioseqHighwaySimdUtilsProbeReceipt*) noexcept;
-extern "C" bool bioseq_highway_probe_sequence_ops(
-    BioseqHighwaySequenceOpsProbeReceipt*) noexcept;
-extern "C" bool bioseq_highway_probe_hashers(
-    BioseqHighwayHashersProbeReceipt*) noexcept;
-extern "C" bool bioseq_highway_probe_two_stack(
-    BioseqHighwayTwoStackProbeReceipt*) noexcept;
+extern "C" bool bioseq_highway_run_simd_utils_probe(
+    bioseq_highway_simd_utils_probe_receipt*) noexcept;
+extern "C" bool bioseq_highway_run_sequence_ops_probe(
+    bioseq_highway_sequence_ops_probe_receipt*) noexcept;
+extern "C" bool bioseq_highway_run_hashers_probe(
+    bioseq_highway_hashers_probe_receipt*) noexcept;
+extern "C" bool bioseq_highway_run_two_stack_probe(
+    bioseq_highway_two_stack_probe_receipt*) noexcept;
 // Test-private access to the original dna4/u8/W10/K4 wrap-path fingerprint.
 // The implementation rejects every other shape rather than widening the
 // production two-stack route contract.
-extern "C" bool bioseq_highway_probe_two_stack_legacy_output(
+extern "C" bool bioseq_highway_collect_two_stack_reference_output(
     const std::uint8_t* ranks,
     std::uint64_t rank_count,
     std::uint32_t input_storage_unit_bytes,
     std::uint32_t window,
     std::uint32_t kmer,
-    BioseqHighwayTwoStackLegacyOutputReceipt*) noexcept;
+    bioseq_highway_two_stack_reference_output_receipt*) noexcept;

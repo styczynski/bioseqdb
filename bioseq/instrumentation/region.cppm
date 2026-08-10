@@ -30,20 +30,20 @@ struct region_measurement {
     bool is_skipped = true;
 };
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] region_scope {
     region_measurement measurement{};
     pmu::counter_sample counter_start{};
 
     [[gnu::always_inline]]
     inline explicit region_scope(const region_descriptor* descriptor) noexcept {
-        if constexpr (configuration_type::enable_profiling) {
+        if constexpr (p_configuration_type::enable_profiling) {
             if (!is_runtime_enabled() || descriptor == nullptr || descriptor->id == 0) return;
-            auto* profiler = active_thread_profiler<configuration_type>;
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             measurement.descriptor = descriptor;
             measurement.start_time_ns = clock::now_ns();
-            if constexpr (configuration_type::enable_counters) {
+            if constexpr (p_configuration_type::enable_counters) {
                 counter_start = pmu::read_thread_counters();
             }
             profiler->stack_depth += 1;
@@ -54,22 +54,22 @@ struct [[nodiscard]] region_scope {
     }
 
     [[gnu::always_inline]] inline ~region_scope() noexcept {
-        if constexpr (configuration_type::enable_profiling) {
+        if constexpr (p_configuration_type::enable_profiling) {
             if (measurement.is_skipped) return;
             const auto end_ns = clock::now_ns();
             const auto duration_ns = end_ns - measurement.start_time_ns;
             pmu::counter_sample counter_delta{};
-            if constexpr (configuration_type::enable_counters) {
+            if constexpr (p_configuration_type::enable_counters) {
                 const auto counter_end = pmu::read_thread_counters();
                 counter_delta = pmu::subtract_clamped(counter_end, counter_start);
             }
-            auto* profiler = active_thread_profiler<configuration_type>;
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             if (profiler->stack_depth > 0) profiler->stack_depth -= 1;
             auto* aggregate = profiler->aggregates.find_or_create(measurement.descriptor->id);
             if (aggregate != nullptr) {
                 record_region_duration(*aggregate, duration_ns);
-                if constexpr (configuration_type::enable_counters) {
+                if constexpr (p_configuration_type::enable_counters) {
                     aggregate->total_cycles += counter_delta.cycles;
                     aggregate->total_instructions += counter_delta.instructions;
                     aggregate->total_branches += counter_delta.branches;
@@ -85,10 +85,10 @@ struct [[nodiscard]] region_scope {
     region_scope& operator=(const region_scope&) = delete;
 };
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline region_scope<configuration_type> region(const region_descriptor* descriptor) noexcept {
-    return region_scope<configuration_type>(descriptor);
+inline region_scope<p_configuration_type> region(const region_descriptor* descriptor) noexcept {
+    return region_scope<p_configuration_type>(descriptor);
 }
 
 /** @brief Measure a region against the benchmark-owned profiler state. */

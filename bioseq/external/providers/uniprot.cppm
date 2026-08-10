@@ -308,9 +308,9 @@ private:
 static_assert(prov::external_api_session_compatible<uniprot_session>);
 
 struct uniprot_provider {
-  static constexpr auto id = bioseq::common::templating::CompTimeStr("uniprot");
+  static constexpr auto id = bioseq::common::templating::compile_time_string("uniprot");
   static constexpr auto name =
-      bioseq::common::templating::CompTimeStr("UniProt");
+      bioseq::common::templating::compile_time_string("UniProt");
   static constexpr bool supports_sequence_retrieval = true;
 
   using plan_type = uniprot_plan;

@@ -632,20 +632,20 @@ struct cpp_template_binding final {
 [[nodiscard]] inline bool compact_sequence_owner_module(
         std::string_view source_module) noexcept {
     return source_module.starts_with(
-        "bioseq.types.pg_compact_sequence:");
+        "bioseq.postgres.types.compact_sequence:");
 }
 
 [[nodiscard]] inline bool table_entrypoint_owner_module(
         std::string_view source_module) noexcept {
-    return source_module == "bioseq.table:access_hooks"
-        || source_module == "bioseq.table:access_method"
-        || source_module == "bioseq.table:custom_scan";
+    return source_module == "bioseq.postgres.table:access_hooks"
+        || source_module == "bioseq.postgres.table:access_method"
+        || source_module == "bioseq.postgres.table:custom_scan";
 }
 
 [[nodiscard]] inline std::string fmgr_owner_key(
         std::string_view source_module) {
     if (compact_sequence_owner_module(source_module)) {
-        return "types_pg_compact_sequence";
+        return "postgres_types_compact_sequence";
     }
     if (table_entrypoint_owner_module(source_module)) {
         return "table_access_hooks";
@@ -683,17 +683,17 @@ struct cpp_template_binding final {
         std::string_view source_module,
         std::string_view owner_key,
         const sql_graph& graph) {
-    if (graph.generated_module_prefix == "bioseq.sql.generated"
+    if (graph.generated_module_prefix == "bioseq.postgres.sql.generated"
         && owner_key == "table_access_hooks") {
-        return "bioseq.table:sql_entrypoints";
+        return "bioseq.postgres.table:sql_entrypoints";
     }
-    if (graph.generated_module_prefix == "bioseq.sql.generated"
-        && owner_key == "types_pg_compact_sequence") {
-        return "bioseq.types.pg_compact_sequence:"
+    if (graph.generated_module_prefix == "bioseq.postgres.sql.generated"
+        && owner_key == "postgres_types_compact_sequence") {
+        return "bioseq.postgres.types.compact_sequence:"
                "generated_sql_entrypoints";
     }
-    if (graph.generated_module_prefix == "bioseq.sql.generated") {
-        return "bioseq.sql.generated.production."
+    if (graph.generated_module_prefix == "bioseq.postgres.sql.generated") {
+        return "bioseq.postgres.sql.generated.production."
             + std::string{owner_key} + ".entrypoints";
     }
     return graph.generated_module_prefix + "."
@@ -719,7 +719,7 @@ struct cpp_template_binding final {
         const std::size_t separator = source_module.find(':');
         return ":" + std::string{source_module.substr(separator + 1)};
     }
-    if (graph.generated_module_prefix != "bioseq.sql.generated") {
+    if (graph.generated_module_prefix != "bioseq.postgres.sql.generated") {
         const std::size_t separator = source_module.find(':');
         if (separator != std::string_view::npos) {
             return std::string{source_module.substr(0, separator)};
@@ -1179,7 +1179,7 @@ struct cpp_template_binding final {
                 result_row_for(entity->source, graph);
             if (row == nullptr) continue;
             if ((graph.generated_module_prefix
-                        == "bioseq.sql.generated"
+                        == "bioseq.postgres.sql.generated"
                     && !row->source_module.ends_with(".sql_rows"))
                 || row->source_module.contains(':')) {
                 throw std::runtime_error(
@@ -1196,7 +1196,7 @@ struct cpp_template_binding final {
             result_row_imports.insert(row->source_module);
         }
     }
-    if (module.owner_key == "types_pg_compact_sequence") {
+    if (module.owner_key == "postgres_types_compact_sequence") {
         owner_imports.insert(":flat_abi");
         owner_imports.insert(":letter");
     }
@@ -1426,7 +1426,7 @@ expected_vector_associations() {
 [[nodiscard]] inline std::string vector_registry_module_name(
         std::string_view compiler_profile,
         std::string_view registry) {
-    return "bioseq.sql.generated."
+    return "bioseq.postgres.sql.generated."
         + generated_profile_name(compiler_profile) + "."
         + std::string{registry};
 }
@@ -1967,7 +1967,7 @@ render_fmgr_entrypoint_modules(
                 + "' has no source modules");
         }
         const bool compact_sequence_owner =
-            owner_key == "types_pg_compact_sequence";
+            owner_key == "postgres_types_compact_sequence";
         const bool table_entrypoint_owner =
             owner_key == "table_access_hooks";
         if (sources->second.size() != 1

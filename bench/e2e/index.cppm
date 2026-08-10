@@ -47,7 +47,7 @@ export module bioseq.bench.e2e;
 import bioseq.common.logging;
 import bioseq.bench.framework;
 import bioseq.instrumentation;
-import bioseq.integration_tests.common;
+import bioseq.tests.integration.support;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.generation;
@@ -82,23 +82,27 @@ namespace gen = bioseq::sequences::generation;
 // keeps generated ranges byte-identical to `bioseq.seq('<alphabet>', 64)` and to
 // the IO writer's view, while the generic generator default remains uint32.
 using bench_storage_t  = std::uint64_t;
-template <sequence_alphabet A>
-using bench_config = sequence_custom_alphabet<A, bench_storage_t>;
-template <sequence_alphabet A>
-using bench_sequence_range = compact_sequence_range<bench_config<A>>;
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
+using bench_config = sequence_custom_alphabet<p_alphabet, bench_storage_t>;
+template <sequence_alphabet p_alphabet>
+using bench_sequence_range = compact_sequence_range<bench_config<p_alphabet>>;
+template <sequence_alphabet p_alphabet>
 using bench_pair_t =
-    typename gen::alphabet_sequence_generator<A, bench_storage_t>::query_target_pair;
+    typename gen::alphabet_sequence_generator<
+        p_alphabet,
+        bench_storage_t>::query_target_pair;
 
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] constexpr std::string_view bench_alphabet_name() {
-    if constexpr (std::same_as<A, seq::dna4>) return "dna4";
-    else if constexpr (std::same_as<A, seq::dna5>) return "dna5";
+    if constexpr (std::same_as<p_alphabet, seq::dna4>) return "dna4";
+    else if constexpr (std::same_as<p_alphabet, seq::dna5>) return "dna5";
     else return "?";
 }
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::string bench_seq_type() {
-    return fmt::format("bioseq.seq('{}', 64)", bench_alphabet_name<A>());
+    return fmt::format(
+        "bioseq.seq('{}', 64)",
+        bench_alphabet_name<p_alphabet>());
 }
 namespace it = bioseq_int_tests;
 
@@ -140,9 +144,6 @@ constexpr std::string_view k_minimizers_per_fragment_index =
     bioseq::indexing::k_minimizers_per_fragment_index_name;
 constexpr std::string_view k_minimizers_per_sequence_index =
     bioseq::indexing::k_minimizers_per_sequence_index_name;
-constexpr std::string_view k_sliced_no_index_algorithm =
-    "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
-
 /** @brief Backend family whose indexes must be prepared during setup. */
 enum class just_index_setup_kind {
     scalar,
@@ -157,6 +158,17 @@ struct e2e_setup_selection {
     bool gpu_just_index = false;
     bool minimap2_just_index = false;
 };
+
+}  // namespace
+
+#if defined(BIOSEQ_E2E_TESTING_API)
+export namespace bioseq::bench::e2e::detail {
+#else
+namespace bioseq::bench::e2e::detail {
+#endif
+
+inline constexpr std::string_view sliced_no_index_algorithm =
+    "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
 
 /** @brief Concrete persisted-index variants needed by one benchmark run. */
 struct e2e_just_index_setup_requirements {
@@ -193,7 +205,6 @@ struct e2e_input {
     std::string alphabet;                        // "dna4" / "dna5"
     std::string seq_type;                        // bioseq.seq('<alphabet>', 64)
     std::string size_label;                      // "2gbp" / "4gbp"
-    std::string just_index_table;                // legacy alias for the per-sequence table
     std::string just_index_table_per_fragment;   // loaded + per-fragment indexed in on_input
     std::string just_index_table_per_sequence;   // loaded + per-sequence indexed in on_input
     std::string just_index_table_simd_per_fragment;
@@ -211,7 +222,6 @@ struct e2e_input {
     std::string target_fasta_split;              // <=split_bp records, for minimap2
     std::string query_fasta;                     // for minimap2
     std::string mmi_path;                        // prebuilt minimap2 index
-    std::string query_bases;                     // ACGTN text for the bioseq SQL literal
     std::vector<e2e_query_truth> queries;
     int kmer_size = 15, window_size = 10;
     bool cigar_projection = false;
@@ -220,21 +230,23 @@ struct e2e_input {
     bool require_cigar_indel = false;
     std::uint32_t min_cigar_deletion_ops = 0;
     std::uint32_t min_cigar_insertion_ops = 0;
-    std::size_t minimap2_split_bp =
-        static_cast<std::size_t>(k_minimap2_split_bp);  // PAF absolute-coord remap (§11)
+    // PAF absolute-coordinate remap (§11). Keep this type self-contained for
+    // the target-owned testing interface rather than exposing implementation
+    // constants from the primary module.
+    std::size_t minimap2_split_bp = std::size_t{2'000'000'352};
     std::int64_t truth_target_start = 0;
     bool truth_is_reverse = false;
     std::int64_t target_bp = 0;
 };
 
-[[nodiscard]] constexpr bool is_sliced_pipeline_evidence_configuration_valid(
+[[nodiscard]] constexpr bool is_sliced_pipeline_stats_configuration_valid(
         std::string_view algorithm,
         const bool cigar_projection) noexcept {
-    return algorithm != k_sliced_no_index_algorithm || cigar_projection;
+    return algorithm != sliced_no_index_algorithm || cigar_projection;
 }
 
-/** @brief Evidence that a cold no-index table has no persisted index state. */
-struct cold_no_index_policy_absence_evidence {
+/** @brief Stats that a cold no-index table has no persisted index state. */
+struct cold_no_index_policy_absence_stats {
     std::int64_t target_rows = -1;
     std::int64_t target_cardinality_metadata_only = 0;
     std::int64_t source_parent_rows_read = -1;
@@ -245,9 +257,8 @@ struct cold_no_index_policy_absence_evidence {
     std::int64_t generation_objects = -1;
 };
 
-/** @brief Measurements and correctness evidence emitted by one execution. */
+/** @brief Measurements and correctness stats emitted by one execution. */
 struct e2e_output {
-	static constexpr std::size_t k_alignment_snapshot_v1_column_count = 150;
 	static constexpr std::size_t k_alignment_snapshot_column_count = 151;
     static constexpr std::size_t k_alignment_snapshot_row_count = 20;
     bool found = false;
@@ -272,7 +283,7 @@ struct e2e_output {
     std::string observed_simd_chaining_policy;
     std::string requested_simd_alignment_algorithm;
     std::string observed_simd_alignment_algorithm;
-    std::int64_t simd_evidence_schema_valid = -1;
+    std::int64_t simd_stats_schema_valid = -1;
     std::int64_t nthash_vector_batches = -1;
     std::int64_t nthash_resident_vector_stream_kernel_calls = -1;
     std::int64_t simd_chaining_exact_policy_calls = -1;
@@ -281,7 +292,7 @@ struct e2e_output {
     std::int64_t simd_chaining_bounded_cutoff_stops = -1;
     std::int64_t simd_chaining_bounded_candidates_skipped = -1;
     std::int64_t simd_chaining_policy_rejections = -1;
-    std::int64_t simd_chaining_policy_evidence_saturated = -1;
+    std::int64_t simd_chaining_policy_stats_saturated = -1;
     std::int64_t block_aligner_execution_stats_available = -1;
     std::int64_t block_aligner_execution_stats_consistent = -1;
     std::int64_t block_aligner_executed_calls = -1;
@@ -292,9 +303,9 @@ struct e2e_output {
     std::int64_t block_aligner_forbidden_ksw2_calls = -1;
     std::int64_t block_aligner_forbidden_scalar_biological_fallbacks = -1;
     std::int64_t block_aligner_execution_stats_saturated = -1;
-    std::int64_t pipeline_evidence_available = 0;
-    std::int64_t pipeline_evidence_attached_to_measurement = 0;
-    std::int64_t pipeline_evidence_consistent = 0;
+    std::int64_t pipeline_stats_available = 0;
+    std::int64_t pipeline_stats_attached_to_measurement = 0;
+    std::int64_t pipeline_stats_consistent = 0;
     std::int64_t stage_engine_matrix_valid = -1;
     std::int64_t prior_alignment_execution_id = -1;
     std::int64_t alignment_execution_id = -1;
@@ -343,7 +354,7 @@ struct e2e_output {
     std::int64_t persisted_manifest_bytes_read = -1;
     std::int64_t persisted_format5_manifest_contract_valid = -1;
     std::int64_t persisted_format6_contract_valid = -1;
-    std::int64_t persisted_format_version = -1;
+    std::string persisted_layout;
     std::int64_t cold_index_schema_valid = -1;
     std::int64_t cold_index_route_empty = -1;
     std::int64_t cold_index_route_selective = -1;
@@ -361,26 +372,26 @@ struct e2e_output {
     std::int64_t cold_index_payload_bytes_requested = -1;
     std::int64_t cold_index_payload_bytes_delivered = -1;
     std::int64_t cold_index_payload_bytes_scanned = -1;
-    std::int64_t format5_reader_capacity_accounting_passes = -1;
-    std::int64_t format5_reader_global_position_storage_preparations = -1;
-    std::int64_t format5_reader_global_position_storage_allocations = -1;
-    std::int64_t format5_reader_position_append_growth_reservations = -1;
-    std::int64_t format5_reader_retained_position_count = -1;
-    std::int64_t format5_reader_retained_position_capacity = -1;
-    std::int64_t format5_reader_directory_capacity_bytes = -1;
-    std::int64_t format5_reader_query_hash_capacity_bytes = -1;
-    std::int64_t format5_reader_query_record_capacity_bytes = -1;
-    std::int64_t format5_reader_ordinal_route_capacity_bytes = -1;
-    std::int64_t format5_reader_selected_extent_capacity_bytes = -1;
-    std::int64_t format5_reader_current_selected_control_capacity_bytes = -1;
-    std::int64_t format5_reader_global_position_capacity_bytes = -1;
-    std::int64_t format5_reader_control_payload_capacity_bytes = -1;
-    std::int64_t format5_reader_owned_capacity_bytes = -1;
-    std::int64_t format5_reader_admitted_bytes = -1;
-    std::int64_t format5_reader_exact_position_image_checks = -1;
-    std::int64_t format5_reader_exact_position_image_failures = -1;
-    std::int64_t format5_reader_retained_layout_checks = -1;
-    std::int64_t format5_reader_retained_layout_failures = -1;
+    std::int64_t grouped_soa_reader_capacity_accounting_passes = -1;
+    std::int64_t grouped_soa_reader_global_position_storage_preparations = -1;
+    std::int64_t grouped_soa_reader_global_position_storage_allocations = -1;
+    std::int64_t grouped_soa_reader_position_append_growth_reservations = -1;
+    std::int64_t grouped_soa_reader_retained_position_count = -1;
+    std::int64_t grouped_soa_reader_retained_position_capacity = -1;
+    std::int64_t grouped_soa_reader_directory_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_query_hash_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_query_record_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_ordinal_route_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_selected_extent_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_current_selected_control_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_global_position_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_control_payload_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_owned_capacity_bytes = -1;
+    std::int64_t grouped_soa_reader_admitted_bytes = -1;
+    std::int64_t grouped_soa_reader_exact_position_image_checks = -1;
+    std::int64_t grouped_soa_reader_exact_position_image_failures = -1;
+    std::int64_t grouped_soa_reader_retained_layout_checks = -1;
+    std::int64_t grouped_soa_reader_retained_layout_failures = -1;
     std::int64_t fragment_native_waves = -1;
     std::int64_t fragment_native_queries = -1;
     std::int64_t fragment_native_occurrence_fill_ns = -1;
@@ -415,7 +426,7 @@ struct e2e_output {
     std::int64_t fragment_native_peak_query_radix_capacity_bytes = -1;
     std::int64_t fragment_native_peak_occurrence_count_capacity_bytes = -1;
     std::int64_t fragment_native_peak_block_layout_capacity_bytes = -1;
-    std::int64_t fragment_native_peak_block_evidence_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_block_stats_capacity_bytes = -1;
     std::int64_t fragment_native_occurrence_allocations = -1;
     std::int64_t fragment_native_query_plan_allocations = -1;
     std::int64_t fragment_native_query_group_offset_allocations = -1;
@@ -423,7 +434,7 @@ struct e2e_output {
     std::int64_t fragment_native_query_radix_allocations = -1;
     std::int64_t fragment_native_occurrence_count_allocations = -1;
     std::int64_t fragment_native_block_layout_allocations = -1;
-    std::int64_t fragment_native_block_evidence_allocations = -1;
+    std::int64_t fragment_native_block_stats_allocations = -1;
     std::int64_t fragment_native_query_occurrences = -1;
     std::int64_t fragment_native_unique_query_plans = -1;
     std::int64_t fragment_native_packed_occurrence_waves = -1;
@@ -443,36 +454,36 @@ struct e2e_output {
     std::int64_t fragment_native_compact_direct_traversal_rank_checkpoints_examined = -1;
     std::int64_t fragment_native_compact_direct_traversal_membership_words_examined = -1;
     std::int64_t fragment_native_compact_direct_rejected_posting_reads = -1;
-    std::int64_t fragment_native_evidence_saturated = -1;
-    std::int64_t format5_reader_memory_evidence_saturated = -1;
-    nlohmann::json format5_reader_memory_evidence = nullptr;
-    std::int64_t format6_directory_rows = -1;
-    std::int64_t format6_directory_bytes = -1;
-    std::int64_t format6_control_rows = -1;
-    std::int64_t format6_control_bytes = -1;
-    std::int64_t format6_posting_rows = -1;
-    std::int64_t format6_posting_bytes = -1;
-    std::int64_t format6_posting_ranges_delivered = -1;
-    std::int64_t format6_selected_block_count = -1;
-    std::int64_t format6_accepted_hash_count = -1;
-    std::int64_t format6_retained_position_count = -1;
-    std::int64_t format6_authorized_posting_bytes = -1;
-    std::int64_t format6_peak_admitted_bytes = -1;
-    std::int64_t format6_retained_owner_bytes = -1;
-    std::int64_t format6_admitted_bytes = -1;
-    std::int64_t format6_failures = -1;
-    std::int64_t format6_saturated = -1;
-    nlohmann::json format6_reader_evidence = nullptr;
-    std::int64_t persisted_gpu_operation_evidence_schema_valid = -1;
-    std::int64_t persisted_gpu_operation_evidence_accepted = -1;
-    std::int64_t persisted_gpu_operation_evidence_complete = -1;
-    std::int64_t persisted_gpu_operation_evidence_saturated = -1;
+    std::int64_t are_fragment_native_stats_saturated = -1;
+    std::int64_t are_grouped_soa_reader_memory_stats_saturated = -1;
+    nlohmann::json minimizer_fragment_reader_stats = nullptr;
+    std::int64_t hash_major_directory_rows = -1;
+    std::int64_t hash_major_directory_bytes = -1;
+    std::int64_t hash_major_control_rows = -1;
+    std::int64_t hash_major_control_bytes = -1;
+    std::int64_t hash_major_posting_rows = -1;
+    std::int64_t hash_major_posting_bytes = -1;
+    std::int64_t hash_major_posting_ranges_delivered = -1;
+    std::int64_t hash_major_selected_block_count = -1;
+    std::int64_t hash_major_accepted_hash_count = -1;
+    std::int64_t hash_major_retained_position_count = -1;
+    std::int64_t hash_major_authorized_posting_bytes = -1;
+    std::int64_t hash_major_peak_admitted_bytes = -1;
+    std::int64_t hash_major_retained_owner_bytes = -1;
+    std::int64_t hash_major_admitted_bytes = -1;
+    std::int64_t hash_major_failures = -1;
+    std::int64_t hash_major_is_saturated = -1;
+    nlohmann::json hash_major_index_reader_stats = nullptr;
+    std::int64_t persisted_gpu_operation_stats_schema_valid = -1;
+    std::int64_t persisted_gpu_operation_stats_accepted = -1;
+    std::int64_t persisted_gpu_operation_stats_complete = -1;
+    std::int64_t persisted_gpu_operation_stats_saturated = -1;
     std::int64_t persisted_gpu_dropped_operation_count = -1;
     std::int64_t persisted_gpu_operation_count = -1;
     std::int64_t persisted_gpu_accepted_operation_count = -1;
     std::int64_t persisted_gpu_job_count = -1;
     std::int64_t persisted_gpu_accepted_job_count = -1;
-    nlohmann::json persisted_gpu_operation_evidence = nullptr;
+    nlohmann::json persisted_gpu_operation_stats = nullptr;
     std::int64_t cold_index_stats_saturated = -1;
     std::int64_t extent_crc_raw_bytes_hashed = -1;
     std::int64_t extent_crc_combined_bytes = -1;
@@ -509,13 +520,13 @@ struct e2e_output {
     std::int64_t pre_restart_persisted_generation_id = -1;
     std::int64_t pre_restart_persisted_gpu_abi_version = -1;
     std::string pre_restart_persisted_source_identity;
-    std::int64_t pre_restart_persisted_format_version = -1;
-    std::int64_t post_restart_persisted_format_version = -1;
-    nlohmann::json pre_restart_format6_ready_audit = nullptr;
-    nlohmann::json post_restart_format6_ready_audit = nullptr;
+    std::string pre_restart_persisted_layout;
+    std::string post_restart_persisted_layout;
+    nlohmann::json pre_restart_hash_major_ready_stats = nullptr;
+    nlohmann::json post_restart_hash_major_ready_stats = nullptr;
     std::int64_t format6_restart_audit_accepted = -1;
-    // Dedicated no-index lifecycle evidence.  Do not overload the persisted
-    // just_index fields: no_index proves an untimed base-data load with no
+    // Dedicated no-index lifecycle stats.  Do not overload the persisted
+    // just_index fields: no_index validates an untimed base-data load with no
     // sidecar, a post-load PostgreSQL restart, and an index-free fresh backend
     // before the transient index+map statement begins.
     std::int64_t cold_no_index_restart_performed = -1;
@@ -528,57 +539,57 @@ struct e2e_output {
     std::int64_t cold_no_index_post_restart_database_oid = -1;
     std::int64_t cold_no_index_pre_restart_target_rows = -1;
     std::int64_t cold_no_index_post_restart_target_rows = -1;
-    std::int64_t cold_no_index_pre_restart_mpf_rows = -1;
-    std::int64_t cold_no_index_pre_restart_mps_rows = -1;
-    std::int64_t cold_no_index_post_restart_mpf_rows = -1;
-    std::int64_t cold_no_index_post_restart_mps_rows = -1;
+    std::int64_t cold_no_index_pre_restart_minimizer_fragment_rows = -1;
+    std::int64_t cold_no_index_pre_restart_minimizer_sequence_rows = -1;
+    std::int64_t cold_no_index_post_restart_minimizer_fragment_rows = -1;
+    std::int64_t cold_no_index_post_restart_minimizer_sequence_rows = -1;
     std::int64_t cold_no_index_pre_restart_async_jobs = -1;
     std::int64_t cold_no_index_post_restart_async_jobs = -1;
     std::int64_t cold_no_index_measured_async_jobs = -1;
     std::int64_t cold_no_index_pre_restart_gucs_off = -1;
     std::int64_t cold_no_index_post_restart_gucs_off = -1;
     std::int64_t cold_no_index_measured_gucs_off = -1;
-    cold_no_index_policy_absence_evidence cold_no_index_pre_restart_mpf{};
-    cold_no_index_policy_absence_evidence cold_no_index_pre_restart_mps{};
-    cold_no_index_policy_absence_evidence cold_no_index_post_restart_mpf{};
-    cold_no_index_policy_absence_evidence cold_no_index_post_restart_mps{};
-    cold_no_index_policy_absence_evidence cold_no_index_measured_mpf{};
-    cold_no_index_policy_absence_evidence cold_no_index_measured_mps{};
+    cold_no_index_policy_absence_stats cold_no_index_pre_restart_minimizer_fragment{};
+    cold_no_index_policy_absence_stats cold_no_index_pre_restart_minimizer_sequence{};
+    cold_no_index_policy_absence_stats cold_no_index_post_restart_minimizer_fragment{};
+    cold_no_index_policy_absence_stats cold_no_index_post_restart_minimizer_sequence{};
+    cold_no_index_policy_absence_stats cold_no_index_measured_minimizer_fragment{};
+    cold_no_index_policy_absence_stats cold_no_index_measured_minimizer_sequence{};
     std::int64_t cold_no_index_lifecycle_accepted = 0;
     std::int64_t persisted_policy_audit_accepted = -1;
     std::int64_t audit_selected_minimizer_is_sequence = -1;
-    std::int64_t audit_mpf_rows = -1;
-    std::int64_t audit_mps_rows = -1;
-    std::int64_t audit_mpf_update_on_insert = -1;
-    std::int64_t audit_mps_update_on_insert = -1;
-    std::int64_t audit_mpf_active_read = -1;
-    std::int64_t audit_mps_active_read = -1;
+    std::int64_t audit_minimizer_fragment_rows = -1;
+    std::int64_t audit_minimizer_sequence_rows = -1;
+    std::int64_t audit_minimizer_fragment_update_on_insert = -1;
+    std::int64_t audit_minimizer_sequence_update_on_insert = -1;
+    std::int64_t audit_minimizer_fragment_active_read = -1;
+    std::int64_t audit_minimizer_sequence_active_read = -1;
     std::int64_t audit_async_persist_jobs_waiting = -1;
     std::int64_t audit_index_rows_wait_attempts = 0;
-    std::int64_t mps_build_backend_pid = -1;
-    std::int64_t mps_build_db_oid = -1;
-    std::int64_t mps_build_relfilenode = -1;
-    std::int64_t mps_build_sequence_rowno = -1;
-    std::int64_t mps_build_total_run_count = -1;
-    std::int64_t mps_build_resident_runs = -1;
-    std::int64_t mps_build_file_runs = -1;
-    std::int64_t mps_build_resident_run_bytes = -1;
-    std::int64_t mps_build_resident_peak_bytes = -1;
-    std::int64_t mps_build_spilled_run_bytes = -1;
-    std::int64_t mps_build_postgres_temp_file_bytes = -1;
-    std::int64_t mps_build_postgres_temp_file_count = -1;
-    std::int64_t mps_build_merge_reader_buffer_bytes = -1;
-    std::int64_t mps_build_merge_pass_count = -1;
-    std::int64_t mps_build_spill_count_from_pressure = -1;
-    std::int64_t mps_build_resident_demotions = -1;
-    std::int64_t mps_build_position_spill_bytes = -1;
-    std::int64_t mps_build_position_spill_count = -1;
-    std::int64_t mps_build_shared_generation = -1;
-    std::int64_t mps_build_worker_build_ns = -1;
-    std::int64_t mps_build_pipeline_mode = -1;
-    std::int64_t mps_build_max_concurrency = -1;
-    std::int64_t mps_build_index_memory_cap_mb = -1;
-    std::int64_t mps_build_lazy_worker_shareable = -1;
+    std::int64_t hash_major_build_backend_pid = -1;
+    std::int64_t hash_major_build_db_oid = -1;
+    std::int64_t hash_major_build_relfilenode = -1;
+    std::int64_t hash_major_build_sequence_rowno = -1;
+    std::int64_t hash_major_build_total_run_count = -1;
+    std::int64_t hash_major_build_resident_runs = -1;
+    std::int64_t hash_major_build_file_runs = -1;
+    std::int64_t hash_major_build_resident_run_bytes = -1;
+    std::int64_t hash_major_build_resident_peak_bytes = -1;
+    std::int64_t hash_major_build_spilled_run_bytes = -1;
+    std::int64_t hash_major_build_postgres_temp_file_bytes = -1;
+    std::int64_t hash_major_build_postgres_temp_file_count = -1;
+    std::int64_t hash_major_build_merge_reader_buffer_bytes = -1;
+    std::int64_t hash_major_build_merge_pass_count = -1;
+    std::int64_t hash_major_build_spill_count_from_pressure = -1;
+    std::int64_t hash_major_build_resident_demotions = -1;
+    std::int64_t hash_major_build_position_spill_bytes = -1;
+    std::int64_t hash_major_build_position_spill_count = -1;
+    std::int64_t hash_major_build_shared_generation = -1;
+    std::int64_t hash_major_build_worker_build_ns = -1;
+    std::int64_t hash_major_build_pipeline_mode = -1;
+    std::int64_t hash_major_build_max_concurrency = -1;
+    std::int64_t hash_major_build_index_memory_cap_mb = -1;
+    std::int64_t hash_major_build_lazy_worker_shareable = -1;
     std::array<std::int64_t, k_alignment_snapshot_column_count>
         alignment_snapshot_numeric_columns = [] {
             std::array<std::int64_t, k_alignment_snapshot_column_count> values{};
@@ -587,19 +598,25 @@ struct e2e_output {
         }();
     // Lossless copy of the exact same-invocation SRF result.  The selected
     // scalar fields above drive fail-closed acceptance; this complete copy is
-    // the durable evidence written to report.json so later analysis never has
-    // to trust a lossy projection of the evidence.
+    // the durable stats written to report.json so later analysis never has
+    // to trust a lossy projection of the stats.
     it::rowset_t alignment_snapshot_rows{};
 };
 
-static_assert(
-    e2e_output::k_alignment_snapshot_column_count
-    == e2e_output::k_alignment_snapshot_v1_column_count + 1);
+}  // namespace bioseq::bench::e2e::detail
 
-[[nodiscard]] bool e2e_expects_format6(
+namespace {
+
+using bioseq::bench::e2e::detail::e2e_input;
+using bioseq::bench::e2e::detail::e2e_just_index_setup_requirements;
+using bioseq::bench::e2e::detail::e2e_output;
+using bioseq::bench::e2e::detail::e2e_query_truth;
+using bioseq::bench::e2e::detail::is_sliced_pipeline_stats_configuration_valid;
+
+[[nodiscard]] bool e2e_expects_hash_major(
     const e2e_input& in,
     std::string_view minimizer_index) noexcept;
-[[nodiscard]] nlohmann::json capture_format6_ready_audit(
+[[nodiscard]] nlohmann::json capture_hash_major_ready_stats(
     const it::connection_test_context& connection,
     const std::string& table,
     std::string_view minimizer_index,
@@ -722,7 +739,7 @@ void preflight_e2e_resources(it::connection_test_context& conn,
     }
 }
 
-// ---- small JSON helpers (same shape as bench_v10_main) ----
+// ---- small JSON helpers shared with the alignment benchmark ----
 [[nodiscard]] std::int64_t jint(simdjson::dom::element d, std::string_view k, std::int64_t fb) {
     std::int64_t v = fb; (void)(d[k].get(v) == simdjson::SUCCESS); return v; }
 [[nodiscard]] double jdbl(simdjson::dom::element d, std::string_view k, double fb) {
@@ -738,14 +755,16 @@ using bench_supported_alphabets = supported_alphabets<
     alphabet_entry<seq::dna4, "dna4">,
     alphabet_entry<seq::dna5, "dna5">>;
 
-template <class handler_fn>
-inline void dispatch_bench_alphabet(std::string_view name, handler_fn&& handler) {
+template <class p_handler>
+inline void dispatch_bench_alphabet(
+    std::string_view name,
+    p_handler&& handler) {
     std::string owned{name};
     const bool matched = bench_supported_alphabets::dispatch_alphabet_by_name(
         owned.c_str(),
-        [&handler]<class entry_type>() {
-            using alphabet_t = typename entry_type::alphabet_type;
-            handler.template operator()<alphabet_t>();
+        [&handler]<class p_entry>() {
+            using alphabet_type = typename p_entry::alphabet_type;
+            handler.template operator()<alphabet_type>();
         });
     if (!matched) {
         bioseq_log<logging_level::error>("[bench_e2e] unsupported alphabet '{}'", name);
@@ -754,17 +773,20 @@ inline void dispatch_bench_alphabet(std::string_view name, handler_fn&& handler)
 }
 
 // ---- §10.0c — zero-copy FASTA emission over the IO sequence_writer ----
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 using bench_writer = bioseq::io::sequence_writer<
-    A, bioseq::io::sequence_file_format::fasta>;
-template <sequence_alphabet A>
-using bench_view = bioseq::io::compact_sequence_view<bench_config<A>>;
+    p_alphabet, bioseq::io::sequence_file_format::fasta>;
+template <sequence_alphabet p_alphabet>
+using bench_view =
+    bioseq::io::compact_sequence_view<bench_config<p_alphabet>>;
 
 // One zero-copy view over [unit_off, unit_off+unit_count) of a generated range.
-template <sequence_alphabet A>
-[[nodiscard]] inline bench_view<A> view_slice(const bench_sequence_range<A>& seq,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline bench_view<p_alphabet> view_slice(
+        const bench_sequence_range<p_alphabet>& seq,
         std::size_t unit_off, std::size_t unit_count, std::size_t padding) {
-    return bench_view<A>{seq._data.data() + unit_off, unit_count, padding};
+    return bench_view<p_alphabet>{
+        seq._data.data() + unit_off, unit_count, padding};
 }
 
 // ---- §11 — FASTA writers / minimap2 drivers / result parsers ----
@@ -775,12 +797,14 @@ template <sequence_alphabet A>
 /// compact_sequence_view fed straight to the bounded SIMD IO writer (zero
 /// re-pack, RSS-bounded). Bodies are line-wrapped (k_fasta_line_width) so
 /// bioseq.load's reader slab stays bounded.
-template <sequence_alphabet A>
-inline void write_fasta(const std::string& path, const bench_sequence_range<A>& seq,
+template <sequence_alphabet p_alphabet>
+inline void write_fasta(
+        const std::string& path,
+        const bench_sequence_range<p_alphabet>& seq,
                         std::string_view base_name, std::size_t record_bp) {
     bioseq::io::writer_options wo = bioseq::io::default_writer_options;
     wo.fasta_line_width = k_fasta_line_width;
-    auto writer_or = bench_writer<A>::open(path, wo);
+    auto writer_or = bench_writer<p_alphabet>::open(path, wo);
     if (!writer_or) {
         bioseq_log<logging_level::error>("[bench_e2e] cannot open '{}': {}", path, writer_or.error()); std::abort();
     }
@@ -791,7 +815,8 @@ inline void write_fasta(const std::string& path, const bench_sequence_range<A>& 
                           std::size_t cnt,
                           std::size_t pad) {
         if (!writer.write_record_streamed(fmt::format("{}{}", base_name, idx),
-                                          view_slice<A>(seq, off, cnt, pad),
+                                          view_slice<p_alphabet>(
+                                              seq, off, cnt, pad),
                                           k_fasta_stream_chunk_bp)) {
             bioseq_log<logging_level::error>("[bench_e2e] write_record_streamed failed for '{}'", path); std::abort();
         }
@@ -808,23 +833,25 @@ inline void write_fasta(const std::string& path, const bench_sequence_range<A>& 
     }
 }
 
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 inline void write_single_record_fasta(const std::string& path, std::string_view name,
-                                      const bench_sequence_range<A>& seq) {
-    write_fasta<A>(path, seq, name, /*record_bp=*/0);       // one record "<name>0"
+                                      const bench_sequence_range<p_alphabet>& seq) {
+    write_fasta<p_alphabet>(
+        path, seq, name, /*record_bp=*/0);       // one record "<name>0"
 }
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 inline void write_split_fasta(const std::string& path, std::string_view base,
-                              const bench_sequence_range<A>& seq, std::size_t split_bp) {
-    write_fasta<A>(path, seq, base, split_bp);
+                              const bench_sequence_range<p_alphabet>& seq,
+                              std::size_t split_bp) {
+    write_fasta<p_alphabet>(path, seq, base, split_bp);
 }
 
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::string decode_target_window(
-        const bench_sequence_range<A>& target,
+        const bench_sequence_range<p_alphabet>& target,
         const std::size_t begin_bp,
         const std::size_t end_bp) {
-    using traits = typename bench_sequence_range<A>::traits;
+    using traits = typename bench_sequence_range<p_alphabet>::traits;
     if (begin_bp > end_bp || end_bp > target.bp_size()) return {};
     auto iterator = target.template iter<SYMBOL>(
         target.cbegin() + static_cast<std::ptrdiff_t>(
@@ -842,12 +869,12 @@ template <sequence_alphabet A>
     return result;
 }
 
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 void write_multi_query_fasta(
         const std::string& path,
         std::span<const e2e_query_truth> queries)
 {
-    (void)sizeof(A);
+    (void)sizeof(p_alphabet);
     std::ofstream out(path);
     if (!out) {
         throw std::runtime_error("failed to open multi-query FASTA: " + path);
@@ -919,7 +946,7 @@ struct resource_sample {
         "ps -axo comm=,rss= | awk '"
         "$1 ~ /postgres/ {pg += $2} "
         "$1 ~ /minimap2/ {mm += $2} "
-        "$1 ~ /bioseq_bench_e2e/ {bench += $2} "
+        "$1 ~ /bioseq_benchmark_e2e/ {bench += $2} "
         "END {printf \"%llu %llu %llu\\n\", pg, mm, bench}'");
     unsigned long long pg = 0, mm = 0, bench = 0;
     if (std::sscanf(rss.c_str(), "%llu %llu %llu", &pg, &mm, &bench) == 3) {
@@ -1129,9 +1156,9 @@ struct benchmark_cigar_operation {
     std::string result;
     result.reserve(forward.size());
     dispatch_bench_alphabet(in.alphabet,
-        [&result, forward]<sequence_alphabet A>() {
+        [&result, forward]<sequence_alphabet p_alphabet>() {
             for (auto it = forward.rbegin(); it != forward.rend(); ++it) {
-                A letter{};
+                p_alphabet letter{};
                 letter.assign_char(*it);
                 result.push_back(seqan3::complement(letter).to_char());
             }
@@ -1453,17 +1480,17 @@ void parse_bioseq_batch_rows(
     return std::optional<std::string>{std::string{text}};
 }
 
-/** @brief Duplicate-detection state for one pipeline evidence document. */
-struct pipeline_evidence_parse_state {
+/** @brief Duplicate-detection state for one pipeline stats document. */
+struct pipeline_stats_parse_state {
     std::set<std::string> seen_fields;
     bool group_found = false;
     bool invalid = false;
 };
 
-[[noreturn]] void abort_pipeline_evidence_capture(std::string_view reason) {
+[[noreturn]] void abort_pipeline_stats_capture(std::string_view reason) {
     std::fprintf(
         stderr,
-        "[bench_e2e] PIPELINE-PROOF-CAPTURE-FAIL %.*s\n",
+        "[bench_e2e] PIPELINE-VALIDATION-CAPTURE-FAIL %.*s\n",
         static_cast<int>(reason.size()),
         reason.data());
     std::fflush(stderr);
@@ -1474,7 +1501,7 @@ void assign_pipeline_explain_metric(
         std::string_view key,
         simdjson::dom::element value,
         e2e_output& out,
-        pipeline_evidence_parse_state& state)
+        pipeline_stats_parse_state& state)
 {
     const auto claim_field = [&] {
         if (!state.seen_fields.emplace(std::string{key}).second) {
@@ -1580,10 +1607,10 @@ void assign_pipeline_explain_metric(
     }
 }
 
-void parse_pipeline_evidence_object(
+void parse_pipeline_stats_object(
         simdjson::dom::element element,
         e2e_output& out,
-        pipeline_evidence_parse_state& state)
+        pipeline_stats_parse_state& state)
 {
     simdjson::dom::object object_value;
     if (element.get(object_value) != simdjson::SUCCESS) {
@@ -1598,7 +1625,7 @@ void parse_pipeline_evidence_object(
 void walk_pipeline_explain_json(
         simdjson::dom::element element,
         e2e_output& out,
-        pipeline_evidence_parse_state& state)
+        pipeline_stats_parse_state& state)
 {
     const simdjson::dom::element_type type = element.type();
     if (type == simdjson::dom::element_type::ARRAY) {
@@ -1625,14 +1652,14 @@ void walk_pipeline_explain_json(
                 continue;
             }
             state.group_found = true;
-            parse_pipeline_evidence_object(field.value, out, state);
+            parse_pipeline_stats_object(field.value, out, state);
             continue;
         }
         walk_pipeline_explain_json(field.value, out, state);
     }
 }
 
-[[nodiscard]] bool pipeline_evidence_fields_complete(
+[[nodiscard]] bool pipeline_stats_fields_complete(
         const e2e_output& out) noexcept
 {
     const auto nonnegative = [](const std::int64_t value) {
@@ -1676,32 +1703,32 @@ void walk_pipeline_explain_json(
         const std::string& align_sql,
         e2e_output& out)
 {
-    // This is a second, untimed statement. Preserve the evidence for
-    // diagnostics, but never present it as evidence of the measured statement.
-    out.pipeline_evidence_attached_to_measurement = 0;
+    // This is a second, untimed statement. Preserve the stats for
+    // diagnostics, but never present it as stats of the measured statement.
+    out.pipeline_stats_attached_to_measurement = 0;
     const it::rowset_t explain_rows = it::query_rows(
         c,
         "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + align_sql);
     if (explain_rows.empty() || explain_rows.front().empty()
         || !explain_rows.front()[0].has_value()) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "canonical pipeline EXPLAIN returned no JSON document");
     }
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     const std::string& json_text = *explain_rows.front()[0];
     if (parser.parse(json_text).get(doc) != simdjson::SUCCESS) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "canonical pipeline EXPLAIN JSON failed to parse");
     }
-    pipeline_evidence_parse_state state{};
+    pipeline_stats_parse_state state{};
     walk_pipeline_explain_json(doc, out, state);
     if (!state.group_found || state.invalid
-        || !pipeline_evidence_fields_complete(out)) {
-        abort_pipeline_evidence_capture(
-            "canonical pipeline EXPLAIN proof is missing, duplicated, or ill-typed");
+        || !pipeline_stats_fields_complete(out)) {
+        abort_pipeline_stats_capture(
+            "canonical pipeline EXPLAIN validation is missing, duplicated, or ill-typed");
     }
-    out.pipeline_evidence_available = 1;
+    out.pipeline_stats_available = 1;
 }
 
 /** @brief Identity of the most recently published alignment snapshot. */
@@ -1746,7 +1773,7 @@ struct alignment_snapshot_identity {
         " WHERE datname=current_database()), "
         "pg_postmaster_start_time()::text;");
     if (rows.size() != 1 || rows.front().size() != 4) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "prior alignment snapshot identity has an invalid row shape");
     }
     const auto execution_id = parse_snapshot_i64(rows.front()[0]);
@@ -1756,7 +1783,7 @@ struct alignment_snapshot_identity {
         || !database_oid.has_value() || *backend_pid == 0
         || *database_oid == 0 || !rows.front()[3].has_value()
         || rows.front()[3]->empty()) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "prior alignment snapshot identity is missing or ill-typed");
     }
     return alignment_snapshot_identity{
@@ -1809,16 +1836,16 @@ inline constexpr std::array<std::string_view,
     "gpu_pipeline_cache_hit",
     "scan_node_count",
     "nested_alignment_executor_count",
-    "completed",
-    "partial",
-    "fully_drained",
+    "is_completed",
+    "is_partial",
+    "is_fully_drained",
     "requested_backend",
     "actual_backend",
     "requested_target_index_source",
     "actual_target_index_source",
     "persisted_generation_id",
     "persisted_source_identity",
-    "mixed_persisted_identity",
+    "has_mixed_persisted_identity",
     "stage",
     "eligible_jobs",
     "executed_host_io_jobs",
@@ -1840,7 +1867,7 @@ inline constexpr std::array<std::string_view,
     "cpu_prepared_duplicate_build_attempts",
     "cpu_prepared_key_set_checksum",
     "cpu_prepared_build_set_checksum",
-    "operational_identity_conflict",
+    "has_operational_identity_conflict",
     "persisted_index_rows",
     "missing_persisted_index_rows",
     "recomputed_target_index_rows",
@@ -1937,16 +1964,16 @@ inline constexpr std::array<std::string_view,
     "gpu_pipeline_creates",
     "backend_declines",
 	"backend_fallbacks",
-	"stats_saturated",
+	"are_stats_saturated",
 	"persisted_source_parent_rows_read",
 	"persisted_source_catalog_rows_read",
 	"persisted_source_catalog_index_scans",
 	"persisted_source_fragment_rows_read",
 	"persisted_source_decoded_bp",
-	"persisted_legacy_globalize_calls",
-	"persisted_legacy_rebase_calls",
+	"persisted_pair_index_conversion_calls",
+	"persisted_segment_rebase_calls",
 	"cold_index_preparation",
-	"simd_execution_evidence",
+	"simd_execution_stats",
 };
 
 [[nodiscard]] constexpr bool fixed_lower_hex(
@@ -1969,7 +1996,7 @@ inline constexpr std::array<std::string_view,
 }
 
 /** @brief Stable cache identity fields required by the qualification gate. */
-struct gpu_cache_identity_gate_evidence {
+struct gpu_cache_identity_gate_stats {
     std::string_view device_uuid;
     std::string_view driver;
     std::string_view policy;
@@ -1979,19 +2006,19 @@ struct gpu_cache_identity_gate_evidence {
     std::int64_t hit = -1;
 };
 
-[[nodiscard]] constexpr bool gpu_cache_identity_evidence_valid(
-        const gpu_cache_identity_gate_evidence& evidence) noexcept {
-    return nonzero_fixed_lower_hex(evidence.device_uuid, 32)
-        && !evidence.driver.empty()
-        && evidence.policy == "immutable_preseed_all_hit"
-        && nonzero_fixed_lower_hex(evidence.seed_sha256, 64)
-        && evidence.seed_size > 0
-        && nonzero_fixed_lower_hex(evidence.manifest_checksum, 16)
-        && evidence.hit == 1;
+[[nodiscard]] constexpr bool gpu_cache_identity_stats_valid(
+        const gpu_cache_identity_gate_stats& stats) noexcept {
+    return nonzero_fixed_lower_hex(stats.device_uuid, 32)
+        && !stats.driver.empty()
+        && stats.policy == "immutable_preseed_all_hit"
+        && nonzero_fixed_lower_hex(stats.seed_sha256, 64)
+        && stats.seed_size > 0
+        && nonzero_fixed_lower_hex(stats.manifest_checksum, 16)
+        && stats.hit == 1;
 }
 
 /** @brief Runtime cache counters required by the qualification gate. */
-struct gpu_cache_runtime_gate_evidence {
+struct gpu_cache_runtime_gate_stats {
     std::int64_t declared_seed_size = -1;
     std::int64_t loads = -1;
     std::int64_t seed_bytes = -1;
@@ -2003,21 +2030,21 @@ struct gpu_cache_runtime_gate_evidence {
     std::int64_t backend_fallbacks = -1;
 };
 
-[[nodiscard]] constexpr bool gpu_cache_runtime_evidence_valid(
-        const gpu_cache_runtime_gate_evidence& evidence) noexcept {
-    return evidence.declared_seed_size > 0
-        && evidence.loads == 1
-        && evidence.seed_bytes == evidence.declared_seed_size
-        && evidence.load_ns > 0
-        && evidence.creation_ns > 0
-        && evidence.timestamp_failures == 0
-        && evidence.pipeline_creates > 0
-        && evidence.backend_declines == 0
-        && evidence.backend_fallbacks == 0;
+[[nodiscard]] constexpr bool gpu_cache_runtime_stats_valid(
+        const gpu_cache_runtime_gate_stats& stats) noexcept {
+    return stats.declared_seed_size > 0
+        && stats.loads == 1
+        && stats.seed_bytes == stats.declared_seed_size
+        && stats.load_ns > 0
+        && stats.creation_ns > 0
+        && stats.timestamp_failures == 0
+        && stats.pipeline_creates > 0
+        && stats.backend_declines == 0
+        && stats.backend_fallbacks == 0;
 }
 
 consteval bool gpu_cache_gate_contract_self_test() {
-    constexpr gpu_cache_identity_gate_evidence valid_identity{
+    constexpr gpu_cache_identity_gate_stats valid_identity{
         .device_uuid = "11111111111111111111111111111111",
         .driver = "vk",
         .policy = "immutable_preseed_all_hit",
@@ -2029,71 +2056,71 @@ consteval bool gpu_cache_gate_contract_self_test() {
         .hit = 1,
     };
     constexpr auto changed_identity = []<typename T>(
-            gpu_cache_identity_gate_evidence evidence,
-            T gpu_cache_identity_gate_evidence::* member,
+            gpu_cache_identity_gate_stats stats,
+            T gpu_cache_identity_gate_stats::* member,
             T value) constexpr {
-        evidence.*member = value;
-        return evidence;
+        stats.*member = value;
+        return stats;
     };
     /** @brief One cache identity gate fixture and expected decision. */
     struct identity_case {
         std::string_view name;
-        gpu_cache_identity_gate_evidence evidence;
+        gpu_cache_identity_gate_stats stats;
         bool expected;
     };
     constexpr auto identity_cases = std::to_array<identity_case>({
         {"valid immutable hit", valid_identity, true},
         {"isolated policy rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::policy,
+            &gpu_cache_identity_gate_stats::policy,
             std::string_view{"isolated_miss_diagnostic"}), false},
         {"not-applicable policy rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::policy,
+            &gpu_cache_identity_gate_stats::policy,
             std::string_view{"not_applicable"}), false},
         {"mixed policy rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::policy,
+            &gpu_cache_identity_gate_stats::policy,
             std::string_view{"mixed_invalid"}), false},
         {"cache miss rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::hit, std::int64_t{0}), false},
+            &gpu_cache_identity_gate_stats::hit, std::int64_t{0}), false},
         {"unset hit rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::hit, std::int64_t{-1}), false},
+            &gpu_cache_identity_gate_stats::hit, std::int64_t{-1}), false},
         {"mixed hit rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::hit, std::int64_t{2}), false},
+            &gpu_cache_identity_gate_stats::hit, std::int64_t{2}), false},
         {"zero UUID rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::device_uuid,
+            &gpu_cache_identity_gate_stats::device_uuid,
             std::string_view{"00000000000000000000000000000000"}), false},
         {"malformed UUID rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::device_uuid,
+            &gpu_cache_identity_gate_stats::device_uuid,
             std::string_view{"A1111111111111111111111111111111"}), false},
         {"empty driver rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::driver,
+            &gpu_cache_identity_gate_stats::driver,
             std::string_view{}), false},
         {"zero SHA rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::seed_sha256,
+            &gpu_cache_identity_gate_stats::seed_sha256,
             std::string_view{
                 "00000000000000000000000000000000"
                 "00000000000000000000000000000000"}), false},
         {"malformed SHA rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::seed_sha256,
+            &gpu_cache_identity_gate_stats::seed_sha256,
             std::string_view{"1"}), false},
         {"zero seed size rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::seed_size,
+            &gpu_cache_identity_gate_stats::seed_size,
             std::int64_t{0}), false},
         {"zero manifest rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::manifest_checksum,
+            &gpu_cache_identity_gate_stats::manifest_checksum,
             std::string_view{"0000000000000000"}), false},
         {"malformed manifest rejected", changed_identity(valid_identity,
-            &gpu_cache_identity_gate_evidence::manifest_checksum,
+            &gpu_cache_identity_gate_stats::manifest_checksum,
             std::string_view{"000000000000123G"}), false},
     });
     for (const auto& test : identity_cases) {
         (void)test.name;
-        if (gpu_cache_identity_evidence_valid(test.evidence)
+        if (gpu_cache_identity_stats_valid(test.stats)
                 != test.expected) {
             return false;
         }
     }
 
-    constexpr gpu_cache_runtime_gate_evidence valid_runtime{
+    constexpr gpu_cache_runtime_gate_stats valid_runtime{
         .declared_seed_size = 64,
         .loads = 1,
         .seed_bytes = 64,
@@ -2105,46 +2132,46 @@ consteval bool gpu_cache_gate_contract_self_test() {
         .backend_fallbacks = 0,
     };
     constexpr auto changed_runtime = [](
-            gpu_cache_runtime_gate_evidence evidence,
-            std::int64_t gpu_cache_runtime_gate_evidence::* member,
+            gpu_cache_runtime_gate_stats stats,
+            std::int64_t gpu_cache_runtime_gate_stats::* member,
             const std::int64_t value) constexpr {
-        evidence.*member = value;
-        return evidence;
+        stats.*member = value;
+        return stats;
     };
     /** @brief One runtime cache gate fixture and expected decision. */
     struct runtime_case {
         std::string_view name;
-        gpu_cache_runtime_gate_evidence evidence;
+        gpu_cache_runtime_gate_stats stats;
         bool expected;
     };
     constexpr auto runtime_cases = std::to_array<runtime_case>({
-        {"valid runtime proof", valid_runtime, true},
+        {"valid runtime validation", valid_runtime, true},
         {"zero declared bytes rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::declared_seed_size, 0), false},
+            &gpu_cache_runtime_gate_stats::declared_seed_size, 0), false},
         {"zero loads rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::loads, 0), false},
+            &gpu_cache_runtime_gate_stats::loads, 0), false},
         {"multiple loads rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::loads, 2), false},
+            &gpu_cache_runtime_gate_stats::loads, 2), false},
         {"zero seed bytes rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::seed_bytes, 0), false},
+            &gpu_cache_runtime_gate_stats::seed_bytes, 0), false},
         {"mismatched seed bytes rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::seed_bytes, 63), false},
+            &gpu_cache_runtime_gate_stats::seed_bytes, 63), false},
         {"zero load timing rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::load_ns, 0), false},
+            &gpu_cache_runtime_gate_stats::load_ns, 0), false},
         {"zero creation timing rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::creation_ns, 0), false},
+            &gpu_cache_runtime_gate_stats::creation_ns, 0), false},
         {"timestamp failure rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::timestamp_failures, 1), false},
+            &gpu_cache_runtime_gate_stats::timestamp_failures, 1), false},
         {"zero pipeline creates rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::pipeline_creates, 0), false},
+            &gpu_cache_runtime_gate_stats::pipeline_creates, 0), false},
         {"backend decline rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::backend_declines, 1), false},
+            &gpu_cache_runtime_gate_stats::backend_declines, 1), false},
         {"backend fallback rejected", changed_runtime(valid_runtime,
-            &gpu_cache_runtime_gate_evidence::backend_fallbacks, 1), false},
+            &gpu_cache_runtime_gate_stats::backend_fallbacks, 1), false},
     });
     for (const auto& test : runtime_cases) {
         (void)test.name;
-        if (gpu_cache_runtime_evidence_valid(test.evidence)
+        if (gpu_cache_runtime_stats_valid(test.stats)
                 != test.expected) {
             return false;
         }
@@ -2154,9 +2181,9 @@ consteval bool gpu_cache_gate_contract_self_test() {
 
 static_assert(gpu_cache_gate_contract_self_test());
 
-inline constexpr auto k_cold_index_evidence_keys =
+inline constexpr auto k_cold_index_stats_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "timing_semantics",
+        "schema", "revision", "timing_semantics",
         "decode_timing_available", "transfer_timing_available",
         "target_relation_reuses", "target_relation_extra_opens",
         "parent_random_reads", "policy_heap_opens", "policy_index_opens",
@@ -2177,33 +2204,33 @@ inline constexpr auto k_cold_index_evidence_keys =
         "row_crc_bytes", "tuple_form_bytes", "policy_ns", "source_ns",
         "bind_ns", "head_ns", "directory_ns", "payload_ns", "decode_ns",
         "transfer_ns", "close_ns", "shared_blks_hit", "shared_blks_read",
-        "stats_saturated",
+        "are_stats_saturated",
     });
-static_assert(k_cold_index_evidence_keys.size() == 59);
+static_assert(k_cold_index_stats_keys.size() == 59);
 
-inline constexpr auto k_format5_reader_memory_evidence_keys =
+inline constexpr auto k_minimizer_fragment_reader_stats_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "execution_id", "backend_pid", "database_oid",
-        "format5_reader_capacity_accounting_passes",
-        "format5_reader_global_position_storage_preparations",
-        "format5_reader_global_position_storage_allocations",
-        "format5_reader_position_append_growth_reservations",
-        "format5_reader_retained_position_count",
-        "format5_reader_retained_position_capacity",
-        "format5_reader_directory_capacity_bytes",
-        "format5_reader_query_hash_capacity_bytes",
-        "format5_reader_query_record_capacity_bytes",
-        "format5_reader_ordinal_route_capacity_bytes",
-        "format5_reader_selected_extent_capacity_bytes",
-        "format5_reader_current_selected_control_capacity_bytes",
-        "format5_reader_global_position_capacity_bytes",
-        "format5_reader_control_payload_capacity_bytes",
-        "format5_reader_owned_capacity_bytes",
-        "format5_reader_admitted_bytes",
-        "format5_reader_exact_position_image_checks",
-        "format5_reader_exact_position_image_failures",
-        "format5_reader_retained_layout_checks",
-        "format5_reader_retained_layout_failures",
+        "schema", "revision", "execution_id", "backend_pid", "database_oid",
+        "grouped_soa_reader_capacity_accounting_passes",
+        "grouped_soa_reader_global_position_storage_preparations",
+        "grouped_soa_reader_global_position_storage_allocations",
+        "grouped_soa_reader_position_append_growth_reservations",
+        "grouped_soa_reader_retained_position_count",
+        "grouped_soa_reader_retained_position_capacity",
+        "grouped_soa_reader_directory_capacity_bytes",
+        "grouped_soa_reader_query_hash_capacity_bytes",
+        "grouped_soa_reader_query_record_capacity_bytes",
+        "grouped_soa_reader_ordinal_route_capacity_bytes",
+        "grouped_soa_reader_selected_extent_capacity_bytes",
+        "grouped_soa_reader_current_selected_control_capacity_bytes",
+        "grouped_soa_reader_global_position_capacity_bytes",
+        "grouped_soa_reader_control_payload_capacity_bytes",
+        "grouped_soa_reader_owned_capacity_bytes",
+        "grouped_soa_reader_admitted_bytes",
+        "grouped_soa_reader_exact_position_image_checks",
+        "grouped_soa_reader_exact_position_image_failures",
+        "grouped_soa_reader_retained_layout_checks",
+        "grouped_soa_reader_retained_layout_failures",
         "fragment_native_waves", "fragment_native_queries",
         "fragment_native_occurrence_fill_ns",
         "fragment_native_occurrence_radix_ns",
@@ -2235,23 +2262,93 @@ inline constexpr auto k_format5_reader_memory_evidence_keys =
         "fragment_native_peak_query_radix_capacity_bytes",
         "fragment_native_peak_occurrence_count_capacity_bytes",
         "fragment_native_peak_block_layout_capacity_bytes",
-        "fragment_native_peak_block_evidence_capacity_bytes",
+        "fragment_native_peak_block_stats_capacity_bytes",
         "fragment_native_occurrence_allocations",
         "fragment_native_query_plan_allocations",
         "fragment_native_query_radix_allocations",
         "fragment_native_occurrence_count_allocations",
         "fragment_native_block_layout_allocations",
-        "fragment_native_block_evidence_allocations",
+        "fragment_native_block_stats_allocations",
         "fragment_native_query_occurrences",
         "fragment_native_unique_query_plans",
         "fragment_native_packed_occurrence_waves",
         "fragment_native_wide_occurrence_waves",
-        "fragment_native_evidence_saturated",
-        "format5_reader_memory_evidence_saturated", "stats_saturated",
+        "are_fragment_native_stats_saturated",
+        "are_grouped_soa_reader_memory_stats_saturated",
+        "are_stats_saturated",
+        "provider_configured",
+        "provider_captured",
+        "provider_persisted",
+        "provider_opened",
+        "provider_head_scans",
+        "provider_head_rows",
+        "provider_descriptor_scans",
+        "provider_descriptor_rows",
+        "payload_tuples_formed",
+        "payload_tuples_inserted",
+        "payload_tuples_reread",
+        "mapped_sink_calls",
+        "mapped_sink_bytes",
+        "mapped_sink_flushes",
+        "mapped_sink_coalescer_capacity_bytes",
+        "mapped_sink_pwrite_calls",
+        "mapped_sink_short_writes",
+        "mapped_sink_eintr_retries",
+        "mapped_sink_preallocation_bytes",
+        "mapped_sink_preallocation_result",
+        "header_crc_bytes",
+        "directory_crc_bytes",
+        "manifest_crc_bytes",
+        "seal_aggregate_payload_crc_bytes",
+        "open_aggregate_payload_crc_bytes",
+        "lazy_extent_cas_winners",
+        "lazy_extent_waiters",
+        "lazy_extent_executions",
+        "lazy_extent_reuses",
+        "lazy_extent_crc_bytes",
+        "lazy_extent_state_bytes",
+        "lazy_extent_invalid_receipts",
+        "lazy_state_layout",
+        "mapping_bytes",
+        "mapping_count",
+        "mapping_resourceowner_releases",
+        "file_action_high_water",
+        "file_action_identity_mismatches",
+        "reaper_descriptors_examined",
+        "reaper_relation_rows_deleted",
+        "reaper_payload_bytes_deleted",
+        "reaper_files_queued",
+        "reaper_remaining",
+        "orphan_entries_examined",
+        "orphan_files_acted",
+        "orphan_bytes_acted",
+        "orphan_remaining",
+        "orphan_cursor_wraps",
+        "madvise_choice",
+        "madvise_result",
+        "fragment_native_peak_query_group_offset_capacity_bytes",
+        "fragment_native_peak_query_membership_filter_capacity_bytes",
+        "fragment_native_query_group_offset_allocations",
+        "fragment_native_query_membership_filter_allocations",
+        "fragment_native_compact_direct_lookup_ns",
+        "fragment_native_compact_direct_selection_shards",
+        "fragment_native_compact_direct_shard_query_layouts",
+        "fragment_native_compact_direct_layout_shards_completed",
+        "fragment_native_compact_direct_emission_shards_completed",
+        "fragment_native_compact_direct_posting_visit_passes",
+        "fragment_native_compact_direct_selected_postings",
+        "fragment_native_compact_direct_layout_postings_visited",
+        "fragment_native_compact_direct_emission_postings_visited",
+        "fragment_native_compact_direct_target_control_scan_bytes",
+        "fragment_native_compact_direct_target_control_scan_passes",
+        "fragment_native_compact_direct_fallbacks",
+        "fragment_native_compact_direct_traversal_rank_checkpoints_examined",
+        "fragment_native_compact_direct_traversal_membership_words_examined",
+        "fragment_native_compact_direct_rejected_posting_reads",
     });
-static_assert(k_format5_reader_memory_evidence_keys.size() == 71);
+static_assert(k_minimizer_fragment_reader_stats_keys.size() == 140);
 
-inline constexpr auto k_format5_reader_memory_evidence_v4_addition_keys =
+inline constexpr auto k_grouped_soa_provider_stats_counter_keys =
     std::to_array<std::string_view>({
         "provider_configured",
         "provider_captured",
@@ -2304,113 +2401,9 @@ inline constexpr auto k_format5_reader_memory_evidence_v4_addition_keys =
         "madvise_choice",
         "madvise_result",
     });
-static_assert(k_format5_reader_memory_evidence_v4_addition_keys.size() == 50);
+static_assert(k_grouped_soa_provider_stats_counter_keys.size() == 50);
 
-inline constexpr auto k_format5_reader_memory_evidence_v4_keys = [] {
-    std::array<std::string_view, 121u> keys{};
-    std::size_t destination = 0u;
-    for (const std::string_view key : k_format5_reader_memory_evidence_keys) {
-        keys[destination++] = key;
-    }
-    for (const std::string_view key
-         : k_format5_reader_memory_evidence_v4_addition_keys) {
-        keys[destination++] = key;
-    }
-    return keys;
-}();
-static_assert(k_format5_reader_memory_evidence_v4_keys.size() == 121);
-static_assert([] {
-    for (std::size_t index = 0u;
-         index < k_format5_reader_memory_evidence_keys.size();
-         ++index) {
-        if (k_format5_reader_memory_evidence_v4_keys[index]
-                != k_format5_reader_memory_evidence_keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}());
-
-inline constexpr auto k_format5_reader_memory_evidence_v5_addition_keys =
-    std::to_array<std::string_view>({
-        "fragment_native_peak_query_group_offset_capacity_bytes",
-        "fragment_native_peak_query_membership_filter_capacity_bytes",
-        "fragment_native_query_group_offset_allocations",
-        "fragment_native_query_membership_filter_allocations",
-    });
-static_assert(k_format5_reader_memory_evidence_v5_addition_keys.size() == 4);
-
-inline constexpr auto k_format5_reader_memory_evidence_v5_keys = [] {
-    std::array<std::string_view, 125u> keys{};
-    std::size_t destination = 0u;
-    for (const std::string_view key : k_format5_reader_memory_evidence_v4_keys) {
-        keys[destination++] = key;
-    }
-    for (const std::string_view key
-         : k_format5_reader_memory_evidence_v5_addition_keys) {
-        keys[destination++] = key;
-    }
-    return keys;
-}();
-static_assert(k_format5_reader_memory_evidence_v5_keys.size() == 125);
-static_assert([] {
-    for (std::size_t index = 0u;
-         index < k_format5_reader_memory_evidence_v4_keys.size();
-         ++index) {
-        if (k_format5_reader_memory_evidence_v5_keys[index]
-                != k_format5_reader_memory_evidence_v4_keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}());
-
-inline constexpr auto k_format5_reader_memory_evidence_v6_addition_keys =
-    std::to_array<std::string_view>({
-        "fragment_native_compact_direct_lookup_ns",
-        "fragment_native_compact_direct_selection_shards",
-        "fragment_native_compact_direct_shard_query_layouts",
-        "fragment_native_compact_direct_layout_shards_completed",
-        "fragment_native_compact_direct_emission_shards_completed",
-        "fragment_native_compact_direct_posting_visit_passes",
-        "fragment_native_compact_direct_selected_postings",
-        "fragment_native_compact_direct_layout_postings_visited",
-        "fragment_native_compact_direct_emission_postings_visited",
-        "fragment_native_compact_direct_target_control_scan_bytes",
-        "fragment_native_compact_direct_target_control_scan_passes",
-        "fragment_native_compact_direct_fallbacks",
-        "fragment_native_compact_direct_traversal_rank_checkpoints_examined",
-        "fragment_native_compact_direct_traversal_membership_words_examined",
-        "fragment_native_compact_direct_rejected_posting_reads",
-    });
-static_assert(k_format5_reader_memory_evidence_v6_addition_keys.size() == 15);
-
-inline constexpr auto k_format5_reader_memory_evidence_v6_keys = [] {
-    std::array<std::string_view, 140u> keys{};
-    std::size_t destination = 0u;
-    for (const std::string_view key : k_format5_reader_memory_evidence_v5_keys) {
-        keys[destination++] = key;
-    }
-    for (const std::string_view key
-         : k_format5_reader_memory_evidence_v6_addition_keys) {
-        keys[destination++] = key;
-    }
-    return keys;
-}();
-static_assert(k_format5_reader_memory_evidence_v6_keys.size() == 140);
-static_assert([] {
-    for (std::size_t index = 0u;
-         index < k_format5_reader_memory_evidence_v5_keys.size();
-         ++index) {
-        if (k_format5_reader_memory_evidence_v6_keys[index]
-                != k_format5_reader_memory_evidence_v5_keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}());
-
-inline constexpr auto k_fragment_native_evidence_counter_keys =
+inline constexpr auto k_fragment_native_stats_counter_keys =
     std::to_array<std::string_view>({
         "fragment_native_waves", "fragment_native_queries",
         "fragment_native_occurrence_fill_ns",
@@ -2445,7 +2438,7 @@ inline constexpr auto k_fragment_native_evidence_counter_keys =
         "fragment_native_peak_query_radix_capacity_bytes",
         "fragment_native_peak_occurrence_count_capacity_bytes",
         "fragment_native_peak_block_layout_capacity_bytes",
-        "fragment_native_peak_block_evidence_capacity_bytes",
+        "fragment_native_peak_block_stats_capacity_bytes",
         "fragment_native_occurrence_allocations",
         "fragment_native_query_plan_allocations",
         "fragment_native_query_group_offset_allocations",
@@ -2453,7 +2446,7 @@ inline constexpr auto k_fragment_native_evidence_counter_keys =
         "fragment_native_query_radix_allocations",
         "fragment_native_occurrence_count_allocations",
         "fragment_native_block_layout_allocations",
-        "fragment_native_block_evidence_allocations",
+        "fragment_native_block_stats_allocations",
         "fragment_native_query_occurrences",
         "fragment_native_unique_query_plans",
         "fragment_native_packed_occurrence_waves",
@@ -2474,12 +2467,32 @@ inline constexpr auto k_fragment_native_evidence_counter_keys =
         "fragment_native_compact_direct_traversal_membership_words_examined",
         "fragment_native_compact_direct_rejected_posting_reads",
     });
-static_assert(k_fragment_native_evidence_counter_keys.size() == 62);
+static_assert(k_fragment_native_stats_counter_keys.size() == 62);
 
-inline constexpr auto k_format6_reader_evidence_keys =
+inline constexpr auto k_compact_direct_reader_stats_counter_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "execution_id", "backend_pid", "database_oid",
-        "format_version", "sessions", "generation_id", "source_identity",
+        "fragment_native_compact_direct_lookup_ns",
+        "fragment_native_compact_direct_selection_shards",
+        "fragment_native_compact_direct_shard_query_layouts",
+        "fragment_native_compact_direct_layout_shards_completed",
+        "fragment_native_compact_direct_emission_shards_completed",
+        "fragment_native_compact_direct_posting_visit_passes",
+        "fragment_native_compact_direct_selected_postings",
+        "fragment_native_compact_direct_layout_postings_visited",
+        "fragment_native_compact_direct_emission_postings_visited",
+        "fragment_native_compact_direct_target_control_scan_bytes",
+        "fragment_native_compact_direct_target_control_scan_passes",
+        "fragment_native_compact_direct_fallbacks",
+        "fragment_native_compact_direct_traversal_rank_checkpoints_examined",
+        "fragment_native_compact_direct_traversal_membership_words_examined",
+        "fragment_native_compact_direct_rejected_posting_reads",
+    });
+static_assert(k_compact_direct_reader_stats_counter_keys.size() == 15);
+
+inline constexpr auto k_hash_major_index_reader_stats_keys =
+    std::to_array<std::string_view>({
+        "schema", "revision", "execution_id", "backend_pid", "database_oid",
+        "format_revision", "sessions", "generation_id", "source_identity",
         "source_content_crc64", "compatibility_digest", "directory_rows",
         "directory_bytes", "control_rows", "control_bytes", "posting_rows",
         "posting_bytes", "directory_row_crc_receipts",
@@ -2489,37 +2502,38 @@ inline constexpr auto k_format6_reader_evidence_keys =
         "posting_range_crc_receipts", "posting_semantic_receipts",
         "authorized_posting_bytes", "query_count", "selected_block_count",
         "accepted_hash_count",
-        "retained_position_count", "directory_phase_peak_bytes",
-        "control_phase_peak_bytes", "posting_phase_peak_bytes",
+        "retained_position_count", "directory_stage_peak_bytes",
+        "control_stage_peak_bytes", "posting_stage_peak_bytes",
         "peak_admitted_bytes", "retained_owner_bytes", "admitted_bytes",
-        "legacy_assembly_calls", "legacy_globalize_calls",
-        "legacy_rebase_calls", "recompute_calls",
+        "assembly_calls", "pair_index_conversion_calls",
+        "segment_rebase_calls", "recompute_calls",
         "generic_source_fallback_calls", "backend_fallbacks", "failures",
-        "saturated", "operational_identity_conflict", "stats_saturated",
+        "is_saturated", "has_operational_identity_conflict",
+        "are_stats_saturated",
     });
-static_assert(k_format6_reader_evidence_keys.size() == 47);
+static_assert(k_hash_major_index_reader_stats_keys.size() == 47);
 
-inline constexpr auto k_format6_ready_audit_keys =
+inline constexpr auto k_hash_major_ready_audit_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "format_version", "database_oid",
+        "schema", "revision", "layout", "database_oid",
         "main_relfilenode", "column_attno", "query_key", "table_name",
         "index_name", "source", "head", "manifest", "metadata", "streams",
     });
-inline constexpr auto k_format6_ready_source_keys =
+inline constexpr auto k_hash_major_ready_source_keys =
     std::to_array<std::string_view>({
-        "sequence_rowno", "locator_version", "bucket_idx", "shard_idx",
+        "sequence_rowno", "locator_revision", "bucket_idx", "shard_idx",
         "num_fragments", "total_bp_size", "first_sub_row_no", "source_epoch",
         "padding_letters", "alphabet_code", "storage_unit_byte_width",
         "source_content_crc64", "source_identity",
     });
-inline constexpr auto k_format6_ready_head_keys =
+inline constexpr auto k_hash_major_ready_head_keys =
     std::to_array<std::string_view>({
         "generation_id", "query_key", "source_epoch", "source_identity",
         "source_content_crc64", "compatibility_digest",
         "manifest_address_bound_row_crc64", "manifest_payload_crc64",
         "head_crc64", "dense_seal_present",
     });
-inline constexpr auto k_format6_ready_manifest_keys =
+inline constexpr auto k_hash_major_ready_manifest_keys =
     std::to_array<std::string_view>({
         "generation_id", "source_epoch", "source_identity",
         "source_content_crc64", "target_length", "unique_hash_count",
@@ -2528,29 +2542,29 @@ inline constexpr auto k_format6_ready_manifest_keys =
         "total_control_bytes", "total_posting_bytes",
         "directory_entry_count", "compatibility",
     });
-inline constexpr auto k_format6_ready_compatibility_keys =
+inline constexpr auto k_hash_major_ready_compatibility_keys =
     std::to_array<std::string_view>({
-        "hash_scheme_id", "hash_scheme_version", "alphabet_code",
+        "hash_scheme_identity", "hash_scheme_revision", "alphabet_code",
         "kmer_size", "window_size", "hash_width_bytes",
-        "stored_posting_width_bytes", "position_encoding_version",
-        "hash_semantics_version", "count_semantics_version",
-        "producer_backend_id", "producer_backend_version",
+        "stored_posting_width_bytes", "position_encoding_revision",
+        "hash_semantics_revision", "count_semantics_revision",
+        "producer_backend_identity", "producer_backend_revision",
         "controls_per_block", "hash_seed",
     });
-inline constexpr auto k_format6_ready_metadata_keys =
+inline constexpr auto k_hash_major_ready_metadata_keys =
     std::to_array<std::string_view>({
         "head_rows", "head_bytes", "manifest_rows", "manifest_bytes",
     });
-inline constexpr auto k_format6_ready_stream_keys =
+inline constexpr auto k_hash_major_ready_stream_keys =
     std::to_array<std::string_view>({
         "kind", "element_count", "logical_bytes", "row_count",
         "stream_crc64", "exact_catalog_rows", "exact_catalog_bytes",
         "exact_catalog_stream_crc64",
     });
 
-inline constexpr auto k_simd_execution_evidence_keys =
+inline constexpr auto k_simd_execution_stats_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "requested_policy", "observed_policy",
+        "schema", "revision", "requested_policy", "observed_policy",
         "requested_alignment_algorithm", "observed_alignment_algorithm",
         "nthash_vector_batches",
         "nthash_resident_vector_stream_kernel_calls",
@@ -2560,10 +2574,10 @@ inline constexpr auto k_simd_execution_evidence_keys =
         "simd_chaining_bounded_cutoff_stops",
         "simd_chaining_bounded_candidates_skipped",
         "simd_chaining_policy_rejections",
-        "simd_chaining_policy_evidence_saturated",
+        "are_simd_chaining_policy_stats_saturated",
         "block_aligner_execution_stats",
     });
-static_assert(k_simd_execution_evidence_keys.size() == 16);
+static_assert(k_simd_execution_stats_keys.size() == 16);
 
 inline constexpr auto k_block_aligner_execution_stats_keys =
     std::to_array<std::string_view>({
@@ -2574,45 +2588,45 @@ inline constexpr auto k_block_aligner_execution_stats_keys =
     });
 static_assert(k_block_aligner_execution_stats_keys.size() == 10);
 
-inline constexpr auto k_persisted_gpu_operation_evidence_keys =
+inline constexpr auto k_persisted_gpu_operation_stats_keys =
     std::to_array<std::string_view>({
-        "schema", "version", "execution_id", "backend_pid", "database_oid",
-        "completed", "partial", "fully_drained", "accepted", "complete",
-        "saturated", "dropped_operation_count", "operation_count",
+        "schema", "revision", "execution_id", "backend_pid", "database_oid",
+        "is_completed", "is_partial", "is_fully_drained", "is_consistent",
+        "is_complete", "is_saturated", "dropped_operation_count", "operation_count",
         "accepted_operation_count", "complete_operation_count", "job_count",
-        "accepted_job_count", "cache_qualification", "operations",
+        "accepted_job_count", "cache_validation", "operations",
     });
-static_assert(k_persisted_gpu_operation_evidence_keys.size() == 19);
+static_assert(k_persisted_gpu_operation_stats_keys.size() == 19);
 
 inline constexpr auto k_persisted_gpu_operation_keys =
     std::to_array<std::string_view>({
-        "operation_identity", "expected_jobs", "proof_jobs",
+        "operation_identity", "expected_jobs", "validated_jobs",
         "consumed_jobs", "accepted_jobs", "burned_jobs", "pending_jobs",
         "staged_jobs", "published_jobs", "publication_commits",
         "query_pipeline_receipt_count", "shape_pipeline_receipt_count",
         "submission_count", "query_pipeline_operation_identity",
         "shape_pipeline_operation_identity", "query_submission_ordinals",
         "seed_receipt_identity", "cache_token_identity",
-        "cache_qualification_identity", "generation_id", "source_identity",
+        "cache_validation_identity", "generation_id", "source_identity",
         "cold_load_identity", "source", "environment", "cache_metrics",
         "jobs",
     });
 static_assert(k_persisted_gpu_operation_keys.size() == 26);
 
-inline constexpr auto k_persisted_gpu_cache_qualification_keys =
+inline constexpr auto k_persisted_gpu_cache_validation_keys =
     std::to_array<std::string_view>({
-        "version", "identity", "accepted", "saturated", "archive_count",
+        "revision", "identity", "is_consistent", "is_saturated", "archive_count",
         "archive_bytes", "archive_checksum", "receipt_count", "hash_passes",
         "hashed_bytes", "private_files_created", "private_files_unlinked",
         "live_private_paths", "pipeline_filesystem_hash_passes",
-        "pipeline_filesystem_hashed_bytes", "helper_protocol_version",
+        "pipeline_filesystem_hashed_bytes", "helper_protocol_revision",
         "helper_build_identity", "helper_source", "helper_executable_size",
         "helper_executable_sha256", "helper_metal_registry_id", "device_uuid",
         "api_version", "driver_version", "vendor_id", "device_id",
         "pipeline_cache_uuid", "seed_receipt_identity", "seed_sha256",
         "seed_size", "manifest_checksum",
     });
-static_assert(k_persisted_gpu_cache_qualification_keys.size() == 31);
+static_assert(k_persisted_gpu_cache_validation_keys.size() == 31);
 
 inline constexpr auto k_persisted_gpu_environment_keys =
     std::to_array<std::string_view>({
@@ -2682,10 +2696,10 @@ inline constexpr auto k_persisted_gpu_coordinate_keys =
     });
 static_assert(k_persisted_gpu_coordinate_keys.size() == 10);
 
-template<std::size_t N>
+template<std::size_t p_key_count>
 [[nodiscard]] bool json_has_exact_keys(
         const nlohmann::json& value,
-        const std::array<std::string_view, N>& keys) {
+        const std::array<std::string_view, p_key_count>& keys) {
     if (!value.is_object() || value.size() != keys.size()) return false;
     return std::all_of(keys.begin(), keys.end(), [&value](const auto key) {
         return value.contains(std::string{key});
@@ -2698,22 +2712,22 @@ template<std::size_t N>
     const auto found = object.find(std::string{key});
     if (found == object.end()
         || !(found->is_number_unsigned() || found->is_number_integer())) {
-        abort_pipeline_evidence_capture(
-            "alignment evidence JSON counter is absent or ill-typed");
+        abort_pipeline_stats_capture(
+            "alignment stats JSON counter is absent or ill-typed");
     }
     if (found->is_number_unsigned()) {
         const auto value = found->get<std::uint64_t>();
         if (value > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::int64_t>::max)())) {
-            abort_pipeline_evidence_capture(
-                "alignment evidence JSON counter exceeds SQL bigint");
+            abort_pipeline_stats_capture(
+                "alignment stats JSON counter exceeds SQL bigint");
         }
         return static_cast<std::int64_t>(value);
     }
     const auto value = found->get<std::int64_t>();
     if (value < 0) {
-        abort_pipeline_evidence_capture(
-            "alignment evidence JSON counter is negative");
+        abort_pipeline_stats_capture(
+            "alignment stats JSON counter is negative");
     }
     return value;
 }
@@ -2722,23 +2736,23 @@ template<std::size_t N>
         const std::optional<std::string>& cell,
         std::string_view diagnostic) {
     if (!cell.has_value()) {
-        abort_pipeline_evidence_capture(diagnostic);
+        abort_pipeline_stats_capture(diagnostic);
     }
     try {
         return nlohmann::json::parse(*cell);
     } catch (const nlohmann::json::exception&) {
-        abort_pipeline_evidence_capture(diagnostic);
+        abort_pipeline_stats_capture(diagnostic);
     }
 }
 
-/// Read one required JSON Boolean or fail the evidence capture closed.
+/// Read one required JSON Boolean or fail the stats capture closed.
 [[nodiscard]] bool required_json_boolean(
         const nlohmann::json& object,
         std::string_view key) {
     const auto found = object.find(std::string{key});
     if (found == object.end() || !found->is_boolean()) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence Boolean is absent or ill-typed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats Boolean is absent or ill-typed");
     }
     return found->get<bool>();
 }
@@ -2749,32 +2763,32 @@ template<std::size_t N>
         std::string_view key) {
     const auto found = object.find(std::string{key});
     if (found == object.end() || !found->is_string()) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence text is absent or ill-typed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats text is absent or ill-typed");
     }
     return found->get_ref<const std::string&>();
 }
 
-/// Read one required JSON array from the retained evidence object.
+/// Read one required JSON array from the retained stats object.
 [[nodiscard]] const nlohmann::json& required_json_array(
         const nlohmann::json& object,
         std::string_view key) {
     const auto found = object.find(std::string{key});
     if (found == object.end() || !found->is_array()) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence array is absent or ill-typed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats array is absent or ill-typed");
     }
     return *found;
 }
 
-/// Read one required nested JSON object from the retained evidence object.
+/// Read one required nested JSON object from the retained stats object.
 [[nodiscard]] const nlohmann::json& required_json_object(
         const nlohmann::json& object,
         std::string_view key) {
     const auto found = object.find(std::string{key});
     if (found == object.end() || !found->is_object()) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence object is absent or ill-typed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats object is absent or ill-typed");
     }
     return *found;
 }
@@ -2786,8 +2800,8 @@ template<std::size_t N>
         const std::size_t width) {
     const std::string& value = required_json_text(object, key);
     if (!nonzero_fixed_lower_hex(value, width)) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence identity is zero or malformed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats identity is zero or malformed");
     }
     return value;
 }
@@ -2796,57 +2810,57 @@ template<std::size_t N>
 [[nodiscard]] std::int64_t required_json_integer_value(
         const nlohmann::json& value) {
     if (!(value.is_number_unsigned() || value.is_number_integer())) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence array integer is ill-typed");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats array integer is ill-typed");
     }
     if (value.is_number_unsigned()) {
         const auto parsed = value.get<std::uint64_t>();
         if (parsed > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::int64_t>::max)())) {
-            abort_pipeline_evidence_capture(
-                "persisted GPU evidence array integer exceeds SQL bigint");
+            abort_pipeline_stats_capture(
+                "persisted GPU stats array integer exceeds SQL bigint");
         }
         return static_cast<std::int64_t>(parsed);
     }
     const auto parsed = value.get<std::int64_t>();
     if (parsed < 0) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU evidence array integer is negative");
+        abort_pipeline_stats_capture(
+            "persisted GPU stats array integer is negative");
     }
     return parsed;
 }
 
-void capture_versioned_alignment_json(
+void capture_alignment_stats_json(
         const it::rowset_t& rows,
         e2e_output& out) {
     const nlohmann::json cold = parse_exact_json_cell(
-        rows.front()[149], "cold-index evidence JSON failed to parse");
+        rows.front()[149], "cold-index stats JSON failed to parse");
     const bool cold_header_valid = json_has_exact_keys(
-            cold, k_cold_index_evidence_keys)
+            cold, k_cold_index_stats_keys)
         && cold["schema"].is_string()
         && cold["schema"] == "bioseq.cold_index_preparation"
-        && cold["version"].is_number_integer()
-        && cold["version"] == 1
+        && cold["revision"].is_number_integer()
+        && cold["revision"] == 1
         && cold["timing_semantics"].is_string()
-        && cold["timing_semantics"] == "payload_inclusive_wall_v1"
+        && cold["timing_semantics"] == "payload_inclusive_wall"
         && cold["decode_timing_available"].is_boolean()
         && !cold["decode_timing_available"].get<bool>()
         && cold["transfer_timing_available"].is_boolean()
         && !cold["transfer_timing_available"].get<bool>()
         && cold["decode_ns"].is_null()
         && cold["transfer_ns"].is_null()
-        && cold["stats_saturated"].is_boolean();
+        && cold["are_stats_saturated"].is_boolean();
     if (!cold_header_valid) {
-        abort_pipeline_evidence_capture(
-            "cold-index evidence JSON has the wrong exact schema or types");
+        abort_pipeline_stats_capture(
+            "cold-index stats JSON has the wrong exact schema or types");
     }
-    for (const auto key : k_cold_index_evidence_keys) {
-        if (key == "schema" || key == "version"
+    for (const auto key : k_cold_index_stats_keys) {
+        if (key == "schema" || key == "revision"
             || key == "timing_semantics"
             || key == "decode_timing_available"
             || key == "transfer_timing_available"
             || key == "decode_ns" || key == "transfer_ns"
-            || key == "stats_saturated") {
+            || key == "are_stats_saturated") {
             continue;
         }
         (void)required_json_counter(cold, key);
@@ -2889,10 +2903,10 @@ void capture_versioned_alignment_json(
     out.extent_crc_combine_rows =
         required_json_counter(cold, "extent_crc_combine_rows");
     out.cold_index_stats_saturated =
-        cold["stats_saturated"].get<bool>() ? 1 : 0;
+        cold["are_stats_saturated"].get<bool>() ? 1 : 0;
 
     const nlohmann::json simd = parse_exact_json_cell(
-        rows.front()[150], "SIMD execution evidence JSON failed to parse");
+        rows.front()[150], "SIMD execution stats JSON failed to parse");
     const auto valid_policy_name = [](const nlohmann::json& value) {
         if (!value.is_string()) return false;
         const std::string& policy = value.get_ref<const std::string&>();
@@ -2909,18 +2923,18 @@ void capture_versioned_alignment_json(
             || algorithm == "mixed_invalid";
     };
     const bool simd_header_valid = json_has_exact_keys(
-            simd, k_simd_execution_evidence_keys)
+            simd, k_simd_execution_stats_keys)
         && simd["schema"].is_string()
-        && simd["schema"] == "bioseq.simd_execution_evidence"
-        && simd["version"].is_number_integer()
-        && simd["version"] == 2
+        && simd["schema"] == "bioseq.simd_execution_stats"
+        && simd["revision"].is_number_integer()
+        && simd["revision"] == 2
         && valid_policy_name(simd["requested_policy"])
         && valid_policy_name(simd["observed_policy"])
         && valid_alignment_algorithm_name(
             simd["requested_alignment_algorithm"])
         && valid_alignment_algorithm_name(
             simd["observed_alignment_algorithm"])
-        && simd["simd_chaining_policy_evidence_saturated"].is_boolean()
+        && simd["are_simd_chaining_policy_stats_saturated"].is_boolean()
         && json_has_exact_keys(
             simd["block_aligner_execution_stats"],
             k_block_aligner_execution_stats_keys)
@@ -2928,12 +2942,12 @@ void capture_versioned_alignment_json(
         && simd["block_aligner_execution_stats"]["consistent"].is_boolean()
         && simd["block_aligner_execution_stats"]["saturated"].is_boolean();
     if (!simd_header_valid) {
-        abort_pipeline_evidence_capture(
-            "SIMD execution evidence JSON has the wrong exact schema or types");
+        abort_pipeline_stats_capture(
+            "SIMD execution stats JSON has the wrong exact schema or types");
     }
     const nlohmann::json& block =
         simd["block_aligner_execution_stats"];
-    out.simd_evidence_schema_valid = 1;
+    out.simd_stats_schema_valid = 1;
     out.requested_simd_chaining_policy =
         simd["requested_policy"].get<std::string>();
     out.observed_simd_chaining_policy =
@@ -2958,8 +2972,8 @@ void capture_versioned_alignment_json(
         simd, "simd_chaining_bounded_candidates_skipped");
     out.simd_chaining_policy_rejections = required_json_counter(
         simd, "simd_chaining_policy_rejections");
-    out.simd_chaining_policy_evidence_saturated =
-        simd["simd_chaining_policy_evidence_saturated"].get<bool>() ? 1 : 0;
+    out.simd_chaining_policy_stats_saturated =
+        simd["are_simd_chaining_policy_stats_saturated"].get<bool>() ? 1 : 0;
     out.block_aligner_execution_stats_available =
         block["available"].get<bool>() ? 1 : 0;
     out.block_aligner_execution_stats_consistent =
@@ -2983,431 +2997,436 @@ void capture_versioned_alignment_json(
         block["saturated"].get<bool>() ? 1 : 0;
 }
 
-void capture_format5_reader_memory_evidence(
+void capture_minimizer_fragment_reader_stats(
         const it::connection_test_context& connection,
         e2e_output& out) {
     const it::row_t row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_format5_reader_memory_evidence_v6();");
+        "SELECT bioseq."
+        "last_alignment_minimizer_fragment_reader_stats();");
     if (row.size() != 1) {
-        abort_pipeline_evidence_capture(
-            "Format-5 reader memory evidence has an invalid scalar shape");
+        abort_pipeline_stats_capture(
+            "minimizer-fragment reader stats have an invalid scalar shape");
     }
-    const nlohmann::json evidence = parse_exact_json_cell(
-        row.front(), "Format-5 reader memory evidence JSON failed to parse");
+    const nlohmann::json stats = parse_exact_json_cell(
+        row.front(), "minimizer-fragment reader stats JSON failed to parse");
     const bool header_valid = json_has_exact_keys(
-            evidence, k_format5_reader_memory_evidence_v6_keys)
-        && evidence["schema"].is_string()
-        && evidence["schema"] == "bioseq.format5_reader_memory_evidence"
-        && evidence["version"].is_number_integer()
-        && evidence["version"] == 6
-        && evidence["fragment_native_evidence_saturated"].is_boolean()
-        && evidence["format5_reader_memory_evidence_saturated"].is_boolean()
-        && evidence["stats_saturated"].is_boolean();
+            stats, k_minimizer_fragment_reader_stats_keys)
+        && stats["schema"].is_string()
+        && stats["schema"] == "bioseq.grouped_soa_reader_memory_stats"
+        && stats["revision"].is_number_integer()
+        && stats["revision"] == 6
+        && stats["are_fragment_native_stats_saturated"].is_boolean()
+        && stats["are_grouped_soa_reader_memory_stats_saturated"].is_boolean()
+        && stats["are_stats_saturated"].is_boolean();
     if (!header_valid) {
-        abort_pipeline_evidence_capture(
-            "Format-5 reader memory evidence has the wrong exact schema or types");
+        abort_pipeline_stats_capture(
+            "minimizer-fragment reader stats have the wrong exact schema or types");
     }
-    for (const std::string_view key : k_fragment_native_evidence_counter_keys) {
-        (void)required_json_counter(evidence, key);
-    }
-    for (const std::string_view key
-         : k_format5_reader_memory_evidence_v4_addition_keys) {
-        (void)required_json_counter(evidence, key);
+    for (const std::string_view key : k_minimizer_fragment_reader_stats_keys) {
+        if (key == "schema"
+            || key == "are_fragment_native_stats_saturated"
+            || key == "are_grouped_soa_reader_memory_stats_saturated"
+            || key == "are_stats_saturated") {
+            continue;
+        }
+        (void)required_json_counter(stats, key);
     }
 
     const std::int64_t execution_id =
-        required_json_counter(evidence, "execution_id");
+        required_json_counter(stats, "execution_id");
     const std::int64_t backend_pid =
-        required_json_counter(evidence, "backend_pid");
+        required_json_counter(stats, "backend_pid");
     const std::int64_t database_oid =
-        required_json_counter(evidence, "database_oid");
+        required_json_counter(stats, "database_oid");
     if (execution_id != out.alignment_execution_id
         || backend_pid != out.alignment_backend_pid
         || database_oid != out.alignment_database_oid
-        || evidence["stats_saturated"].get<bool>()
+        || stats["are_stats_saturated"].get<bool>()
             != (out.stats_saturated != 0)) {
-        abort_pipeline_evidence_capture(
-            "Format-5 reader memory evidence identity/saturation does not match v6");
+        abort_pipeline_stats_capture(
+            "minimizer-fragment reader stats identity/saturation mismatch");
     }
 
-    out.format5_reader_capacity_accounting_passes = required_json_counter(
-        evidence, "format5_reader_capacity_accounting_passes");
-    out.format5_reader_global_position_storage_preparations =
+    out.grouped_soa_reader_capacity_accounting_passes = required_json_counter(
+        stats, "grouped_soa_reader_capacity_accounting_passes");
+    out.grouped_soa_reader_global_position_storage_preparations =
         required_json_counter(
-            evidence,
-            "format5_reader_global_position_storage_preparations");
-    out.format5_reader_global_position_storage_allocations =
+            stats,
+            "grouped_soa_reader_global_position_storage_preparations");
+    out.grouped_soa_reader_global_position_storage_allocations =
         required_json_counter(
-            evidence,
-            "format5_reader_global_position_storage_allocations");
-    out.format5_reader_position_append_growth_reservations =
+            stats,
+            "grouped_soa_reader_global_position_storage_allocations");
+    out.grouped_soa_reader_position_append_growth_reservations =
         required_json_counter(
-            evidence,
-            "format5_reader_position_append_growth_reservations");
-    out.format5_reader_retained_position_count = required_json_counter(
-        evidence, "format5_reader_retained_position_count");
-    out.format5_reader_retained_position_capacity = required_json_counter(
-        evidence, "format5_reader_retained_position_capacity");
-    out.format5_reader_directory_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_directory_capacity_bytes");
-    out.format5_reader_query_hash_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_query_hash_capacity_bytes");
-    out.format5_reader_query_record_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_query_record_capacity_bytes");
-    out.format5_reader_ordinal_route_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_ordinal_route_capacity_bytes");
-    out.format5_reader_selected_extent_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_selected_extent_capacity_bytes");
-    out.format5_reader_current_selected_control_capacity_bytes =
+            stats,
+            "grouped_soa_reader_position_append_growth_reservations");
+    out.grouped_soa_reader_retained_position_count = required_json_counter(
+        stats, "grouped_soa_reader_retained_position_count");
+    out.grouped_soa_reader_retained_position_capacity = required_json_counter(
+        stats, "grouped_soa_reader_retained_position_capacity");
+    out.grouped_soa_reader_directory_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_directory_capacity_bytes");
+    out.grouped_soa_reader_query_hash_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_query_hash_capacity_bytes");
+    out.grouped_soa_reader_query_record_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_query_record_capacity_bytes");
+    out.grouped_soa_reader_ordinal_route_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_ordinal_route_capacity_bytes");
+    out.grouped_soa_reader_selected_extent_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_selected_extent_capacity_bytes");
+    out.grouped_soa_reader_current_selected_control_capacity_bytes =
         required_json_counter(
-            evidence,
-            "format5_reader_current_selected_control_capacity_bytes");
-    out.format5_reader_global_position_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_global_position_capacity_bytes");
-    out.format5_reader_control_payload_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_control_payload_capacity_bytes");
-    out.format5_reader_owned_capacity_bytes = required_json_counter(
-        evidence, "format5_reader_owned_capacity_bytes");
-    out.format5_reader_admitted_bytes = required_json_counter(
-        evidence, "format5_reader_admitted_bytes");
-    out.format5_reader_exact_position_image_checks = required_json_counter(
-        evidence, "format5_reader_exact_position_image_checks");
-    out.format5_reader_exact_position_image_failures = required_json_counter(
-        evidence, "format5_reader_exact_position_image_failures");
-    out.format5_reader_retained_layout_checks = required_json_counter(
-        evidence, "format5_reader_retained_layout_checks");
-    out.format5_reader_retained_layout_failures = required_json_counter(
-        evidence, "format5_reader_retained_layout_failures");
+            stats,
+            "grouped_soa_reader_current_selected_control_capacity_bytes");
+    out.grouped_soa_reader_global_position_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_global_position_capacity_bytes");
+    out.grouped_soa_reader_control_payload_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_control_payload_capacity_bytes");
+    out.grouped_soa_reader_owned_capacity_bytes = required_json_counter(
+        stats, "grouped_soa_reader_owned_capacity_bytes");
+    out.grouped_soa_reader_admitted_bytes = required_json_counter(
+        stats, "grouped_soa_reader_admitted_bytes");
+    out.grouped_soa_reader_exact_position_image_checks = required_json_counter(
+        stats, "grouped_soa_reader_exact_position_image_checks");
+    out.grouped_soa_reader_exact_position_image_failures = required_json_counter(
+        stats, "grouped_soa_reader_exact_position_image_failures");
+    out.grouped_soa_reader_retained_layout_checks = required_json_counter(
+        stats, "grouped_soa_reader_retained_layout_checks");
+    out.grouped_soa_reader_retained_layout_failures = required_json_counter(
+        stats, "grouped_soa_reader_retained_layout_failures");
     out.fragment_native_waves = required_json_counter(
-        evidence, "fragment_native_waves");
+        stats, "fragment_native_waves");
     out.fragment_native_queries = required_json_counter(
-        evidence, "fragment_native_queries");
+        stats, "fragment_native_queries");
     out.fragment_native_occurrence_fill_ns = required_json_counter(
-        evidence, "fragment_native_occurrence_fill_ns");
+        stats, "fragment_native_occurrence_fill_ns");
     out.fragment_native_occurrence_radix_ns = required_json_counter(
-        evidence, "fragment_native_occurrence_radix_ns");
+        stats, "fragment_native_occurrence_radix_ns");
     out.fragment_native_unique_plan_build_ns = required_json_counter(
-        evidence, "fragment_native_unique_plan_build_ns");
+        stats, "fragment_native_unique_plan_build_ns");
     out.fragment_native_query_plan_radix_fill_ns = required_json_counter(
-        evidence, "fragment_native_query_plan_radix_fill_ns");
+        stats, "fragment_native_query_plan_radix_fill_ns");
     out.fragment_native_control_count_pass_ns = required_json_counter(
-        evidence, "fragment_native_control_count_pass_ns");
+        stats, "fragment_native_control_count_pass_ns");
     out.fragment_native_rejected_control_validation_ns =
         required_json_counter(
-            evidence, "fragment_native_rejected_control_validation_ns");
+            stats, "fragment_native_rejected_control_validation_ns");
     out.fragment_native_orientation_layout_ns = required_json_counter(
-        evidence, "fragment_native_orientation_layout_ns");
+        stats, "fragment_native_orientation_layout_ns");
     out.fragment_native_direct_emission_ns = required_json_counter(
-        evidence, "fragment_native_direct_emission_ns");
+        stats, "fragment_native_direct_emission_ns");
     out.fragment_native_local_sort_ns = required_json_counter(
-        evidence, "fragment_native_local_sort_ns");
+        stats, "fragment_native_local_sort_ns");
     out.fragment_native_tie_normalization_ns = required_json_counter(
-        evidence, "fragment_native_tie_normalization_ns");
+        stats, "fragment_native_tie_normalization_ns");
     out.fragment_native_control_count_bytes = required_json_counter(
-        evidence, "fragment_native_control_count_bytes");
+        stats, "fragment_native_control_count_bytes");
     out.fragment_native_rejected_control_validation_bytes =
         required_json_counter(
-            evidence, "fragment_native_rejected_control_validation_bytes");
+            stats, "fragment_native_rejected_control_validation_bytes");
     out.fragment_native_pass2_position_bytes = required_json_counter(
-        evidence, "fragment_native_pass2_position_bytes");
+        stats, "fragment_native_pass2_position_bytes");
     out.fragment_native_pass3_position_bytes = required_json_counter(
-        evidence, "fragment_native_pass3_position_bytes");
+        stats, "fragment_native_pass3_position_bytes");
     out.fragment_native_anchors_constructed = required_json_counter(
-        evidence, "fragment_native_anchors_constructed");
+        stats, "fragment_native_anchors_constructed");
     out.fragment_native_local_sort_bytes = required_json_counter(
-        evidence, "fragment_native_local_sort_bytes");
+        stats, "fragment_native_local_sort_bytes");
     out.fragment_native_tie_normalization_bytes = required_json_counter(
-        evidence, "fragment_native_tie_normalization_bytes");
+        stats, "fragment_native_tie_normalization_bytes");
     out.fragment_native_exact_final_bytes = required_json_counter(
-        evidence, "fragment_native_exact_final_bytes");
+        stats, "fragment_native_exact_final_bytes");
     out.fragment_native_peak_exact_final_bytes = required_json_counter(
-        evidence, "fragment_native_peak_exact_final_bytes");
+        stats, "fragment_native_peak_exact_final_bytes");
     out.fragment_native_global_sort_calls_invoked = required_json_counter(
-        evidence, "fragment_native_global_sort_calls_invoked");
+        stats, "fragment_native_global_sort_calls_invoked");
     out.fragment_native_global_sort_calls_skipped = required_json_counter(
-        evidence, "fragment_native_global_sort_calls_skipped");
+        stats, "fragment_native_global_sort_calls_skipped");
     out.fragment_native_candidate_anchor_bytes = required_json_counter(
-        evidence, "fragment_native_candidate_anchor_bytes");
+        stats, "fragment_native_candidate_anchor_bytes");
     out.fragment_native_plan_ordinal_bytes = required_json_counter(
-        evidence, "fragment_native_plan_ordinal_bytes");
+        stats, "fragment_native_plan_ordinal_bytes");
     out.fragment_native_compaction_bytes = required_json_counter(
-        evidence, "fragment_native_compaction_bytes");
+        stats, "fragment_native_compaction_bytes");
     out.fragment_native_final_copy_bytes = required_json_counter(
-        evidence, "fragment_native_final_copy_bytes");
+        stats, "fragment_native_final_copy_bytes");
     out.fragment_native_peak_occurrence_capacity_bytes = required_json_counter(
-        evidence, "fragment_native_peak_occurrence_capacity_bytes");
+        stats, "fragment_native_peak_occurrence_capacity_bytes");
     out.fragment_native_peak_query_plan_capacity_bytes = required_json_counter(
-        evidence, "fragment_native_peak_query_plan_capacity_bytes");
+        stats, "fragment_native_peak_query_plan_capacity_bytes");
     out.fragment_native_peak_query_group_offset_capacity_bytes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_peak_query_group_offset_capacity_bytes");
     out.fragment_native_peak_query_membership_filter_capacity_bytes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_peak_query_membership_filter_capacity_bytes");
     out.fragment_native_peak_query_radix_capacity_bytes = required_json_counter(
-        evidence, "fragment_native_peak_query_radix_capacity_bytes");
+        stats, "fragment_native_peak_query_radix_capacity_bytes");
     out.fragment_native_peak_occurrence_count_capacity_bytes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_peak_occurrence_count_capacity_bytes");
     out.fragment_native_peak_block_layout_capacity_bytes =
         required_json_counter(
-            evidence, "fragment_native_peak_block_layout_capacity_bytes");
-    out.fragment_native_peak_block_evidence_capacity_bytes =
+            stats, "fragment_native_peak_block_layout_capacity_bytes");
+    out.fragment_native_peak_block_stats_capacity_bytes =
         required_json_counter(
-            evidence, "fragment_native_peak_block_evidence_capacity_bytes");
+            stats, "fragment_native_peak_block_stats_capacity_bytes");
     out.fragment_native_occurrence_allocations = required_json_counter(
-        evidence, "fragment_native_occurrence_allocations");
+        stats, "fragment_native_occurrence_allocations");
     out.fragment_native_query_plan_allocations = required_json_counter(
-        evidence, "fragment_native_query_plan_allocations");
+        stats, "fragment_native_query_plan_allocations");
     out.fragment_native_query_group_offset_allocations = required_json_counter(
-        evidence, "fragment_native_query_group_offset_allocations");
+        stats, "fragment_native_query_group_offset_allocations");
     out.fragment_native_query_membership_filter_allocations =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_query_membership_filter_allocations");
     out.fragment_native_query_radix_allocations = required_json_counter(
-        evidence, "fragment_native_query_radix_allocations");
+        stats, "fragment_native_query_radix_allocations");
     out.fragment_native_occurrence_count_allocations = required_json_counter(
-        evidence, "fragment_native_occurrence_count_allocations");
+        stats, "fragment_native_occurrence_count_allocations");
     out.fragment_native_block_layout_allocations = required_json_counter(
-        evidence, "fragment_native_block_layout_allocations");
-    out.fragment_native_block_evidence_allocations = required_json_counter(
-        evidence, "fragment_native_block_evidence_allocations");
+        stats, "fragment_native_block_layout_allocations");
+    out.fragment_native_block_stats_allocations = required_json_counter(
+        stats, "fragment_native_block_stats_allocations");
     out.fragment_native_query_occurrences = required_json_counter(
-        evidence, "fragment_native_query_occurrences");
+        stats, "fragment_native_query_occurrences");
     out.fragment_native_unique_query_plans = required_json_counter(
-        evidence, "fragment_native_unique_query_plans");
+        stats, "fragment_native_unique_query_plans");
     out.fragment_native_packed_occurrence_waves = required_json_counter(
-        evidence, "fragment_native_packed_occurrence_waves");
+        stats, "fragment_native_packed_occurrence_waves");
     out.fragment_native_wide_occurrence_waves = required_json_counter(
-        evidence, "fragment_native_wide_occurrence_waves");
+        stats, "fragment_native_wide_occurrence_waves");
     out.fragment_native_compact_direct_lookup_ns = required_json_counter(
-        evidence, "fragment_native_compact_direct_lookup_ns");
+        stats, "fragment_native_compact_direct_lookup_ns");
     out.fragment_native_compact_direct_selection_shards =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_selection_shards");
     out.fragment_native_compact_direct_shard_query_layouts =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_shard_query_layouts");
     out.fragment_native_compact_direct_layout_shards_completed =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_layout_shards_completed");
     out.fragment_native_compact_direct_emission_shards_completed =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_emission_shards_completed");
     out.fragment_native_compact_direct_posting_visit_passes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_posting_visit_passes");
     out.fragment_native_compact_direct_selected_postings =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_selected_postings");
     out.fragment_native_compact_direct_layout_postings_visited =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_layout_postings_visited");
     out.fragment_native_compact_direct_emission_postings_visited =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_emission_postings_visited");
     out.fragment_native_compact_direct_target_control_scan_bytes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_target_control_scan_bytes");
     out.fragment_native_compact_direct_target_control_scan_passes =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_target_control_scan_passes");
     out.fragment_native_compact_direct_fallbacks = required_json_counter(
-        evidence, "fragment_native_compact_direct_fallbacks");
+        stats, "fragment_native_compact_direct_fallbacks");
     out.fragment_native_compact_direct_traversal_rank_checkpoints_examined =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_traversal_rank_checkpoints_examined");
     out.fragment_native_compact_direct_traversal_membership_words_examined =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_traversal_membership_words_examined");
     out.fragment_native_compact_direct_rejected_posting_reads =
         required_json_counter(
-            evidence,
+            stats,
             "fragment_native_compact_direct_rejected_posting_reads");
-    out.fragment_native_evidence_saturated =
-        evidence["fragment_native_evidence_saturated"].get<bool>() ? 1 : 0;
-    out.format5_reader_memory_evidence_saturated =
-        evidence["format5_reader_memory_evidence_saturated"].get<bool>()
+    out.are_fragment_native_stats_saturated =
+        stats["are_fragment_native_stats_saturated"].get<bool>() ? 1 : 0;
+    out.are_grouped_soa_reader_memory_stats_saturated =
+        stats["are_grouped_soa_reader_memory_stats_saturated"].get<bool>()
             ? 1 : 0;
-    out.format5_reader_memory_evidence = evidence;
+    out.minimizer_fragment_reader_stats = stats;
 }
 
-void capture_format6_reader_evidence(
+void capture_hash_major_index_reader_stats(
         const it::connection_test_context& connection,
         e2e_output& out) {
     const it::row_t row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_format6_reader_evidence();");
+        "SELECT bioseq.last_alignment_hash_major_index_reader_stats();");
     if (row.size() != 1) {
-        abort_pipeline_evidence_capture(
-            "Format-6 reader evidence has an invalid scalar shape");
+        abort_pipeline_stats_capture(
+            "hash-major index reader stats have an invalid scalar shape");
     }
-    const nlohmann::json evidence = parse_exact_json_cell(
-        row.front(), "Format-6 reader evidence JSON failed to parse");
+    const nlohmann::json stats = parse_exact_json_cell(
+        row.front(), "hash-major index reader stats JSON failed to parse");
     const bool header_valid = json_has_exact_keys(
-            evidence, k_format6_reader_evidence_keys)
-        && evidence["schema"].is_string()
-        && evidence["schema"] == "bioseq.format6_reader_evidence"
-        && evidence["version"].is_number_integer()
-        && evidence["version"] == 1
-        && evidence["saturated"].is_boolean()
-        && evidence["operational_identity_conflict"].is_boolean()
-        && evidence["stats_saturated"].is_boolean();
+            stats, k_hash_major_index_reader_stats_keys)
+        && stats["schema"].is_string()
+        && stats["schema"] == "bioseq.hash_major_reader_stats"
+        && stats["revision"].is_number_integer()
+        && stats["revision"] == 1
+        && stats["is_saturated"].is_boolean()
+        && stats["has_operational_identity_conflict"].is_boolean()
+        && stats["are_stats_saturated"].is_boolean();
     if (!header_valid) {
-        abort_pipeline_evidence_capture(
-            "Format-6 reader evidence has the wrong exact schema or types");
+        abort_pipeline_stats_capture(
+            "hash-major index reader stats have the wrong exact schema or types");
     }
 
-    for (const auto key : k_format6_reader_evidence_keys) {
-        if (key == "schema" || key == "version"
+    for (const auto key : k_hash_major_index_reader_stats_keys) {
+        if (key == "schema"
             || key == "source_identity"
             || key == "source_content_crc64"
             || key == "compatibility_digest"
-            || key == "saturated"
-            || key == "operational_identity_conflict"
-            || key == "stats_saturated") {
+            || key == "is_saturated"
+            || key == "has_operational_identity_conflict"
+            || key == "are_stats_saturated") {
             continue;
         }
-        (void)required_json_counter(evidence, key);
+        (void)required_json_counter(stats, key);
     }
     const std::string& source_identity =
-        required_json_text(evidence, "source_identity");
+        required_json_text(stats, "source_identity");
     const std::string& source_content_crc64 =
-        required_json_text(evidence, "source_content_crc64");
+        required_json_text(stats, "source_content_crc64");
     const std::string& compatibility_digest =
-        required_json_text(evidence, "compatibility_digest");
+        required_json_text(stats, "compatibility_digest");
     if (!fixed_lower_hex(source_identity, 32)
         || !fixed_lower_hex(source_content_crc64, 16)
         || !fixed_lower_hex(compatibility_digest, 64)) {
-        abort_pipeline_evidence_capture(
-            "Format-6 reader evidence identity is malformed");
+        abort_pipeline_stats_capture(
+            "hash-major index reader stats identity is malformed");
     }
 
     const std::int64_t execution_id =
-        required_json_counter(evidence, "execution_id");
+        required_json_counter(stats, "execution_id");
     const std::int64_t backend_pid =
-        required_json_counter(evidence, "backend_pid");
+        required_json_counter(stats, "backend_pid");
     const std::int64_t database_oid =
-        required_json_counter(evidence, "database_oid");
+        required_json_counter(stats, "database_oid");
     if (execution_id != out.alignment_execution_id
         || backend_pid != out.alignment_backend_pid
         || database_oid != out.alignment_database_oid
-        || evidence["operational_identity_conflict"].get<bool>()
+        || required_json_counter(stats, "format_revision")
+            != (out.persisted_layout == "hash_major" ? 6 : 0)
+        || stats["has_operational_identity_conflict"].get<bool>()
             != (out.operational_identity_conflict != 0)
-        || evidence["stats_saturated"].get<bool>()
+        || stats["are_stats_saturated"].get<bool>()
             != (out.stats_saturated != 0)
-        || required_json_counter(evidence, "backend_fallbacks")
+        || required_json_counter(stats, "backend_fallbacks")
             != out.backend_fallbacks
-        || required_json_counter(evidence, "recompute_calls")
+        || required_json_counter(stats, "recompute_calls")
             != out.recomputed_target_index_rows) {
-        abort_pipeline_evidence_capture(
-            "Format-6 reader evidence identity/counters do not match v1");
+        abort_pipeline_stats_capture(
+            "hash-major index reader stats identity/counters mismatch");
     }
 
-    out.format6_directory_rows =
-        required_json_counter(evidence, "directory_rows");
-    out.format6_directory_bytes =
-        required_json_counter(evidence, "directory_bytes");
-    out.format6_control_rows =
-        required_json_counter(evidence, "control_rows");
-    out.format6_control_bytes =
-        required_json_counter(evidence, "control_bytes");
-    out.format6_posting_rows =
-        required_json_counter(evidence, "posting_rows");
-    out.format6_posting_bytes =
-        required_json_counter(evidence, "posting_bytes");
-    out.format6_posting_ranges_delivered =
-        required_json_counter(evidence, "posting_ranges_delivered");
-    out.format6_selected_block_count =
-        required_json_counter(evidence, "selected_block_count");
-    out.format6_accepted_hash_count =
-        required_json_counter(evidence, "accepted_hash_count");
-    out.format6_retained_position_count =
-        required_json_counter(evidence, "retained_position_count");
-    out.format6_authorized_posting_bytes =
-        required_json_counter(evidence, "authorized_posting_bytes");
-    out.format6_peak_admitted_bytes =
-        required_json_counter(evidence, "peak_admitted_bytes");
-    out.format6_retained_owner_bytes =
-        required_json_counter(evidence, "retained_owner_bytes");
-    out.format6_admitted_bytes =
-        required_json_counter(evidence, "admitted_bytes");
-    out.format6_failures =
-        required_json_counter(evidence, "failures");
-    out.format6_saturated =
-        evidence["saturated"].get<bool>() ? 1 : 0;
-    out.format6_reader_evidence = evidence;
+    out.hash_major_directory_rows =
+        required_json_counter(stats, "directory_rows");
+    out.hash_major_directory_bytes =
+        required_json_counter(stats, "directory_bytes");
+    out.hash_major_control_rows =
+        required_json_counter(stats, "control_rows");
+    out.hash_major_control_bytes =
+        required_json_counter(stats, "control_bytes");
+    out.hash_major_posting_rows =
+        required_json_counter(stats, "posting_rows");
+    out.hash_major_posting_bytes =
+        required_json_counter(stats, "posting_bytes");
+    out.hash_major_posting_ranges_delivered =
+        required_json_counter(stats, "posting_ranges_delivered");
+    out.hash_major_selected_block_count =
+        required_json_counter(stats, "selected_block_count");
+    out.hash_major_accepted_hash_count =
+        required_json_counter(stats, "accepted_hash_count");
+    out.hash_major_retained_position_count =
+        required_json_counter(stats, "retained_position_count");
+    out.hash_major_authorized_posting_bytes =
+        required_json_counter(stats, "authorized_posting_bytes");
+    out.hash_major_peak_admitted_bytes =
+        required_json_counter(stats, "peak_admitted_bytes");
+    out.hash_major_retained_owner_bytes =
+        required_json_counter(stats, "retained_owner_bytes");
+    out.hash_major_admitted_bytes =
+        required_json_counter(stats, "admitted_bytes");
+    out.hash_major_failures =
+        required_json_counter(stats, "failures");
+    out.hash_major_is_saturated =
+        stats["is_saturated"].get<bool>() ? 1 : 0;
+    out.hash_major_index_reader_stats = stats;
 }
 
 /// Validate and retain the immediate cache-qualified persisted-GPU ledger.
-void capture_persisted_gpu_operation_evidence(
+void capture_persisted_gpu_operation_stats(
         const it::row_t& row,
         e2e_output& out) {
     if (row.size() != 1) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU operation evidence has an invalid scalar shape");
+        abort_pipeline_stats_capture(
+            "persisted GPU operation stats has an invalid scalar shape");
     }
-    const nlohmann::json evidence = parse_exact_json_cell(
-        row.front(), "persisted GPU operation evidence JSON failed to parse");
-    if (!json_has_exact_keys(evidence, k_persisted_gpu_operation_evidence_keys)
-        || required_json_text(evidence, "schema")
-            != "bioseq.persisted_gpu_operation_evidence"
-        || required_json_counter(evidence, "version") != 2) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU operation evidence has the wrong exact schema");
+    const nlohmann::json stats = parse_exact_json_cell(
+        row.front(), "persisted GPU operation stats JSON failed to parse");
+    if (!json_has_exact_keys(stats, k_persisted_gpu_operation_stats_keys)
+        || required_json_text(stats, "schema")
+            != "bioseq.persisted_gpu_operation_stats"
+        || required_json_counter(stats, "revision") != 2) {
+        abort_pipeline_stats_capture(
+            "persisted GPU operation stats has the wrong exact schema");
     }
 
     const std::int64_t execution_id =
-        required_json_counter(evidence, "execution_id");
+        required_json_counter(stats, "execution_id");
     const std::int64_t backend_pid =
-        required_json_counter(evidence, "backend_pid");
+        required_json_counter(stats, "backend_pid");
     const std::int64_t database_oid =
-        required_json_counter(evidence, "database_oid");
-    const bool completed = required_json_boolean(evidence, "completed");
-    const bool partial = required_json_boolean(evidence, "partial");
+        required_json_counter(stats, "database_oid");
+    const bool completed = required_json_boolean(stats, "is_completed");
+    const bool partial = required_json_boolean(stats, "is_partial");
     const bool fully_drained =
-        required_json_boolean(evidence, "fully_drained");
-    const bool producer_accepted =
-        required_json_boolean(evidence, "accepted");
-    const bool complete = required_json_boolean(evidence, "complete");
-    const bool saturated = required_json_boolean(evidence, "saturated");
+        required_json_boolean(stats, "is_fully_drained");
+    const bool producer_consistent =
+        required_json_boolean(stats, "is_consistent");
+    const bool complete = required_json_boolean(stats, "is_complete");
+    const bool saturated = required_json_boolean(stats, "is_saturated");
     const std::int64_t dropped_operation_count =
-        required_json_counter(evidence, "dropped_operation_count");
+        required_json_counter(stats, "dropped_operation_count");
     const std::int64_t operation_count =
-        required_json_counter(evidence, "operation_count");
+        required_json_counter(stats, "operation_count");
     const std::int64_t accepted_operation_count =
-        required_json_counter(evidence, "accepted_operation_count");
+        required_json_counter(stats, "accepted_operation_count");
     const std::int64_t complete_operation_count =
-        required_json_counter(evidence, "complete_operation_count");
+        required_json_counter(stats, "complete_operation_count");
     const std::int64_t job_count =
-        required_json_counter(evidence, "job_count");
+        required_json_counter(stats, "job_count");
     const std::int64_t accepted_job_count =
-        required_json_counter(evidence, "accepted_job_count");
+        required_json_counter(stats, "accepted_job_count");
     const nlohmann::json& operations =
-        required_json_array(evidence, "operations");
+        required_json_array(stats, "operations");
     const bool expects_persisted_gpu = out.actual_backend == "vulkan_gpu"
         && out.actual_target_index_source == "persisted";
-    const auto qualification_found = evidence.find("cache_qualification");
-    if (qualification_found == evidence.end()) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU cache qualification is absent");
+    const auto validation_found = stats.find("cache_validation");
+    if (validation_found == stats.end()) {
+        abort_pipeline_stats_capture(
+            "persisted GPU cache validation is absent");
     }
 
     if (execution_id != out.alignment_execution_id
@@ -3416,127 +3435,128 @@ void capture_persisted_gpu_operation_evidence(
         || completed != (out.alignment_completed != 0)
         || partial != (out.alignment_partial != 0)
         || fully_drained != (out.alignment_fully_drained != 0)) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU operation evidence identity/lifecycle differs from v2");
+        abort_pipeline_stats_capture(
+            "persisted GPU operation stats identity/lifecycle differs from the alignment snapshot");
     }
     if (operations.size() > static_cast<std::size_t>(
             (std::numeric_limits<std::int64_t>::max)())
         || operation_count
             != static_cast<std::int64_t>(operations.size())) {
-        abort_pipeline_evidence_capture(
-            "persisted GPU operation evidence operation count is inconsistent");
+        abort_pipeline_stats_capture(
+            "persisted GPU operation stats operation count is inconsistent");
     }
 
-    std::string qualification_identity;
-    std::string qualification_seed_receipt_identity;
-    std::string qualification_device_uuid;
-    std::string qualification_pipeline_cache_uuid;
-    std::string qualification_seed_sha256;
-    std::string qualification_manifest_checksum;
-    std::int64_t qualification_api_version = 0;
-    std::int64_t qualification_driver_version = 0;
-    std::int64_t qualification_vendor_id = 0;
-    std::int64_t qualification_device_id = 0;
-    std::int64_t qualification_seed_size = 0;
-    bool cache_qualification_equations_valid = !expects_persisted_gpu;
+
+    std::string validation_identity;
+    std::string validation_seed_receipt_identity;
+    std::string validation_device_uuid;
+    std::string validation_pipeline_cache_uuid;
+    std::string validation_seed_sha256;
+    std::string validation_manifest_checksum;
+    std::int64_t validation_api_version = 0;
+    std::int64_t validation_driver_version = 0;
+    std::int64_t validation_vendor_id = 0;
+    std::int64_t validation_device_id = 0;
+    std::int64_t validation_seed_size = 0;
+    bool cache_validation_equations_valid = !expects_persisted_gpu;
     if (expects_persisted_gpu) {
-        if (!qualification_found->is_object()
+        if (!validation_found->is_object()
             || !json_has_exact_keys(
-                *qualification_found,
-                k_persisted_gpu_cache_qualification_keys)) {
-            abort_pipeline_evidence_capture(
-                "persisted GPU cache qualification has the wrong exact schema");
+                *validation_found,
+                k_persisted_gpu_cache_validation_keys)) {
+            abort_pipeline_stats_capture(
+                "persisted GPU cache validation has the wrong exact schema");
         }
-        const nlohmann::json& qualification = *qualification_found;
-        const std::int64_t qualification_version =
-            required_json_counter(qualification, "version");
-        qualification_identity = required_json_hex_identity(
-            qualification, "identity", 16);
-        const bool qualification_accepted =
-            required_json_boolean(qualification, "accepted");
-        const bool qualification_saturated =
-            required_json_boolean(qualification, "saturated");
+        const nlohmann::json& validation = *validation_found;
+        const std::int64_t validation_revision =
+            required_json_counter(validation, "revision");
+        validation_identity = required_json_hex_identity(
+            validation, "identity", 16);
+        const bool validation_consistent =
+            required_json_boolean(validation, "is_consistent");
+        const bool validation_saturated =
+            required_json_boolean(validation, "is_saturated");
         const std::int64_t archive_count =
-            required_json_counter(qualification, "archive_count");
+            required_json_counter(validation, "archive_count");
         const std::int64_t archive_bytes =
-            required_json_counter(qualification, "archive_bytes");
+            required_json_counter(validation, "archive_bytes");
         (void)required_json_hex_identity(
-            qualification, "archive_checksum", 16);
+            validation, "archive_checksum", 16);
         const std::int64_t receipt_count =
-            required_json_counter(qualification, "receipt_count");
+            required_json_counter(validation, "receipt_count");
         const std::int64_t hash_passes =
-            required_json_counter(qualification, "hash_passes");
+            required_json_counter(validation, "hash_passes");
         const std::int64_t hashed_bytes =
-            required_json_counter(qualification, "hashed_bytes");
+            required_json_counter(validation, "hashed_bytes");
         const std::int64_t private_files_created = required_json_counter(
-            qualification, "private_files_created");
+            validation, "private_files_created");
         const std::int64_t private_files_unlinked = required_json_counter(
-            qualification, "private_files_unlinked");
+            validation, "private_files_unlinked");
         const std::int64_t live_private_paths = required_json_counter(
-            qualification, "live_private_paths");
+            validation, "live_private_paths");
         const std::int64_t pipeline_filesystem_hash_passes =
             required_json_counter(
-                qualification, "pipeline_filesystem_hash_passes");
+                validation, "pipeline_filesystem_hash_passes");
         const std::int64_t pipeline_filesystem_hashed_bytes =
             required_json_counter(
-                qualification, "pipeline_filesystem_hashed_bytes");
-        const std::int64_t helper_protocol_version = required_json_counter(
-            qualification, "helper_protocol_version");
+                validation, "pipeline_filesystem_hashed_bytes");
+        const std::int64_t helper_protocol_revision = required_json_counter(
+            validation, "helper_protocol_revision");
         const std::string& helper_build_identity = required_json_text(
-            qualification, "helper_build_identity");
+            validation, "helper_build_identity");
         const std::string& helper_source =
-            required_json_text(qualification, "helper_source");
+            required_json_text(validation, "helper_source");
         const std::int64_t helper_executable_size = required_json_counter(
-            qualification, "helper_executable_size");
+            validation, "helper_executable_size");
         (void)required_json_hex_identity(
-            qualification, "helper_executable_sha256", 64);
+            validation, "helper_executable_sha256", 64);
         (void)required_json_hex_identity(
-            qualification, "helper_metal_registry_id", 16);
-        qualification_device_uuid = required_json_hex_identity(
-            qualification, "device_uuid", 32);
-        qualification_api_version =
-            required_json_counter(qualification, "api_version");
-        qualification_driver_version =
-            required_json_counter(qualification, "driver_version");
-        qualification_vendor_id =
-            required_json_counter(qualification, "vendor_id");
-        qualification_device_id =
-            required_json_counter(qualification, "device_id");
-        qualification_pipeline_cache_uuid = required_json_hex_identity(
-            qualification, "pipeline_cache_uuid", 32);
-        qualification_seed_receipt_identity = required_json_hex_identity(
-            qualification, "seed_receipt_identity", 16);
-        qualification_seed_sha256 = required_json_hex_identity(
-            qualification, "seed_sha256", 64);
-        qualification_seed_size =
-            required_json_counter(qualification, "seed_size");
-        qualification_manifest_checksum = required_json_hex_identity(
-            qualification, "manifest_checksum", 16);
+            validation, "helper_metal_registry_id", 16);
+        validation_device_uuid = required_json_hex_identity(
+            validation, "device_uuid", 32);
+        validation_api_version =
+            required_json_counter(validation, "api_version");
+        validation_driver_version =
+            required_json_counter(validation, "driver_version");
+        validation_vendor_id =
+            required_json_counter(validation, "vendor_id");
+        validation_device_id =
+            required_json_counter(validation, "device_id");
+        validation_pipeline_cache_uuid = required_json_hex_identity(
+            validation, "pipeline_cache_uuid", 32);
+        validation_seed_receipt_identity = required_json_hex_identity(
+            validation, "seed_receipt_identity", 16);
+        validation_seed_sha256 = required_json_hex_identity(
+            validation, "seed_sha256", 64);
+        validation_seed_size =
+            required_json_counter(validation, "seed_size");
+        validation_manifest_checksum = required_json_hex_identity(
+            validation, "manifest_checksum", 16);
 
         const bool helper_build_valid = helper_build_identity
-            == "bioseq_gpu_archive_builder_v2";
+            == "bioseq_gpu_archive_builder";
         const bool numeric_driver_identity_valid =
-            qualification_api_version > 0
-            && qualification_driver_version > 0
-            && qualification_api_version
+            validation_api_version > 0
+            && validation_driver_version > 0
+            && validation_api_version
                 <= (std::numeric_limits<std::uint32_t>::max)()
-            && qualification_driver_version
+            && validation_driver_version
                 <= (std::numeric_limits<std::uint32_t>::max)()
-            && qualification_vendor_id
+            && validation_vendor_id
                 <= (std::numeric_limits<std::uint32_t>::max)()
-            && qualification_device_id
+            && validation_device_id
                 <= (std::numeric_limits<std::uint32_t>::max)();
         const std::string canonical_driver = numeric_driver_identity_valid
             ? fmt::format(
                 "api={:08x};driver={:08x};vendor={:08x};device={:08x};pcuuid={}",
-                static_cast<std::uint32_t>(qualification_api_version),
-                static_cast<std::uint32_t>(qualification_driver_version),
-                static_cast<std::uint32_t>(qualification_vendor_id),
-                static_cast<std::uint32_t>(qualification_device_id),
-                qualification_pipeline_cache_uuid)
+                static_cast<std::uint32_t>(validation_api_version),
+                static_cast<std::uint32_t>(validation_driver_version),
+                static_cast<std::uint32_t>(validation_vendor_id),
+                static_cast<std::uint32_t>(validation_device_id),
+                validation_pipeline_cache_uuid)
             : std::string{};
-        cache_qualification_equations_valid = qualification_version == 2
-            && qualification_accepted && !qualification_saturated
+        cache_validation_equations_valid = validation_revision == 2
+            && validation_consistent && !validation_saturated
             && archive_count > 0 && archive_bytes > 0
             && receipt_count == archive_count && hash_passes == 1
             && hashed_bytes == archive_bytes
@@ -3545,20 +3565,20 @@ void capture_persisted_gpu_operation_evidence(
             && live_private_paths == 0
             && pipeline_filesystem_hash_passes == 0
             && pipeline_filesystem_hashed_bytes == 0
-            && helper_protocol_version == 2 && helper_build_valid
+            && helper_protocol_revision == 2 && helper_build_valid
             && helper_source == "installed-sibling"
             && helper_executable_size > 0
             && numeric_driver_identity_valid
-            && qualification_device_uuid == out.gpu_device_uuid
+            && validation_device_uuid == out.gpu_device_uuid
             && canonical_driver == out.gpu_driver
-            && qualification_seed_sha256
+            && validation_seed_sha256
                 == out.gpu_pipeline_cache_seed_sha256
-            && qualification_seed_size == out.gpu_pipeline_cache_seed_size
-            && qualification_manifest_checksum
+            && validation_seed_size == out.gpu_pipeline_cache_seed_size
+            && validation_manifest_checksum
                 == out.gpu_pipeline_cache_manifest_checksum;
-    } else if (!qualification_found->is_null()) {
-        abort_pipeline_evidence_capture(
-            "non-persisted-GPU evidence retained cache qualification");
+    } else if (!validation_found->is_null()) {
+        abort_pipeline_stats_capture(
+            "non-persisted-GPU stats retained cache validation");
     }
 
     bool operation_equations_valid = true;
@@ -3579,15 +3599,15 @@ void capture_persisted_gpu_operation_evidence(
 
     for (const nlohmann::json& operation : operations) {
         if (!json_has_exact_keys(operation, k_persisted_gpu_operation_keys)) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "persisted GPU operation has the wrong exact schema");
         }
         const std::string& operation_identity = required_json_hex_identity(
             operation, "operation_identity", 16);
         const std::int64_t expected_jobs =
             required_json_counter(operation, "expected_jobs");
-        const std::int64_t attested_jobs =
-            required_json_counter(operation, "proof_jobs");
+        const std::int64_t validated_jobs =
+            required_json_counter(operation, "validated_jobs");
         const std::int64_t consumed_jobs =
             required_json_counter(operation, "consumed_jobs");
         const std::int64_t accepted_jobs =
@@ -3622,9 +3642,9 @@ void capture_persisted_gpu_operation_evidence(
         const std::string& cache_token_identity =
             required_json_hex_identity(
                 operation, "cache_token_identity", 16);
-        const std::string& cache_qualification_identity =
+        const std::string& cache_validation_identity =
             required_json_hex_identity(
-                operation, "cache_qualification_identity", 16);
+                operation, "cache_validation_identity", 16);
         const std::int64_t generation_id =
             required_json_counter(operation, "generation_id");
         const std::string& source_identity = required_json_hex_identity(
@@ -3641,7 +3661,7 @@ void capture_persisted_gpu_operation_evidence(
         if (!json_has_exact_keys(environment, k_persisted_gpu_environment_keys)
             || !json_has_exact_keys(
                 cache_metrics, k_persisted_gpu_cache_metrics_keys)) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "persisted GPU operation environment/cache schema is invalid");
         }
         const std::string& device_uuid = required_json_hex_identity(
@@ -3736,7 +3756,7 @@ void capture_persisted_gpu_operation_evidence(
         };
         for (const nlohmann::json& job : jobs) {
             if (!json_has_exact_keys(job, k_persisted_gpu_job_keys)) {
-                abort_pipeline_evidence_capture(
+                abort_pipeline_stats_capture(
                     "persisted GPU job has the wrong exact schema");
             }
             const std::int64_t logical_target_row =
@@ -3770,7 +3790,7 @@ void capture_persisted_gpu_operation_evidence(
                     forbidden, k_persisted_gpu_forbidden_keys)
                 || !json_has_exact_keys(
                     coordinate, k_persisted_gpu_coordinate_keys)) {
-                abort_pipeline_evidence_capture(
+                abort_pipeline_stats_capture(
                     "persisted GPU job nested object schema is invalid");
             }
 
@@ -3809,7 +3829,7 @@ void capture_persisted_gpu_operation_evidence(
                     submissions[submission_index];
                 if (!json_has_exact_keys(
                         submission, k_persisted_gpu_submission_keys)) {
-                    abort_pipeline_evidence_capture(
+                    abort_pipeline_stats_capture(
                         "persisted GPU submission has the wrong exact schema");
                 }
                 const std::string& stage =
@@ -3930,24 +3950,24 @@ void capture_persisted_gpu_operation_evidence(
             && operation_identity == shape_operation_identity
             && query_operation_identity != shape_operation_identity
             && cache_token_identity == operation_identity
-            && cache_qualification_identity == qualification_identity
+            && cache_validation_identity == validation_identity
             && seed_receipt_identity
-                == qualification_seed_receipt_identity
+                == validation_seed_receipt_identity
             && seed_receipt_matches && cold_load_matches
             && generation_id == out.persisted_generation_id
             && source_identity == out.persisted_source_identity
-            && source == "persisted_shape_v5"
-            && device_uuid == qualification_device_uuid
-            && api_version == qualification_api_version
-            && driver_version == qualification_driver_version
-            && vendor_id == qualification_vendor_id
-            && device_id == qualification_device_id
-            && pipeline_cache_uuid == qualification_pipeline_cache_uuid
-            && seed_sha256 == qualification_seed_sha256
-            && seed_size == qualification_seed_size
-            && manifest_checksum == qualification_manifest_checksum;
+            && source == "persisted_grouped_soa"
+            && device_uuid == validation_device_uuid
+            && api_version == validation_api_version
+            && driver_version == validation_driver_version
+            && vendor_id == validation_vendor_id
+            && device_id == validation_device_id
+            && pipeline_cache_uuid == validation_pipeline_cache_uuid
+            && seed_sha256 == validation_seed_sha256
+            && seed_size == validation_seed_size
+            && manifest_checksum == validation_manifest_checksum;
         const bool publication_valid = expected_jobs > 0
-            && attested_jobs == expected_jobs
+            && validated_jobs == expected_jobs
             && consumed_jobs == expected_jobs
             && accepted_jobs == expected_jobs
             && burned_jobs == 0 && pending_jobs == 0
@@ -3978,7 +3998,7 @@ void capture_persisted_gpu_operation_evidence(
         && cache_load_ns_sum == static_cast<__int128>(counter(126))
         && pipeline_creation_ns_sum == static_cast<__int128>(counter(127))
         && pipeline_create_sum == static_cast<__int128>(counter(138));
-    const bool accepted_equations = producer_accepted
+    const bool accepted_equations = producer_consistent
         && completed && !partial && fully_drained && complete && !saturated
         && dropped_operation_count == 0 && operation_count > 0
         && accepted_operation_count == operation_count
@@ -3989,29 +4009,29 @@ void capture_persisted_gpu_operation_evidence(
         && accepted_job_count == out.fully_attested_alignment_jobs
         && out.unattested_alignment_jobs == 0
         && output_coordinate_witness
-        && cache_qualification_equations_valid
+        && cache_validation_equations_valid
         && operation_equations_valid && aggregate_cache_valid;
-    const bool exact_empty_non_gpu_evidence = !producer_accepted && complete
+    const bool exact_empty_non_gpu_stats = !producer_consistent && complete
         && !saturated && dropped_operation_count == 0
         && operation_count == 0 && accepted_operation_count == 0
         && complete_operation_count == 0 && job_count == 0
         && accepted_job_count == 0 && operations.empty();
-    if (!expects_persisted_gpu && !exact_empty_non_gpu_evidence) {
-        abort_pipeline_evidence_capture(
-            "non-persisted-GPU snapshot retained stale operation evidence");
+    if (!expects_persisted_gpu && !exact_empty_non_gpu_stats) {
+        abort_pipeline_stats_capture(
+            "non-persisted-GPU snapshot retained stale operation stats");
     }
 
-    out.persisted_gpu_operation_evidence_schema_valid = 1;
-    out.persisted_gpu_operation_evidence_accepted =
+    out.persisted_gpu_operation_stats_schema_valid = 1;
+    out.persisted_gpu_operation_stats_accepted =
         expects_persisted_gpu && accepted_equations ? 1 : 0;
-    out.persisted_gpu_operation_evidence_complete = complete ? 1 : 0;
-    out.persisted_gpu_operation_evidence_saturated = saturated ? 1 : 0;
+    out.persisted_gpu_operation_stats_complete = complete ? 1 : 0;
+    out.persisted_gpu_operation_stats_saturated = saturated ? 1 : 0;
     out.persisted_gpu_dropped_operation_count = dropped_operation_count;
     out.persisted_gpu_operation_count = operation_count;
     out.persisted_gpu_accepted_operation_count = accepted_operation_count;
     out.persisted_gpu_job_count = job_count;
     out.persisted_gpu_accepted_job_count = accepted_job_count;
-    out.persisted_gpu_operation_evidence = evidence;
+    out.persisted_gpu_operation_stats = stats;
 }
 
 void capture_alignment_statement_stats(
@@ -4033,15 +4053,16 @@ void capture_alignment_statement_stats(
     };
     const it::rowset_t rows = it::query_rows(
         connection,
-        "SELECT * FROM bioseq.last_alignment_execution_stats_v2();");
+        "SELECT * FROM bioseq.last_alignment_execution_stats();");
     // This must be the very next SQL statement on the same backend. Retain
     // its scalar value now, before any other diagnostic query can obscure the
     // one-shot cache-qualified ledger bound to the execution identity.
     const it::row_t persisted_gpu_operation_row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_persisted_gpu_operation_evidence_v2();");
+        "SELECT bioseq."
+        "last_alignment_persisted_gpu_operation_stats();");
     if (rows.size() != k_stage_count) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "alignment snapshot did not return exactly 20 stage rows");
     }
     for (std::size_t row_no = 0; row_no < rows.size(); ++row_no) {
@@ -4049,7 +4070,7 @@ void capture_alignment_statement_stats(
         if (row.size() != k_column_count
             || !row[23].has_value()
             || *row[23] != expected_stages[row_no]) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "alignment snapshot has an invalid column/stage shape");
         }
         for (std::size_t column = 0; column < row.size(); ++column) {
@@ -4060,11 +4081,11 @@ void capture_alignment_statement_stats(
             }
             if (alignment_stats_boolean_column(column)) {
                 if (!parse_snapshot_bool(row[column]).has_value()) {
-                    abort_pipeline_evidence_capture(
+                    abort_pipeline_stats_capture(
                         "alignment snapshot contains an ill-typed Boolean");
                 }
             } else if (!parse_snapshot_i64(row[column]).has_value()) {
-                abort_pipeline_evidence_capture(
+                abort_pipeline_stats_capture(
                     "alignment snapshot contains an ill-typed integer");
             }
         }
@@ -4072,7 +4093,7 @@ void capture_alignment_statement_stats(
             for (std::size_t column = 0; column < row.size(); ++column) {
                 const bool stage_local = column >= 23 && column <= 31;
                 if (!stage_local && row[column] != rows.front()[column]) {
-                    abort_pipeline_evidence_capture(
+                    abort_pipeline_stats_capture(
                         "alignment snapshot envelope differs between stage rows");
                 }
             }
@@ -4082,12 +4103,12 @@ void capture_alignment_statement_stats(
     // copy made after the timed statement; it cannot affect the measured
     // region and it is the sole source for raw attestation serialization.
     out.alignment_snapshot_rows = rows;
-    capture_versioned_alignment_json(rows, out);
+    capture_alignment_stats_json(rows, out);
 
     const auto required_i64 = [&rows](const std::size_t column) {
         const auto parsed = parse_snapshot_i64(rows.front()[column]);
         if (!parsed.has_value()) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "alignment snapshot required integer is NULL/invalid");
         }
         return *parsed;
@@ -4095,7 +4116,7 @@ void capture_alignment_statement_stats(
     const auto required_bool = [&rows](const std::size_t column) {
         const auto parsed = parse_snapshot_bool(rows.front()[column]);
         if (!parsed.has_value()) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "alignment snapshot required Boolean is NULL/invalid");
         }
         return *parsed;
@@ -4110,7 +4131,7 @@ void capture_alignment_statement_stats(
             ? parse_snapshot_bool(rows.front()[column])
             : parse_snapshot_i64(rows.front()[column]);
         if (!parsed.has_value()) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "alignment snapshot numeric envelope is ill-typed");
         }
         out.alignment_snapshot_numeric_columns[column] = *parsed;
@@ -4122,7 +4143,7 @@ void capture_alignment_statement_stats(
         || execution_id != prior.execution_id + 1
         || backend_pid != prior.backend_pid
         || database_oid != prior.database_oid) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "alignment snapshot is stale or belongs to another backend/database");
     }
 
@@ -4192,15 +4213,15 @@ void capture_alignment_statement_stats(
     out.backend_declines = required_i64(139);
     out.backend_fallbacks = required_i64(140);
     out.stats_saturated = required_bool(141);
-    capture_persisted_gpu_operation_evidence(
+    capture_persisted_gpu_operation_stats(
         persisted_gpu_operation_row, out);
-    capture_format5_reader_memory_evidence(connection, out);
-    capture_format6_reader_evidence(connection, out);
+    capture_minimizer_fragment_reader_stats(connection, out);
+    capture_hash_major_index_reader_stats(connection, out);
     out.query_sketch_host_wall_ns = required_i64(30);
     out.target_index_build_host_wall_ns = [&rows] {
         const auto parsed = parse_snapshot_i64(rows[2][30]);
         if (!parsed.has_value()) {
-            abort_pipeline_evidence_capture(
+            abort_pipeline_stats_capture(
                 "target-index stage timing is NULL/invalid");
         }
         return *parsed;
@@ -4225,8 +4246,8 @@ void capture_alignment_statement_stats(
         && ((out.actual_backend == "vulkan_gpu" && gpu_environment)
             || (out.actual_backend != "vulkan_gpu" && non_gpu_environment));
     out.environment_mixed_invalid = environment_valid ? 0 : 1;
-    out.pipeline_evidence_available = 1;
-    out.pipeline_evidence_attached_to_measurement = 1;
+    out.pipeline_stats_available = 1;
+    out.pipeline_stats_attached_to_measurement = 1;
 }
 
 // Parse one exact primary PAF row per query. Every accepted row must carry a
@@ -4410,7 +4431,7 @@ inline void require_mapped(std::string_view algo, const e2e_input& in,
 }
 
 /** @brief Expected pipeline cardinality and worker shape for one statement. */
-struct pipeline_evidence_expectation {
+struct pipeline_stats_expectation {
     std::int64_t target_rows = 0;
     std::int64_t attempted_alignment_jobs = 0;
     std::int64_t target_rows_per_dispatch = 0;
@@ -4426,7 +4447,7 @@ struct pipeline_evidence_expectation {
         || (target_rows != 0 && query_count > limit / target_rows)) {
         std::fprintf(
             stderr,
-            "[bench_e2e] PIPELINE-PROOF-EXPECTATION-OVERFLOW "
+            "[bench_e2e] PIPELINE-VALIDATION-EXPECTATION-OVERFLOW "
             "targets=%zu queries=%zu\n",
             target_rows,
             query_count);
@@ -4436,13 +4457,13 @@ struct pipeline_evidence_expectation {
     return static_cast<std::int64_t>(target_rows * query_count);
 }
 
-[[nodiscard]] pipeline_evidence_expectation make_pipeline_evidence_expectation(
+[[nodiscard]] pipeline_stats_expectation make_pipeline_stats_expectation(
         const e2e_input& in,
         const bool just_index,
         const int effective_cpu_workers) {
     // Both cold modes use exactly one physical target row and N independently
     // materialized query rows through BioseqBatchJoin. Physical target
-    // duplication is not a supported benchmark compatibility mode.
+    // duplication is not a supported benchmark topology.
     (void)just_index;
     constexpr std::size_t target_rows_per_dispatch = 1;
     const std::size_t queries_per_target_dispatch = in.queries.size();
@@ -4452,7 +4473,7 @@ struct pipeline_evidence_expectation {
     if (headline_comparison_case && queries_per_target_dispatch != 16) {
         std::fprintf(
             stderr,
-            "[bench_e2e] PIPELINE-PROOF-SHAPE-FAIL headline case '%s' "
+            "[bench_e2e] PIPELINE-VALIDATION-SHAPE-FAIL headline case '%s' "
             "requires target_rows=1/query_rows=16; actual query_rows=%zu\n",
             in.size_label.c_str(),
             queries_per_target_dispatch);
@@ -4462,7 +4483,7 @@ struct pipeline_evidence_expectation {
     const std::int64_t expected_jobs = checked_pipeline_job_product(
         target_rows_per_dispatch,
         queries_per_target_dispatch);
-    return pipeline_evidence_expectation{
+    return pipeline_stats_expectation{
         .target_rows = static_cast<std::int64_t>(target_rows_per_dispatch),
         .attempted_alignment_jobs = expected_jobs,
         .target_rows_per_dispatch = static_cast<std::int64_t>(
@@ -4544,11 +4565,11 @@ struct pipeline_evidence_expectation {
     return true;
 }
 
-inline void require_pipeline_execution_evidence(
+inline void require_pipeline_execution_stats(
         std::string_view algo,
         const e2e_input& in,
         e2e_output& out,
-        const pipeline_evidence_expectation& expectation,
+        const pipeline_stats_expectation& expectation,
         std::string_view minimizer_index) {
     const bool expect_gpu =
         algo.find("_gpu_") != std::string_view::npos
@@ -4639,18 +4660,18 @@ inline void require_pipeline_execution_evidence(
         return static_cast<__int128>(total)
             == static_cast<__int128>(count) * static_cast<__int128>(width);
     };
-    const bool expect_format6 =
-        expect_persisted && e2e_expects_format6(in, minimizer_index);
-    const bool expect_format5 =
-        expect_persisted && !expect_format6;
-    out.persisted_format_version = expect_format6
-        ? 6 : expect_format5 ? 5 : 0;
+    const bool expect_hash_major =
+        expect_persisted && e2e_expects_hash_major(in, minimizer_index);
+    const bool expect_grouped_soa =
+        expect_persisted && !expect_hash_major;
+    out.persisted_layout = expect_hash_major
+        ? "hash_major" : expect_grouped_soa ? "grouped_soa" : "none";
     const bool persisted_manifest_size_valid =
         scaled_equal(
             counter(56), counter(55),
             bioseq::indexing::minimizer_generation_manifest::
                 encoded_bytes);
-    out.persisted_format5_manifest_contract_valid = expect_format5
+    out.persisted_format5_manifest_contract_valid = expect_grouped_soa
         && out.pre_restart_persisted_gpu_abi_version == 3
         && counter(55) == out.persisted_generation_read_sessions
         && persisted_manifest_size_valid
@@ -4670,14 +4691,14 @@ inline void require_pipeline_execution_evidence(
             == out.cold_index_payload_bytes_delivered
         && out.cold_index_payload_bytes_scanned
             >= out.cold_index_payload_bytes_delivered;
-    const bool mapped_format5_cold_route =
-        expect_format5
+    const bool mapped_grouped_soa_cold_route =
+        expect_grouped_soa
         && out.cold_index_route_empty == 0
         && out.cold_index_route_selective == 0
         && out.cold_index_route_full == 0;
     const bool one_cold_route =
-        mapped_format5_cold_route
-        || (!expect_format5
+        mapped_grouped_soa_cold_route
+        || (!expect_grouped_soa
         && out.cold_index_route_empty >= 0
         && out.cold_index_route_selective >= 0
         && out.cold_index_route_full >= 0
@@ -4722,7 +4743,7 @@ inline void require_pipeline_execution_evidence(
         && out.extent_crc_combine_rows
             == out.cold_index_payload_rows_delivered
         && counter(80) == 1;
-    const bool format5_mapped_image_read_gate =
+    const bool grouped_soa_mapped_image_read_gate =
         out.cold_index_schema_valid == 1
         && out.cold_index_route_empty == 0
         && out.cold_index_route_selective == 0
@@ -4744,13 +4765,13 @@ inline void require_pipeline_execution_evidence(
         && out.cold_index_payload_bytes_requested == 0
         && out.cold_index_payload_bytes_delivered == 0
         && out.cold_index_payload_bytes_scanned == 0;
-    const bool format5_metadata_read_shape =
+    const bool grouped_soa_metadata_read_shape =
         expect_compact_h32_direct
         ? counter(57) == 0 && counter(58) == 0
         : counter(57) > 0 && counter(58) > 0;
-    const bool format5_persisted_read_gate = expect_format5
+    const bool grouped_soa_persisted_read_gate = expect_grouped_soa
         ? out.cold_index_schema_valid == 1
-            && format5_mapped_image_read_gate
+            && grouped_soa_mapped_image_read_gate
             && cold_payload_equations
             && out.persisted_generation_read_sessions == 1
             && out.persisted_generation_read_sessions == out.target_rows
@@ -4764,7 +4785,7 @@ inline void require_pipeline_execution_evidence(
             && out.persisted_manifest_bytes_read == counter(56)
             && out.persisted_format5_manifest_contract_valid == 1
             && persisted_manifest_size_valid
-            && format5_metadata_read_shape
+            && grouped_soa_metadata_read_shape
             && counter(59) == 0
             && static_cast<__int128>(counter(60))
                 == static_cast<__int128>(counter(52))
@@ -4824,33 +4845,33 @@ inline void require_pipeline_execution_evidence(
                 }));
     // Keep these diagnostic groups mathematically identical to the persisted
     // branch above.  They do not participate in acceptance; they only make a
-    // failed cold-reader evidence identify its exact class of disagreement
+    // failed cold-reader stats identify its exact class of disagreement
     // without another opaque E2E run.
-    const bool persisted_read_route_evidence =
-        expect_format5
-            ? format5_mapped_image_read_gate
+    const bool persisted_read_route_stats =
+        expect_grouped_soa
+            ? grouped_soa_mapped_image_read_gate
                 && cold_payload_equations
             : out.cold_index_schema_valid == 1
                 && one_cold_route
                 && (selective_read_gate || full_read_gate)
                 && cold_payload_equations;
-    const bool persisted_read_session_evidence =
+    const bool persisted_read_session_stats =
         out.persisted_generation_read_sessions == 1
         && out.persisted_generation_read_sessions == out.target_rows
         && out.persisted_relation_opens == out.target_rows;
-    const bool persisted_read_head_evidence =
+    const bool persisted_read_head_stats =
         counter(51) == out.persisted_generation_read_sessions
         && counter(52) == out.persisted_generation_read_sessions
         && scaled_equal(counter(53), counter(52), 64);
-    const bool persisted_read_manifest_evidence =
+    const bool persisted_read_manifest_stats =
         counter(54) == out.persisted_generation_read_sessions
         && counter(55) == out.persisted_generation_read_sessions
         && out.persisted_manifest_rows_read == counter(55)
         && out.persisted_manifest_bytes_read == counter(56)
         && out.persisted_format5_manifest_contract_valid == 1
         && persisted_manifest_size_valid;
-    const bool persisted_read_directory_evidence =
-        format5_metadata_read_shape
+    const bool persisted_read_directory_stats =
+        grouped_soa_metadata_read_shape
         && counter(59) == 0
         && static_cast<__int128>(counter(60))
             == static_cast<__int128>(counter(52))
@@ -4860,8 +4881,8 @@ inline void require_pipeline_execution_evidence(
             == static_cast<__int128>(counter(53))
                 + static_cast<__int128>(counter(56))
                 + static_cast<__int128>(counter(58));
-    const bool persisted_read_payload_evidence =
-        expect_format5
+    const bool persisted_read_payload_stats =
+        expect_grouped_soa
             ? counter(62) == 0
                 && counter(63) == 0
                 && counter(67) == counter(61)
@@ -4896,49 +4917,49 @@ inline void require_pipeline_execution_evidence(
                 + static_cast<__int128>(counter(80))
         && sum_equal(counter(64), counter(60), counter(62))
         && counter(76) == out.cold_index_payload_bytes_delivered;
-    const bool persisted_read_zero_work_evidence =
+    const bool persisted_read_zero_work_stats =
         counter(65) == 0
         && counter(66) == 0
         && counter(73) == 0
         && counter(82) == 0
         && counter(84) == 0
         && counter(85) == 0;
-    const bool no_format5_reader_memory_evidence =
-        out.format5_reader_capacity_accounting_passes == 0
-        && out.format5_reader_global_position_storage_preparations == 0
-        && out.format5_reader_global_position_storage_allocations == 0
-        && out.format5_reader_position_append_growth_reservations == 0
-        && out.format5_reader_retained_position_count == 0
-        && out.format5_reader_retained_position_capacity == 0
-        && out.format5_reader_directory_capacity_bytes == 0
-        && out.format5_reader_query_hash_capacity_bytes == 0
-        && out.format5_reader_query_record_capacity_bytes == 0
-        && out.format5_reader_ordinal_route_capacity_bytes == 0
-        && out.format5_reader_selected_extent_capacity_bytes == 0
-        && out.format5_reader_current_selected_control_capacity_bytes == 0
-        && out.format5_reader_global_position_capacity_bytes == 0
-        && out.format5_reader_control_payload_capacity_bytes == 0
-        && out.format5_reader_owned_capacity_bytes == 0
-        && out.format5_reader_admitted_bytes == 0
-        && out.format5_reader_exact_position_image_checks == 0
-        && out.format5_reader_exact_position_image_failures == 0
-        && out.format5_reader_retained_layout_checks == 0
-        && out.format5_reader_retained_layout_failures == 0
-        && out.format5_reader_memory_evidence_saturated == 0;
-    const bool no_format6_reader_evidence = [&out] {
-        const auto& evidence = out.format6_reader_evidence;
-        if (required_json_counter(evidence, "format_version") != 0
-            || required_json_counter(evidence, "sessions") != 0
-            || required_json_counter(evidence, "generation_id") != 0
-            || required_json_text(evidence, "source_identity")
+    const bool no_minimizer_fragment_reader_stats =
+        out.grouped_soa_reader_capacity_accounting_passes == 0
+        && out.grouped_soa_reader_global_position_storage_preparations == 0
+        && out.grouped_soa_reader_global_position_storage_allocations == 0
+        && out.grouped_soa_reader_position_append_growth_reservations == 0
+        && out.grouped_soa_reader_retained_position_count == 0
+        && out.grouped_soa_reader_retained_position_capacity == 0
+        && out.grouped_soa_reader_directory_capacity_bytes == 0
+        && out.grouped_soa_reader_query_hash_capacity_bytes == 0
+        && out.grouped_soa_reader_query_record_capacity_bytes == 0
+        && out.grouped_soa_reader_ordinal_route_capacity_bytes == 0
+        && out.grouped_soa_reader_selected_extent_capacity_bytes == 0
+        && out.grouped_soa_reader_current_selected_control_capacity_bytes == 0
+        && out.grouped_soa_reader_global_position_capacity_bytes == 0
+        && out.grouped_soa_reader_control_payload_capacity_bytes == 0
+        && out.grouped_soa_reader_owned_capacity_bytes == 0
+        && out.grouped_soa_reader_admitted_bytes == 0
+        && out.grouped_soa_reader_exact_position_image_checks == 0
+        && out.grouped_soa_reader_exact_position_image_failures == 0
+        && out.grouped_soa_reader_retained_layout_checks == 0
+        && out.grouped_soa_reader_retained_layout_failures == 0
+        && out.are_grouped_soa_reader_memory_stats_saturated == 0;
+    const bool no_hash_major_index_reader_stats = [&out] {
+        const auto& stats = out.hash_major_index_reader_stats;
+        if (required_json_counter(stats, "format_revision") != 0
+            || required_json_counter(stats, "sessions") != 0
+            || required_json_counter(stats, "generation_id") != 0
+            || required_json_text(stats, "source_identity")
                 != "00000000000000000000000000000000"
-            || required_json_text(evidence, "source_content_crc64")
+            || required_json_text(stats, "source_content_crc64")
                 != "0000000000000000"
-            || required_json_text(evidence, "compatibility_digest")
+            || required_json_text(stats, "compatibility_digest")
                 != std::string(64, '0')
-            || evidence["saturated"].get<bool>()
-            || evidence["operational_identity_conflict"].get<bool>()
-            || evidence["stats_saturated"].get<bool>()) {
+            || stats["is_saturated"].get<bool>()
+            || stats["has_operational_identity_conflict"].get<bool>()
+            || stats["are_stats_saturated"].get<bool>()) {
             return false;
         }
         constexpr auto zero_keys = std::to_array<std::string_view>({
@@ -4951,29 +4972,29 @@ inline void require_pipeline_execution_evidence(
             "posting_range_crc_receipts", "posting_semantic_receipts",
             "authorized_posting_bytes", "query_count",
             "selected_block_count", "accepted_hash_count",
-            "retained_position_count", "directory_phase_peak_bytes",
-            "control_phase_peak_bytes", "posting_phase_peak_bytes",
+            "retained_position_count", "directory_stage_peak_bytes",
+            "control_stage_peak_bytes", "posting_stage_peak_bytes",
             "peak_admitted_bytes", "retained_owner_bytes",
-            "admitted_bytes", "legacy_assembly_calls",
-            "legacy_globalize_calls", "legacy_rebase_calls",
+            "admitted_bytes", "assembly_calls",
+            "pair_index_conversion_calls", "segment_rebase_calls",
             "generic_source_fallback_calls", "backend_fallbacks",
             "failures",
         });
-        return std::ranges::all_of(zero_keys, [&evidence](const auto key) {
-            return required_json_counter(evidence, key) == 0;
+        return std::ranges::all_of(zero_keys, [&stats](const auto key) {
+            return required_json_counter(stats, key) == 0;
         });
     }();
-    const bool format6_persisted_read_gate = !expect_format6 || [&] {
-        const auto& evidence = out.format6_reader_evidence;
-        const auto& audit = out.post_restart_format6_ready_audit;
+    const bool hash_major_persisted_read_gate = !expect_hash_major || [&] {
+        const auto& stats = out.hash_major_index_reader_stats;
+        const auto& audit = out.post_restart_hash_major_ready_stats;
         const auto& source = required_json_object(audit, "source");
         const auto& head = required_json_object(audit, "head");
         const auto& manifest = required_json_object(audit, "manifest");
         const auto& compatibility =
             required_json_object(manifest, "compatibility");
         const auto& streams = required_json_array(audit, "streams");
-        const auto f6 = [&evidence](const std::string_view key) {
-            return required_json_counter(evidence, key);
+        const auto hash_major = [&stats](const std::string_view key) {
+            return required_json_counter(stats, key);
         };
         const auto audit_counter = [](const nlohmann::json& object,
                                       const std::string_view key) {
@@ -4985,10 +5006,10 @@ inline void require_pipeline_execution_evidence(
             audit_counter(streams[0], "logical_bytes");
         const std::int64_t posting_width =
             audit_counter(compatibility, "stored_posting_width_bytes");
-        const std::int64_t phase_peak = std::max({
-            f6("directory_phase_peak_bytes"),
-            f6("control_phase_peak_bytes"),
-            f6("posting_phase_peak_bytes"),
+        const std::int64_t stage_peak = std::max({
+            hash_major("directory_stage_peak_bytes"),
+            hash_major("control_stage_peak_bytes"),
+            hash_major("posting_stage_peak_bytes"),
         });
         const bool physical_metadata =
             out.persisted_generation_read_sessions == 1
@@ -5011,132 +5032,136 @@ inline void require_pipeline_execution_evidence(
             && counter(148) == 0
             && counter(82) == 0;
         const bool runtime_identity =
-            f6("format_version") == 6
-            && f6("sessions") == 1
-            && f6("generation_id")
+            hash_major("format_revision") == 6
+            && hash_major("sessions") == 1
+            && hash_major("generation_id")
                 == audit_counter(head, "generation_id")
-            && f6("generation_id") == out.persisted_generation_id
-            && required_json_text(evidence, "source_identity")
+            && hash_major("generation_id") == out.persisted_generation_id
+            && required_json_text(stats, "source_identity")
                 == required_json_text(source, "source_identity")
-            && required_json_text(evidence, "source_content_crc64")
+            && required_json_text(stats, "source_content_crc64")
                 == required_json_text(source, "source_content_crc64")
-            && required_json_text(evidence, "compatibility_digest")
+            && required_json_text(stats, "compatibility_digest")
                 == required_json_text(head, "compatibility_digest");
         const bool directory_receipts =
-            f6("directory_rows") == directory_rows
-            && f6("directory_bytes") == directory_bytes
-            && f6("directory_row_crc_receipts") == directory_rows
-            && f6("directory_stream_crc_receipts") == 1;
+            hash_major("directory_rows") == directory_rows
+            && hash_major("directory_bytes") == directory_bytes
+            && hash_major("directory_row_crc_receipts") == directory_rows
+            && hash_major("directory_stream_crc_receipts") == 1;
         const bool control_receipts =
-            f6("control_rows") > 0
-            && f6("control_bytes") > 0
-            && f6("control_bytes") >= f6("control_rows")
-            && static_cast<__int128>(f6("control_bytes"))
-                <= static_cast<__int128>(f6("control_rows"))
+            hash_major("control_rows") > 0
+            && hash_major("control_bytes") > 0
+            && hash_major("control_bytes") >= hash_major("control_rows")
+            && static_cast<__int128>(hash_major("control_bytes"))
+                <= static_cast<__int128>(hash_major("control_rows"))
                     * static_cast<__int128>(
                         bioseq::indexing::
                             k_hash_major_minimizer_row_payload_bytes)
-            && f6("control_row_crc_receipts") == f6("control_rows")
-            && f6("selected_block_count") > 0
-            && f6("control_block_crc_receipts")
-                == f6("selected_block_count")
-            && f6("control_semantic_receipts")
-                == f6("selected_block_count");
+            && hash_major("control_row_crc_receipts")
+                == hash_major("control_rows")
+            && hash_major("selected_block_count") > 0
+            && hash_major("control_block_crc_receipts")
+                == hash_major("selected_block_count")
+            && hash_major("control_semantic_receipts")
+                == hash_major("selected_block_count");
         const bool posting_receipts =
-            f6("posting_rows") > 0
-            && f6("posting_bytes") > 0
-            && f6("posting_bytes") >= f6("posting_rows")
-            && static_cast<__int128>(f6("posting_bytes"))
-                <= static_cast<__int128>(f6("posting_rows"))
+            hash_major("posting_rows") > 0
+            && hash_major("posting_bytes") > 0
+            && hash_major("posting_bytes") >= hash_major("posting_rows")
+            && static_cast<__int128>(hash_major("posting_bytes"))
+                <= static_cast<__int128>(hash_major("posting_rows"))
                     * static_cast<__int128>(
                         bioseq::indexing::
                             k_hash_major_minimizer_row_payload_bytes)
-            && f6("posting_row_crc_receipts") == f6("posting_rows")
-            && f6("posting_ranges_delivered") > 0
-            && f6("posting_semantic_receipts")
-                == f6("posting_ranges_delivered")
-            && f6("posting_range_crc_receipts")
-                <= f6("posting_ranges_delivered")
-            && f6("retained_position_count") > 0
-            && static_cast<__int128>(f6("authorized_posting_bytes"))
+            && hash_major("posting_row_crc_receipts")
+                == hash_major("posting_rows")
+            && hash_major("posting_ranges_delivered") > 0
+            && hash_major("posting_semantic_receipts")
+                == hash_major("posting_ranges_delivered")
+            && hash_major("posting_range_crc_receipts")
+                <= hash_major("posting_ranges_delivered")
+            && hash_major("retained_position_count") > 0
+            && static_cast<__int128>(hash_major("authorized_posting_bytes"))
                 == static_cast<__int128>(
-                    f6("retained_position_count"))
+                    hash_major("retained_position_count"))
                     * static_cast<__int128>(posting_width);
         const bool selective_work =
-            f6("query_count") > 0
-            && f6("accepted_hash_count") > 0
-            && f6("accepted_hash_count") <= f6("query_count")
-            && f6("selected_block_count")
+            hash_major("query_count") > 0
+            && hash_major("accepted_hash_count") > 0
+            && hash_major("accepted_hash_count")
+                <= hash_major("query_count")
+            && hash_major("selected_block_count")
                 <= audit_counter(manifest, "directory_entry_count");
         const bool exact_memory =
-            f6("directory_phase_peak_bytes") > 0
-            && f6("control_phase_peak_bytes") > 0
-            && f6("posting_phase_peak_bytes") > 0
-            && f6("peak_admitted_bytes") == phase_peak
-            && f6("retained_owner_bytes") > 0
-            && f6("retained_owner_bytes") == f6("admitted_bytes");
+            hash_major("directory_stage_peak_bytes") > 0
+            && hash_major("control_stage_peak_bytes") > 0
+            && hash_major("posting_stage_peak_bytes") > 0
+            && hash_major("peak_admitted_bytes") == stage_peak
+            && hash_major("retained_owner_bytes") > 0
+            && hash_major("retained_owner_bytes")
+                == hash_major("admitted_bytes");
         const bool forbidden_routes =
-            f6("legacy_assembly_calls") == 0
-            && f6("legacy_globalize_calls") == 0
-            && f6("legacy_rebase_calls") == 0
-            && f6("recompute_calls") == 0
-            && f6("generic_source_fallback_calls") == 0
-            && f6("backend_fallbacks") == 0
-            && f6("failures") == 0
-            && !evidence["saturated"].get<bool>()
-            && !evidence["operational_identity_conflict"].get<bool>()
-            && !evidence["stats_saturated"].get<bool>();
+            hash_major("assembly_calls") == 0
+            && hash_major("pair_index_conversion_calls") == 0
+            && hash_major("segment_rebase_calls") == 0
+            && hash_major("recompute_calls") == 0
+            && hash_major("generic_source_fallback_calls") == 0
+            && hash_major("backend_fallbacks") == 0
+            && hash_major("failures") == 0
+            && !stats["is_saturated"].get<bool>()
+            && !stats["has_operational_identity_conflict"].get<bool>()
+            && !stats["are_stats_saturated"].get<bool>();
         return physical_metadata && runtime_identity
             && directory_receipts && control_receipts
             && posting_receipts && selective_work && exact_memory
             && forbidden_routes;
     }();
     out.persisted_format6_contract_valid =
-        expect_format6 && format6_persisted_read_gate ? 1 : 0;
-    const bool persisted_read_gate = expect_format6
-        ? format6_persisted_read_gate
-        : expect_format5
-            ? format5_persisted_read_gate && no_format6_reader_evidence
-            : no_persisted_read_gate && no_format6_reader_evidence;
-    const __int128 format5_reader_sessions =
+        expect_hash_major && hash_major_persisted_read_gate ? 1 : 0;
+    const bool persisted_read_gate = expect_hash_major
+        ? hash_major_persisted_read_gate
+        : expect_grouped_soa
+            ? grouped_soa_persisted_read_gate && no_hash_major_index_reader_stats
+            : no_persisted_read_gate && no_hash_major_index_reader_stats;
+    const __int128 grouped_soa_reader_sessions =
         static_cast<__int128>(out.persisted_generation_read_sessions);
-    const __int128 format5_reader_passes = static_cast<__int128>(
-        out.format5_reader_capacity_accounting_passes);
-    /* MPF performs one fixed accounting pass. The compact-direct-only route
-     * owns the nested direct mapping authority but no Format-5 directory,
+    const __int128 grouped_soa_reader_passes = static_cast<__int128>(
+        out.grouped_soa_reader_capacity_accounting_passes);
+    /* grouped-SoA performs one fixed accounting pass. The compact-direct-only route
+     * owns the nested direct mapping authority but no grouped-SoA directory,
      * payload, entry plan, or block plan. */
-    const bool format5_reader_accounting_shape =
-        format5_reader_sessions > 0
-        && format5_reader_passes == format5_reader_sessions;
-    const __int128 format5_reader_exact_position_bytes =
-        static_cast<__int128>(out.format5_reader_retained_position_count)
+    const bool grouped_soa_reader_accounting_shape =
+        grouped_soa_reader_sessions > 0
+        && grouped_soa_reader_passes == grouped_soa_reader_sessions;
+    const __int128 grouped_soa_reader_exact_position_bytes =
+        static_cast<__int128>(out.grouped_soa_reader_retained_position_count)
             * static_cast<__int128>(sizeof(std::uint64_t));
-    const __int128 format5_reader_layout_bytes =
-        static_cast<__int128>(out.format5_reader_directory_capacity_bytes)
-        + static_cast<__int128>(out.format5_reader_query_hash_capacity_bytes)
-        + static_cast<__int128>(out.format5_reader_query_record_capacity_bytes)
-        + static_cast<__int128>(out.format5_reader_ordinal_route_capacity_bytes)
-        + static_cast<__int128>(out.format5_reader_selected_extent_capacity_bytes)
+    const __int128 grouped_soa_reader_layout_bytes =
+        static_cast<__int128>(out.grouped_soa_reader_directory_capacity_bytes)
+        + static_cast<__int128>(out.grouped_soa_reader_query_hash_capacity_bytes)
+        + static_cast<__int128>(out.grouped_soa_reader_query_record_capacity_bytes)
+        + static_cast<__int128>(out.grouped_soa_reader_ordinal_route_capacity_bytes)
+        + static_cast<__int128>(out.grouped_soa_reader_selected_extent_capacity_bytes)
         + static_cast<__int128>(
-            out.format5_reader_current_selected_control_capacity_bytes)
+            out.grouped_soa_reader_current_selected_control_capacity_bytes)
         + static_cast<__int128>(
-            out.format5_reader_global_position_capacity_bytes)
+            out.grouped_soa_reader_global_position_capacity_bytes)
         + static_cast<__int128>(
-            out.format5_reader_control_payload_capacity_bytes);
+            out.grouped_soa_reader_control_payload_capacity_bytes);
     const auto fragment_native = [&out](const std::string_view key) {
         return required_json_counter(
-            out.format5_reader_memory_evidence, key);
+            out.minimizer_fragment_reader_stats, key);
     };
-    const bool no_fragment_native_query_evidence =
+    const bool no_fragment_native_query_stats =
         std::ranges::all_of(
-            k_fragment_native_evidence_counter_keys,
+            k_fragment_native_stats_counter_keys,
             [&fragment_native](const std::string_view key) {
                 return fragment_native(key) == 0;
             })
-        && !out.format5_reader_memory_evidence[
-            "fragment_native_evidence_saturated"].get<bool>();
+        && !out.minimizer_fragment_reader_stats[
+            "are_fragment_native_stats_saturated"].get<bool>();
     const bool canonical_p3_packed_single_wave =
-        in.size_label != "2gbp_dna4_mpf_fragment_local_focus"
+        in.size_label != "2gbp_dna4_grouped_soa_fragment_local_focus"
         || minimizer_index != k_minimizers_per_fragment_index
         || (fragment_native("fragment_native_waves") == 1
             && fragment_native("fragment_native_queries") == 16
@@ -5191,11 +5216,11 @@ inline void require_pipeline_execution_evidence(
                     "fragment_native_compact_direct_rejected_posting_reads")
                 == 0
         : std::ranges::all_of(
-            k_format5_reader_memory_evidence_v6_addition_keys,
+            k_compact_direct_reader_stats_counter_keys,
             [&fragment_native](const std::string_view key) {
                 return fragment_native(key) == 0;
             });
-    const bool fragment_native_query_gate = expect_format5 && !expect_gpu
+    const bool fragment_native_query_gate = expect_grouped_soa && !expect_gpu
         ? canonical_p3_packed_single_wave
             && compact_direct_one_decode_gate
             && fragment_native("fragment_native_waves") > 0
@@ -5327,48 +5352,49 @@ inline void require_pipeline_execution_evidence(
             && fragment_native(
                     "fragment_native_peak_block_layout_capacity_bytes") > 0
             && fragment_native(
-                    "fragment_native_peak_block_evidence_capacity_bytes") > 0
-            && !out.format5_reader_memory_evidence[
-                "fragment_native_evidence_saturated"].get<bool>()
-        : no_fragment_native_query_evidence;
-    const bool format5_reader_memory_gate = expect_format5 && !expect_gpu
-        ? out.format5_reader_global_position_storage_preparations == 0
-            && out.format5_reader_global_position_storage_allocations == 0
-            && out.format5_reader_position_append_growth_reservations == 0
-            && out.format5_reader_retained_position_count == 0
-            && out.format5_reader_retained_position_capacity == 0
-            && out.format5_reader_global_position_capacity_bytes == 0
-            && format5_reader_exact_position_bytes == 0
-            && out.format5_reader_exact_position_image_checks
+                    "fragment_native_peak_block_stats_capacity_bytes") > 0
+            && !out.minimizer_fragment_reader_stats[
+                "are_fragment_native_stats_saturated"].get<bool>()
+        : no_fragment_native_query_stats;
+    const bool minimizer_fragment_reader_stats_gate =
+        expect_grouped_soa && !expect_gpu
+        ? out.grouped_soa_reader_global_position_storage_preparations == 0
+            && out.grouped_soa_reader_global_position_storage_allocations == 0
+            && out.grouped_soa_reader_position_append_growth_reservations == 0
+            && out.grouped_soa_reader_retained_position_count == 0
+            && out.grouped_soa_reader_retained_position_capacity == 0
+            && out.grouped_soa_reader_global_position_capacity_bytes == 0
+            && grouped_soa_reader_exact_position_bytes == 0
+            && out.grouped_soa_reader_exact_position_image_checks
                 == out.persisted_generation_read_sessions
-            && out.format5_reader_exact_position_image_failures == 0
-            && out.format5_reader_retained_layout_checks
+            && out.grouped_soa_reader_exact_position_image_failures == 0
+            && out.grouped_soa_reader_retained_layout_checks
                 == out.persisted_generation_read_sessions
-            && out.format5_reader_retained_layout_failures == 0
-            && format5_reader_layout_bytes
+            && out.grouped_soa_reader_retained_layout_failures == 0
+            && grouped_soa_reader_layout_bytes
                 == static_cast<__int128>(
-                    out.format5_reader_owned_capacity_bytes)
-            && out.format5_reader_owned_capacity_bytes
-                == out.format5_reader_admitted_bytes
+                    out.grouped_soa_reader_owned_capacity_bytes)
+            && out.grouped_soa_reader_owned_capacity_bytes
+                == out.grouped_soa_reader_admitted_bytes
             && (expect_compact_h32_direct
-                ? out.format5_reader_directory_capacity_bytes == 0
-                : out.format5_reader_directory_capacity_bytes > 0)
-            && out.format5_reader_query_record_capacity_bytes == 0
+                ? out.grouped_soa_reader_directory_capacity_bytes == 0
+                : out.grouped_soa_reader_directory_capacity_bytes > 0)
+            && out.grouped_soa_reader_query_record_capacity_bytes == 0
             && (expect_compact_h32_direct
-                ? out.format5_reader_ordinal_route_capacity_bytes == 0
-                : out.format5_reader_ordinal_route_capacity_bytes > 0)
-            && out.format5_reader_selected_extent_capacity_bytes == 0
-            && out.format5_reader_query_hash_capacity_bytes == 0
-            && out.format5_reader_current_selected_control_capacity_bytes == 0
-            && out.format5_reader_control_payload_capacity_bytes == 0
-            && format5_reader_accounting_shape
+                ? out.grouped_soa_reader_ordinal_route_capacity_bytes == 0
+                : out.grouped_soa_reader_ordinal_route_capacity_bytes > 0)
+            && out.grouped_soa_reader_selected_extent_capacity_bytes == 0
+            && out.grouped_soa_reader_query_hash_capacity_bytes == 0
+            && out.grouped_soa_reader_current_selected_control_capacity_bytes == 0
+            && out.grouped_soa_reader_control_payload_capacity_bytes == 0
+            && grouped_soa_reader_accounting_shape
             && fragment_native_query_gate
-            && out.format5_reader_memory_evidence_saturated == 0
-        : no_format5_reader_memory_evidence
+            && out.are_grouped_soa_reader_memory_stats_saturated == 0
+        : no_minimizer_fragment_reader_stats
             && fragment_native_query_gate;
-    // Format 5 is consumed directly from the authenticated persisted reader.
+    // grouped-SoA is consumed directly from the authenticated persisted reader.
     // That path prepares a key set and matching reader checksum, but it does
-    // not construct or reuse the legacy in-memory target-index hashmap.
+    // not construct or reuse a separate in-memory target-index hashmap.
     const bool cpu_prepared_gate = expect_persisted && !expect_gpu
         ? out.cpu_prepared_index_builds == 0
             && out.cpu_prepared_index_reuses == 0
@@ -5394,9 +5420,9 @@ inline void require_pipeline_execution_evidence(
         : out.gpu_persisted_resident_uploads == 0
             && out.gpu_persisted_resident_cache_hits == 0;
     const bool simd_json_counters_match_prefix =
-        out.simd_evidence_schema_valid == 1
+        out.simd_stats_schema_valid == 1
         && out.nthash_vector_batches == counter(94);
-    const bool no_block_aligner_execution_evidence =
+    const bool no_block_aligner_execution_stats =
         out.requested_simd_alignment_algorithm == "none"
         && out.observed_simd_alignment_algorithm == "none"
         && out.block_aligner_execution_stats_available == 0
@@ -5409,7 +5435,7 @@ inline void require_pipeline_execution_evidence(
         && out.block_aligner_forbidden_ksw2_calls == 0
         && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
         && out.block_aligner_execution_stats_saturated == 0;
-    const bool accepted_block_aligner_execution_evidence =
+    const bool accepted_block_aligner_execution_stats =
         out.requested_simd_alignment_algorithm == "block_aligner"
         && out.observed_simd_alignment_algorithm == "block_aligner"
         && out.block_aligner_execution_stats_available == 1
@@ -5423,7 +5449,7 @@ inline void require_pipeline_execution_evidence(
         && out.block_aligner_forbidden_ksw2_calls == 0
         && out.block_aligner_forbidden_scalar_biological_fallbacks == 0
         && out.block_aligner_execution_stats_saturated == 0;
-    const bool no_simd_policy_evidence =
+    const bool no_simd_policy_stats =
         simd_json_counters_match_prefix
         && out.requested_simd_chaining_policy == "none"
         && out.observed_simd_chaining_policy == "none"
@@ -5435,9 +5461,9 @@ inline void require_pipeline_execution_evidence(
         && out.simd_chaining_bounded_cutoff_stops == 0
         && out.simd_chaining_bounded_candidates_skipped == 0
         && out.simd_chaining_policy_rejections == 0
-        && out.simd_chaining_policy_evidence_saturated == 0
-        && no_block_aligner_execution_evidence;
-    const bool bounded_simd_policy_evidence =
+        && out.simd_chaining_policy_stats_saturated == 0
+        && no_block_aligner_execution_stats;
+    const bool bounded_simd_policy_stats =
         simd_json_counters_match_prefix
         && out.requested_simd_chaining_policy
             == "bounded_batch_approximate"
@@ -5449,10 +5475,10 @@ inline void require_pipeline_execution_evidence(
         && out.simd_chaining_bounded_policy_calls > 0
         && out.simd_chaining_bounded_score_batches > 0
         && out.simd_chaining_policy_rejections == 0
-        && out.simd_chaining_policy_evidence_saturated == 0
-        && accepted_block_aligner_execution_evidence;
+        && out.simd_chaining_policy_stats_saturated == 0
+        && accepted_block_aligner_execution_stats;
     const bool simd_operational_gate = !expect_simd
-        || (bounded_simd_policy_evidence
+        || (bounded_simd_policy_stats
             && counter(93) == 0
             && counter(95) == 0
             && counter(96) == 0
@@ -5465,7 +5491,7 @@ inline void require_pipeline_execution_evidence(
                 out.alignment_snapshot_numeric_columns.begin() + 139,
                 [](const std::int64_t value) noexcept { return value == 0; }));
     const bool scalar_operational_gate = !expect_scalar
-        || (no_simd_policy_evidence
+        || (no_simd_policy_stats
             && std::all_of(
                 out.alignment_snapshot_numeric_columns.begin() + 94,
                 out.alignment_snapshot_numeric_columns.begin() + 102,
@@ -5475,7 +5501,7 @@ inline void require_pipeline_execution_evidence(
                 out.alignment_snapshot_numeric_columns.begin() + 139,
                 [](const std::int64_t value) noexcept { return value == 0; }));
     const bool gpu_cache_identity_gate = !expect_gpu
-        || gpu_cache_identity_evidence_valid({
+        || gpu_cache_identity_stats_valid({
             .device_uuid = out.gpu_device_uuid,
             .driver = out.gpu_driver,
             .policy = out.gpu_pipeline_cache_policy,
@@ -5485,7 +5511,7 @@ inline void require_pipeline_execution_evidence(
             .hit = out.gpu_pipeline_cache_hit,
         });
     const bool gpu_cache_runtime_gate = !expect_gpu
-        || gpu_cache_runtime_evidence_valid({
+        || gpu_cache_runtime_stats_valid({
             .declared_seed_size = out.gpu_pipeline_cache_seed_size,
             .loads = counter(124),
             .seed_bytes = counter(125),
@@ -5497,7 +5523,7 @@ inline void require_pipeline_execution_evidence(
             .backend_fallbacks = out.backend_fallbacks,
         });
     const bool gpu_operational_gate = !expect_gpu
-        || (no_simd_policy_evidence
+        || (no_simd_policy_stats
             && gpu_cache_identity_gate
             && gpu_cache_runtime_gate
             && counter(82) == 0
@@ -5518,10 +5544,10 @@ inline void require_pipeline_execution_evidence(
             && counter(112) == 0);
     const bool persisted_gpu_operation_gate =
         !expect_gpu || !expect_persisted
-        || (out.persisted_gpu_operation_evidence_schema_valid == 1
-            && out.persisted_gpu_operation_evidence_accepted == 1
-            && out.persisted_gpu_operation_evidence_complete == 1
-            && out.persisted_gpu_operation_evidence_saturated == 0
+        || (out.persisted_gpu_operation_stats_schema_valid == 1
+            && out.persisted_gpu_operation_stats_accepted == 1
+            && out.persisted_gpu_operation_stats_complete == 1
+            && out.persisted_gpu_operation_stats_saturated == 0
             && out.persisted_gpu_dropped_operation_count == 0
             && out.persisted_gpu_operation_count > 0
             && out.persisted_gpu_accepted_operation_count
@@ -5549,36 +5575,36 @@ inline void require_pipeline_execution_evidence(
             && out.pre_restart_persisted_generation_id > 0
             && out.pre_restart_persisted_generation_id
                 == out.persisted_generation_id);
-    const bool format5_cold_restart_identity_gate = !expect_format5
-        || (out.pre_restart_persisted_format_version == 5
-            && out.post_restart_persisted_format_version == 5
+    const bool grouped_soa_cold_restart_identity_gate = !expect_grouped_soa
+        || (out.pre_restart_persisted_layout == "grouped_soa"
+            && out.post_restart_persisted_layout == "grouped_soa"
             && fixed_lower_hex(
                 out.pre_restart_persisted_source_identity, 16)
             && out.pre_restart_persisted_source_identity
                 != "0000000000000000"
             && out.pre_restart_persisted_source_identity
                 == out.persisted_source_identity);
-    const bool format6_cold_restart_identity_gate = !expect_format6
-        || (out.pre_restart_persisted_format_version == 6
-            && out.post_restart_persisted_format_version == 6
+    const bool hash_major_cold_restart_identity_gate = !expect_hash_major
+        || (out.pre_restart_persisted_layout == "hash_major"
+            && out.post_restart_persisted_layout == "hash_major"
             && out.format6_restart_audit_accepted == 1
-            && out.pre_restart_format6_ready_audit
-                == out.post_restart_format6_ready_audit
+            && out.pre_restart_hash_major_ready_stats
+                == out.post_restart_hash_major_ready_stats
             && fixed_lower_hex(
                 out.pre_restart_persisted_source_identity, 32)
             && required_json_text(
-                out.format6_reader_evidence, "source_identity")
+                out.hash_major_index_reader_stats, "source_identity")
                 == out.pre_restart_persisted_source_identity);
     const bool cold_restart_gate = cold_restart_process_gate
-        && format5_cold_restart_identity_gate
-        && format6_cold_restart_identity_gate;
+        && grouped_soa_cold_restart_identity_gate
+        && hash_major_cold_restart_identity_gate;
     const bool cold_no_index_gate = expect_persisted
         || out.cold_no_index_lifecycle_accepted == 1;
     const bool persisted_policy_gate = !expect_persisted
         || out.persisted_policy_audit_accepted == 1;
-    const bool evidence_envelope_gate =
-        out.pipeline_evidence_available == 1
-        && out.pipeline_evidence_attached_to_measurement == 1
+    const bool stats_envelope_gate =
+        out.pipeline_stats_available == 1
+        && out.pipeline_stats_attached_to_measurement == 1
         && out.stage_engine_matrix_valid == 1
         && out.alignment_execution_id > 0
         && out.alignment_backend_pid > 0
@@ -5609,14 +5635,14 @@ inline void require_pipeline_execution_evidence(
         && out.mixed_persisted_identity == 0
         && out.operational_identity_conflict == 0;
     const bool accepted =
-        evidence_envelope_gate
+        stats_envelope_gate
         && attested_cardinality_gate
         && backend_identity_gate
         && row_equation
         && source_valid
         && persisted_identity_valid
         && persisted_read_gate
-        && format5_reader_memory_gate
+        && minimizer_fragment_reader_stats_gate
         && cpu_prepared_gate
         && gpu_residency_gate
         && simd_operational_gate
@@ -5627,13 +5653,13 @@ inline void require_pipeline_execution_evidence(
         && cold_no_index_gate
         && persisted_policy_gate
         && backend_specific;
-    out.pipeline_evidence_consistent = accepted ? 1 : 0;
+    out.pipeline_stats_consistent = accepted ? 1 : 0;
     if (accepted) {
         return;
     }
     std::fprintf(
         stderr,
-        "[bench_e2e] PIPELINE-PROOF-FAIL algo=%.*s present=%lld attached=%lld "
+        "[bench_e2e] PIPELINE-VALIDATION-FAIL algo=%.*s present=%lld attached=%lld "
         "stage_matrix=%lld "
         "requested_backend=%s actual_backend=%s requested_source=%s "
         "actual_source=%s attempted=%lld fully_attested=%lld unattested=%lld "
@@ -5646,8 +5672,8 @@ inline void require_pipeline_execution_evidence(
         "persisted_policy_accepted=%lld "
         "declines=%lld fallbacks=%lld\n",
         static_cast<int>(algo.size()), algo.data(),
-        static_cast<long long>(out.pipeline_evidence_available),
-        static_cast<long long>(out.pipeline_evidence_attached_to_measurement),
+        static_cast<long long>(out.pipeline_stats_available),
+        static_cast<long long>(out.pipeline_stats_attached_to_measurement),
         static_cast<long long>(out.stage_engine_matrix_valid),
         out.requested_backend.c_str(),
         out.actual_backend.c_str(),
@@ -5680,10 +5706,10 @@ inline void require_pipeline_execution_evidence(
         static_cast<long long>(out.backend_fallbacks));
     std::fprintf(
         stderr,
-        "[bench_e2e] PIPELINE-PROOF-FAIL-GATES "
-        "proof_envelope=%d attested_cardinality=%d backend_identity=%d "
+        "[bench_e2e] PIPELINE-VALIDATION-FAIL-GATES "
+        "validation_envelope=%d attested_cardinality=%d backend_identity=%d "
         "row_equation=%d source_valid=%d persisted_identity=%d "
-        "persisted_read=%d format5_reader_memory=%d cpu_prepared=%d "
+        "persisted_read=%d minimizer_fragment_reader=%d cpu_prepared=%d "
         "gpu_residency=%d "
         "simd_operational=%d scalar_operational=%d gpu_operational=%d "
         "persisted_gpu_operation=%d "
@@ -5692,14 +5718,14 @@ inline void require_pipeline_execution_evidence(
         "backend_specific=%d manifest_size=%d cold_payload_equations=%d "
         "one_cold_route=%d selective_read=%d full_read=%d "
         "prepared_key_checksum=%s prepared_reader_checksum=%s\n",
-        static_cast<int>(evidence_envelope_gate),
+        static_cast<int>(stats_envelope_gate),
         static_cast<int>(attested_cardinality_gate),
         static_cast<int>(backend_identity_gate),
         static_cast<int>(row_equation),
         static_cast<int>(source_valid),
         static_cast<int>(persisted_identity_valid),
         static_cast<int>(persisted_read_gate),
-        static_cast<int>(format5_reader_memory_gate),
+        static_cast<int>(minimizer_fragment_reader_stats_gate),
         static_cast<int>(cpu_prepared_gate),
         static_cast<int>(gpu_residency_gate),
         static_cast<int>(simd_operational_gate),
@@ -5722,7 +5748,7 @@ inline void require_pipeline_execution_evidence(
     if (expect_gpu) {
         std::fprintf(
             stderr,
-            "[bench_e2e] PIPELINE-PROOF-FAIL-GPU-CACHE "
+            "[bench_e2e] PIPELINE-VALIDATION-FAIL-GPU-CACHE "
             "identity=%d runtime=%d uuid=%s driver=%s policy=%s "
             "seed_sha256=%s seed_size=%lld manifest=%s hit=%lld "
             "loads=%lld seed_bytes=%lld load_ns=%lld creation_ns=%lld "
@@ -5747,19 +5773,19 @@ inline void require_pipeline_execution_evidence(
             static_cast<long long>(out.backend_fallbacks));
         std::fprintf(
             stderr,
-            "[bench_e2e] PIPELINE-PROOF-FAIL-GPU-OPERATION "
+            "[bench_e2e] PIPELINE-VALIDATION-FAIL-GPU-OPERATION "
             "gate=%d schema=%lld accepted=%lld complete=%lld "
             "saturated=%lld dropped=%lld operations=%lld/%lld "
             "jobs=%lld/%lld expected_jobs=%lld\n",
             static_cast<int>(persisted_gpu_operation_gate),
             static_cast<long long>(
-                out.persisted_gpu_operation_evidence_schema_valid),
+                out.persisted_gpu_operation_stats_schema_valid),
             static_cast<long long>(
-                out.persisted_gpu_operation_evidence_accepted),
+                out.persisted_gpu_operation_stats_accepted),
             static_cast<long long>(
-                out.persisted_gpu_operation_evidence_complete),
+                out.persisted_gpu_operation_stats_complete),
             static_cast<long long>(
-                out.persisted_gpu_operation_evidence_saturated),
+                out.persisted_gpu_operation_stats_saturated),
             static_cast<long long>(
                 out.persisted_gpu_dropped_operation_count),
             static_cast<long long>(out.persisted_gpu_accepted_operation_count),
@@ -5771,54 +5797,59 @@ inline void require_pipeline_execution_evidence(
     if (expect_persisted) {
         std::fprintf(
             stderr,
-            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-READ "
+            "[bench_e2e] PIPELINE-VALIDATION-FAIL-PERSISTED-READ "
             "route=%d session=%d head=%d manifest=%d directory=%d "
             "payload=%d scan_equations=%d zero_work=%d "
             "cold_schema=%lld pre_restart_gpu_abi=%lld "
-            "format5_contract=%lld target_rows=%lld "
+            "grouped_soa_contract=%lld target_rows=%lld "
             "memory_passes=%lld memory_preparations=%lld "
             "memory_allocations=%lld append_growth=%lld retained=%lld/%lld "
             "position_bytes=%lld layout=%lld/%lld admitted=%lld "
             "exact_checks=%lld/%lld layout_checks=%lld/%lld "
             "memory_saturated=%lld\n",
-            static_cast<int>(persisted_read_route_evidence),
-            static_cast<int>(persisted_read_session_evidence),
-            static_cast<int>(persisted_read_head_evidence),
-            static_cast<int>(persisted_read_manifest_evidence),
-            static_cast<int>(persisted_read_directory_evidence),
-            static_cast<int>(persisted_read_payload_evidence),
+            static_cast<int>(persisted_read_route_stats),
+            static_cast<int>(persisted_read_session_stats),
+            static_cast<int>(persisted_read_head_stats),
+            static_cast<int>(persisted_read_manifest_stats),
+            static_cast<int>(persisted_read_directory_stats),
+            static_cast<int>(persisted_read_payload_stats),
             static_cast<int>(persisted_read_scan_equations),
-            static_cast<int>(persisted_read_zero_work_evidence),
+            static_cast<int>(persisted_read_zero_work_stats),
             static_cast<long long>(out.cold_index_schema_valid),
             static_cast<long long>(out.pre_restart_persisted_gpu_abi_version),
             static_cast<long long>(
                 out.persisted_format5_manifest_contract_valid),
             static_cast<long long>(out.target_rows),
             static_cast<long long>(
-                out.format5_reader_capacity_accounting_passes),
+                out.grouped_soa_reader_capacity_accounting_passes),
             static_cast<long long>(
-                out.format5_reader_global_position_storage_preparations),
+                out.grouped_soa_reader_global_position_storage_preparations),
             static_cast<long long>(
-                out.format5_reader_global_position_storage_allocations),
+                out.grouped_soa_reader_global_position_storage_allocations),
             static_cast<long long>(
-                out.format5_reader_position_append_growth_reservations),
-            static_cast<long long>(out.format5_reader_retained_position_count),
-            static_cast<long long>(out.format5_reader_retained_position_capacity),
+                out.grouped_soa_reader_position_append_growth_reservations),
             static_cast<long long>(
-                out.format5_reader_global_position_capacity_bytes),
-            static_cast<long long>(out.format5_reader_owned_capacity_bytes),
-            static_cast<long long>(format5_reader_layout_bytes),
-            static_cast<long long>(out.format5_reader_admitted_bytes),
+                out.grouped_soa_reader_retained_position_count),
             static_cast<long long>(
-                out.format5_reader_exact_position_image_checks),
+                out.grouped_soa_reader_retained_position_capacity),
             static_cast<long long>(
-                out.format5_reader_exact_position_image_failures),
-            static_cast<long long>(out.format5_reader_retained_layout_checks),
-            static_cast<long long>(out.format5_reader_retained_layout_failures),
+                out.grouped_soa_reader_global_position_capacity_bytes),
             static_cast<long long>(
-                out.format5_reader_memory_evidence_saturated));
+                out.grouped_soa_reader_owned_capacity_bytes),
+            static_cast<long long>(grouped_soa_reader_layout_bytes),
+            static_cast<long long>(out.grouped_soa_reader_admitted_bytes),
+            static_cast<long long>(
+                out.grouped_soa_reader_exact_position_image_checks),
+            static_cast<long long>(
+                out.grouped_soa_reader_exact_position_image_failures),
+            static_cast<long long>(
+                out.grouped_soa_reader_retained_layout_checks),
+            static_cast<long long>(
+                out.grouped_soa_reader_retained_layout_failures),
+            static_cast<long long>(
+                out.are_grouped_soa_reader_memory_stats_saturated));
         std::fputs(
-            "[bench_e2e] PIPELINE-PROOF-FAIL-PERSISTED-COUNTERS",
+            "[bench_e2e] PIPELINE-VALIDATION-FAIL-PERSISTED-COUNTERS",
             stderr);
         for (std::size_t column = 48; column <= 85; ++column) {
             const std::string_view name =
@@ -5832,11 +5863,11 @@ inline void require_pipeline_execution_evidence(
     }
     std::fprintf(
         stderr,
-        "[bench_e2e] PIPELINE-PROOF-FAIL-SIMD "
+        "[bench_e2e] PIPELINE-VALIDATION-FAIL-SIMD "
         "requested_policy=%s observed_policy=%s "
         "requested_alignment=%s observed_alignment=%s "
-        "json_matches_prefix=%d no_simd_evidence=%d bounded_simd_evidence=%d "
-        "no_block_evidence=%d accepted_block_evidence=%d "
+        "json_matches_prefix=%d no_simd_stats=%d bounded_simd_stats=%d "
+        "no_block_stats=%d accepted_block_stats=%d "
         "block_present=%lld block_accepted=%lld block_calls=%lld "
         "block_nonempty=%lld block_nonempty_simd=%lld "
         "block_vector_batches=%lld block_cells=%lld block_ksw2=%lld "
@@ -5846,10 +5877,10 @@ inline void require_pipeline_execution_evidence(
         out.requested_simd_alignment_algorithm.c_str(),
         out.observed_simd_alignment_algorithm.c_str(),
         static_cast<int>(simd_json_counters_match_prefix),
-        static_cast<int>(no_simd_policy_evidence),
-        static_cast<int>(bounded_simd_policy_evidence),
-        static_cast<int>(no_block_aligner_execution_evidence),
-        static_cast<int>(accepted_block_aligner_execution_evidence),
+        static_cast<int>(no_simd_policy_stats),
+        static_cast<int>(bounded_simd_policy_stats),
+        static_cast<int>(no_block_aligner_execution_stats),
+        static_cast<int>(accepted_block_aligner_execution_stats),
         static_cast<long long>(out.block_aligner_execution_stats_available),
         static_cast<long long>(out.block_aligner_execution_stats_consistent),
         static_cast<long long>(out.block_aligner_executed_calls),
@@ -5883,11 +5914,11 @@ void create_e2e_table(it::connection_test_context& c, const std::string& t,
 void configure_bioseq_aligner_session(it::connection_test_context& c,
                                       int kmer_size,
                                       int window_size) {
-    it::exec_sql(c, "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
-    it::exec_sql(c, "SET bioseq.aligner.chaining_algorithm       = 'simd_mm2';");
-    it::exec_sql(c, "SET bioseq.aligner.minimizer_algorithm      = 'two_stack_nthash';");
-    it::exec_sqlf(c, "SET bioseq.aligner.kmer_size   = {};", kmer_size);
-    it::exec_sqlf(c, "SET bioseq.aligner.window_size = {};", window_size);
+    it::exec_sql(c, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
+    it::exec_sql(c, "SET bioseq.aligner.chaining.algorithm       = 'simd_minimap2';");
+    it::exec_sql(c, "SET bioseq.aligner.minimizer.algorithm      = 'two_stack_nthash';");
+    it::exec_sqlf(c, "SET bioseq.aligner.minimizer.kmer_size   = {};", kmer_size);
+    it::exec_sqlf(c, "SET bioseq.aligner.minimizer.window_size = {};", window_size);
 }
 
 void configure_bioseq_simd_session(
@@ -5896,12 +5927,12 @@ void configure_bioseq_simd_session(
     int window_size)
 {
     configure_bioseq_aligner_session(connection, kmer_size, window_size);
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_seed_hits_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_index_cache_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_fused_frontend_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_extend_enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.seed_lookup.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.index_cache.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.index_build.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
 }
 
 void configure_bioseq_scalar_session(
@@ -5912,19 +5943,19 @@ void configure_bioseq_scalar_session(
     configure_bioseq_aligner_session(connection, kmer_size, window_size);
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
+        "SET bioseq.aligner.base_alignment.algorithm = 'ksw2';");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.chaining_algorithm = 'scalar_mm2';");
+        "SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_seed_hits_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_index_cache_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_fused_frontend_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off;");
-    it::exec_sql(connection, "SET bioseq.aligner.vulkan_extend_enabled = off;");
+        "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.seed_lookup.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.index_cache.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.index_build.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
 }
 
 // Full Vulkan minimizer and GPU-index configuration. Apply it before persisted
@@ -5938,28 +5969,28 @@ void configure_bioseq_vulkan_index_session(
     configure_bioseq_aligner_session(connection, kmer_size, window_size);
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.chaining_algorithm = 'vulkan_tiled_dp';");
+        "SET bioseq.aligner.chaining.algorithm = 'vulkan_tiled_dynamic_programming';");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.minimizer_algorithm = 'vulkan_minimap_int';");
+        "SET bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer';");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.vulkan_enabled = on;");
+        "SET bioseq.aligner.vulkan.enabled = on;");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.vulkan_seed_hits_enabled = on;");
+        "SET bioseq.aligner.vulkan.seed_lookup.enabled = on;");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.vulkan_index_cache_enabled = on;");
+        "SET bioseq.aligner.vulkan.index_cache.enabled = on;");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.vulkan_fused_frontend_enabled = on;");
+        "SET bioseq.aligner.vulkan.fused_frontend.enabled = on;");
     it::exec_sql(
         connection,
-        "SET bioseq.aligner.vulkan_gpu_index_build_enabled = on;");
+        "SET bioseq.aligner.vulkan.index_build.enabled = on;");
     it::exec_sqlf(
         connection,
-        "SET bioseq.aligner.vulkan_extend_enabled = {};",
+        "SET bioseq.aligner.vulkan.alignment_extension.enabled = {};",
         enable_extension ? "on" : "off");
 }
 
@@ -6012,14 +6043,18 @@ void configure_bioseq_vulkan_index_session(
     return index;
 }
 
-[[nodiscard]] std::string param_mps_pair_sort_impl(const parameter_map& params) {
-    std::string impl = param_string(params, "mps_pair_sort_impl", "std_sort");
+[[nodiscard]] std::string param_sequence_minimizer_sort_algorithm(
+        const parameter_map& params) {
+    std::string impl =
+        param_string(params, "sequence_minimizer_sort_algorithm", "std_sort");
     if (impl != "std_sort"
         && impl != "simd_u128_vqsort"
         && impl != "simd_u128_vec_stream_1"
         && impl != "simd_u128_vec_stream_2"
         && impl != "simd_u128_vec_stream_4") {
-        bioseq_log<logging_level::error>("[bench_e2e] unsupported mps_pair_sort_impl '{}'", impl);
+        bioseq_log<logging_level::error>(
+            "[bench_e2e] unsupported sequence_minimizer_sort_algorithm '{}'",
+            impl);
         std::abort();
     }
     return impl;
@@ -6028,16 +6063,19 @@ void configure_bioseq_vulkan_index_session(
 void configure_bioseq_pair_sort_session(
         it::connection_test_context& c,
         const parameter_map& params) {
-    const std::string impl = param_mps_pair_sort_impl(params);
-    it::exec_sqlf(c, "SET bioseq.mps_pair_sort_impl = '{}';", impl);
+    const std::string impl = param_sequence_minimizer_sort_algorithm(params);
+    it::exec_sqlf(
+        c,
+        "SET bioseq.index.sequence_minimizer_sort.algorithm = '{}';",
+        impl);
 }
 
 void configure_bioseq_scheduler_session(it::connection_test_context& c,
                                         std::string_view pipeline_mode) {
     it::exec_sql(c, "SET max_parallel_workers_per_gather = 0;");
-    it::exec_sqlf(c, "SET bioseq.scheduler.pipeline_concurrency_mode = '{}';",
+    it::exec_sqlf(c, "SET bioseq.scheduler.pipeline.mode = '{}';",
                   pipeline_mode);
-    it::exec_sql(c, "SET bioseq.index_async_persist = on;");
+    it::exec_sql(c, "SET bioseq.index.async_persistence.enabled = on;");
 }
 
 void configure_bioseq_minimizer_policy(
@@ -6153,7 +6191,7 @@ void configure_bioseq_minimizer_policy(
     std::abort();
 }
 
-void capture_mps_build_stats(
+void capture_hash_major_build_stats(
         const it::connection_test_context& c,
         e2e_output& out) {
     const auto rows = it::query_rows(c,
@@ -6164,35 +6202,35 @@ void capture_mps_build_stats(
         "spill_count_from_pressure, resident_demotions, position_spill_bytes, "
         "position_spill_count, generation, worker_build_ns, pipeline_mode, "
         "max_concurrency, index_memory_cap_mb, lazy_worker_shareable "
-        "FROM bioseq.scheduler_mps_build_stats();");
+        "FROM bioseq.scheduler_minimizer_sequence_build_stats();");
     if (rows.empty()) {
         return;
     }
     const it::row_t& row = rows.front();
-    out.mps_build_backend_pid = row_i64_or_minus_one(row, 0);
-    out.mps_build_db_oid = row_i64_or_minus_one(row, 1);
-    out.mps_build_relfilenode = row_i64_or_minus_one(row, 2);
-    out.mps_build_sequence_rowno = row_i64_or_minus_one(row, 3);
-    out.mps_build_total_run_count = row_i64_or_minus_one(row, 4);
-    out.mps_build_resident_runs = row_i64_or_minus_one(row, 5);
-    out.mps_build_file_runs = row_i64_or_minus_one(row, 6);
-    out.mps_build_resident_run_bytes = row_i64_or_minus_one(row, 7);
-    out.mps_build_resident_peak_bytes = row_i64_or_minus_one(row, 8);
-    out.mps_build_spilled_run_bytes = row_i64_or_minus_one(row, 9);
-    out.mps_build_postgres_temp_file_bytes = row_i64_or_minus_one(row, 10);
-    out.mps_build_postgres_temp_file_count = row_i64_or_minus_one(row, 11);
-    out.mps_build_merge_reader_buffer_bytes = row_i64_or_minus_one(row, 12);
-    out.mps_build_merge_pass_count = row_i64_or_minus_one(row, 13);
-    out.mps_build_spill_count_from_pressure = row_i64_or_minus_one(row, 14);
-    out.mps_build_resident_demotions = row_i64_or_minus_one(row, 15);
-    out.mps_build_position_spill_bytes = row_i64_or_minus_one(row, 16);
-    out.mps_build_position_spill_count = row_i64_or_minus_one(row, 17);
-    out.mps_build_shared_generation = row_i64_or_minus_one(row, 18);
-    out.mps_build_worker_build_ns = row_i64_or_minus_one(row, 19);
-    out.mps_build_pipeline_mode = row_i64_or_minus_one(row, 20);
-    out.mps_build_max_concurrency = row_i64_or_minus_one(row, 21);
-    out.mps_build_index_memory_cap_mb = row_i64_or_minus_one(row, 22);
-    out.mps_build_lazy_worker_shareable = row_i64_or_minus_one(row, 23);
+    out.hash_major_build_backend_pid = row_i64_or_minus_one(row, 0);
+    out.hash_major_build_db_oid = row_i64_or_minus_one(row, 1);
+    out.hash_major_build_relfilenode = row_i64_or_minus_one(row, 2);
+    out.hash_major_build_sequence_rowno = row_i64_or_minus_one(row, 3);
+    out.hash_major_build_total_run_count = row_i64_or_minus_one(row, 4);
+    out.hash_major_build_resident_runs = row_i64_or_minus_one(row, 5);
+    out.hash_major_build_file_runs = row_i64_or_minus_one(row, 6);
+    out.hash_major_build_resident_run_bytes = row_i64_or_minus_one(row, 7);
+    out.hash_major_build_resident_peak_bytes = row_i64_or_minus_one(row, 8);
+    out.hash_major_build_spilled_run_bytes = row_i64_or_minus_one(row, 9);
+    out.hash_major_build_postgres_temp_file_bytes = row_i64_or_minus_one(row, 10);
+    out.hash_major_build_postgres_temp_file_count = row_i64_or_minus_one(row, 11);
+    out.hash_major_build_merge_reader_buffer_bytes = row_i64_or_minus_one(row, 12);
+    out.hash_major_build_merge_pass_count = row_i64_or_minus_one(row, 13);
+    out.hash_major_build_spill_count_from_pressure = row_i64_or_minus_one(row, 14);
+    out.hash_major_build_resident_demotions = row_i64_or_minus_one(row, 15);
+    out.hash_major_build_position_spill_bytes = row_i64_or_minus_one(row, 16);
+    out.hash_major_build_position_spill_count = row_i64_or_minus_one(row, 17);
+    out.hash_major_build_shared_generation = row_i64_or_minus_one(row, 18);
+    out.hash_major_build_worker_build_ns = row_i64_or_minus_one(row, 19);
+    out.hash_major_build_pipeline_mode = row_i64_or_minus_one(row, 20);
+    out.hash_major_build_max_concurrency = row_i64_or_minus_one(row, 21);
+    out.hash_major_build_index_memory_cap_mb = row_i64_or_minus_one(row, 22);
+    out.hash_major_build_lazy_worker_shareable = row_i64_or_minus_one(row, 23);
 }
 
 [[nodiscard]] std::int64_t index_row_count(
@@ -6205,8 +6243,8 @@ void capture_mps_build_stats(
     return first_i64_or_minus_one(rows);
 }
 
-[[nodiscard]] cold_no_index_policy_absence_evidence
-read_cold_no_index_policy_absence_evidence(
+[[nodiscard]] cold_no_index_policy_absence_stats
+read_cold_no_index_policy_absence_stats(
         const it::connection_test_context& c,
         const std::string& table,
         const std::string_view index_name) {
@@ -6226,7 +6264,7 @@ read_cold_no_index_policy_absence_evidence(
         std::abort();
     }
     const it::row_t& row = rows.front();
-    return cold_no_index_policy_absence_evidence{
+    return cold_no_index_policy_absence_stats{
         .target_rows = row_i64_or_minus_one(row, 0),
         .target_cardinality_metadata_only = row_i64_or_minus_one(row, 1),
         .source_parent_rows_read = row_i64_or_minus_one(row, 2),
@@ -6242,10 +6280,11 @@ read_cold_no_index_policy_absence_evidence(
         const it::connection_test_context& c) {
     const auto rows = it::query_rows(
         c,
-        "SELECT (current_setting('bioseq.update_index_on_insert') = 'off')::int, "
-        "       (current_setting('bioseq.read_sequence_index') = 'off')::int, "
-        "       (current_setting('bioseq.index_async_persist') = 'off')::int, "
-        "       (current_setting('bioseq.recompute_async_persist') = 'off')::int;");
+        "SELECT (current_setting('bioseq.index.insert_maintenance.enabled') = 'off')::int, "
+        "       (current_setting('bioseq.index.sequence_read.enabled') = 'off')::int, "
+        "       (current_setting('bioseq.index.async_persistence.enabled') = 'off')::int, "
+        "       (current_setting("
+        "'bioseq.index.recompute_async_persistence.enabled') = 'off')::int;");
     if (rows.size() != 1 || rows.front().size() != 4) {
         return 0;
     }
@@ -6257,7 +6296,7 @@ read_cold_no_index_policy_absence_evidence(
 }
 
 /** @brief Lifecycle point represented by a cold no-index audit. */
-enum class cold_no_index_audit_phase : std::uint8_t {
+enum class cold_no_index_audit_stage : std::uint8_t {
     pre_restart,
     post_restart,
     measured,
@@ -6267,87 +6306,101 @@ void capture_cold_no_index_absence(
         const it::connection_test_context& c,
         const e2e_input& in,
         e2e_output& out,
-        const cold_no_index_audit_phase phase) {
-    const cold_no_index_policy_absence_evidence mpf =
-        read_cold_no_index_policy_absence_evidence(
+        const cold_no_index_audit_stage stage) {
+    const cold_no_index_policy_absence_stats minimizer_fragment =
+        read_cold_no_index_policy_absence_stats(
             c, in.no_index_table, k_minimizers_per_fragment_index);
-    const cold_no_index_policy_absence_evidence mps =
-        read_cold_no_index_policy_absence_evidence(
+    const cold_no_index_policy_absence_stats minimizer_sequence =
+        read_cold_no_index_policy_absence_stats(
             c, in.no_index_table, k_minimizers_per_sequence_index);
-    const std::int64_t target_rows = mpf.target_rows;
-    const std::int64_t mpf_rows = mpf.persisted_index_rows;
-    const std::int64_t mps_rows = mps.persisted_index_rows;
+    const std::int64_t target_rows = minimizer_fragment.target_rows;
+    const std::int64_t minimizer_fragment_rows =
+        minimizer_fragment.persisted_index_rows;
+    const std::int64_t minimizer_sequence_rows =
+        minimizer_sequence.persisted_index_rows;
     const std::int64_t async_jobs = first_i64_or_minus_one(it::query_rows(
         c,
         "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();"));
     const std::int64_t gucs_off = cold_no_index_gucs_are_off(c);
 
-    if (phase == cold_no_index_audit_phase::pre_restart) {
+    if (stage == cold_no_index_audit_stage::pre_restart) {
         out.cold_no_index_pre_restart_target_rows = target_rows;
-        out.cold_no_index_pre_restart_mpf_rows = mpf_rows;
-        out.cold_no_index_pre_restart_mps_rows = mps_rows;
+        out.cold_no_index_pre_restart_minimizer_fragment_rows =
+            minimizer_fragment_rows;
+        out.cold_no_index_pre_restart_minimizer_sequence_rows =
+            minimizer_sequence_rows;
         out.cold_no_index_pre_restart_async_jobs = async_jobs;
         out.cold_no_index_pre_restart_gucs_off = gucs_off;
-        out.cold_no_index_pre_restart_mpf = mpf;
-        out.cold_no_index_pre_restart_mps = mps;
-    } else if (phase == cold_no_index_audit_phase::post_restart) {
+        out.cold_no_index_pre_restart_minimizer_fragment = minimizer_fragment;
+        out.cold_no_index_pre_restart_minimizer_sequence = minimizer_sequence;
+    } else if (stage == cold_no_index_audit_stage::post_restart) {
         out.cold_no_index_post_restart_target_rows = target_rows;
-        out.cold_no_index_post_restart_mpf_rows = mpf_rows;
-        out.cold_no_index_post_restart_mps_rows = mps_rows;
+        out.cold_no_index_post_restart_minimizer_fragment_rows =
+            minimizer_fragment_rows;
+        out.cold_no_index_post_restart_minimizer_sequence_rows =
+            minimizer_sequence_rows;
         out.cold_no_index_post_restart_async_jobs = async_jobs;
         out.cold_no_index_post_restart_gucs_off = gucs_off;
-        out.cold_no_index_post_restart_mpf = mpf;
-        out.cold_no_index_post_restart_mps = mps;
+        out.cold_no_index_post_restart_minimizer_fragment = minimizer_fragment;
+        out.cold_no_index_post_restart_minimizer_sequence = minimizer_sequence;
     } else {
         out.cold_no_index_measured_async_jobs = async_jobs;
         out.cold_no_index_measured_gucs_off = gucs_off;
-        out.cold_no_index_measured_mpf = mpf;
-        out.cold_no_index_measured_mps = mps;
+        out.cold_no_index_measured_minimizer_fragment = minimizer_fragment;
+        out.cold_no_index_measured_minimizer_sequence = minimizer_sequence;
     }
 
-    const auto exact_absence = [](const cold_no_index_policy_absence_evidence& evidence) {
-        return evidence.target_rows == 1
-            && evidence.target_cardinality_metadata_only == 1
-            && evidence.source_parent_rows_read == 0
-            && evidence.source_fragment_rows_read == 0
-            && evidence.source_decoded_bp == 0
-            && evidence.physical_index_relations == 0
-            && evidence.persisted_index_rows == 0
-            && evidence.generation_objects == 0;
+    const auto exact_absence = [](const cold_no_index_policy_absence_stats& stats) {
+        return stats.target_rows == 1
+            && stats.target_cardinality_metadata_only == 1
+            && stats.source_parent_rows_read == 0
+            && stats.source_fragment_rows_read == 0
+            && stats.source_decoded_bp == 0
+            && stats.physical_index_relations == 0
+            && stats.persisted_index_rows == 0
+            && stats.generation_objects == 0;
     };
-    if (!exact_absence(mpf) || !exact_absence(mps)
-        || target_rows != mps.target_rows
-        || mpf_rows != 0 || mps_rows != 0
+    if (!exact_absence(minimizer_fragment)
+        || !exact_absence(minimizer_sequence)
+        || target_rows != minimizer_sequence.target_rows
+        || minimizer_fragment_rows != 0 || minimizer_sequence_rows != 0
         || async_jobs != 0 || gucs_off != 1) {
         std::fprintf(
             stderr,
-            "[bench_e2e] COLD-NO-INDEX-ABSENCE-FAIL phase=%s "
-            "target_rows=%lld mpf_rows=%lld mps_rows=%lld "
+            "[bench_e2e] COLD-NO-INDEX-ABSENCE-FAIL stage=%s "
+            "target_rows=%lld minimizer_fragment_rows=%lld "
+            "minimizer_sequence_rows=%lld "
             "async_jobs=%lld gucs_off=%lld "
-            "mpf_meta=%lld mpf_source=%lld/%lld/%lld mpf_objects=%lld/%lld/%lld "
-            "mps_meta=%lld mps_source=%lld/%lld/%lld mps_objects=%lld/%lld/%lld\n",
-            phase == cold_no_index_audit_phase::pre_restart ? "pre_restart"
-                : phase == cold_no_index_audit_phase::post_restart
+            "minimizer_fragment_meta=%lld "
+            "minimizer_fragment_source=%lld/%lld/%lld "
+            "minimizer_fragment_objects=%lld/%lld/%lld "
+            "minimizer_sequence_meta=%lld "
+            "minimizer_sequence_source=%lld/%lld/%lld "
+            "minimizer_sequence_objects=%lld/%lld/%lld\n",
+            stage == cold_no_index_audit_stage::pre_restart ? "pre_restart"
+                : stage == cold_no_index_audit_stage::post_restart
                     ? "post_restart" : "measured",
             static_cast<long long>(target_rows),
-            static_cast<long long>(mpf_rows),
-            static_cast<long long>(mps_rows),
+            static_cast<long long>(minimizer_fragment_rows),
+            static_cast<long long>(minimizer_sequence_rows),
             static_cast<long long>(async_jobs),
             static_cast<long long>(gucs_off),
-            static_cast<long long>(mpf.target_cardinality_metadata_only),
-            static_cast<long long>(mpf.source_parent_rows_read),
-            static_cast<long long>(mpf.source_fragment_rows_read),
-            static_cast<long long>(mpf.source_decoded_bp),
-            static_cast<long long>(mpf.physical_index_relations),
-            static_cast<long long>(mpf.persisted_index_rows),
-            static_cast<long long>(mpf.generation_objects),
-            static_cast<long long>(mps.target_cardinality_metadata_only),
-            static_cast<long long>(mps.source_parent_rows_read),
-            static_cast<long long>(mps.source_fragment_rows_read),
-            static_cast<long long>(mps.source_decoded_bp),
-            static_cast<long long>(mps.physical_index_relations),
-            static_cast<long long>(mps.persisted_index_rows),
-            static_cast<long long>(mps.generation_objects));
+            static_cast<long long>(
+                minimizer_fragment.target_cardinality_metadata_only),
+            static_cast<long long>(minimizer_fragment.source_parent_rows_read),
+            static_cast<long long>(minimizer_fragment.source_fragment_rows_read),
+            static_cast<long long>(minimizer_fragment.source_decoded_bp),
+            static_cast<long long>(minimizer_fragment.physical_index_relations),
+            static_cast<long long>(minimizer_fragment.persisted_index_rows),
+            static_cast<long long>(minimizer_fragment.generation_objects),
+            static_cast<long long>(
+                minimizer_sequence.target_cardinality_metadata_only),
+            static_cast<long long>(minimizer_sequence.source_parent_rows_read),
+            static_cast<long long>(minimizer_sequence.source_fragment_rows_read),
+            static_cast<long long>(minimizer_sequence.source_decoded_bp),
+            static_cast<long long>(minimizer_sequence.physical_index_relations),
+            static_cast<long long>(minimizer_sequence.persisted_index_rows),
+            static_cast<long long>(minimizer_sequence.generation_objects));
         std::fflush(stderr);
         std::abort();
     }
@@ -6361,42 +6414,42 @@ struct cold_no_index_lifecycle_gate_input {
     std::int64_t alignment_uses_post_restart_backend = 0;
     std::int64_t pre_target_rows = 0;
     std::int64_t post_target_rows = 0;
-    std::int64_t pre_mpf_rows = 0;
-    std::int64_t pre_mps_rows = 0;
-    std::int64_t post_mpf_rows = 0;
-    std::int64_t post_mps_rows = 0;
-    std::int64_t measured_mpf_rows = 0;
-    std::int64_t measured_mps_rows = 0;
+    std::int64_t pre_minimizer_fragment_rows = 0;
+    std::int64_t pre_minimizer_sequence_rows = 0;
+    std::int64_t post_minimizer_fragment_rows = 0;
+    std::int64_t post_minimizer_sequence_rows = 0;
+    std::int64_t measured_minimizer_fragment_rows = 0;
+    std::int64_t measured_minimizer_sequence_rows = 0;
     std::int64_t pre_async_jobs = 0;
     std::int64_t post_async_jobs = 0;
     std::int64_t measured_async_jobs = 0;
     std::int64_t pre_gucs_off = 0;
     std::int64_t post_gucs_off = 0;
     std::int64_t measured_gucs_off = 0;
-    std::int64_t metadata_only_physical_absence_proven = 0;
+    std::int64_t metadata_only_physical_absence_validated = 0;
 };
 
 [[nodiscard]] constexpr bool cold_no_index_lifecycle_gate(
-        const cold_no_index_lifecycle_gate_input& evidence) noexcept {
-    return evidence.restart_performed == 1
-        && evidence.restart_identity_changed == 1
-        && evidence.identity_fields_present == 1
-        && evidence.alignment_uses_post_restart_backend == 1
-        && evidence.pre_target_rows == 1
-        && evidence.post_target_rows == 1
-        && evidence.pre_mpf_rows == 0
-        && evidence.pre_mps_rows == 0
-        && evidence.post_mpf_rows == 0
-        && evidence.post_mps_rows == 0
-        && evidence.measured_mpf_rows == 0
-        && evidence.measured_mps_rows == 0
-        && evidence.pre_async_jobs == 0
-        && evidence.post_async_jobs == 0
-        && evidence.measured_async_jobs == 0
-        && evidence.pre_gucs_off == 1
-        && evidence.post_gucs_off == 1
-        && evidence.measured_gucs_off == 1
-        && evidence.metadata_only_physical_absence_proven == 1;
+        const cold_no_index_lifecycle_gate_input& stats) noexcept {
+    return stats.restart_performed == 1
+        && stats.restart_identity_changed == 1
+        && stats.identity_fields_present == 1
+        && stats.alignment_uses_post_restart_backend == 1
+        && stats.pre_target_rows == 1
+        && stats.post_target_rows == 1
+        && stats.pre_minimizer_fragment_rows == 0
+        && stats.pre_minimizer_sequence_rows == 0
+        && stats.post_minimizer_fragment_rows == 0
+        && stats.post_minimizer_sequence_rows == 0
+        && stats.measured_minimizer_fragment_rows == 0
+        && stats.measured_minimizer_sequence_rows == 0
+        && stats.pre_async_jobs == 0
+        && stats.post_async_jobs == 0
+        && stats.measured_async_jobs == 0
+        && stats.pre_gucs_off == 1
+        && stats.post_gucs_off == 1
+        && stats.measured_gucs_off == 1
+        && stats.metadata_only_physical_absence_validated == 1;
 }
 
 constexpr cold_no_index_lifecycle_gate_input k_cold_no_index_valid_gate_fixture{
@@ -6409,48 +6462,48 @@ constexpr cold_no_index_lifecycle_gate_input k_cold_no_index_valid_gate_fixture{
     .pre_gucs_off = 1,
     .post_gucs_off = 1,
     .measured_gucs_off = 1,
-    .metadata_only_physical_absence_proven = 1,
+    .metadata_only_physical_absence_validated = 1,
 };
 static_assert(cold_no_index_lifecycle_gate(k_cold_no_index_valid_gate_fixture));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.restart_performed = 0;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.restart_performed = 0;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.restart_identity_changed = 0;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.restart_identity_changed = 0;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.post_mpf_rows = 1;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.post_minimizer_fragment_rows = 1;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.pre_mps_rows = 1;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.pre_minimizer_sequence_rows = 1;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.post_async_jobs = 1;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.post_async_jobs = 1;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.post_gucs_off = 0;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.post_gucs_off = 0;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.alignment_uses_post_restart_backend = 0;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.alignment_uses_post_restart_backend = 0;
+    return stats;
 }()));
 static_assert(!cold_no_index_lifecycle_gate([] {
-    auto evidence = k_cold_no_index_valid_gate_fixture;
-    evidence.metadata_only_physical_absence_proven = 0;
-    return evidence;
+    auto stats = k_cold_no_index_valid_gate_fixture;
+    stats.metadata_only_physical_absence_validated = 0;
+    return stats;
 }()));
 
 void require_cold_no_index_lifecycle(e2e_output& out) {
@@ -6473,24 +6526,24 @@ void require_cold_no_index_lifecycle(e2e_output& out) {
             == out.cold_no_index_post_restart_database_oid
         && out.timed_postmaster_start_time
             == out.cold_no_index_post_restart_postmaster_start_time;
-    const auto exact_absence = [](const cold_no_index_policy_absence_evidence& evidence) {
-        return evidence.target_rows == 1
-            && evidence.target_cardinality_metadata_only == 1
-            && evidence.source_parent_rows_read == 0
-            && evidence.source_fragment_rows_read == 0
-            && evidence.source_decoded_bp == 0
-            && evidence.physical_index_relations == 0
-            && evidence.persisted_index_rows == 0
-            && evidence.generation_objects == 0;
+    const auto exact_absence = [](const cold_no_index_policy_absence_stats& stats) {
+        return stats.target_rows == 1
+            && stats.target_cardinality_metadata_only == 1
+            && stats.source_parent_rows_read == 0
+            && stats.source_fragment_rows_read == 0
+            && stats.source_decoded_bp == 0
+            && stats.physical_index_relations == 0
+            && stats.persisted_index_rows == 0
+            && stats.generation_objects == 0;
     };
-    const bool metadata_only_physical_absence_proven =
-        exact_absence(out.cold_no_index_pre_restart_mpf)
-        && exact_absence(out.cold_no_index_pre_restart_mps)
-        && exact_absence(out.cold_no_index_post_restart_mpf)
-        && exact_absence(out.cold_no_index_post_restart_mps)
-        && exact_absence(out.cold_no_index_measured_mpf)
-        && exact_absence(out.cold_no_index_measured_mps);
-    const cold_no_index_lifecycle_gate_input evidence{
+    const bool metadata_only_physical_absence_validated =
+        exact_absence(out.cold_no_index_pre_restart_minimizer_fragment)
+        && exact_absence(out.cold_no_index_pre_restart_minimizer_sequence)
+        && exact_absence(out.cold_no_index_post_restart_minimizer_fragment)
+        && exact_absence(out.cold_no_index_post_restart_minimizer_sequence)
+        && exact_absence(out.cold_no_index_measured_minimizer_fragment)
+        && exact_absence(out.cold_no_index_measured_minimizer_sequence);
+    const cold_no_index_lifecycle_gate_input stats{
         .restart_performed = out.cold_no_index_restart_performed,
         .restart_identity_changed =
             out.cold_no_index_restart_identity_changed,
@@ -6499,25 +6552,25 @@ void require_cold_no_index_lifecycle(e2e_output& out) {
             alignment_uses_post_restart_backend ? 1 : 0,
         .pre_target_rows = out.cold_no_index_pre_restart_target_rows,
         .post_target_rows = out.cold_no_index_post_restart_target_rows,
-        .pre_mpf_rows = out.cold_no_index_pre_restart_mpf_rows,
-        .pre_mps_rows = out.cold_no_index_pre_restart_mps_rows,
-        .post_mpf_rows = out.cold_no_index_post_restart_mpf_rows,
-        .post_mps_rows = out.cold_no_index_post_restart_mps_rows,
-        .measured_mpf_rows =
-            out.cold_no_index_measured_mpf.persisted_index_rows,
-        .measured_mps_rows =
-            out.cold_no_index_measured_mps.persisted_index_rows,
+        .pre_minimizer_fragment_rows = out.cold_no_index_pre_restart_minimizer_fragment_rows,
+        .pre_minimizer_sequence_rows = out.cold_no_index_pre_restart_minimizer_sequence_rows,
+        .post_minimizer_fragment_rows = out.cold_no_index_post_restart_minimizer_fragment_rows,
+        .post_minimizer_sequence_rows = out.cold_no_index_post_restart_minimizer_sequence_rows,
+        .measured_minimizer_fragment_rows =
+            out.cold_no_index_measured_minimizer_fragment.persisted_index_rows,
+        .measured_minimizer_sequence_rows =
+            out.cold_no_index_measured_minimizer_sequence.persisted_index_rows,
         .pre_async_jobs = out.cold_no_index_pre_restart_async_jobs,
         .post_async_jobs = out.cold_no_index_post_restart_async_jobs,
         .measured_async_jobs = out.cold_no_index_measured_async_jobs,
         .pre_gucs_off = out.cold_no_index_pre_restart_gucs_off,
         .post_gucs_off = out.cold_no_index_post_restart_gucs_off,
         .measured_gucs_off = out.cold_no_index_measured_gucs_off,
-        .metadata_only_physical_absence_proven =
-            metadata_only_physical_absence_proven ? 1 : 0,
+        .metadata_only_physical_absence_validated =
+            metadata_only_physical_absence_validated ? 1 : 0,
     };
     out.cold_no_index_lifecycle_accepted =
-        cold_no_index_lifecycle_gate(evidence) ? 1 : 0;
+        cold_no_index_lifecycle_gate(stats) ? 1 : 0;
     if (out.cold_no_index_lifecycle_accepted == 1) {
         return;
     }
@@ -6525,7 +6578,7 @@ void require_cold_no_index_lifecycle(e2e_output& out) {
         stderr,
         "[bench_e2e] COLD-NO-INDEX-LIFECYCLE-FAIL restart=%lld "
         "identity_changed=%lld identity_present=%d alignment_fresh=%d "
-        "target=%lld/%lld mpf=%lld/%lld/%lld mps=%lld/%lld/%lld "
+        "target=%lld/%lld grouped_soa=%lld/%lld/%lld hash_major=%lld/%lld/%lld "
         "async=%lld/%lld/%lld gucs=%lld/%lld/%lld physical_absence=%d\n",
         static_cast<long long>(out.cold_no_index_restart_performed),
         static_cast<long long>(out.cold_no_index_restart_identity_changed),
@@ -6533,21 +6586,21 @@ void require_cold_no_index_lifecycle(e2e_output& out) {
         alignment_uses_post_restart_backend ? 1 : 0,
         static_cast<long long>(out.cold_no_index_pre_restart_target_rows),
         static_cast<long long>(out.cold_no_index_post_restart_target_rows),
-        static_cast<long long>(out.cold_no_index_pre_restart_mpf_rows),
-        static_cast<long long>(out.cold_no_index_post_restart_mpf_rows),
+        static_cast<long long>(out.cold_no_index_pre_restart_minimizer_fragment_rows),
+        static_cast<long long>(out.cold_no_index_post_restart_minimizer_fragment_rows),
         static_cast<long long>(
-            out.cold_no_index_measured_mpf.persisted_index_rows),
-        static_cast<long long>(out.cold_no_index_pre_restart_mps_rows),
-        static_cast<long long>(out.cold_no_index_post_restart_mps_rows),
+            out.cold_no_index_measured_minimizer_fragment.persisted_index_rows),
+        static_cast<long long>(out.cold_no_index_pre_restart_minimizer_sequence_rows),
+        static_cast<long long>(out.cold_no_index_post_restart_minimizer_sequence_rows),
         static_cast<long long>(
-            out.cold_no_index_measured_mps.persisted_index_rows),
+            out.cold_no_index_measured_minimizer_sequence.persisted_index_rows),
         static_cast<long long>(out.cold_no_index_pre_restart_async_jobs),
         static_cast<long long>(out.cold_no_index_post_restart_async_jobs),
         static_cast<long long>(out.cold_no_index_measured_async_jobs),
         static_cast<long long>(out.cold_no_index_pre_restart_gucs_off),
         static_cast<long long>(out.cold_no_index_post_restart_gucs_off),
         static_cast<long long>(out.cold_no_index_measured_gucs_off),
-        metadata_only_physical_absence_proven ? 1 : 0);
+        metadata_only_physical_absence_validated ? 1 : 0);
     std::fflush(stderr);
     std::abort();
 }
@@ -6559,15 +6612,15 @@ void capture_index_audit(
         e2e_output& out) {
     out.audit_selected_minimizer_is_sequence =
         minimizer_index == k_minimizers_per_sequence_index ? 1 : 0;
-    out.audit_mpf_rows =
+    out.audit_minimizer_fragment_rows =
         index_row_count(c, table, k_minimizers_per_fragment_index);
-    out.audit_mps_rows =
+    out.audit_minimizer_sequence_rows =
         index_row_count(c, table, k_minimizers_per_sequence_index);
 
-    out.audit_mpf_update_on_insert = -1;
-    out.audit_mps_update_on_insert = -1;
-    out.audit_mpf_active_read = -1;
-    out.audit_mps_active_read = -1;
+    out.audit_minimizer_fragment_update_on_insert = -1;
+    out.audit_minimizer_sequence_update_on_insert = -1;
+    out.audit_minimizer_fragment_active_read = -1;
+    out.audit_minimizer_sequence_active_read = -1;
     const auto policy_rows = it::query_rows(c, fmt::format(
         "SELECT index_name, update_on_insert::int, is_active_read::int "
         "FROM bioseq_internal.index_policy "
@@ -6587,11 +6640,11 @@ void capture_index_audit(
         const std::int64_t uoi = row[1].has_value() ? parse_i64(*row[1]) : -1;
         const std::int64_t active = row[2].has_value() ? parse_i64(*row[2]) : -1;
         if (name == k_minimizers_per_fragment_index) {
-            out.audit_mpf_update_on_insert = uoi;
-            out.audit_mpf_active_read = active;
+            out.audit_minimizer_fragment_update_on_insert = uoi;
+            out.audit_minimizer_fragment_active_read = active;
         } else if (name == k_minimizers_per_sequence_index) {
-            out.audit_mps_update_on_insert = uoi;
-            out.audit_mps_active_read = active;
+            out.audit_minimizer_sequence_update_on_insert = uoi;
+            out.audit_minimizer_sequence_active_read = active;
         }
     }
 
@@ -6609,33 +6662,43 @@ void finalize_post_measure_persisted_policy_audit(
         e2e_output& out) {
     const bool expect_sequence =
         minimizer_index == k_minimizers_per_sequence_index;
-    const bool mpf_selected = !expect_sequence;
+    const bool minimizer_fragment_selected = !expect_sequence;
     const bool accepted =
         out.audit_selected_minimizer_is_sequence
             == (expect_sequence ? 1 : 0)
-        && out.audit_mpf_update_on_insert == (mpf_selected ? 1 : 0)
-        && out.audit_mps_update_on_insert == (expect_sequence ? 1 : 0)
-        && out.audit_mpf_active_read == (mpf_selected ? 1 : 0)
-        && out.audit_mps_active_read == (expect_sequence ? 1 : 0)
-        && (mpf_selected ? out.audit_mpf_rows > 0 : out.audit_mpf_rows == 0)
-        && (expect_sequence ? out.audit_mps_rows > 0 : out.audit_mps_rows == 0)
+        && out.audit_minimizer_fragment_update_on_insert
+            == (minimizer_fragment_selected ? 1 : 0)
+        && out.audit_minimizer_sequence_update_on_insert
+            == (expect_sequence ? 1 : 0)
+        && out.audit_minimizer_fragment_active_read
+            == (minimizer_fragment_selected ? 1 : 0)
+        && out.audit_minimizer_sequence_active_read
+            == (expect_sequence ? 1 : 0)
+        && (minimizer_fragment_selected
+            ? out.audit_minimizer_fragment_rows > 0
+            : out.audit_minimizer_fragment_rows == 0)
+        && (expect_sequence
+            ? out.audit_minimizer_sequence_rows > 0
+            : out.audit_minimizer_sequence_rows == 0)
         && out.audit_async_persist_jobs_waiting == 0
         && out.audit_index_rows_wait_attempts == 0;
     out.persisted_policy_audit_accepted = accepted ? 1 : 0;
     if (!accepted) {
         bioseq_log<logging_level::error>(
             "[bench_e2e] post-measure persisted-policy audit failed "
-            "index={} selected_is_sequence={} mpf_rows={} mps_rows={} "
-            "mpf_update={} mps_update={} mpf_active={} mps_active={} "
+            "index={} selected_is_sequence={} minimizer_fragment_rows={} "
+            "minimizer_sequence_rows={} minimizer_fragment_update={} "
+            "minimizer_sequence_update={} minimizer_fragment_active={} "
+            "minimizer_sequence_active={} "
             "async_waiting={} wait_attempts={}",
             minimizer_index,
             out.audit_selected_minimizer_is_sequence,
-            out.audit_mpf_rows,
-            out.audit_mps_rows,
-            out.audit_mpf_update_on_insert,
-            out.audit_mps_update_on_insert,
-            out.audit_mpf_active_read,
-            out.audit_mps_active_read,
+            out.audit_minimizer_fragment_rows,
+            out.audit_minimizer_sequence_rows,
+            out.audit_minimizer_fragment_update_on_insert,
+            out.audit_minimizer_sequence_update_on_insert,
+            out.audit_minimizer_fragment_active_read,
+            out.audit_minimizer_sequence_active_read,
             out.audit_async_persist_jobs_waiting,
             out.audit_index_rows_wait_attempts);
     }
@@ -6668,7 +6731,7 @@ void capture_index_audit_after_async_persist(
         }
         capture_index_audit(c, table, minimizer_index, out);
         const std::int64_t target_rows =
-            expect_sequence ? out.audit_mps_rows : out.audit_mpf_rows;
+            expect_sequence ? out.audit_minimizer_sequence_rows : out.audit_minimizer_fragment_rows;
         if (target_rows > 0 || out.audit_async_persist_jobs_waiting == 0) {
             return;
         }
@@ -6709,7 +6772,7 @@ void log_measured_case(std::string_view algo,
             out.found,
             out.abs_offset_bp);
     bioseq_log<logging_level::debug>(
-            "[bench_e2e] proof_env workers={}/{} lifecycle=(nodes={},nested={},completed={},partial={},drained={}) persisted=(generation={},source={}) gpu=(uuid={},driver={},cache_policy={},seed_sha256={},seed_size={},manifest={},hit={})",
+            "[bench_e2e] validation_env workers={}/{} lifecycle=(nodes={},nested={},completed={},partial={},drained={}) persisted=(generation={},source={}) gpu=(uuid={},driver={},cache_policy={},seed_sha256={},seed_size={},manifest={},hit={})",
             out.effective_cpu_workers,
             out.comparison_cpu_workers,
             out.alignment_scan_node_count,
@@ -6770,10 +6833,10 @@ void cleanup_e2e_input(std::string_view,
 }
 
 // ---- §10.1 on_estimate ----
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] run_constraints e2e_estimate_typed(simdjson::dom::element data) {
-    using traits = compact_sequence_range<bench_config<A>>::traits;
-    using storage_unit_t = typename bench_config<A>::storage_unit;
+    using traits = compact_sequence_range<bench_config<p_alphabet>>::traits;
+    using storage_unit_t = typename bench_config<p_alphabet>::storage_unit;
     const auto ref_bp = static_cast<std::size_t>(
         jint(data, "reference_length", k_default_reference_length_bp));
     const auto query_bp = static_cast<std::size_t>(
@@ -6781,8 +6844,9 @@ template <sequence_alphabet A>
     const std::size_t packed_units =
         (ref_bp + traits::letters_per_unit - 1) / traits::letters_per_unit;
     const std::size_t packed_bytes = packed_units * sizeof(storage_unit_t);
-    const std::size_t unpacked_reference_bytes = ref_bp * sizeof(A);
-    const std::size_t query_bytes = query_bp * sizeof(A);
+    const std::size_t unpacked_reference_bytes =
+        ref_bp * sizeof(p_alphabet);
+    const std::size_t query_bytes = query_bp * sizeof(p_alphabet);
     return {
         .base_memory = packed_bytes + query_bytes,
         .extra_memory = unpacked_reference_bytes + query_bytes
@@ -6793,14 +6857,14 @@ template <sequence_alphabet A>
                                           simdjson::dom::element data) {
     run_constraints out{};
     dispatch_bench_alphabet(jstr(data, "alphabet", "dna4"),
-        [&out, data]<sequence_alphabet A>() {
-            out = e2e_estimate_typed<A>(data);
+        [&out, data]<sequence_alphabet p_alphabet>() {
+            out = e2e_estimate_typed<p_alphabet>(data);
         });
     return out;
 }
 
 // ---- §10.2 on_input (all untimed setup) ----
-template <sequence_alphabet A>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] e2e_input e2e_input_typed(std::string_view /*data_dir*/,
                                        std::string_view test_case_name,
                                        simdjson::dom::element data,
@@ -6820,8 +6884,8 @@ template <sequence_alphabet A>
     gp.use_vulkan             = jbool(data, "use_vulkan_generation", false);
 
     e2e_input in;
-    in.alphabet    = std::string{bench_alphabet_name<A>()};
-    in.seq_type    = bench_seq_type<A>();
+    in.alphabet = std::string{bench_alphabet_name<p_alphabet>()};
+    in.seq_type = bench_seq_type<p_alphabet>();
     in.size_label  = jstr(data, "size_label", "x");
     in.kmer_size   = static_cast<int>(jint(data, "kmer_size", k_default_kmer_size));
     in.window_size = static_cast<int>(jint(data, "window_size", k_default_window_size));
@@ -6835,7 +6899,8 @@ template <sequence_alphabet A>
         static_cast<std::uint32_t>(jint(data, "min_cigar_insertion_ops", 0));
     in.minimap2_split_bp = static_cast<std::size_t>(jint(data, "minimap2_split_bp", k_minimap2_split_bp));
     const std::size_t split_bp = in.minimap2_split_bp;
-    using active_traits = typename bench_sequence_range<A>::traits;
+    using active_traits =
+        typename bench_sequence_range<p_alphabet>::traits;
     if (split_bp > static_cast<std::size_t>(k_minimap2_max_record_bp) ||
         split_bp % active_traits::letters_per_unit != 0) {
         const std::size_t lpu =
@@ -6874,20 +6939,19 @@ template <sequence_alphabet A>
     in.query_fasta         = fmt::format("{}/e2e_{}_query.fasta",         tmp, in.size_label);
     in.mmi_path            = fmt::format("{}/e2e_{}_target.mmi",          tmp, in.size_label);
     in.just_index_table_simd_per_fragment =
-        fmt::format("e2e_{}_just_simd_mpf", in.size_label);
+        fmt::format("e2e_{}_just_simd_minimizer_fragment", in.size_label);
     in.just_index_table_simd_per_sequence =
-        fmt::format("e2e_{}_just_simd_mps", in.size_label);
+        fmt::format("e2e_{}_just_simd_minimizer_sequence", in.size_label);
     in.just_index_table_scalar_per_fragment =
-        fmt::format("e2e_{}_just_scalar_mpf", in.size_label);
+        fmt::format("e2e_{}_just_scalar_minimizer_fragment", in.size_label);
     in.just_index_table_scalar_per_sequence =
-        fmt::format("e2e_{}_just_scalar_mps", in.size_label);
+        fmt::format("e2e_{}_just_scalar_minimizer_sequence", in.size_label);
     in.just_index_table_gpu_per_fragment =
-        fmt::format("e2e_{}_just_gpu_mpf", in.size_label);
+        fmt::format("e2e_{}_just_gpu_minimizer_fragment", in.size_label);
     in.just_index_table_gpu_per_sequence =
-        fmt::format("e2e_{}_just_gpu_mps", in.size_label);
+        fmt::format("e2e_{}_just_gpu_minimizer_sequence", in.size_label);
     in.just_index_table_per_fragment = in.just_index_table_simd_per_fragment;
     in.just_index_table_per_sequence = in.just_index_table_simd_per_sequence;
-    in.just_index_table = in.just_index_table_per_sequence;
     in.no_index_table = fmt::format("e2e_{}_noidx", in.size_label);
 
     /* Parse reuse before any multi-gigabyte artifact write.  Query truth is
@@ -6902,7 +6966,9 @@ template <sequence_alphabet A>
             && std::string_view{skip_index_setup_env} == "1");
 
     // (1) generate one shared target plus N query fragments.
-    auto pairs = gen::alphabet_sequence_generator<A, bench_storage_t>(gp)
+    auto pairs = gen::alphabet_sequence_generator<
+                     p_alphabet,
+                     bench_storage_t>(gp)
                      .generate_sequences_pairs(gp.fragment_count);
     if (pairs.empty()) {
         std::fputs("[bench_e2e] generated zero query fragments\n", stderr);
@@ -6911,7 +6977,7 @@ template <sequence_alphabet A>
     in.queries.clear();
     in.queries.reserve(pairs.size());
     for (std::size_t i = 0; i < pairs.size(); ++i) {
-        const bench_pair_t<A>& pair = pairs[i];
+        const bench_pair_t<p_alphabet>& pair = pairs[i];
         in.queries.push_back(e2e_query_truth{
             .id = static_cast<std::int32_t>(i),
             .bases = pair.query.to_string(),
@@ -6932,7 +6998,8 @@ template <sequence_alphabet A>
                 + static_cast<std::size_t>(k_position_tolerance_bp));
         in.queries.back().target_window_start = static_cast<std::int64_t>(
             target_window_start);
-        in.queries.back().target_window_bases = decode_target_window<A>(
+        in.queries.back().target_window_bases =
+            decode_target_window<p_alphabet>(
             *pair.target, target_window_start, target_window_end);
         if (in.designed_indel_cigar) {
             if (in.queries.back().truth_is_reverse) {
@@ -6957,7 +7024,7 @@ template <sequence_alphabet A>
             apply_designed_many_gap_cigar_mutation(in.queries.back());
         }
     }
-    const bench_pair_t<A>& first = pairs.front();
+    const bench_pair_t<p_alphabet>& first = pairs.front();
     in.truth_target_start = static_cast<std::int64_t>(first.truth_target_start);
     in.truth_is_reverse   = first.is_reverse;
     in.target_bp          = static_cast<std::int64_t>(gp.reference_length);
@@ -6966,12 +7033,12 @@ template <sequence_alphabet A>
     // existing files byte-for-byte; SQL-only cells do not consume them, while
     // minimap/no-index cells can reuse the retained deterministic copies.
     if (!skip_index_baseline_setup) {
-        write_single_record_fasta<A>(in.target_fasta, "ref", *first.target);
-        write_split_fasta<A>(
+        write_single_record_fasta<p_alphabet>(
+            in.target_fasta, "ref", *first.target);
+        write_split_fasta<p_alphabet>(
             in.target_fasta_split, "ref", *first.target, split_bp);
-        write_multi_query_fasta<A>(in.query_fasta, in.queries);
+        write_multi_query_fasta<p_alphabet>(in.query_fasta, in.queries);
     }
-    in.query_bases = in.queries.front().bases;   // compatibility literal path
 
     /* An explicit skip is an iteration accelerator for reader-only changes:
      * retain the already-published deterministic target/generation and let
@@ -7063,8 +7130,8 @@ template <sequence_alphabet A>
         just_index_setup_pipeline_env != nullptr
             ? std::string{just_index_setup_pipeline_env}
             : std::string{"task_parallel"};
-    if (just_index_setup_pipeline_mode != "single"
-        && just_index_setup_pipeline_mode != "parallel"
+    if (just_index_setup_pipeline_mode != "single_thread"
+        && just_index_setup_pipeline_mode != "parallel_dispatch"
         && just_index_setup_pipeline_mode != "task_parallel") {
         bioseq_log<logging_level::error>("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE='{}'",
              just_index_setup_pipeline_mode);
@@ -7088,12 +7155,12 @@ template <sequence_alphabet A>
                 it::exec_sql(
                     *in.conn,
                     "DO $$ BEGIN "
-                    "PERFORM current_setting('bioseq.aligner.vulkan_enabled'); "
-                    "IF current_setting('bioseq.aligner.minimizer_algorithm') "
-                    "   <> 'vulkan_minimap_int' THEN "
+                    "PERFORM current_setting('bioseq.aligner.vulkan.enabled'); "
+                    "IF current_setting('bioseq.aligner.minimizer.algorithm') "
+                    "   <> 'vulkan_minimap_integer' THEN "
                     "  RAISE EXCEPTION 'GPU just_index setup did not select Vulkan minimizers'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled') "
+                    "IF current_setting('bioseq.aligner.vulkan.index_build.enabled') "
                     "   <> 'on' THEN "
                     "  RAISE EXCEPTION 'GPU just_index setup did not enable GPU index build'; "
                     "END IF; "
@@ -7106,15 +7173,15 @@ template <sequence_alphabet A>
                 it::exec_sql(
                     *in.conn,
                     "DO $$ BEGIN "
-                    "IF current_setting('bioseq.aligner.minimizer_algorithm') "
+                    "IF current_setting('bioseq.aligner.minimizer.algorithm') "
                     "   <> 'two_stack_nthash' THEN "
                     "  RAISE EXCEPTION 'SIMD just_index setup did not select two_stack_nthash'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.chaining_algorithm') "
-                    "   <> 'simd_mm2' THEN "
-                    "  RAISE EXCEPTION 'SIMD just_index setup did not select simd_mm2'; "
+                    "IF current_setting('bioseq.aligner.chaining.algorithm') "
+                    "   <> 'simd_minimap2' THEN "
+                    "  RAISE EXCEPTION 'SIMD just_index setup did not select simd_minimap2'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.vulkan_enabled') "
+                    "IF current_setting('bioseq.aligner.vulkan.enabled') "
                     "   <> 'off' THEN "
                     "  RAISE EXCEPTION 'SIMD just_index setup left Vulkan enabled'; "
                     "END IF; "
@@ -7127,46 +7194,36 @@ template <sequence_alphabet A>
                 it::exec_sql(
                     *in.conn,
                     "DO $$ BEGIN "
-                    "IF current_setting('bioseq.aligner.minimizer_algorithm') "
+                    "IF current_setting('bioseq.aligner.minimizer.algorithm') "
                     "   <> 'scalar' THEN "
                     "  RAISE EXCEPTION 'Scalar just_index setup did not select scalar minimizers'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.chaining_algorithm') "
-                    "   <> 'scalar_mm2' THEN "
-                    "  RAISE EXCEPTION 'Scalar just_index setup did not select scalar_mm2'; "
+                    "IF current_setting('bioseq.aligner.chaining.algorithm') "
+                    "   <> 'scalar_minimap2' THEN "
+                    "  RAISE EXCEPTION 'Scalar just_index setup did not select scalar_minimap2'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.base_alignment_algorithm') "
+                    "IF current_setting('bioseq.aligner.base_alignment.algorithm') "
                     "   <> 'ksw2' THEN "
                     "  RAISE EXCEPTION 'Scalar just_index setup did not select KSW2'; "
                     "END IF; "
-                    "IF current_setting('bioseq.aligner.vulkan_enabled') "
+                    "IF current_setting('bioseq.aligner.vulkan.enabled') "
                     "   <> 'off' THEN "
                     "  RAISE EXCEPTION 'Scalar just_index setup left Vulkan enabled'; "
                     "END IF; "
                     "END $$;");
             }
             configure_bioseq_minimizer_policy(*in.conn, table, index_name);
-            /* The production Format-5 MPF publisher currently seals an
-             * authenticated MPF5 mmap sidecar from the completely reread
-             * PostgreSQL generation.  Its descriptor provider therefore
-             * remains postgres_relation even when the timed reader consumes
-             * only the nested compact-H32 file image.  The distinct
-             * mapped_file provider lifecycle is deliberately fail-closed
-             * until its direct-write publication/retirement/reaping contract
-             * is complete; selecting it here would reject setup before any
-             * benchmark sample exists. */
-            it::exec_sql(
-                *in.conn,
-                "SET bioseq.index_payload_storage_backend = 'postgres_relation';");
+            // The production publisher owns the PostgreSQL-backed generation;
+            // there is no session-selectable payload-storage route.
             // A just_index sample owns a fully published PostgreSQL generation
             // before timing starts.  Load only the base sequence first, then
-            // build the selected minimizer index explicitly: relying on the
-            // INSERT hook writes the legacy layout and does not establish the
-            // READY-generation identity that the post-restart reader proves.
-            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
-            it::exec_sql(*in.conn, "SET bioseq.index_async_persist = off;");
-            it::exec_sql(*in.conn, "SET bioseq.recompute_async_persist = off;");
-            it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+            // build the selected minimizer index explicitly: the INSERT hook
+            // does not establish the READY-generation identity that the
+            // post-restart reader validates.
+            it::exec_sql(*in.conn, "SET bioseq.index.insert_maintenance.enabled = off;");
+            it::exec_sql(*in.conn, "SET bioseq.index.async_persistence.enabled = off;");
+            it::exec_sql(*in.conn, "SET bioseq.index.recompute_async_persistence.enabled = off;");
+            it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled = on;");
             it::exec_sqlf(
                 *in.conn,
                 "SELECT bioseq.load('{}'::regclass, '{}');",
@@ -7188,14 +7245,15 @@ template <sequence_alphabet A>
                     index_name);
                 std::abort();
             }
-            if (!e2e_expects_format6(in, index_name)) {
+            if (!e2e_expects_hash_major(in, index_name)) {
             const std::string audit_sql = fmt::format(
-                "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
-                "current_setting('bioseq.aligner.vulkan_enabled'), "
-                "current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled'), "
-                "(current_setting('bioseq.update_index_on_insert') = 'off')::int, "
-                "(current_setting('bioseq.index_async_persist') = 'off')::int, "
-                "(current_setting('bioseq.recompute_async_persist') = 'off')::int, "
+                "SELECT current_setting('bioseq.aligner.minimizer.algorithm'), "
+                "current_setting('bioseq.aligner.vulkan.enabled'), "
+                "current_setting('bioseq.aligner.vulkan.index_build.enabled'), "
+                "(current_setting('bioseq.index.insert_maintenance.enabled') = 'off')::int, "
+                "(current_setting('bioseq.index.async_persistence.enabled') = 'off')::int, "
+                "(current_setting("
+                "'bioseq.index.recompute_async_persistence.enabled') = 'off')::int, "
                 "generation_id, sequence_rowno, gpu_abi_version, total_bp_size, "
                 "kmer_size, window_size "
                 "FROM bioseq.inspect_ready_minimizer_generation("
@@ -7301,7 +7359,7 @@ template <sequence_alphabet A>
     // This avoids a per-sequence run accidentally succeeding through a residual
     // per-fragment index, and keeps the per-fragment cell valid too.  Reuse
     // captures only the table-AM row key here; the exact generation/source/
-    // compatibility audit still runs immediately before and after the cold
+    // storage-profile audit still runs immediately before and after the cold
     // measured statement, so a stale or mismatched retained setup fails closed.
     if (skip_index_baseline_setup && setup_requirements.any_bioseq()) {
         if (setup_requirements.scalar_per_fragment) {
@@ -7375,7 +7433,7 @@ template <sequence_alphabet A>
                 setup_selection.gpu_just_index);
     }
 
-    // (6) no_index table: create empty. Each rep loads base data untimed, proves
+    // (6) no_index table: create empty. Each rep loads base data untimed, validates
     // both minimizer sidecars absent, restarts PostgreSQL, then times only
     // transient index construction + mapping.
     create_e2e_table(*in.conn, in.no_index_table, in.seq_type);
@@ -7404,8 +7462,10 @@ template <sequence_alphabet A>
                                  const run_constraints& constraints) {
     e2e_input out;
     dispatch_bench_alphabet(jstr(data, "alphabet", "dna4"),
-        [&out, data_dir, test_case_name, data, &constraints]<sequence_alphabet A>() {
-            out = e2e_input_typed<A>(data_dir, test_case_name, data, constraints);
+        [&out, data_dir, test_case_name, data, &constraints]
+        <sequence_alphabet p_alphabet>() {
+            out = e2e_input_typed<p_alphabet>(
+                data_dir, test_case_name, data, constraints);
         });
     return out;
 }
@@ -7420,7 +7480,7 @@ template <sequence_alphabet A>
 //   arch -arm64 .../pg_ctl -D '<datadir>' restart -m fast -w > /tmp/r.log 2>&1).
 // When the env var is unset, abort before timing. Warm just_index timings are
 // not comparable to cold restarted reads.
-/** @brief PostgreSQL process identity used to prove a real restart. */
+/** @brief PostgreSQL process identity used to validate a real restart. */
 struct postmaster_identity {
     std::string start_time;
     std::int64_t backend_pid = 0;
@@ -7428,12 +7488,12 @@ struct postmaster_identity {
 };
 
 /** @brief Postmaster identities captured before and after a cold restart. */
-struct cold_restart_evidence {
+struct cold_restart_stats {
     postmaster_identity before{};
     postmaster_identity after{};
 };
 
-[[nodiscard]] bool e2e_expects_format6(
+[[nodiscard]] bool e2e_expects_hash_major(
         const e2e_input& in,
         std::string_view minimizer_index) noexcept {
     return minimizer_index == "minimizers_per_sequence"
@@ -7451,14 +7511,14 @@ struct cold_restart_evidence {
         " WHERE datname=current_database());");
     if (rows.size() != 1 || rows.front().size() != 3
         || !rows.front()[0].has_value() || rows.front()[0]->empty()) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "postmaster identity has an invalid row shape");
     }
     const auto backend_pid = parse_snapshot_i64(rows.front()[1]);
     const auto database_oid = parse_snapshot_i64(rows.front()[2]);
     if (!backend_pid.has_value() || *backend_pid == 0
         || !database_oid.has_value() || *database_oid == 0) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "postmaster identity is missing or ill-typed");
     }
     return postmaster_identity{
@@ -7468,7 +7528,7 @@ struct cold_restart_evidence {
     };
 }
 
-[[nodiscard]] nlohmann::json capture_format6_ready_audit(
+[[nodiscard]] nlohmann::json capture_hash_major_ready_stats(
         const it::connection_test_context& connection,
         const std::string& table,
         const std::string_view minimizer_index,
@@ -7477,24 +7537,24 @@ struct cold_restart_evidence {
     const it::row_t row = it::query_one(
         connection,
         fmt::format(
-            "SELECT bioseq.inspect_ready_minimizer_format6_generation("
+            "SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
             "'{}'::regclass, '{}', {});",
             table,
             minimizer_index,
             sequence_rowno));
     if (row.size() != 1) {
-        abort_pipeline_evidence_capture(
-            "Format-6 READY audit has an invalid scalar shape");
+        abort_pipeline_stats_capture(
+            "hash-major READY audit has an invalid scalar shape");
     }
     const nlohmann::json audit = parse_exact_json_cell(
-        row.front(), "Format-6 READY audit JSON failed to parse");
-    if (!json_has_exact_keys(audit, k_format6_ready_audit_keys)
+        row.front(), "hash-major READY audit JSON failed to parse");
+    if (!json_has_exact_keys(audit, k_hash_major_ready_audit_keys)
         || required_json_text(audit, "schema")
-            != "bioseq.ready_minimizer_format6_generation"
-        || required_json_counter(audit, "version") != 1
-        || required_json_counter(audit, "format_version") != 6) {
-        abort_pipeline_evidence_capture(
-            "Format-6 READY audit has the wrong exact top-level schema");
+            != "bioseq.hash_major_minimizer_generation_inspection"
+        || required_json_counter(audit, "revision") != 1
+        || required_json_text(audit, "layout") != "hash_major") {
+        abort_pipeline_stats_capture(
+            "hash-major READY audit has the wrong exact top-level schema");
     }
 
     const nlohmann::json& source =
@@ -7509,21 +7569,21 @@ struct cold_restart_evidence {
         required_json_object(manifest, "compatibility");
     const nlohmann::json& streams =
         required_json_array(audit, "streams");
-    if (!json_has_exact_keys(source, k_format6_ready_source_keys)
-        || !json_has_exact_keys(head, k_format6_ready_head_keys)
-        || !json_has_exact_keys(manifest, k_format6_ready_manifest_keys)
+    if (!json_has_exact_keys(source, k_hash_major_ready_source_keys)
+        || !json_has_exact_keys(head, k_hash_major_ready_head_keys)
+        || !json_has_exact_keys(manifest, k_hash_major_ready_manifest_keys)
         || !json_has_exact_keys(
-            compatibility, k_format6_ready_compatibility_keys)
-        || !json_has_exact_keys(metadata, k_format6_ready_metadata_keys)
+            compatibility, k_hash_major_ready_compatibility_keys)
+        || !json_has_exact_keys(metadata, k_hash_major_ready_metadata_keys)
         || streams.size() != 3
         || !head["dense_seal_present"].is_boolean()) {
-        abort_pipeline_evidence_capture(
-            "Format-6 READY audit has the wrong exact nested schema");
+        abort_pipeline_stats_capture(
+            "hash-major READY audit has the wrong exact nested schema");
     }
     for (const auto& stream : streams) {
-        if (!json_has_exact_keys(stream, k_format6_ready_stream_keys)) {
-            abort_pipeline_evidence_capture(
-                "Format-6 READY audit stream has the wrong exact schema");
+        if (!json_has_exact_keys(stream, k_hash_major_ready_stream_keys)) {
+            abort_pipeline_stats_capture(
+                "hash-major READY audit stream has the wrong exact schema");
         }
     }
 
@@ -7549,7 +7609,7 @@ struct cold_restart_evidence {
         && std::string_view{required_json_text(audit, "index_name")}
             == minimizer_index
         && counter(source, "sequence_rowno") == sequence_rowno
-        && counter(source, "locator_version") > 0
+        && counter(source, "locator_revision") > 0
         && counter(source, "num_fragments") > 0
         && counter(source, "total_bp_size") == in.target_bp
         && counter(source, "source_epoch") > 0
@@ -7595,11 +7655,11 @@ struct cold_restart_evidence {
         && counter(compatibility, "hash_width_bytes") == 4
         && stored_posting_width
             == (target_length <= (std::int64_t{1} << 31) ? 4 : 8)
-        && counter(compatibility, "position_encoding_version") == 1
-        && counter(compatibility, "hash_semantics_version") == 1
-        && counter(compatibility, "count_semantics_version") == 1
-        && counter(compatibility, "producer_backend_id") > 0
-        && counter(compatibility, "producer_backend_version") > 0
+        && counter(compatibility, "position_encoding_revision") == 1
+        && counter(compatibility, "hash_semantics_revision") == 1
+        && counter(compatibility, "count_semantics_revision") == 1
+        && counter(compatibility, "producer_backend_identity") > 0
+        && counter(compatibility, "producer_backend_revision") > 0
         && counter(compatibility, "controls_per_block")
             == bioseq::indexing::k_hash_major_minimizer_controls_per_block
         && counter(compatibility, "hash_seed") == 0;
@@ -7669,8 +7729,8 @@ struct cold_restart_evidence {
                 * static_cast<__int128>(stored_posting_width);
     if (!identity_valid || !compatibility_valid || !metadata_valid
         || !streams_valid || !stream_equations) {
-        abort_pipeline_evidence_capture(
-            "Format-6 READY audit identity/profile/stream equations disagree");
+        abort_pipeline_stats_capture(
+            "hash-major READY audit identity/profile/stream equations disagree");
     }
     return audit;
 }
@@ -7696,7 +7756,7 @@ void capture_pre_restart_persisted_identity(
         || !rows.front()[1].has_value()
         || !rows.front()[2].has_value()
         || !rows.front()[3].has_value()) {
-        abort_pipeline_evidence_capture(
+        abort_pipeline_stats_capture(
             "pre-restart persisted generation identity has an invalid row shape");
     }
     const auto generation = parse_snapshot_i64(rows.front()[0]);
@@ -7709,13 +7769,14 @@ void capture_pre_restart_persisted_identity(
         || *gpu_abi_version != 3
         || !observed_sequence_rowno.has_value()
         || *observed_sequence_rowno != sequence_rowno) {
-        abort_pipeline_evidence_capture(
-            "pre-restart persisted generation is not production Format-5 ABI3");
+        abort_pipeline_stats_capture(
+            "pre-restart persisted generation is not the production "
+            "grouped-SoA layout with GPU ABI revision 3");
     }
     out.pre_restart_persisted_generation_id = *generation;
     out.pre_restart_persisted_gpu_abi_version = *gpu_abi_version;
     out.pre_restart_persisted_source_identity = *rows.front()[1];
-    out.pre_restart_persisted_format_version = 5;
+    out.pre_restart_persisted_layout = "grouped_soa";
 }
 
 void capture_pre_restart_persisted_audit(
@@ -7725,22 +7786,22 @@ void capture_pre_restart_persisted_audit(
         const std::int64_t sequence_rowno,
         const e2e_input& in,
         e2e_output& out) {
-    if (!e2e_expects_format6(in, minimizer_index)) {
+    if (!e2e_expects_hash_major(in, minimizer_index)) {
         capture_pre_restart_persisted_identity(
             connection, table, minimizer_index, sequence_rowno, out);
         return;
     }
-    out.pre_restart_format6_ready_audit = capture_format6_ready_audit(
+    out.pre_restart_hash_major_ready_stats = capture_hash_major_ready_stats(
         connection, table, minimizer_index, sequence_rowno, in);
     const nlohmann::json& head =
-        required_json_object(out.pre_restart_format6_ready_audit, "head");
+        required_json_object(out.pre_restart_hash_major_ready_stats, "head");
     const nlohmann::json& source =
-        required_json_object(out.pre_restart_format6_ready_audit, "source");
+        required_json_object(out.pre_restart_hash_major_ready_stats, "source");
     out.pre_restart_persisted_generation_id =
         required_json_counter(head, "generation_id");
     out.pre_restart_persisted_source_identity =
         required_json_text(source, "source_identity");
-    out.pre_restart_persisted_format_version = 6;
+    out.pre_restart_persisted_layout = "hash_major";
 }
 
 void capture_post_restart_persisted_audit(
@@ -7750,27 +7811,27 @@ void capture_post_restart_persisted_audit(
         const std::int64_t sequence_rowno,
         const e2e_input& in,
         e2e_output& out) {
-    if (!e2e_expects_format6(in, minimizer_index)) {
-        out.post_restart_persisted_format_version = 5;
+    if (!e2e_expects_hash_major(in, minimizer_index)) {
+        out.post_restart_persisted_layout = "grouped_soa";
         return;
     }
-    out.post_restart_format6_ready_audit = capture_format6_ready_audit(
+    out.post_restart_hash_major_ready_stats = capture_hash_major_ready_stats(
         connection, table, minimizer_index, sequence_rowno, in);
-    out.post_restart_persisted_format_version = 6;
+    out.post_restart_persisted_layout = "hash_major";
     out.format6_restart_audit_accepted =
-        out.pre_restart_format6_ready_audit
-                == out.post_restart_format6_ready_audit
+        out.pre_restart_hash_major_ready_stats
+                == out.post_restart_hash_major_ready_stats
             ? 1 : 0;
     if (out.format6_restart_audit_accepted != 1) {
-        abort_pipeline_evidence_capture(
-            "Format-6 READY identity/content/profile changed across restart");
+        abort_pipeline_stats_capture(
+            "hash-major READY identity/content/profile changed across restart");
     }
 }
 
 // Return the exact before/after identity after a successful restart.  Both
 // just_index and no_index use this common mechanism but retain disjoint output
 // fields and acceptance gates.
-[[nodiscard]] cold_restart_evidence restart_postgres_for_cold_measure(
+[[nodiscard]] cold_restart_stats restart_postgres_for_cold_measure(
         const e2e_input& in,
         const std::string_view lifecycle_name,
         const std::string_view cold_work) {
@@ -7832,7 +7893,7 @@ void capture_post_restart_persisted_audit(
         || before.backend_pid == after.backend_pid
         || before.database_oid != after.database_oid) {
         bioseq_log<logging_level::error>(
-            "[bench_e2e] restart command returned without proving a new "
+            "[bench_e2e] restart command returned without validating a new "
             "postmaster/backend identity (before_start={}, after_start={}, "
             "before_pid={}, after_pid={}, before_db={}, after_db={})",
             before.start_time,
@@ -7852,22 +7913,22 @@ void capture_post_restart_persisted_audit(
         after.start_time,
         before.backend_pid,
         after.backend_pid);
-    return cold_restart_evidence{.before = before, .after = after};
+    return cold_restart_stats{.before = before, .after = after};
 }
 
 // Returns true after a restart has completed and its identity change has been
-// proved. A successful restart command alone is not cold-run evidence.
+// validated. A successful restart command alone is not cold-run stats.
 bool restart_postgres_for_cold_just_index(
         const e2e_input& in,
         e2e_output& out) {
-    const cold_restart_evidence evidence = restart_postgres_for_cold_measure(
+    const cold_restart_stats stats = restart_postgres_for_cold_measure(
         in, "just_index", "persisted-index read plus mapping");
-    out.pre_restart_postmaster_start_time = evidence.before.start_time;
-    out.pre_restart_backend_pid = evidence.before.backend_pid;
-    out.pre_restart_database_oid = evidence.before.database_oid;
-    out.post_restart_postmaster_start_time = evidence.after.start_time;
-    out.post_restart_backend_pid = evidence.after.backend_pid;
-    out.post_restart_database_oid = evidence.after.database_oid;
+    out.pre_restart_postmaster_start_time = stats.before.start_time;
+    out.pre_restart_backend_pid = stats.before.backend_pid;
+    out.pre_restart_database_oid = stats.before.database_oid;
+    out.post_restart_postmaster_start_time = stats.after.start_time;
+    out.post_restart_backend_pid = stats.after.backend_pid;
+    out.post_restart_database_oid = stats.after.database_oid;
     out.cold_restart_identity_changed = 1;
     return true;
 }
@@ -7875,25 +7936,25 @@ bool restart_postgres_for_cold_just_index(
 bool restart_postgres_for_cold_no_index(
         const e2e_input& in,
         e2e_output& out) {
-    const cold_restart_evidence evidence = restart_postgres_for_cold_measure(
+    const cold_restart_stats stats = restart_postgres_for_cold_measure(
         in, "no_index", "transient exact target-index construction plus mapping");
     out.cold_no_index_pre_restart_postmaster_start_time =
-        evidence.before.start_time;
-    out.cold_no_index_pre_restart_backend_pid = evidence.before.backend_pid;
-    out.cold_no_index_pre_restart_database_oid = evidence.before.database_oid;
-    out.cold_no_index_post_restart_postmaster_start_time = evidence.after.start_time;
-    out.cold_no_index_post_restart_backend_pid = evidence.after.backend_pid;
-    out.cold_no_index_post_restart_database_oid = evidence.after.database_oid;
+        stats.before.start_time;
+    out.cold_no_index_pre_restart_backend_pid = stats.before.backend_pid;
+    out.cold_no_index_pre_restart_database_oid = stats.before.database_oid;
+    out.cold_no_index_post_restart_postmaster_start_time = stats.after.start_time;
+    out.cold_no_index_post_restart_backend_pid = stats.after.backend_pid;
+    out.cold_no_index_post_restart_database_oid = stats.after.database_oid;
     out.cold_no_index_restart_identity_changed = 1;
     return true;
 }
 
 void configure_no_index_storage_session(
         const it::connection_test_context& connection) {
-    it::exec_sql(connection, "SET bioseq.update_index_on_insert = off;");
-    it::exec_sql(connection, "SET bioseq.read_sequence_index = off;");
-    it::exec_sql(connection, "SET bioseq.index_async_persist = off;");
-    it::exec_sql(connection, "SET bioseq.recompute_async_persist = off;");
+    it::exec_sql(connection, "SET bioseq.index.insert_maintenance.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.index.sequence_read.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.index.async_persistence.enabled = off;");
+    it::exec_sql(connection, "SET bioseq.index.recompute_async_persistence.enabled = off;");
 }
 
 void prepare_and_restart_cold_no_index_base(
@@ -7902,7 +7963,7 @@ void prepare_and_restart_cold_no_index_base(
         const std::string_view minimizer_index,
         const std::string_view pipeline_mode) {
     // Base PostgreSQL data is setup, not target-index construction.  Load it
-    // with both minimizer policies disabled, prove no legacy or revision-3 row
+    // with both minimizer policies disabled, validate no retired index row
     // exists, then restart so neither shared buffers nor backend-local
     // transient state populated by the load can enter the timed statement.
     configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
@@ -7917,7 +7978,7 @@ void prepare_and_restart_cold_no_index_base(
         in.no_index_table,
         in.target_fasta);
     capture_cold_no_index_absence(
-        *in.conn, in, out, cold_no_index_audit_phase::pre_restart);
+        *in.conn, in, out, cold_no_index_audit_stage::pre_restart);
     out.cold_no_index_restart_performed =
         restart_postgres_for_cold_no_index(in, out) ? 1 : 0;
 }
@@ -8005,7 +8066,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
                                 const e2e_input& in) {
     // The sliced case exercises the full SIMD pipeline. Block Aligner executes
     // only when a downstream result helper requests CIGAR data.
-    if (!is_sliced_pipeline_evidence_configuration_valid(
+    if (!is_sliced_pipeline_stats_configuration_valid(
             algo, in.cigar_projection)) {
         std::fprintf(
             stderr,
@@ -8017,7 +8078,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         std::abort();
     }
     e2e_output out;
-    const std::string pipeline_mode = param_string(params, "pipeline_mode", "single");
+    const std::string pipeline_mode =
+        param_string(params, "pipeline_mode", "single_thread");
     const int fair_workers = fair_scheduler_worker_count(*in.conn);
     const int configured_minimap_threads = param_int(params, "threads", 0);
     if (configured_minimap_threads > 0
@@ -8031,12 +8093,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
         std::fflush(stderr);
         std::abort();
     }
-    /* Zero means exact parity with the live bioseq scheduler.  Bioseq evidence
+    /* Zero means exact parity with the live bioseq scheduler.  Bioseq stats
      * later independently attests the same effective worker count. */
     const int minimap_threads = fair_workers;
     out.comparison_cpu_workers = fair_workers;
     const std::string minimizer_index = param_minimizer_index(params);
-    const std::string qlit = fmt::format("'{}'::{}", in.query_bases, in.seq_type);
+    const std::string qlit = fmt::format(
+        "'{}'::{}", in.queries.front().bases, in.seq_type);
     const std::string proj = e2e_projection_sql(in);
 
     if (algo == "bioseq_ksw2_scalar_dp_scalar_mm_just_index") {
@@ -8053,11 +8116,11 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
-        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+        it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled = on;");
         it::exec_sql(
             *in.conn,
-            "SET bioseq.aligner.mpf_format5_lookup_route = "
-            "'format5_control_scans';");
+            "SET bioseq.aligner.fragment_minimizer.lookup_route = "
+            "'control_block_scan';");
         const std::string sql = batched_coord_sql(table, proj, 2);
         const alignment_snapshot_identity prior_alignment =
             capture_prior_alignment_identity(*in.conn);
@@ -8080,12 +8143,12 @@ void load_e2e_query_table(const it::connection_test_context& c,
             just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, true, fair_workers),
+            make_pipeline_stats_expectation(in, true, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out,
             minimizer_index);
@@ -8106,18 +8169,16 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         configure_bioseq_simd_session(*in.conn, in.kmer_size, in.window_size);
-        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
-        /* Exercise the explicit fail-closed direct image after the cold
-         * restart for MPF. This is
-         * setup, outside the measured statement, and cannot fall back to the
-         * three legacy Format-5 control scans. */
+        it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled = on;");
+        // Select the grouped-SoA direct lookup after the cold restart for a
+        // per-fragment generation; per-sequence generations use control blocks.
         it::exec_sql(
             *in.conn,
             minimizer_index == k_minimizers_per_fragment_index
-                ? "SET bioseq.aligner.mpf_format5_lookup_route = "
-                    "'compact_h32_direct';"
-                : "SET bioseq.aligner.mpf_format5_lookup_route = "
-                    "'format5_control_scans';");
+                ? "SET bioseq.aligner.fragment_minimizer.lookup_route = "
+                    "'direct_compact_hash_lookup';"
+                : "SET bioseq.aligner.fragment_minimizer.lookup_route = "
+                    "'control_block_scan';");
         const std::string sql = batched_coord_sql(table, proj, 2);
         const alignment_snapshot_identity prior_alignment =
             capture_prior_alignment_identity(*in.conn);
@@ -8137,12 +8198,12 @@ void load_e2e_query_table(const it::connection_test_context& c,
             just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, true, fair_workers),
+            make_pipeline_stats_expectation(in, true, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
@@ -8160,7 +8221,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             just_index_sequence_rowno_for(in, table), in, out);
         // Resident two-submit Vulkan frontend applied to the just-index path:
         // the index is prebuilt (untimed), and only the Vulkan-driven
-        // alignment is timed. Same Vulkan settings as bench_v10's
+        // alignment is timed. Use the alignment benchmark's Vulkan settings
         // bioseq_block_vulkan_resident_gpu_index_frontend row.
         // Restart PostgreSQL first so the prebuilt index is assembled cold from
         // storage (GPU seeding/tiled-DP chaining + block aligner over a cold index).
@@ -8168,7 +8229,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
-        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+        it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled = on;");
         configure_bioseq_vulkan_index_session(
             *in.conn,
             in.kmer_size,
@@ -8193,18 +8254,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
             just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, true, fair_workers),
+            make_pipeline_stats_expectation(in, true, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_ksw2_scalar_dp_scalar_mm_no_index") {
-        const bool recompute_async_persist =
-            param_string(params, "recompute_async_persist", "off") == "on";
-        if (recompute_async_persist) {
+        const bool recompute_async_persistence =
+            param_string(params, "recompute_async_persistence", "off") == "on";
+        if (recompute_async_persistence) {
             std::fprintf(
                 stderr,
                 "[bench_e2e] SCALAR-NO-INDEX-ASYNC-PERSIST-FORBIDDEN "
@@ -8223,7 +8284,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             *in.conn, in.no_index_table, minimizer_index);
         configure_no_index_storage_session(*in.conn);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::post_restart);
+            *in.conn, in, out, cold_no_index_audit_stage::post_restart);
         const std::string align_sql =
             batched_coord_sql(in.no_index_table, proj, 1);
         const alignment_snapshot_identity prior_alignment =
@@ -8242,15 +8303,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         capture_index_audit(
             *in.conn, in.no_index_table, minimizer_index, out);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::measured);
+            *in.conn, in, out, cold_no_index_audit_stage::measured);
         require_cold_no_index_lifecycle(out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, false, fair_workers),
+            make_pipeline_stats_expectation(in, false, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
@@ -8259,10 +8320,10 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
     } else if (algo == "bioseq_no_index"
                || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index"
-               || algo == k_sliced_no_index_algorithm) {
-        const bool recompute_async_persist =
-            param_string(params, "recompute_async_persist", "off") == "on";
-        if (recompute_async_persist) {
+               || algo == bioseq::bench::e2e::detail::sliced_no_index_algorithm) {
+        const bool recompute_async_persistence =
+            param_string(params, "recompute_async_persistence", "off") == "on";
+        if (recompute_async_persistence) {
             std::fprintf(
                 stderr,
                 "[bench_e2e] STANDARD-NO-INDEX-ASYNC-PERSIST-FORBIDDEN "
@@ -8281,9 +8342,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
             *in.conn, in.no_index_table, minimizer_index);
         configure_no_index_storage_session(*in.conn);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::post_restart);
+            *in.conn, in, out, cold_no_index_audit_stage::post_restart);
         const bool transformed_recipe =
-            algo == k_sliced_no_index_algorithm;
+            algo == bioseq::bench::e2e::detail::sliced_no_index_algorithm;
         const std::int64_t transformed_target_origin = transformed_recipe
             ? sliced_transformed_target_origin(in) : 0;
         const std::string align_sql = transformed_recipe
@@ -8304,15 +8365,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(*in.conn, prior_alignment, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         capture_index_audit(
             *in.conn, in.no_index_table, minimizer_index, out);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::measured);
+            *in.conn, in, out, cold_no_index_audit_stage::measured);
         require_cold_no_index_lifecycle(out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, false, fair_workers),
+            make_pipeline_stats_expectation(in, false, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
@@ -8322,9 +8383,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         // The target exists in PostgreSQL before timing, but no minimizer
         // sidecar/generation exists.  Restart after the untimed load, then time
         // only exact GPU transient target-index construction plus mapping.
-        const bool recompute_async_persist =
-            param_string(params, "recompute_async_persist", "off") == "on";
-        if (recompute_async_persist) {
+        const bool recompute_async_persistence =
+            param_string(params, "recompute_async_persistence", "off") == "on";
+        if (recompute_async_persistence) {
             std::fprintf(
                 stderr,
                 "[bench_e2e] STANDARD-NO-INDEX-ASYNC-PERSIST-FORBIDDEN "
@@ -8347,7 +8408,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             *in.conn, in.no_index_table, minimizer_index);
         configure_no_index_storage_session(*in.conn);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::post_restart);
+            *in.conn, in, out, cold_no_index_audit_stage::post_restart);
         const std::string align_sql =
             batched_coord_sql(in.no_index_table, proj, 1);
         const alignment_snapshot_identity prior_alignment =
@@ -8363,15 +8424,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(*in.conn, prior_alignment, out);
-        capture_mps_build_stats(*in.conn, out);
+        capture_hash_major_build_stats(*in.conn, out);
         capture_index_audit(
             *in.conn, in.no_index_table, minimizer_index, out);
         capture_cold_no_index_absence(
-            *in.conn, in, out, cold_no_index_audit_phase::measured);
+            *in.conn, in, out, cold_no_index_audit_stage::measured);
         require_cold_no_index_lifecycle(out);
-        require_pipeline_execution_evidence(
+        require_pipeline_execution_stats(
             algo, in, out,
-            make_pipeline_evidence_expectation(in, false, fair_workers),
+            make_pipeline_stats_expectation(in, false, fair_workers),
             minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
@@ -8383,8 +8444,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
         configure_bioseq_minimizer_policy(
             *in.conn, in.no_index_table, minimizer_index);
-        it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
-        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");
+        it::exec_sql(*in.conn, "SET bioseq.index.insert_maintenance.enabled = off;");
+        it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled   = off;");
         const std::string load_sql = fmt::format(
             "SELECT bioseq.load('{}'::regclass, '{}')",
             in.no_index_table, in.target_fasta);
@@ -8404,15 +8465,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_recompute_only") {
-        const bool recompute_async_persist =
-            param_string(params, "recompute_async_persist", "off") == "on";
+        const bool recompute_async_persistence =
+            param_string(params, "recompute_async_persistence", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
         configure_bioseq_minimizer_policy(
             *in.conn, in.no_index_table, minimizer_index);
-        it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
-        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");
+        it::exec_sql(*in.conn, "SET bioseq.index.insert_maintenance.enabled = off;");
+        it::exec_sql(*in.conn, "SET bioseq.index.sequence_read.enabled   = off;");
         it::exec_sqlf(*in.conn,
             "SELECT bioseq.load('{}'::regclass, '{}')",
             in.no_index_table, in.target_fasta);
@@ -8421,10 +8482,10 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
         configure_bioseq_scheduler_session(read_conn, pipeline_mode);
         configure_bioseq_pair_sort_session(read_conn, params);
-        it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
-        it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
-        it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
-                      recompute_async_persist ? "on" : "off");
+        it::exec_sql(read_conn, "SET bioseq.index.insert_maintenance.enabled = off;");
+        it::exec_sql(read_conn, "SET bioseq.index.sequence_read.enabled   = off;");
+        it::exec_sqlf(read_conn, "SET bioseq.index.recompute_async_persistence.enabled = {};",
+                      recompute_async_persistence ? "on" : "off");
 
         const std::string align_sql = fmt::format(
             "SELECT header, {} FROM {} WHERE mmsearch(seq, {}, "
@@ -8435,15 +8496,15 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {
             auto _scope = bioseq::instrumentation::region(k_measured_region); // TIMED: recompute align only
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
-            capture_mps_build_stats(read_conn, out);
+            capture_hash_major_build_stats(read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
-        if (recompute_async_persist) {
+        if (recompute_async_persistence) {
             capture_index_audit_after_async_persist(
                 *in.conn, in.no_index_table, minimizer_index, out);
-            capture_mps_build_stats(*in.conn, out);
+            capture_hash_major_build_stats(*in.conn, out);
         } else {
             capture_index_audit(
                 *in.conn, in.no_index_table, minimizer_index, out);
@@ -8504,9 +8565,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"found_fraction",          o.found ? 1.0 : 0.0},
         {"mean_position_offset_bp", o.abs_offset_bp},
         {"max_position_offset_bp",  o.max_abs_offset_bp},
-        {"pipeline_proof_present", static_cast<double>(o.pipeline_evidence_available)},
-        {"pipeline_proof_attached_to_measurement", static_cast<double>(o.pipeline_evidence_attached_to_measurement)},
-        {"pipeline_proof_accepted", static_cast<double>(o.pipeline_evidence_consistent)},
+        {"pipeline_validation_present", static_cast<double>(o.pipeline_stats_available)},
+        {"pipeline_validation_attached_to_measurement", static_cast<double>(o.pipeline_stats_attached_to_measurement)},
+        {"pipeline_validation_accepted", static_cast<double>(o.pipeline_stats_consistent)},
         {"stage_engine_matrix_valid",
             static_cast<double>(o.stage_engine_matrix_valid)},
         {"effective_cpu_workers", static_cast<double>(o.effective_cpu_workers)},
@@ -8554,7 +8615,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"actual_target_index_source_recomputed", o.actual_target_index_source == "recomputed" ? 1.0 : 0.0},
         {"actual_target_index_source_persisted", o.actual_target_index_source == "persisted" ? 1.0 : 0.0},
         {"actual_target_index_source_mixed_invalid", o.actual_target_index_source == "mixed_invalid" ? 1.0 : 0.0},
-        {"simd_evidence_schema_valid", static_cast<double>(o.simd_evidence_schema_valid)},
+        {"simd_stats_schema_valid", static_cast<double>(o.simd_stats_schema_valid)},
         {"requested_simd_policy_none", o.requested_simd_chaining_policy == "none" ? 1.0 : 0.0},
         {"requested_simd_policy_exact_visited", o.requested_simd_chaining_policy == "exact_visited" ? 1.0 : 0.0},
         {"requested_simd_policy_bounded_batch_approximate", o.requested_simd_chaining_policy == "bounded_batch_approximate" ? 1.0 : 0.0},
@@ -8583,7 +8644,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"simd_chaining_bounded_cutoff_stops", static_cast<double>(o.simd_chaining_bounded_cutoff_stops)},
         {"simd_chaining_bounded_candidates_skipped", static_cast<double>(o.simd_chaining_bounded_candidates_skipped)},
         {"simd_chaining_policy_rejections", static_cast<double>(o.simd_chaining_policy_rejections)},
-        {"simd_chaining_policy_evidence_saturated", static_cast<double>(o.simd_chaining_policy_evidence_saturated)},
+        {"simd_chaining_policy_stats_saturated", static_cast<double>(o.simd_chaining_policy_stats_saturated)},
         {"attempted_alignment_jobs", static_cast<double>(o.attempted_alignment_jobs)},
         {"fully_attested_alignment_jobs", static_cast<double>(o.fully_attested_alignment_jobs)},
         {"unattested_alignment_jobs", static_cast<double>(o.unattested_alignment_jobs)},
@@ -8611,26 +8672,26 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"extent_crc_raw_bytes_hashed", static_cast<double>(o.extent_crc_raw_bytes_hashed)},
         {"extent_crc_combined_bytes", static_cast<double>(o.extent_crc_combined_bytes)},
         {"extent_crc_combine_rows", static_cast<double>(o.extent_crc_combine_rows)},
-        {"format5_reader_capacity_accounting_passes", static_cast<double>(o.format5_reader_capacity_accounting_passes)},
-        {"format5_reader_global_position_storage_preparations", static_cast<double>(o.format5_reader_global_position_storage_preparations)},
-        {"format5_reader_global_position_storage_allocations", static_cast<double>(o.format5_reader_global_position_storage_allocations)},
-        {"format5_reader_position_append_growth_reservations", static_cast<double>(o.format5_reader_position_append_growth_reservations)},
-        {"format5_reader_retained_position_count", static_cast<double>(o.format5_reader_retained_position_count)},
-        {"format5_reader_retained_position_capacity", static_cast<double>(o.format5_reader_retained_position_capacity)},
-        {"format5_reader_directory_capacity_bytes", static_cast<double>(o.format5_reader_directory_capacity_bytes)},
-        {"format5_reader_query_hash_capacity_bytes", static_cast<double>(o.format5_reader_query_hash_capacity_bytes)},
-        {"format5_reader_query_record_capacity_bytes", static_cast<double>(o.format5_reader_query_record_capacity_bytes)},
-        {"format5_reader_ordinal_route_capacity_bytes", static_cast<double>(o.format5_reader_ordinal_route_capacity_bytes)},
-        {"format5_reader_selected_extent_capacity_bytes", static_cast<double>(o.format5_reader_selected_extent_capacity_bytes)},
-        {"format5_reader_current_selected_control_capacity_bytes", static_cast<double>(o.format5_reader_current_selected_control_capacity_bytes)},
-        {"format5_reader_global_position_capacity_bytes", static_cast<double>(o.format5_reader_global_position_capacity_bytes)},
-        {"format5_reader_control_payload_capacity_bytes", static_cast<double>(o.format5_reader_control_payload_capacity_bytes)},
-        {"format5_reader_owned_capacity_bytes", static_cast<double>(o.format5_reader_owned_capacity_bytes)},
-        {"format5_reader_admitted_bytes", static_cast<double>(o.format5_reader_admitted_bytes)},
-        {"format5_reader_exact_position_image_checks", static_cast<double>(o.format5_reader_exact_position_image_checks)},
-        {"format5_reader_exact_position_image_failures", static_cast<double>(o.format5_reader_exact_position_image_failures)},
-        {"format5_reader_retained_layout_checks", static_cast<double>(o.format5_reader_retained_layout_checks)},
-        {"format5_reader_retained_layout_failures", static_cast<double>(o.format5_reader_retained_layout_failures)},
+        {"grouped_soa_reader_capacity_accounting_passes", static_cast<double>(o.grouped_soa_reader_capacity_accounting_passes)},
+        {"grouped_soa_reader_global_position_storage_preparations", static_cast<double>(o.grouped_soa_reader_global_position_storage_preparations)},
+        {"grouped_soa_reader_global_position_storage_allocations", static_cast<double>(o.grouped_soa_reader_global_position_storage_allocations)},
+        {"grouped_soa_reader_position_append_growth_reservations", static_cast<double>(o.grouped_soa_reader_position_append_growth_reservations)},
+        {"grouped_soa_reader_retained_position_count", static_cast<double>(o.grouped_soa_reader_retained_position_count)},
+        {"grouped_soa_reader_retained_position_capacity", static_cast<double>(o.grouped_soa_reader_retained_position_capacity)},
+        {"grouped_soa_reader_directory_capacity_bytes", static_cast<double>(o.grouped_soa_reader_directory_capacity_bytes)},
+        {"grouped_soa_reader_query_hash_capacity_bytes", static_cast<double>(o.grouped_soa_reader_query_hash_capacity_bytes)},
+        {"grouped_soa_reader_query_record_capacity_bytes", static_cast<double>(o.grouped_soa_reader_query_record_capacity_bytes)},
+        {"grouped_soa_reader_ordinal_route_capacity_bytes", static_cast<double>(o.grouped_soa_reader_ordinal_route_capacity_bytes)},
+        {"grouped_soa_reader_selected_extent_capacity_bytes", static_cast<double>(o.grouped_soa_reader_selected_extent_capacity_bytes)},
+        {"grouped_soa_reader_current_selected_control_capacity_bytes", static_cast<double>(o.grouped_soa_reader_current_selected_control_capacity_bytes)},
+        {"grouped_soa_reader_global_position_capacity_bytes", static_cast<double>(o.grouped_soa_reader_global_position_capacity_bytes)},
+        {"grouped_soa_reader_control_payload_capacity_bytes", static_cast<double>(o.grouped_soa_reader_control_payload_capacity_bytes)},
+        {"grouped_soa_reader_owned_capacity_bytes", static_cast<double>(o.grouped_soa_reader_owned_capacity_bytes)},
+        {"grouped_soa_reader_admitted_bytes", static_cast<double>(o.grouped_soa_reader_admitted_bytes)},
+        {"grouped_soa_reader_exact_position_image_checks", static_cast<double>(o.grouped_soa_reader_exact_position_image_checks)},
+        {"grouped_soa_reader_exact_position_image_failures", static_cast<double>(o.grouped_soa_reader_exact_position_image_failures)},
+        {"grouped_soa_reader_retained_layout_checks", static_cast<double>(o.grouped_soa_reader_retained_layout_checks)},
+        {"grouped_soa_reader_retained_layout_failures", static_cast<double>(o.grouped_soa_reader_retained_layout_failures)},
         {"fragment_native_waves", static_cast<double>(o.fragment_native_waves)},
         {"fragment_native_queries", static_cast<double>(o.fragment_native_queries)},
         {"fragment_native_occurrence_fill_ns", static_cast<double>(o.fragment_native_occurrence_fill_ns)},
@@ -8665,7 +8726,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"fragment_native_peak_query_radix_capacity_bytes", static_cast<double>(o.fragment_native_peak_query_radix_capacity_bytes)},
         {"fragment_native_peak_occurrence_count_capacity_bytes", static_cast<double>(o.fragment_native_peak_occurrence_count_capacity_bytes)},
         {"fragment_native_peak_block_layout_capacity_bytes", static_cast<double>(o.fragment_native_peak_block_layout_capacity_bytes)},
-        {"fragment_native_peak_block_evidence_capacity_bytes", static_cast<double>(o.fragment_native_peak_block_evidence_capacity_bytes)},
+        {"fragment_native_peak_block_stats_capacity_bytes", static_cast<double>(o.fragment_native_peak_block_stats_capacity_bytes)},
         {"fragment_native_occurrence_allocations", static_cast<double>(o.fragment_native_occurrence_allocations)},
         {"fragment_native_query_plan_allocations", static_cast<double>(o.fragment_native_query_plan_allocations)},
         {"fragment_native_query_group_offset_allocations", static_cast<double>(o.fragment_native_query_group_offset_allocations)},
@@ -8673,7 +8734,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"fragment_native_query_radix_allocations", static_cast<double>(o.fragment_native_query_radix_allocations)},
         {"fragment_native_occurrence_count_allocations", static_cast<double>(o.fragment_native_occurrence_count_allocations)},
         {"fragment_native_block_layout_allocations", static_cast<double>(o.fragment_native_block_layout_allocations)},
-        {"fragment_native_block_evidence_allocations", static_cast<double>(o.fragment_native_block_evidence_allocations)},
+        {"fragment_native_block_stats_allocations", static_cast<double>(o.fragment_native_block_stats_allocations)},
         {"fragment_native_query_occurrences", static_cast<double>(o.fragment_native_query_occurrences)},
         {"fragment_native_unique_query_plans", static_cast<double>(o.fragment_native_unique_query_plans)},
         {"fragment_native_packed_occurrence_waves", static_cast<double>(o.fragment_native_packed_occurrence_waves)},
@@ -8693,27 +8754,30 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"fragment_native_compact_direct_traversal_rank_checkpoints_examined", static_cast<double>(o.fragment_native_compact_direct_traversal_rank_checkpoints_examined)},
         {"fragment_native_compact_direct_traversal_membership_words_examined", static_cast<double>(o.fragment_native_compact_direct_traversal_membership_words_examined)},
         {"fragment_native_compact_direct_rejected_posting_reads", static_cast<double>(o.fragment_native_compact_direct_rejected_posting_reads)},
-        {"fragment_native_evidence_saturated", static_cast<double>(o.fragment_native_evidence_saturated)},
-        {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
-        {"persisted_format_version", static_cast<double>(o.persisted_format_version)},
+        {"are_fragment_native_stats_saturated", static_cast<double>(o.are_fragment_native_stats_saturated)},
+        {"are_grouped_soa_reader_memory_stats_saturated", static_cast<double>(o.are_grouped_soa_reader_memory_stats_saturated)},
+        {"persisted_grouped_soa_layout", static_cast<double>(
+            o.persisted_layout == "grouped_soa")},
+        {"persisted_hash_major_layout", static_cast<double>(
+            o.persisted_layout == "hash_major")},
         {"persisted_format6_contract_valid", static_cast<double>(o.persisted_format6_contract_valid)},
         {"format6_restart_audit_accepted", static_cast<double>(o.format6_restart_audit_accepted)},
-        {"format6_directory_rows", static_cast<double>(o.format6_directory_rows)},
-        {"format6_directory_bytes", static_cast<double>(o.format6_directory_bytes)},
-        {"format6_control_rows", static_cast<double>(o.format6_control_rows)},
-        {"format6_control_bytes", static_cast<double>(o.format6_control_bytes)},
-        {"format6_posting_rows", static_cast<double>(o.format6_posting_rows)},
-        {"format6_posting_bytes", static_cast<double>(o.format6_posting_bytes)},
-        {"format6_posting_ranges_delivered", static_cast<double>(o.format6_posting_ranges_delivered)},
-        {"format6_selected_block_count", static_cast<double>(o.format6_selected_block_count)},
-        {"format6_accepted_hash_count", static_cast<double>(o.format6_accepted_hash_count)},
-        {"format6_retained_position_count", static_cast<double>(o.format6_retained_position_count)},
-        {"format6_authorized_posting_bytes", static_cast<double>(o.format6_authorized_posting_bytes)},
-        {"format6_peak_admitted_bytes", static_cast<double>(o.format6_peak_admitted_bytes)},
-        {"format6_retained_owner_bytes", static_cast<double>(o.format6_retained_owner_bytes)},
-        {"format6_admitted_bytes", static_cast<double>(o.format6_admitted_bytes)},
-        {"format6_failures", static_cast<double>(o.format6_failures)},
-        {"format6_saturated", static_cast<double>(o.format6_saturated)},
+        {"hash_major_directory_rows", static_cast<double>(o.hash_major_directory_rows)},
+        {"hash_major_directory_bytes", static_cast<double>(o.hash_major_directory_bytes)},
+        {"hash_major_control_rows", static_cast<double>(o.hash_major_control_rows)},
+        {"hash_major_control_bytes", static_cast<double>(o.hash_major_control_bytes)},
+        {"hash_major_posting_rows", static_cast<double>(o.hash_major_posting_rows)},
+        {"hash_major_posting_bytes", static_cast<double>(o.hash_major_posting_bytes)},
+        {"hash_major_posting_ranges_delivered", static_cast<double>(o.hash_major_posting_ranges_delivered)},
+        {"hash_major_selected_block_count", static_cast<double>(o.hash_major_selected_block_count)},
+        {"hash_major_accepted_hash_count", static_cast<double>(o.hash_major_accepted_hash_count)},
+        {"hash_major_retained_position_count", static_cast<double>(o.hash_major_retained_position_count)},
+        {"hash_major_authorized_posting_bytes", static_cast<double>(o.hash_major_authorized_posting_bytes)},
+        {"hash_major_peak_admitted_bytes", static_cast<double>(o.hash_major_peak_admitted_bytes)},
+        {"hash_major_retained_owner_bytes", static_cast<double>(o.hash_major_retained_owner_bytes)},
+        {"hash_major_admitted_bytes", static_cast<double>(o.hash_major_admitted_bytes)},
+        {"hash_major_failures", static_cast<double>(o.hash_major_failures)},
+        {"hash_major_is_saturated", static_cast<double>(o.hash_major_is_saturated)},
         {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
         {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},
         {"gpu_chain_backtrack_dispatches", static_cast<double>(o.gpu_chain_backtrack_dispatches)},
@@ -8740,10 +8804,10 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"cold_no_index_restart_identity_changed", static_cast<double>(o.cold_no_index_restart_identity_changed)},
         {"cold_no_index_pre_restart_target_rows", static_cast<double>(o.cold_no_index_pre_restart_target_rows)},
         {"cold_no_index_post_restart_target_rows", static_cast<double>(o.cold_no_index_post_restart_target_rows)},
-        {"cold_no_index_pre_restart_mpf_rows", static_cast<double>(o.cold_no_index_pre_restart_mpf_rows)},
-        {"cold_no_index_pre_restart_mps_rows", static_cast<double>(o.cold_no_index_pre_restart_mps_rows)},
-        {"cold_no_index_post_restart_mpf_rows", static_cast<double>(o.cold_no_index_post_restart_mpf_rows)},
-        {"cold_no_index_post_restart_mps_rows", static_cast<double>(o.cold_no_index_post_restart_mps_rows)},
+        {"cold_no_index_pre_restart_minimizer_fragment_rows", static_cast<double>(o.cold_no_index_pre_restart_minimizer_fragment_rows)},
+        {"cold_no_index_pre_restart_minimizer_sequence_rows", static_cast<double>(o.cold_no_index_pre_restart_minimizer_sequence_rows)},
+        {"cold_no_index_post_restart_minimizer_fragment_rows", static_cast<double>(o.cold_no_index_post_restart_minimizer_fragment_rows)},
+        {"cold_no_index_post_restart_minimizer_sequence_rows", static_cast<double>(o.cold_no_index_post_restart_minimizer_sequence_rows)},
         {"cold_no_index_pre_restart_async_jobs", static_cast<double>(o.cold_no_index_pre_restart_async_jobs)},
         {"cold_no_index_post_restart_async_jobs", static_cast<double>(o.cold_no_index_post_restart_async_jobs)},
         {"cold_no_index_pre_restart_gucs_off", static_cast<double>(o.cold_no_index_pre_restart_gucs_off)},
@@ -8752,60 +8816,63 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"persisted_policy_audit_accepted",
             static_cast<double>(o.persisted_policy_audit_accepted)},
         {"audit_selected_minimizer_is_sequence", static_cast<double>(o.audit_selected_minimizer_is_sequence)},
-        {"audit_mpf_rows",          static_cast<double>(o.audit_mpf_rows)},
-        {"audit_mps_rows",          static_cast<double>(o.audit_mps_rows)},
-        {"audit_mpf_update_on_insert", static_cast<double>(o.audit_mpf_update_on_insert)},
-        {"audit_mps_update_on_insert", static_cast<double>(o.audit_mps_update_on_insert)},
-        {"audit_mpf_active_read",   static_cast<double>(o.audit_mpf_active_read)},
-        {"audit_mps_active_read",   static_cast<double>(o.audit_mps_active_read)},
+        {"audit_minimizer_fragment_rows",          static_cast<double>(o.audit_minimizer_fragment_rows)},
+        {"audit_minimizer_sequence_rows",          static_cast<double>(o.audit_minimizer_sequence_rows)},
+        {"audit_minimizer_fragment_update_on_insert", static_cast<double>(o.audit_minimizer_fragment_update_on_insert)},
+        {"audit_minimizer_sequence_update_on_insert", static_cast<double>(o.audit_minimizer_sequence_update_on_insert)},
+        {"audit_minimizer_fragment_active_read",   static_cast<double>(o.audit_minimizer_fragment_active_read)},
+        {"audit_minimizer_sequence_active_read",   static_cast<double>(o.audit_minimizer_sequence_active_read)},
         {"audit_async_persist_jobs_waiting", static_cast<double>(o.audit_async_persist_jobs_waiting)},
         {"audit_index_rows_wait_attempts", static_cast<double>(o.audit_index_rows_wait_attempts)},
-        {"mps_build_backend_pid", static_cast<double>(o.mps_build_backend_pid)},
-        {"mps_build_db_oid", static_cast<double>(o.mps_build_db_oid)},
-        {"mps_build_relfilenode", static_cast<double>(o.mps_build_relfilenode)},
-        {"mps_build_sequence_rowno", static_cast<double>(o.mps_build_sequence_rowno)},
-        {"mps_build_total_run_count", static_cast<double>(o.mps_build_total_run_count)},
-        {"mps_build_resident_runs", static_cast<double>(o.mps_build_resident_runs)},
-        {"mps_build_file_runs", static_cast<double>(o.mps_build_file_runs)},
-        {"mps_build_resident_run_bytes", static_cast<double>(o.mps_build_resident_run_bytes)},
-        {"mps_build_resident_peak_bytes", static_cast<double>(o.mps_build_resident_peak_bytes)},
-        {"mps_build_spilled_run_bytes", static_cast<double>(o.mps_build_spilled_run_bytes)},
-        {"mps_build_postgres_temp_file_bytes", static_cast<double>(o.mps_build_postgres_temp_file_bytes)},
-        {"mps_build_postgres_temp_file_count", static_cast<double>(o.mps_build_postgres_temp_file_count)},
-        {"mps_build_merge_reader_buffer_bytes", static_cast<double>(o.mps_build_merge_reader_buffer_bytes)},
-        {"mps_build_merge_pass_count", static_cast<double>(o.mps_build_merge_pass_count)},
-        {"mps_build_spill_count_from_pressure", static_cast<double>(o.mps_build_spill_count_from_pressure)},
-        {"mps_build_resident_demotions", static_cast<double>(o.mps_build_resident_demotions)},
-        {"mps_build_position_spill_bytes", static_cast<double>(o.mps_build_position_spill_bytes)},
-        {"mps_build_position_spill_count", static_cast<double>(o.mps_build_position_spill_count)},
-        {"mps_build_shared_generation", static_cast<double>(o.mps_build_shared_generation)},
-        {"mps_build_worker_build_ns", static_cast<double>(o.mps_build_worker_build_ns)},
-        {"mps_build_pipeline_mode", static_cast<double>(o.mps_build_pipeline_mode)},
-        {"mps_build_max_concurrency", static_cast<double>(o.mps_build_max_concurrency)},
-        {"mps_build_index_memory_cap_mb", static_cast<double>(o.mps_build_index_memory_cap_mb)},
-        {"mps_build_lazy_worker_shareable", static_cast<double>(o.mps_build_lazy_worker_shareable)},
+        {"hash_major_build_backend_pid", static_cast<double>(o.hash_major_build_backend_pid)},
+        {"hash_major_build_db_oid", static_cast<double>(o.hash_major_build_db_oid)},
+        {"hash_major_build_relfilenode", static_cast<double>(o.hash_major_build_relfilenode)},
+        {"hash_major_build_sequence_rowno", static_cast<double>(o.hash_major_build_sequence_rowno)},
+        {"hash_major_build_total_run_count", static_cast<double>(o.hash_major_build_total_run_count)},
+        {"hash_major_build_resident_runs", static_cast<double>(o.hash_major_build_resident_runs)},
+        {"hash_major_build_file_runs", static_cast<double>(o.hash_major_build_file_runs)},
+        {"hash_major_build_resident_run_bytes", static_cast<double>(o.hash_major_build_resident_run_bytes)},
+        {"hash_major_build_resident_peak_bytes", static_cast<double>(o.hash_major_build_resident_peak_bytes)},
+        {"hash_major_build_spilled_run_bytes", static_cast<double>(o.hash_major_build_spilled_run_bytes)},
+        {"hash_major_build_postgres_temp_file_bytes", static_cast<double>(o.hash_major_build_postgres_temp_file_bytes)},
+        {"hash_major_build_postgres_temp_file_count", static_cast<double>(o.hash_major_build_postgres_temp_file_count)},
+        {"hash_major_build_merge_reader_buffer_bytes", static_cast<double>(o.hash_major_build_merge_reader_buffer_bytes)},
+        {"hash_major_build_merge_pass_count", static_cast<double>(o.hash_major_build_merge_pass_count)},
+        {"hash_major_build_spill_count_from_pressure", static_cast<double>(o.hash_major_build_spill_count_from_pressure)},
+        {"hash_major_build_resident_demotions", static_cast<double>(o.hash_major_build_resident_demotions)},
+        {"hash_major_build_position_spill_bytes", static_cast<double>(o.hash_major_build_position_spill_bytes)},
+        {"hash_major_build_position_spill_count", static_cast<double>(o.hash_major_build_position_spill_count)},
+        {"hash_major_build_shared_generation", static_cast<double>(o.hash_major_build_shared_generation)},
+        {"hash_major_build_worker_build_ns", static_cast<double>(o.hash_major_build_worker_build_ns)},
+        {"hash_major_build_pipeline_mode", static_cast<double>(o.hash_major_build_pipeline_mode)},
+        {"hash_major_build_max_concurrency", static_cast<double>(o.hash_major_build_max_concurrency)},
+        {"hash_major_build_index_memory_cap_mb", static_cast<double>(o.hash_major_build_index_memory_cap_mb)},
+        {"hash_major_build_lazy_worker_shareable", static_cast<double>(o.hash_major_build_lazy_worker_shareable)},
     };
-    const bool format5_memory_v6_valid = json_has_exact_keys(
-            o.format5_reader_memory_evidence,
-            k_format5_reader_memory_evidence_v6_keys)
-        && o.format5_reader_memory_evidence["version"].is_number_integer()
-        && o.format5_reader_memory_evidence["version"] == 6;
+    const bool minimizer_fragment_reader_stats_valid = json_has_exact_keys(
+            o.minimizer_fragment_reader_stats,
+            k_minimizer_fragment_reader_stats_keys)
+        && o.minimizer_fragment_reader_stats["schema"].is_string()
+        && o.minimizer_fragment_reader_stats["schema"]
+            == "bioseq.grouped_soa_reader_memory_stats"
+        && o.minimizer_fragment_reader_stats["revision"].is_number_integer()
+        && o.minimizer_fragment_reader_stats["revision"] == 6;
     for (const std::string_view key
-         : k_format5_reader_memory_evidence_v4_addition_keys) {
-        const double value = format5_memory_v6_valid
+         : k_grouped_soa_provider_stats_counter_keys) {
+        const double value = minimizer_fragment_reader_stats_valid
             ? static_cast<double>(required_json_counter(
-                o.format5_reader_memory_evidence, key))
+                o.minimizer_fragment_reader_stats, key))
             : -1.0;
         metrics.emplace(std::string{key}, value);
     }
     return metrics;
 }
 
-[[noreturn]] void abort_raw_evidence_serialization(
+[[noreturn]] void abort_raw_stats_serialization(
         std::string_view reason) {
     std::fprintf(
         stderr,
-        "[bench_e2e] RAW-EVIDENCE-SERIALIZATION-FAIL %.*s\n",
+        "[bench_e2e] RAW-STATS-SERIALIZATION-FAIL %.*s\n",
         static_cast<int>(reason.size()),
         reason.data());
     std::fflush(stderr);
@@ -8816,14 +8883,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const e2e_output& out) {
     if (out.alignment_snapshot_rows.size()
         != e2e_output::k_alignment_snapshot_row_count) {
-        abort_raw_evidence_serialization(
+        abort_raw_stats_serialization(
             "PostgreSQL sample is missing the exact 20-row alignment SRF");
     }
 
     nlohmann::json snapshot = nlohmann::json::object();
     snapshot["schema"] =
-        "bioseq.last_alignment_execution_stats_v2/raw-rowset";
-    snapshot["schema_version"] = 2;
+        "bioseq.last_alignment_execution_stats/raw-rowset";
+    snapshot["schema_revision"] = 2;
     snapshot["expected_row_count"] =
         e2e_output::k_alignment_snapshot_row_count;
     snapshot["actual_row_count"] = out.alignment_snapshot_rows.size();
@@ -8851,8 +8918,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
     nlohmann::json serialized_rows = nlohmann::json::array();
     for (const auto& row : out.alignment_snapshot_rows) {
         if (row.size() != e2e_output::k_alignment_snapshot_column_count) {
-            abort_raw_evidence_serialization(
-				"alignment SRF v2 row does not have exactly 151 columns");
+            abort_raw_stats_serialization(
+				"alignment SRF row does not have exactly 151 columns");
         }
         nlohmann::json serialized_row = nlohmann::json::array();
         for (std::size_t column = 0; column < row.size(); ++column) {
@@ -8865,7 +8932,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
                 try {
                     serialized_row.push_back(nlohmann::json::parse(*cell));
                 } catch (const nlohmann::json::exception&) {
-                    abort_raw_evidence_serialization(
+                    abort_raw_stats_serialization(
                         "alignment SRF JSON changed after validation");
                 }
                 continue;
@@ -8877,7 +8944,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             if (alignment_stats_boolean_column(column)) {
                 const auto parsed = parse_snapshot_bool(cell);
                 if (!parsed.has_value()) {
-                    abort_raw_evidence_serialization(
+                    abort_raw_stats_serialization(
                         "alignment SRF Boolean changed after validation");
                 }
                 serialized_row.push_back(*parsed != 0);
@@ -8885,7 +8952,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
             }
             const auto parsed = parse_snapshot_i64(cell);
             if (!parsed.has_value()) {
-                abort_raw_evidence_serialization(
+                abort_raw_stats_serialization(
                     "alignment SRF integer changed after validation");
             }
             serialized_row.push_back(*parsed);
@@ -8916,58 +8983,58 @@ void load_e2e_query_table(const it::connection_test_context& c,
     if (postgres_sample
         && out.alignment_snapshot_rows.size()
             != e2e_output::k_alignment_snapshot_row_count) {
-        abort_raw_evidence_serialization(
-            "bioseq sample has no complete same-invocation SRF evidence");
+        abort_raw_stats_serialization(
+            "bioseq sample has no complete same-invocation SRF stats");
     }
     if (attested_backend_sample
-        && out.pipeline_evidence_consistent != 1) {
-        abort_raw_evidence_serialization(
+        && out.pipeline_stats_consistent != 1) {
+        abort_raw_stats_serialization(
             "selected backend sample was not accepted before serialization");
     }
     if (postgres_sample
-        && (out.persisted_gpu_operation_evidence_schema_valid != 1
-            || out.persisted_gpu_operation_evidence.is_null())) {
-        abort_raw_evidence_serialization(
-            "PostgreSQL sample is missing versioned GPU operation evidence");
+        && (out.persisted_gpu_operation_stats_schema_valid != 1
+            || out.persisted_gpu_operation_stats.is_null())) {
+        abort_raw_stats_serialization(
+            "PostgreSQL sample is missing current GPU operation stats");
     }
-    const bool format5_memory_v6_valid = json_has_exact_keys(
-            out.format5_reader_memory_evidence,
-            k_format5_reader_memory_evidence_v6_keys)
-        && out.format5_reader_memory_evidence["schema"].is_string()
-        && out.format5_reader_memory_evidence["schema"]
-            == "bioseq.format5_reader_memory_evidence"
-        && out.format5_reader_memory_evidence["version"].is_number_integer()
-        && out.format5_reader_memory_evidence["version"] == 6;
-    if (postgres_sample && !format5_memory_v6_valid) {
-        abort_raw_evidence_serialization(
-            "PostgreSQL sample is missing exact Format-5 memory evidence v6");
+    const bool minimizer_fragment_reader_stats_valid = json_has_exact_keys(
+            out.minimizer_fragment_reader_stats,
+            k_minimizer_fragment_reader_stats_keys)
+        && out.minimizer_fragment_reader_stats["schema"].is_string()
+        && out.minimizer_fragment_reader_stats["schema"]
+            == "bioseq.grouped_soa_reader_memory_stats"
+        && out.minimizer_fragment_reader_stats["revision"].is_number_integer()
+        && out.minimizer_fragment_reader_stats["revision"] == 6;
+    if (postgres_sample && !minimizer_fragment_reader_stats_valid) {
+        abort_raw_stats_serialization(
+            "PostgreSQL sample is missing exact minimizer-fragment reader stats schema");
     }
-    const bool format6_reader_v1_valid = json_has_exact_keys(
-            out.format6_reader_evidence,
-            k_format6_reader_evidence_keys)
-        && out.format6_reader_evidence["schema"].is_string()
-        && out.format6_reader_evidence["schema"]
-            == "bioseq.format6_reader_evidence"
-        && out.format6_reader_evidence["version"].is_number_integer()
-        && out.format6_reader_evidence["version"] == 1;
-    if (postgres_sample && !format6_reader_v1_valid) {
-        abort_raw_evidence_serialization(
-            "PostgreSQL sample is missing exact Format-6 reader evidence v1");
+    const bool hash_major_index_reader_stats_valid = json_has_exact_keys(
+            out.hash_major_index_reader_stats,
+            k_hash_major_index_reader_stats_keys)
+        && out.hash_major_index_reader_stats["schema"].is_string()
+        && out.hash_major_index_reader_stats["schema"]
+            == "bioseq.hash_major_reader_stats"
+        && out.hash_major_index_reader_stats["revision"].is_number_integer()
+        && out.hash_major_index_reader_stats["revision"] == 1;
+    if (postgres_sample && !hash_major_index_reader_stats_valid) {
+        abort_raw_stats_serialization(
+            "PostgreSQL sample is missing exact hash-major index reader stats schema");
     }
     if (persisted_gpu_sample
-        && out.persisted_gpu_operation_evidence_accepted != 1) {
-        abort_raw_evidence_serialization(
-            "persisted all-GPU sample lacks accepted operation evidence");
+        && out.persisted_gpu_operation_stats_accepted != 1) {
+        abort_raw_stats_serialization(
+            "persisted all-GPU sample lacks accepted operation stats");
     }
     if (postgres_sample && algorithm.ends_with("_no_index")
         && out.cold_no_index_lifecycle_accepted != 1) {
-        abort_raw_evidence_serialization(
-            "no_index sample lacks accepted cold lifecycle evidence");
+        abort_raw_stats_serialization(
+            "no_index sample lacks accepted cold lifecycle stats");
     }
     if (postgres_sample && algorithm.ends_with("_just_index")
         && out.persisted_policy_audit_accepted != 1) {
-        abort_raw_evidence_serialization(
-            "just_index sample lacks accepted post-measure persisted-policy evidence");
+        abort_raw_stats_serialization(
+            "just_index sample lacks accepted post-measure persisted-policy stats");
     }
 
     nlohmann::json payload = nlohmann::json::object();
@@ -8999,18 +9066,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"cigar_replay_count", out.cigar_replay_count},
         {"max_abs_offset_bp", out.max_abs_offset_bp},
     };
-    const auto absence_evidence_json = [](
-            const cold_no_index_policy_absence_evidence& evidence) {
+    const auto absence_stats_json = [](
+            const cold_no_index_policy_absence_stats& stats) {
         return nlohmann::json{
-            {"target_rows", evidence.target_rows},
+            {"target_rows", stats.target_rows},
             {"target_cardinality_metadata_only",
-                evidence.target_cardinality_metadata_only},
-            {"source_parent_rows_read", evidence.source_parent_rows_read},
-            {"source_fragment_rows_read", evidence.source_fragment_rows_read},
-            {"source_decoded_bp", evidence.source_decoded_bp},
-            {"physical_index_relations", evidence.physical_index_relations},
-            {"persisted_index_rows", evidence.persisted_index_rows},
-            {"generation_objects", evidence.generation_objects},
+                stats.target_cardinality_metadata_only},
+            {"source_parent_rows_read", stats.source_parent_rows_read},
+            {"source_fragment_rows_read", stats.source_fragment_rows_read},
+            {"source_decoded_bp", stats.source_decoded_bp},
+            {"physical_index_relations", stats.physical_index_relations},
+            {"persisted_index_rows", stats.persisted_index_rows},
+            {"generation_objects", stats.generation_objects},
         };
     };
 
@@ -9068,14 +9135,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
                 {"selected_minimizer_is_sequence",
                     out.audit_selected_minimizer_is_sequence},
                 {"minimizers_per_fragment", nlohmann::json{
-                    {"rows", out.audit_mpf_rows},
-                    {"update_on_insert", out.audit_mpf_update_on_insert},
-                    {"active_read", out.audit_mpf_active_read},
+                    {"rows", out.audit_minimizer_fragment_rows},
+                    {"update_on_insert", out.audit_minimizer_fragment_update_on_insert},
+                    {"active_read", out.audit_minimizer_fragment_active_read},
                 }},
                 {"minimizers_per_sequence", nlohmann::json{
-                    {"rows", out.audit_mps_rows},
-                    {"update_on_insert", out.audit_mps_update_on_insert},
-                    {"active_read", out.audit_mps_active_read},
+                    {"rows", out.audit_minimizer_sequence_rows},
+                    {"update_on_insert", out.audit_minimizer_sequence_update_on_insert},
+                    {"active_read", out.audit_minimizer_sequence_active_read},
                 }},
                 {"async_persist_jobs_waiting",
                     out.audit_async_persist_jobs_waiting},
@@ -9094,13 +9161,13 @@ void load_e2e_query_table(const it::connection_test_context& c,
             {"actual_source_identity", out.persisted_source_identity},
             {"restart_identity", restart_identity},
             {"persisted_policy", persisted_policy},
-            {"persisted_format", just_index
+            {"persisted_layout", just_index
                 ? nlohmann::json{
-                    {"format_version", out.persisted_format_version},
-                    {"pre_restart_format_version",
-                        out.pre_restart_persisted_format_version},
-                    {"post_restart_format_version",
-                        out.post_restart_persisted_format_version},
+                    {"layout", out.persisted_layout},
+                    {"pre_restart_layout",
+                        out.pre_restart_persisted_layout},
+                    {"post_restart_layout",
+                        out.post_restart_persisted_layout},
                     {"ready_generation_gpu_abi_version",
                         out.pre_restart_persisted_gpu_abi_version},
                     {"manifest_rows_read",
@@ -9109,16 +9176,16 @@ void load_e2e_query_table(const it::connection_test_context& c,
                         out.persisted_manifest_bytes_read},
                     {"read_sessions",
                         out.persisted_generation_read_sessions},
-                    {"format5_manifest_contract_valid",
+                    {"grouped_soa_manifest_contract_valid",
                         out.persisted_format5_manifest_contract_valid},
-                    {"format6_contract_valid",
+                    {"hash_major_contract_valid",
                         out.persisted_format6_contract_valid},
                     {"format6_restart_audit_accepted",
                         out.format6_restart_audit_accepted},
-                    {"format6_pre_restart_ready_audit",
-                        out.pre_restart_format6_ready_audit},
-                    {"format6_post_restart_ready_audit",
-                        out.post_restart_format6_ready_audit},
+                    {"hash_major_pre_restart_ready_stats",
+                        out.pre_restart_hash_major_ready_stats},
+                    {"hash_major_post_restart_ready_stats",
+                        out.post_restart_hash_major_ready_stats},
                 }
                 : nlohmann::json{nullptr}},
             {"restart_performed", just_index
@@ -9134,18 +9201,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
                         out.cold_no_index_pre_restart_target_rows},
                     {"post_restart_target_rows",
                         out.cold_no_index_post_restart_target_rows},
-                    {"pre_restart_mpf_rows",
-                        out.cold_no_index_pre_restart_mpf_rows},
-                    {"pre_restart_mps_rows",
-                        out.cold_no_index_pre_restart_mps_rows},
-                    {"post_restart_mpf_rows",
-                        out.cold_no_index_post_restart_mpf_rows},
-                    {"post_restart_mps_rows",
-                        out.cold_no_index_post_restart_mps_rows},
-                    {"post_measure_mpf_rows",
-                        out.cold_no_index_measured_mpf.persisted_index_rows},
-                    {"post_measure_mps_rows",
-                        out.cold_no_index_measured_mps.persisted_index_rows},
+                    {"pre_restart_minimizer_fragment_rows",
+                        out.cold_no_index_pre_restart_minimizer_fragment_rows},
+                    {"pre_restart_minimizer_sequence_rows",
+                        out.cold_no_index_pre_restart_minimizer_sequence_rows},
+                    {"post_restart_minimizer_fragment_rows",
+                        out.cold_no_index_post_restart_minimizer_fragment_rows},
+                    {"post_restart_minimizer_sequence_rows",
+                        out.cold_no_index_post_restart_minimizer_sequence_rows},
+                    {"post_measure_minimizer_fragment_rows",
+                        out.cold_no_index_measured_minimizer_fragment.persisted_index_rows},
+                    {"post_measure_minimizer_sequence_rows",
+                        out.cold_no_index_measured_minimizer_sequence.persisted_index_rows},
                     {"pre_restart_async_jobs",
                         out.cold_no_index_pre_restart_async_jobs},
                     {"post_restart_async_jobs",
@@ -9158,35 +9225,35 @@ void load_e2e_query_table(const it::connection_test_context& c,
                         out.cold_no_index_post_restart_gucs_off},
                     {"post_measure_gucs_off",
                         out.cold_no_index_measured_gucs_off},
-                    {"pre_restart_mpf_absence", absence_evidence_json(
-                        out.cold_no_index_pre_restart_mpf)},
-                    {"pre_restart_mps_absence", absence_evidence_json(
-                        out.cold_no_index_pre_restart_mps)},
-                    {"post_restart_mpf_absence", absence_evidence_json(
-                        out.cold_no_index_post_restart_mpf)},
-                    {"post_restart_mps_absence", absence_evidence_json(
-                        out.cold_no_index_post_restart_mps)},
-                    {"post_measure_mpf_absence", absence_evidence_json(
-                        out.cold_no_index_measured_mpf)},
-                    {"post_measure_mps_absence", absence_evidence_json(
-                        out.cold_no_index_measured_mps)},
+                    {"pre_restart_minimizer_fragment_absence", absence_stats_json(
+                        out.cold_no_index_pre_restart_minimizer_fragment)},
+                    {"pre_restart_minimizer_sequence_absence", absence_stats_json(
+                        out.cold_no_index_pre_restart_minimizer_sequence)},
+                    {"post_restart_minimizer_fragment_absence", absence_stats_json(
+                        out.cold_no_index_post_restart_minimizer_fragment)},
+                    {"post_restart_minimizer_sequence_absence", absence_stats_json(
+                        out.cold_no_index_post_restart_minimizer_sequence)},
+                    {"post_measure_minimizer_fragment_absence", absence_stats_json(
+                        out.cold_no_index_measured_minimizer_fragment)},
+                    {"post_measure_minimizer_sequence_absence", absence_stats_json(
+                        out.cold_no_index_measured_minimizer_sequence)},
                 }
                 : nlohmann::json{nullptr}},
         };
         payload["alignment_snapshot"] =
             serialize_alignment_snapshot_rows(out);
-        payload["persisted_gpu_operation_evidence"] =
-            out.persisted_gpu_operation_evidence;
+        payload["persisted_gpu_operation_stats"] =
+            out.persisted_gpu_operation_stats;
     } else {
         payload["postgres"] = nullptr;
         payload["alignment_snapshot"] = nullptr;
-        payload["persisted_gpu_operation_evidence"] = nullptr;
+        payload["persisted_gpu_operation_stats"] = nullptr;
     }
     payload["attestation"] = nlohmann::json{
-        {"proof_present", out.pipeline_evidence_available},
-        {"proof_attached_to_measurement",
-            out.pipeline_evidence_attached_to_measurement},
-        {"proof_accepted", out.pipeline_evidence_consistent},
+        {"validation_present", out.pipeline_stats_available},
+        {"validation_attached_to_measurement",
+            out.pipeline_stats_attached_to_measurement},
+        {"validation_accepted", out.pipeline_stats_consistent},
         {"stage_engine_matrix_valid", out.stage_engine_matrix_valid},
         {"requested_backend", out.requested_backend},
         {"actual_backend", out.actual_backend},
@@ -9223,16 +9290,16 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"backend_declines", out.backend_declines},
         {"backend_fallbacks", out.backend_fallbacks},
         {"stats_saturated", out.stats_saturated},
-        {"persisted_gpu_operation_evidence_accepted",
+        {"persisted_gpu_operation_stats_accepted",
             postgres_sample
                 ? nlohmann::json(
-                    out.persisted_gpu_operation_evidence_accepted)
+                    out.persisted_gpu_operation_stats_accepted)
                 : nlohmann::json{nullptr}},
-        {"format5_reader_memory_evidence", postgres_sample
-            ? out.format5_reader_memory_evidence
+        {"minimizer_fragment_reader_stats", postgres_sample
+            ? out.minimizer_fragment_reader_stats
             : nlohmann::json{nullptr}},
-        {"format6_reader_evidence", postgres_sample
-            ? out.format6_reader_evidence
+        {"hash_major_index_reader_stats", postgres_sample
+            ? out.hash_major_index_reader_stats
             : nlohmann::json{nullptr}},
     };
     return payload.dump();
@@ -9247,7 +9314,7 @@ struct sort_scan_input {
     std::size_t sequence_length = 0;
 };
 
-/** @brief Correctness and timing evidence from one SQL sort scan. */
+/** @brief Correctness and timing stats from one SQL sort scan. */
 struct sort_scan_output {
     std::int64_t row_count = 0;
     std::int64_t sorted_correct = 0;
@@ -9402,8 +9469,8 @@ void cleanup_sort_scan_input(
     out.row_count = static_cast<std::int64_t>(in.row_count);
     const std::string implementation = param_string(params, "implementation", "gpu");
     const bool use_gpu = implementation == "gpu" || algo == "sort_scan_gpu";
-    it::exec_sql(*in.conn, "SET bioseq.enable_sequence_sort_scan = on;");
-    it::exec_sqlf(*in.conn, "SET bioseq.aligner.vulkan_enabled = {};",
+    it::exec_sql(*in.conn, "SET bioseq.planner.sequence_sort_scan.enabled = on;");
+    it::exec_sqlf(*in.conn, "SET bioseq.aligner.vulkan.enabled = {};",
                   use_gpu ? "on" : "off");
 
     const std::string sql = fmt::format("SELECT pk FROM {} ORDER BY seq0;", in.table);
@@ -9471,6 +9538,93 @@ void cleanup_sort_scan_input(
 
 }  // anonymous namespace
 
+#if defined(BIOSEQ_E2E_TESTING_API)
+/**
+ * @brief Exact production contracts exposed only while compiling the E2E test
+ * target.
+ *
+ * The public benchmark module remains launcher-only.  This conditional bridge
+ * lets the separately owned `bioseq.bench.e2e.tests.support` module exercise
+ * the production serializer, evaluator, setup resolver, and parsers without
+ * textually including a translation unit or publishing them to production
+ * consumers.
+ */
+export namespace bioseq::bench::e2e::detail {
+
+using config_value = bioseq::bench::framework::config_value;
+using parameter_map = bioseq::bench::framework::parameter_map;
+using resolved_execution_tuple =
+    bioseq::bench::framework::resolved_execution_tuple;
+using rowset = bioseq_int_tests::rowset_t;
+using run_constraints = bioseq::bench::framework::run_constraints;
+
+[[nodiscard]] std::span<const std::string_view>
+cold_index_stats_keys() noexcept {
+    return k_cold_index_stats_keys;
+}
+
+[[nodiscard]] std::span<const std::string_view>
+minimizer_fragment_reader_stats_keys() noexcept {
+    return k_minimizer_fragment_reader_stats_keys;
+}
+
+[[nodiscard]] std::string_view minimizers_per_fragment_index() noexcept {
+    return k_minimizers_per_fragment_index;
+}
+
+[[nodiscard]] std::string serialize_raw_sample(
+        std::string_view algorithm,
+        const parameter_map& parameters,
+        const e2e_input& input,
+        const e2e_output& output) {
+    return serialize_e2e_raw_sample(
+        algorithm, parameters, input, output);
+}
+
+[[nodiscard]] std::map<std::string, double> evaluate(
+        std::string_view algorithm,
+        const parameter_map& parameters,
+        const e2e_input& input,
+        const e2e_output& output) {
+    return e2e_eval(algorithm, parameters, input, output);
+}
+
+[[nodiscard]] e2e_just_index_setup_requirements
+resolve_just_index_setup_requirements(
+        const run_constraints& constraints) {
+    return resolve_e2e_just_index_setup_requirements(constraints);
+}
+
+[[nodiscard]] std::string projection_sql(const e2e_input& input) {
+    return e2e_projection_sql(input);
+}
+
+[[nodiscard]] std::string batched_transformed_coordinate_sql(
+        const std::string& target_table,
+        std::string_view projection,
+        std::int64_t query_start,
+        std::int64_t target_start) {
+    return batched_transformed_coord_sql(
+        target_table, projection, query_start, target_start);
+}
+
+void parse_bioseq_rows(
+        const rowset& rows,
+        const e2e_input& input,
+        e2e_output& output) {
+    parse_bioseq_batch_rows(rows, input, output);
+}
+
+void parse_minimap2_rows(
+        const std::string& paf,
+        const e2e_input& input,
+        e2e_output& output) {
+    parse_minimap2_paf(paf, input, output);
+}
+
+}  // namespace bioseq::bench::e2e::detail
+#endif
+
 export namespace bioseq::bench::e2e {
 
 int run(int argc, char** argv) {
@@ -9501,8 +9655,8 @@ int run(int argc, char** argv) {
             "Five-repeat sign-off SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
             "bench_e2e_signoff", cfg, est, inp, run, evl, cln, raw),
         bioseq::bench::framework::create_benchmark<e2e_input, e2e_output>(
-            "E2E resident GPU batch proof vs SIMD and minimap2",
-            "bench_e2e_gpu_batch_proof", cfg, est, inp, run, evl, cln, raw),
+            "E2E resident GPU batch validation vs SIMD and minimap2",
+            "bench_e2e_gpu_batch_validation", cfg, est, inp, run, evl, cln, raw),
         bioseq::bench::framework::create_benchmark<sort_scan_input, sort_scan_output>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));

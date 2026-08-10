@@ -135,7 +135,7 @@ describe_pipeline_for_pg_alphabet(
 
 
 /*
- * Initial reservation hint passed to TupleDispatchBuffer when a
+ * Initial reservation hint passed to tuple_dispatch_buffer when a
  * bioseq_scan_runtime is constructed. Sized for the typical small-result
  * scan; the buffer reallocates linearly past this if a query produces
  * more buffered tuples.
@@ -200,7 +200,7 @@ struct per_scan_aligner_state {
  * inner side), BeginCustomScan stashes the Param coordinates here. Every
  * ReScanCustomScan invocation then resolves the Param through
  * EvalParamsMutator, detoasts the resulting bioseq.seq varlena and pushes
- * the new query into TupleDispatchBuffer::configure_mmsearch — turning a
+ * the new query into tuple_dispatch_buffer::configure_mmsearch — turning a
  * single-literal scan into a many-to-many alignment under NL.
  *
  * `paramid` and `paramkind` preserve PostgreSQL's native Param coordinates.
@@ -209,7 +209,7 @@ struct per_scan_aligner_state {
  * the executor's ParamListInfo.
  *
  * `seq_attno` / `column_name` / `alphabet_code` / `storage_unit_byte_width` /
- * `primary_key_attno` mirror the equivalent MmsearchContext fields so the
+ * `primary_key_attno` mirror the equivalent mmsearch_context fields so the
  * ReScan path can call configure_mmsearch with a fresh query without
  * re-walking the plan.
  */
@@ -323,7 +323,7 @@ enum class slice_project_source_slot_layout : std::uint8_t {
 };
 
 struct bioseq_scan_runtime {
-	bioseq::scheduler::DispatchBufferRuntime buffer{k_bioseq_runtime_buffer_reserve};
+	bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
 	bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
 		alignment_registration{};
 	placeholder_constants                   placeholder_consts{};
@@ -336,7 +336,7 @@ struct bioseq_scan_runtime {
 	Index                                     match_sequence_varno = 0;
 	AttrNumber                                match_sequence_attno = InvalidAttrNumber;
 	/* The finalized post-setrefs operand recipes are executor identities, not
-	 * deparse-only metadata.  Raw-Var owners keep the historical attribute fast
+	 * deparse-only metadata.  Raw-Var owners use the direct attribute fast
 	 * path; every other base-local target/query is evaluated exactly once per
 	 * admitted row by these ExprStates after its BSS3 leaves are promoted. */
 	Node*                                     match_target_recipe = nullptr;
@@ -425,7 +425,7 @@ enum match_owner_descriptor_index : int {
 	k_match_owner_stable_id = 2,
 	k_match_owner_target_recipe = 3,
 	k_match_owner_base_lineage = 4,
-	k_match_owner_legacy_target_relid = 5,
+	k_match_owner_base_relid = 5,
 };
 
 enum class match_helper_binding_kind : int {
@@ -467,8 +467,8 @@ enum per_row_join_private_index : int {
 	k_per_row_storage_unit_byte_width = 7,
 	k_per_row_query_alphabet_code = 8,
 	k_per_row_query_storage_unit_byte_width = 9,
-	k_per_row_target_typmod_erased_proof = 10,
-	k_per_row_query_typmod_erased_proof = 11,
+	k_per_row_target_typmod_erased = 10,
+	k_per_row_query_typmod_erased = 11,
 	k_per_row_placeholder_sites = 12,
 	k_per_row_mmsearch_expr = 13,
 	k_per_row_index_read_requirement = 14,
@@ -533,7 +533,7 @@ inline constexpr std::uint64_t k_batch_join_retained_recipe_admission_bytes =
 	+ static_cast<std::uint64_t>(MAXALIGN(sizeof(pg_sequence_expanded)));
 
 struct batch_join_runtime {
-	bioseq::scheduler::DispatchBufferRuntime buffer{k_bioseq_runtime_buffer_reserve};
+	bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
 	bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
 		alignment_registration{};
 	PlanState* target_child = nullptr;
@@ -546,7 +546,7 @@ struct batch_join_runtime {
 	TupleTableSlot* query_staging_slot = nullptr;
 	std::vector<bioseq::parallelism::memory_permit> query_permits{};
 	std::vector<batch_join_query_tuple> query_tuples{};
-	std::vector<bioseq::scheduler::DispatchJoinQueryRef> all_query_refs{};
+	std::vector<bioseq::scheduler::dispatch_join_query_ref> all_query_refs{};
 	std::vector<batch_join_placeholder_site> placeholder_sites{};
 	std::size_t next_query_batch = 0;
 	std::size_t active_query_batch_end = 0;
@@ -596,7 +596,7 @@ static_assert(std::is_standard_layout_v<batch_join_state>);
 static_assert(offsetof(batch_join_state, custom_scan_state) == 0);
 
 struct per_row_join_runtime {
-	bioseq::scheduler::DispatchBufferRuntime buffer{k_bioseq_runtime_buffer_reserve};
+	bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
 	bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
 		alignment_registration{};
 	PlanState* child = nullptr;
@@ -800,7 +800,7 @@ struct bioseq_stub_oids {
  * executing.  Its catalog surface is therefore allowed to be absent or only
  * partially installed.  These missing-ok probes are deliberately separate
  * from LookupStubOids(): the executor/planner hot paths retain the exact,
- * throwing lookup once the complete surface has been proven ready.
+ * throwing lookup once the complete surface is validated and ready.
  */
 [[nodiscard]] static Oid lookup_defined_type_missing_ok(
 		const char* schema_name, const char* type_name) {
@@ -1386,9 +1386,10 @@ struct owned_mmsearch_restriction {
 };
 
 /* Cheap prefilter used by the early clause-ownership pass.  The complete
- * grammar/nulling/type proof lives beside the per-row recipe validator (which
+ * grammar/nulling/type validation lives beside the per-row recipe validator
+ * (which
  * is declared later in this translation unit); this predicate only keeps a
- * potentially base-local sequence expression alive until that exact proof can
+ * potentially base-local sequence expression alive until that validation can
  * run in AddBioseqColumnScanPath.  Volatility inside an operand is deliberately
  * not rejected: the expression remains at its original baserel frontier and is
  * evaluated once by its authoritative ExprState. */
@@ -1430,8 +1431,8 @@ bounded_batch_fallback_options_are_supported(
  * either one semantic call, or the narrow BatchJoin-fallback shape consisting
  * of an ordinary-relation outer Var primary plus one same-target Const base
  * filter.  The decision is deliberately made against the original planner
- * nodes: their pointer identities are the proof later used to remove only
- * these restrictions from executable quals and to prune competing paths that
+ * nodes: their pointer identities later select exactly which restrictions are
+ * removed from executable quals and which competing paths
  * would execute them.
  */
 [[nodiscard]] static owned_mmsearch_restriction
@@ -1530,7 +1531,7 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 			}
 		}
 
-		bool legacy_bounded_fallback_candidate = false;
+		bool bounded_fallback_candidate = false;
 		if (semantic_calls == 2u) {
 			RestrictInfo* first = reinterpret_cast<RestrictInfo*>(
 				linitial(semantic_restrictions));
@@ -1557,7 +1558,7 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 					lsecond(ppi_expression->args));
 				Var* ppi_query_var = try_cast_pg_node<Var>(ppi_query);
 				Const* base_query_const = try_cast_pg_node<Const>(base_query);
-				legacy_bounded_fallback_candidate =
+				bounded_fallback_candidate =
 					try_cast_pg_node<Var>(base_target) != nullptr
 					&& try_cast_pg_node<Var>(ppi_target) != nullptr
 					&& equal(base_target, ppi_target)
@@ -1575,7 +1576,7 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 						param_relids);
 			}
 		}
-		if (!legacy_bounded_fallback_candidate) return {};
+		if (!bounded_fallback_candidate) return {};
 	}
 
 	RestrictInfo* primary_restriction = nullptr;
@@ -1649,8 +1650,8 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 			} else {
 				/* A complete base-local query recipe (slice/concat/reverse,
 				 * CASE/COALESCE, dynamic bounds, or an opaque effectful arm) is
-				 * evaluated once per row after the target.  The later exact proof
-				 * validates every Var/nulling frontier and derives its bound type. */
+				 * evaluated once per row after the target.  The later validation
+				 * checks every Var/nulling frontier and derives its bound type. */
 				parameterized_query = semantic_calls == 1
 					&& coarse_base_mmsearch_operand_candidate(
 						query, rel, oids,
@@ -1842,7 +1843,7 @@ storage_prunable_quals_without_mmsearch(List* quals, const bioseq_stub_oids& oid
 	Node* argument_node = reinterpret_cast<Node*>(linitial(function->args));
 	if (argument_node == nullptr
 		|| exprType(argument_node) != oids.bioseq_seq_type_oid) {
-		/* Preserve the established target-owned row-marker helper form. */
+		/* Accept the target-owned row-marker helper form. */
 		return true;
 	}
 	Var* argument = try_cast_pg_node<Var>(argument_node);
@@ -1862,7 +1863,7 @@ storage_prunable_quals_without_mmsearch(List* quals, const bioseq_stub_oids& oid
 
 /* A transformed target has biological identity in its complete canonical
  * recipe, not merely in the first storage Var below that recipe.  Preserve the
- * legacy raw-Var check above for base scans, while allowing bioseq.edit() to
+ * raw-Var check above for base scans, while allowing bioseq.edit() to
  * name the exact owned transformed expression. */
 [[nodiscard]] static bool edit_sequence_argument_matches_recipe(
 		const FuncExpr* function,
@@ -1875,7 +1876,7 @@ storage_prunable_quals_without_mmsearch(List* quals, const bioseq_stub_oids& oid
 		return false;
 	}
 	Node* argument = reinterpret_cast<Node*>(linitial(function->args));
-	/* A sequence-valued helper argument is biological identity, not a legacy
+	/* A sequence-valued helper argument is biological identity, not a
 	 * row marker.  It must name the complete owned recipe; accepting the raw
 	 * storage Var of a sliced/reversed/concatenated target would silently report
 	 * the transformed match as if it belonged to the whole stored sequence. */
@@ -1883,9 +1884,9 @@ storage_prunable_quals_without_mmsearch(List* quals, const bioseq_stub_oids& oid
 		&& exprType(argument) == oids.bioseq_seq_type_oid) {
 		return equal(argument, target_expression);
 	}
-	/* Only non-sequence legacy row-marker spellings reach the historical
-	 * target-owned fallback.  The surrounding helper registration has already
-	 * proved that such a Var belongs to target_relid. */
+	/* Only non-sequence row-marker spellings reach the target-owned
+	 * fallback.  The surrounding helper registration has already validated
+	 * that such a Var belongs to target_relid. */
 	return edit_sequence_argument_matches_target(
 		function, target_relid, target_sequence_attno, oids);
 }
@@ -2097,12 +2098,10 @@ detect_restrictinfo_feature_flags(
  * Plan-time detection of an mmsearch typmod-coalesce (same alphabet,
  * different storage width between the bioseq.seq column and the query literal).
  *
- * BioseqColumnScan_ExplainCustomScan needs this because the "coalesce to
- * seq('<alpha>', <bits>)" hint used to be surfaced from the runtime buffer
- * (`coalesce_active()`), which is ONLY populated when BeginCustomScan ran —
- * i.e. NOT for `EXPLAIN` without `ANALYZE`. The coalesce decision is, however,
- * fully determined at plan time by the column Var's typmod vs the literal's
- * typmod, so we re-derive it from the plan qual here. Mirrors the BeginCustomScan
+ * `EXPLAIN` without `ANALYZE` has no populated runtime buffer, while the
+ * coalesce decision is fully determined at plan time by the column Var's
+ * typmod versus the literal's typmod. Derive it from the plan qual here using
+ * the same BeginCustomScan
  * typmod logic (same `compact_sequence_stdc_type_params::decode`), reading no
  * runtime state. A mismatch we cannot classify simply yields `active=false`
  * (no hint, never a crash).
@@ -3048,9 +3047,9 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		/*
 		 * Range-check before the enum cast — otherwise a crafted caller
 		 * (aligner_options(chaining_algorithm => 42)) injects an invalid
-		 * enum value into params.chaining_algorithm, which produces UB
-		 * via the constexpr switch in to_chaining_params(). Known-good
-		 * ordinals: 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ, 3=VULKAN_TILED_DP.
+		 * enum value into params.chaining_algorithm. Supported
+		 * ordinals are 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ, and
+		 * 3=VULKAN_TILED_DP.
 		 */
 		const std::int32_t raw = *options.chaining_algorithm;
 		if (raw >= 0 && raw <= 3) {
@@ -3148,7 +3147,8 @@ finalize_simd_chaining_policy(
 		 errmsg("final SIMD chaining policy cannot be selected"),
 		 errdetail("chaining_algorithm has unknown ordinal %u",
 			 static_cast<unsigned>(params.chaining_algorithm)),
-		 errhint("Select scalar_mm2, simd_mm2, rmq, or vulkan_tiled_dp explicitly; no fallback is performed.")));
+		 errhint("Select scalar_minimap2, simd_minimap2, range_minimum_query, or "
+			 "vulkan_tiled_dynamic_programming explicitly; no fallback is performed.")));
 }
 
 /*
@@ -3315,7 +3315,7 @@ enum slice_project_dsm_test_fixture : int {
 	k_slice_dsm_test_malformed = 2,
 };
 
-/* Backend-local, one-shot diagnostic state.  The revoked SQL seam arms one
+/* Backend-local, one-shot diagnostic state.  The test hook arms one
  * mode; the next analyzed SliceProject takes it before running any fixture
  * code, so ERROR during the fixture cannot leave a latent injection behind. */
 static int pending_slice_dsm_test_fixture = k_slice_dsm_test_none;
@@ -3534,7 +3534,7 @@ bioseq_batch_join_descriptor_is_structural(
 	}
 	for (const int index : {
 			k_match_owner_magic, k_match_owner_version, k_match_owner_stable_id,
-			k_match_owner_legacy_target_relid}) {
+			k_match_owner_base_relid}) {
 		if (!bioseq_batch_join_private_integer(descriptor, index)) {
 			return false;
 		}
@@ -3554,7 +3554,7 @@ bioseq_batch_join_descriptor_is_structural(
 		&& target_recipe != nullptr
 		&& (base_lineage == nullptr || IsA(base_lineage, List))
 		&& bioseq_is_concrete_rte_varno(static_cast<Index>(intVal(
-			list_nth(descriptor, k_match_owner_legacy_target_relid))));
+			list_nth(descriptor, k_match_owner_base_relid))));
 }
 
 } // namespace
@@ -4035,7 +4035,7 @@ slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
 		/* PostgreSQL represents SQL operator syntax as OpExpr, even when the
 		 * implementation is one of the exact registered concat functions.  Do
 		 * not recognize an arbitrary operator merely because opfuncid happens
-		 * to be populated: prove the binary catalog operator/function identity
+		 * to be populated: validate the binary catalog operator/function identity
 		 * and the sequence result shape first. */
 		if (OidIsValid(operation->opno)
 			&& OidIsValid(operation->opfuncid)
@@ -4782,7 +4782,7 @@ bioseq_slice_project_scan_methods() noexcept;
 /* A nested SliceProject must initialize its child's trace before it can bind
  * the parent projector, while child initialization calls back through the
  * parent-aware binding path. This forward declaration closes that genuine
- * initialization cycle without moving either executor phase out of order. */
+ * initialization cycle without moving either executor stage out of order. */
 static void slice_project_ensure_trace_initialized(CustomScanState* custom);
 static void slice_project_reinitialize_dsm(
 	CustomScanState* custom, ParallelContext* pcxt, void* coordinate);
@@ -6853,7 +6853,7 @@ static void slice_project_rescan(CustomScanState* custom) {
 	ExecScanReScan(&custom->ss);
 	/* ExecScanReScan resets scan input and expression state but does not
 	 * guarantee that a previously projected virtual result is invalidated.
-	 * Nested-loop PARAM_EXEC rescans must not return that old expanded slice
+	 * Nested-loop PARAM_EXEC rescans must not return that stale expanded slice
 	 * when the next child row projects NULL. */
 	if (custom->ss.ps.ps_ResultTupleSlot != nullptr) {
 		ExecClearTuple(custom->ss.ps.ps_ResultTupleSlot);
@@ -7414,7 +7414,7 @@ bioseq_slice_project_exec_methods() noexcept {
 }
 
 /* An ordered upper target may omit resjunk entries retained by its child's
- * full target.  Prove every requested top-level lazy expression, including
+ * full target.  Validate every requested top-level lazy expression, including
  * its sortgroupref and duplicate multiplicity, is already published by that
  * full target.  Non-lazy outputs remain core's ordinary projection concern. */
 [[nodiscard]] static bool slice_project_requested_lazy_target_is_subset(
@@ -7461,7 +7461,7 @@ bioseq_slice_project_exec_methods() noexcept {
 	return saw_lazy_expression;
 }
 
-/* Recognition only: after the subset proof, pin the child's complete target
+/* Recognition only: after the subset validation, pin the child's complete target
  * and cross exactly the ordering/parallel containers which preserve every
  * expression and sortgroupref.  Never cross projection, materialization,
  * joins, or any other evaluation frontier. */
@@ -7994,26 +7994,26 @@ struct slice_project_base_target_validation {
 struct slice_project_base_target_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			slice_project_base_target_validation& proof) const noexcept {
+			slice_project_base_target_validation& validation) const noexcept {
 		if (node.try_as<PlaceHolderVar>() != nullptr) {
 			/* A PHV belongs to a planner-selected evaluation/nulling frontier.
 			 * A base SliceProject must not move it below that frontier. */
-			proof.invalid = true;
+			validation.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (Var* var = node.try_as<Var>()) {
-			if (proof.allow_row_identity
+			if (validation.allow_row_identity
 				&& slice_project_is_target_row_identity_var(
-					var, proof.relid)) {
+					var, validation.relid)) {
 				return pg_walk_step::skip_subtree;
 			}
-			if (var->varno != proof.relid || var->varattno <= 0
+			if (var->varno != validation.relid || var->varattno <= 0
 				|| var->varlevelsup != 0
 				|| !bms_is_empty(var->varnullingrels)) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
-			proof.saw_base_var = true;
+			validation.saw_base_var = true;
 			return pg_walk_step::skip_subtree;
 		}
 		return pg_walk_step::descend;
@@ -8041,8 +8041,8 @@ struct slice_project_base_target_visitor {
 
 /* UPDATE's RETURNING target belongs to ModifyTable, not to its scan/join
  * subplan.  We may describe a nonvolatile lazy subtree below a volatile final
- * consumer, but we must never move or execute that consumer here.  This proof
- * therefore checks only the base-local Var/semantic frontier and deliberately
+ * consumer, but we must never move or execute that consumer here.  This
+ * validation checks only the base-local Var/semantic frontier and deliberately
  * does not reject volatile ancestors; slice_project_discover_target() rejects
  * every recognized lazy subtree which itself contains volatility. */
 [[nodiscard]] static bool slice_project_update_recipe_target_is_safe(
@@ -8055,15 +8055,15 @@ struct slice_project_base_target_visitor {
 		|| expression_returns_set(reinterpret_cast<Node*>(target->exprs))) {
 		return false;
 	}
-	slice_project_base_target_validation proof{.relid = rel->relid};
+	slice_project_base_target_validation validation{.relid = rel->relid};
 	slice_project_base_target_visitor visitor;
 	walk_pg_expression_including_root(
-		reinterpret_cast<Node*>(target->exprs), proof, visitor);
-	return proof.saw_base_var && !proof.invalid;
+		reinterpret_cast<Node*>(target->exprs), validation, visitor);
+	return validation.saw_base_var && !validation.invalid;
 }
 
-/* Prove the final processed projection can be evaluated immediately above
- * this one base relation.  The single-baserel restriction is intentionally
+/* Validate that the final processed projection can be evaluated immediately
+ * above this one base relation.  The single-baserel restriction is intentionally
  * strict: a wider query needs a join/upper owner which preserves its own
  * nulling and evaluation frontier. */
 [[nodiscard]] static bool slice_project_base_target_is_safe(
@@ -8081,15 +8081,15 @@ struct slice_project_base_target_visitor {
 		|| slice_project_target_has_semantic_owner(root, target)) {
 		return false;
 	}
-	slice_project_base_target_validation proof{
+	slice_project_base_target_validation validation{
 		.relid = rel->relid,
 		.allow_row_identity = root->parse->commandType == CMD_UPDATE,
 	};
 	slice_project_base_target_visitor visitor;
 	walk_pg_expression_including_root(
-		reinterpret_cast<Node*>(target->exprs), proof, visitor);
-	return (proof.saw_base_var
-		|| root->parse->commandType == CMD_UPDATE) && !proof.invalid;
+		reinterpret_cast<Node*>(target->exprs), validation, visitor);
+	return (validation.saw_base_var
+		|| root->parse->commandType == CMD_UPDATE) && !validation.invalid;
 }
 
 [[nodiscard]] static bool slice_project_update_sources_are_stable(
@@ -8230,7 +8230,7 @@ static void slice_project_try_install_base_owner(
 	/* Gather paths are derived after this hook from reltarget.  Since every
 	 * surviving ordinary and partial path publishes the processed projection,
 	 * make that target canonical before core constructs Gather; otherwise it
-	 * asks a final-expression SliceProject child to publish the old raw Var. */
+	 * asks a final-expression SliceProject child to publish the raw Var. */
 	rel->reltarget = copy_pathtarget(projection_target);
 	rel->pathlist = NIL;
 	rel->partial_pathlist = NIL;
@@ -8251,9 +8251,9 @@ struct slice_project_aggregate_recipe_presence_visitor {
 	/* Stop at the first planner expression represented by the projection IR. */
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			slice_project_aggregate_recipe_presence& proof) const noexcept {
-		if (slice_project_node_opcode(node.raw(), *proof.oids).has_value()) {
-			proof.found = true;
+			slice_project_aggregate_recipe_presence& analysis) const noexcept {
+		if (slice_project_node_opcode(node.raw(), *analysis.oids).has_value()) {
+			analysis.found = true;
 			return pg_walk_step::stop;
 		}
 		return pg_walk_step::descend;
@@ -8264,10 +8264,10 @@ struct slice_project_aggregate_recipe_presence_visitor {
 [[nodiscard]] static inline bool slice_project_aggregate_expression_has_recipe(
 		Node* expression, const bioseq_stub_oids* oids) {
 	if (expression == nullptr || oids == nullptr) return false;
-	slice_project_aggregate_recipe_presence proof{.oids = oids};
+	slice_project_aggregate_recipe_presence analysis{.oids = oids};
 	slice_project_aggregate_recipe_presence_visitor visitor;
-	walk_pg_expression_including_root(expression, proof, visitor);
-	return proof.found;
+	walk_pg_expression_including_root(expression, analysis, visitor);
+	return analysis.found;
 }
 
 struct slice_project_aggregate_argument_validation {
@@ -8278,26 +8278,26 @@ struct slice_project_aggregate_argument_validation {
 };
 
 struct slice_project_aggregate_argument_visitor {
-	/* Prove that every Var belongs to the aggregate input relation. */
+	/* Validate that every Var belongs to the aggregate input relation. */
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			slice_project_aggregate_argument_validation& proof) const noexcept {
+			slice_project_aggregate_argument_validation& validation) const noexcept {
 		if (node.try_as<PlaceHolderVar>() != nullptr
 			|| node.try_as<Param>() != nullptr) {
-			proof.invalid = true;
+			validation.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (Var* var = node.try_as<Var>()) {
 			if (!bioseq_is_concrete_rte_varno(var->varno)
 				|| !bms_is_member(static_cast<int>(var->varno),
-					proof.available_relids)
+					validation.available_relids)
 				|| var->varattno <= 0 || var->varlevelsup != 0
 				|| !bms_is_empty(var->varnullingrels)) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
-			if (var->vartype == proof.oids->bioseq_seq_type_oid) {
-				proof.saw_sequence_var = true;
+			if (var->vartype == validation.oids->bioseq_seq_type_oid) {
+				validation.saw_sequence_var = true;
 			}
 			return pg_walk_step::skip_subtree;
 		}
@@ -8317,12 +8317,12 @@ struct slice_project_aggregate_argument_visitor {
 		|| expression_returns_set(expression)
 		|| contain_volatile_functions(expression)
 		|| !is_parallel_safe(root, expression)) return false;
-	slice_project_aggregate_argument_validation proof{
+	slice_project_aggregate_argument_validation validation{
 		.oids = oids, .available_relids = available_relids};
 	slice_project_aggregate_argument_visitor visitor;
-	walk_pg_expression_including_root(expression, proof, visitor);
-	return !proof.invalid
-		&& (!require_sequence_var || proof.saw_sequence_var);
+	walk_pg_expression_including_root(expression, validation, visitor);
+	return !validation.invalid
+		&& (!require_sequence_var || validation.saw_sequence_var);
 }
 
 struct slice_project_aggregate_input_validation {
@@ -8338,29 +8338,29 @@ struct slice_project_aggregate_input_validation {
 
 /* Append one structurally distinct whole aggregate-argument expression. */
 static inline void slice_project_add_unique_aggregate_candidate(
-		slice_project_aggregate_input_validation& proof, Node* expression) {
-	for (Node* candidate : postgres_list<Node>(proof.candidates)) {
+		slice_project_aggregate_input_validation& validation, Node* expression) {
+	for (Node* candidate : postgres_list<Node>(validation.candidates)) {
 		if (equal(candidate, expression)) return;
 	}
-	proof.candidates = lappend(proof.candidates, expression);
+	validation.candidates = lappend(validation.candidates, expression);
 }
 
 /* Retain every ordinary argument expression so raw Vars needed by resjunk
  * ORDER BY carriers are published through the lower owner as well. */
 static inline void slice_project_add_unique_aggregate_input(
-		slice_project_aggregate_input_validation& proof, Node* expression) {
-	for (Node* input : postgres_list<Node>(proof.input_expressions)) {
+		slice_project_aggregate_input_validation& validation, Node* expression) {
+	for (Node* input : postgres_list<Node>(validation.input_expressions)) {
 		if (equal(input, expression)) return;
 	}
-	proof.input_expressions = lappend(
-		proof.input_expressions, expression);
+	validation.input_expressions = lappend(
+		validation.input_expressions, expression);
 }
 
 struct slice_project_aggregate_input_visitor {
 	/* Collect movable whole arguments while enforcing aggregate barriers. */
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			slice_project_aggregate_input_validation& proof) const {
+			slice_project_aggregate_input_validation& validation) const {
 		if (node.tag() == T_GroupingFunc
 			|| node.tag() == T_WindowFunc
 			|| node.tag() == T_SubPlan) {
@@ -8369,11 +8369,11 @@ struct slice_project_aggregate_input_visitor {
 		Aggref* aggregate = node.try_as<Aggref>();
 		if (aggregate == nullptr) return pg_walk_step::descend;
 		if (aggregate->agglevelsup != 0
-			|| list_member_ptr(proof.visited_aggregates, aggregate)) {
+			|| list_member_ptr(validation.visited_aggregates, aggregate)) {
 			return pg_walk_step::skip_subtree;
 		}
-		proof.visited_aggregates = lappend(
-			proof.visited_aggregates, aggregate);
+		validation.visited_aggregates = lappend(
+			validation.visited_aggregates, aggregate);
 
 		List* aggregate_candidates = NIL;
 		bool malformed_arguments = false;
@@ -8392,7 +8392,7 @@ struct slice_project_aggregate_input_visitor {
 				|| expression_returns_set(expression)
 				|| contain_volatile_functions(expression);
 			if (slice_project_aggregate_expression_has_recipe(
-					expression, proof.oids)) {
+					expression, validation.oids)) {
 				aggregate_candidates = lappend(
 					aggregate_candidates, expression);
 			}
@@ -8401,17 +8401,17 @@ struct slice_project_aggregate_input_visitor {
 		for (Node* direct : postgres_list<Node>(aggregate->aggdirectargs)) {
 			barrier_has_recipe = barrier_has_recipe
 				|| slice_project_aggregate_expression_has_recipe(
-					direct, proof.oids);
+					direct, validation.oids);
 		}
 		if (aggregate->aggfilter != nullptr) {
 			barrier_has_recipe = barrier_has_recipe
 				|| slice_project_aggregate_expression_has_recipe(
-					reinterpret_cast<Node*>(aggregate->aggfilter), proof.oids);
+					reinterpret_cast<Node*>(aggregate->aggfilter), validation.oids);
 		}
 		if (aggregate_candidates == NIL && !barrier_has_recipe) {
 			return pg_walk_step::skip_subtree;
 		}
-		proof.saw_recipe = true;
+		validation.saw_recipe = true;
 		/* FILTER controls whether ordinary arguments are evaluated.  Direct
 		 * arguments and ordered-set/hypothetical aggregates have group-level
 		 * rather than per-input-row semantics.  None may cross this Agg node. */
@@ -8419,7 +8419,7 @@ struct slice_project_aggregate_input_visitor {
 			|| aggregate->aggdirectargs != NIL
 			|| aggregate->aggfilter != nullptr || barrier_has_recipe
 			|| other_argument_is_unsafe) {
-			proof.invalid = true;
+			validation.invalid = true;
 			return pg_walk_step::stop;
 		}
 		/* Validate every ordinary input, including resjunk ORDER BY carriers,
@@ -8430,24 +8430,24 @@ struct slice_project_aggregate_input_visitor {
 			TargetEntry* argument = try_cast_pg_node<TargetEntry>(raw_argument);
 			Node* expression = reinterpret_cast<Node*>(argument->expr);
 			if (!slice_project_aggregate_argument_is_safe(
-					proof.root, proof.available_relids, expression,
-					proof.oids, false)) {
-				proof.invalid = true;
+					validation.root, validation.available_relids, expression,
+					validation.oids, false)) {
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
-			slice_project_add_unique_aggregate_input(proof, expression);
+			slice_project_add_unique_aggregate_input(validation, expression);
 		}
 		for (Node* expression : postgres_list<Node>(aggregate_candidates)) {
 			if (!slice_project_aggregate_argument_is_safe(
-					proof.root, proof.available_relids, expression,
-					proof.oids)) {
-				proof.invalid = true;
+					validation.root, validation.available_relids, expression,
+					validation.oids)) {
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			/* Publish the exact argument expression, never its TargetEntry.  The
 			 * Aggref therefore retains its resno/ressortgroupref and aggorder
 			 * wiring while setrefs maps only the argument to the owner output. */
-			slice_project_add_unique_aggregate_candidate(proof, expression);
+			slice_project_add_unique_aggregate_candidate(validation, expression);
 		}
 		return pg_walk_step::skip_subtree;
 	}
@@ -8490,7 +8490,7 @@ struct slice_project_aggregate_input_visitor {
 slice_project_collect_aggregate_inputs(
 		PlannerInfo* root, AggPath* aggregate,
 		const bioseq_stub_oids* oids) {
-	slice_project_aggregate_input_validation proof{
+	slice_project_aggregate_input_validation validation{
 		.root = root,
 		.oids = oids,
 		.available_relids = aggregate != nullptr
@@ -8499,19 +8499,19 @@ slice_project_collect_aggregate_inputs(
 	};
 	if (aggregate == nullptr || aggregate->path.pathtarget == nullptr
 		|| aggregate->path.pathtarget->exprs == NIL
-		|| proof.available_relids == nullptr) {
-		proof.invalid = true;
-		return proof;
+		|| validation.available_relids == nullptr) {
+		validation.invalid = true;
+		return validation;
 	}
 	slice_project_aggregate_input_visitor visitor;
 	walk_pg_expression_including_root(
 		reinterpret_cast<Node*>(aggregate->path.pathtarget->exprs),
-		proof, visitor);
-	if (!proof.invalid && aggregate->qual != NIL) {
+		validation, visitor);
+	if (!validation.invalid && aggregate->qual != NIL) {
 		walk_pg_expression_including_root(
-			reinterpret_cast<Node*>(aggregate->qual), proof, visitor);
+			reinterpret_cast<Node*>(aggregate->qual), validation, visitor);
 	}
-	return proof;
+	return validation;
 }
 
 /* Report whether a path spine crosses a Gather or GatherMerge boundary. */
@@ -8573,14 +8573,14 @@ slice_project_collect_aggregate_inputs(
 /* Build the lower SliceProject that materializes aggregate arguments lazily. */
 [[nodiscard]] static inline Path* slice_project_build_aggregate_input_owner(
 		PlannerInfo* root, AggPath* aggregate,
-		slice_project_aggregate_input_validation const& proof) {
+		slice_project_aggregate_input_validation const& validation) {
 	Path* source = aggregate == nullptr ? nullptr : aggregate->subpath;
 	Relids source_relids = slice_project_aggregate_source_relids(source);
 	if (root == nullptr || source == nullptr || source->parent == nullptr
-		|| source->param_info != nullptr || proof.candidates == NIL
-		|| proof.oids == nullptr
+		|| source->param_info != nullptr || validation.candidates == NIL
+		|| validation.oids == nullptr
 		|| source_relids == nullptr
-		|| !bms_equal(source_relids, proof.available_relids)
+		|| !bms_equal(source_relids, validation.available_relids)
 		|| !slice_project_path_tree_has_bioseq_scan(source)) return nullptr;
 
 	PathTarget* lower_target = copy_pathtarget(source->pathtarget);
@@ -8588,9 +8588,9 @@ slice_project_collect_aggregate_inputs(
 	 * only structural equality across the setrefs boundary: neither later
 	 * child-target processing nor the SliceProject codec may share those exact
 	 * mutable Node objects with the parent Aggref. */
-	List* owned_candidates = static_cast<List*>(copyObject(proof.candidates));
+	List* owned_candidates = static_cast<List*>(copyObject(validation.candidates));
 	List* owned_inputs = static_cast<List*>(
-		copyObject(proof.input_expressions));
+		copyObject(validation.input_expressions));
 	List* required = NIL;
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
 		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
@@ -8606,7 +8606,7 @@ slice_project_collect_aggregate_inputs(
 	add_new_columns_to_pathtarget(lower_target, owned_candidates);
 	set_pathtarget_cost_width(root, lower_target);
 	slice_project_ir_builder builder{
-		.oids = proof.oids,
+		.oids = validation.oids,
 		/* Aggregate inputs are internal executor values, not client output. */
 		.command_type = CMD_UNKNOWN,
 	};
@@ -8722,16 +8722,16 @@ slice_project_rewrite_aggregate_path(
 			&& aggregate->aggsplit == AGGSPLIT_INITIAL_SERIAL)
 		|| (stage == UPPERREL_GROUP_AGG
 			&& aggregate->aggsplit == AGGSPLIT_SIMPLE);
-	slice_project_aggregate_input_validation proof =
+	slice_project_aggregate_input_validation validation =
 		slice_project_collect_aggregate_inputs(root, aggregate, oids);
-	if (!proof.saw_recipe) return {.path = path};
-	if (!supported_split || proof.invalid || proof.candidates == NIL
+	if (!validation.saw_recipe) return {.path = path};
+	if (!supported_split || validation.invalid || validation.candidates == NIL
 		|| (stage == UPPERREL_GROUP_AGG
 			&& slice_project_path_tree_has_exchange(aggregate->subpath))) {
 		return {.path = path, .unsafe = true};
 	}
 	Path* owner = slice_project_build_aggregate_input_owner(
-		root, aggregate, proof);
+		root, aggregate, validation);
 	if (owner == nullptr) return {.path = path, .unsafe = true};
 
 	auto* clone = makeNode(AggPath);
@@ -8869,12 +8869,13 @@ static inline void bioseq_slice_project_create_upper_paths(
 		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
 	/* Only the owned recipe graph needs raw child inputs.  Ordinary projection
 	 * expressions are already represented by the chosen child's PathTarget and
-	 * must remain atomic here.  In particular, a raw ABI-v3 BatchJoin publishes
-	 * each match_result helper as one exact output identity; descending through
-	 * bioseq.query_start(t.pk) would synthesize a new t.pk requirement above the
-	 * owner even though that raw Var is intentionally absent from its public
-	 * target.  Core setrefs would then fail while binding the intermediate
-	 * ProjectionPath.  The IR expression list contains every lazy producer,
+	 * must remain atomic here.  In particular, a raw BatchJoin output contract
+	 * publishes each match_result helper as one exact output identity;
+	 * descending through bioseq.query_start(t.pk) would synthesize a new t.pk
+	 * requirement above the owner even though that raw Var is intentionally
+	 * absent from its public target.  Core setrefs would then fail while binding
+	 * the intermediate ProjectionPath.  The IR expression list contains every
+	 * lazy producer,
 	 * source, concat operand, and bound expression, so pulling from it retains
 	 * the complete SliceProject dependency closure without opening non-lazy
 	 * helper identities. */
@@ -9021,7 +9022,8 @@ bioseq_column_set_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rt
 		if (bioseq::settings::planner::custom_scan::enabled)
 		{
 			/*
-			 * When columnar custom scan is enabled (bioseq.enable_custom_scan),
+			 * When columnar custom scan is enabled
+			 * (bioseq.planner.custom_scan.enabled),
 			 * we only consider BioseqColumnScanPath's & IndexPath's. For this reason,
 			 * we remove other paths and re-estimate IndexPath costs to make accurate
 			 * comparisons between them.
@@ -9165,7 +9167,7 @@ struct batch_join_target_projection_visitor {
 [[noreturn]] static void raise_mmsearch_alphabet_mismatch(
 		const compact_sequence_stdc_type_params target,
 		const compact_sequence_stdc_type_params query,
-		const char* phase) {
+		const char* stage) {
 	const auto target_name =
 		pgseq_supported_alphabets::name_of_alphabet_code(
 			target.alphabet_code);
@@ -9176,8 +9178,8 @@ struct batch_join_target_projection_visitor {
 		(errcode(ERRCODE_DATATYPE_MISMATCH),
 		 errmsg("bioseq mmsearch requires operands with the same bound alphabet"),
 		 errdetail(
-			"phase=%s target=seq('%.*s', %u) query=seq('%.*s', %u)",
-			phase,
+			"stage=%s target=seq('%.*s', %u) query=seq('%.*s', %u)",
+			stage,
 			static_cast<int>(target_name.size()), target_name.data(),
 			static_cast<unsigned>(target.storage_unit_byte_width) * 8u,
 			static_cast<int>(query_name.size()), query_name.data(),
@@ -9243,11 +9245,11 @@ struct per_row_sequence_typmod_validation {
 
 /* PostgreSQL does not propagate typmods through ordinary FuncExpr results,
  * even when the exact catalog function is sequence-type preserving.  Admit an
- * erased descriptor only after recursively proving one identical concrete
+ * erased descriptor only after recursively validating one identical concrete
  * typmod at every sequence-valued leaf.  Non-sequence literal/array operands
  * are neutral only for the exact registered concat overloads. */
 [[nodiscard]] static std::optional<per_row_sequence_typmod_validation>
-per_row_sequence_typmod_proof(
+per_row_validate_sequence_typmod(
 		Node* expression, bioseq_stub_oids const& oids) {
 	check_stack_depth();
 	if (expression == nullptr
@@ -9255,22 +9257,22 @@ per_row_sequence_typmod_proof(
 		return std::nullopt;
 	}
 	const int32 descriptor_typmod = exprTypmod(expression);
-	auto finish = [descriptor_typmod](const int32 proven_typmod)
+	auto finish = [descriptor_typmod](const int32 validated_typmod)
 			-> std::optional<per_row_sequence_typmod_validation> {
-		if (!batch_join_typmod_is_supported(proven_typmod)
+		if (!batch_join_typmod_is_supported(validated_typmod)
 			|| (descriptor_typmod != -1
-				&& descriptor_typmod != proven_typmod)) {
+				&& descriptor_typmod != validated_typmod)) {
 			return std::nullopt;
 		}
 		return per_row_sequence_typmod_validation{
-			.typmod = proven_typmod,
+			.typmod = validated_typmod,
 			.descriptor_erased = descriptor_typmod == -1};
 	};
 	if (IsA(expression, RelabelType)) {
 		auto* relabel = reinterpret_cast<RelabelType*>(expression);
 		if (relabel->resulttype != oids.bioseq_seq_type_oid
 			|| relabel->arg == nullptr) return std::nullopt;
-		auto child = per_row_sequence_typmod_proof(
+		auto child = per_row_validate_sequence_typmod(
 			reinterpret_cast<Node*>(relabel->arg), oids);
 		return child.has_value() ? finish(child->typmod) : std::nullopt;
 	}
@@ -9285,7 +9287,7 @@ per_row_sequence_typmod_proof(
 			|| subscript->refrestype != oids.bioseq_seq_type_oid
 			|| subscript->reflowerindexpr == NIL
 			|| subscript->refexpr == nullptr) return std::nullopt;
-		auto source = per_row_sequence_typmod_proof(
+		auto source = per_row_validate_sequence_typmod(
 			reinterpret_cast<Node*>(subscript->refexpr), oids);
 		return source.has_value() ? finish(source->typmod) : std::nullopt;
 	}
@@ -9298,7 +9300,7 @@ per_row_sequence_typmod_proof(
 			return std::nullopt;
 		}
 		if (list_length(function->args) != 1) return std::nullopt;
-		auto source = per_row_sequence_typmod_proof(
+		auto source = per_row_validate_sequence_typmod(
 			reinterpret_cast<Node*>(linitial(function->args)), oids);
 		return source.has_value() ? finish(source->typmod) : std::nullopt;
 	}
@@ -9327,7 +9329,7 @@ per_row_sequence_typmod_proof(
 	std::optional<int32> common_typmod;
 	for (Node* argument : postgres_list<Node>(arguments)) {
 		if (exprType(argument) != oids.bioseq_seq_type_oid) continue;
-		auto child = per_row_sequence_typmod_proof(argument, oids);
+		auto child = per_row_validate_sequence_typmod(argument, oids);
 		if (!child.has_value()
 			|| (common_typmod.has_value()
 				&& *common_typmod != child->typmod)) return std::nullopt;
@@ -9480,7 +9482,7 @@ struct batch_join_bioseq_path_candidate {
 	Node* target_recipe, const bioseq_stub_oids& oids);
 
 [[nodiscard]] static List* make_match_owner_descriptor(
-	Node* target_recipe, Index legacy_target_relid,
+	Node* target_recipe, Index base_relid,
 	const bioseq_stub_oids& oids);
 
 [[nodiscard]] static bool batch_join_match_helper_names_recipe(
@@ -9513,7 +9515,7 @@ struct batch_join_bioseq_path_candidate {
 }
 
 /* Generic PHV shape used by transformed exact-recipe helpers.  Unlike the
- * legacy helper decoder below, the PHV may cover more than one relation when
+ * base-lineage helper decoder below, the PHV may cover more than one relation when
  * the target recipe is a concat.  The final owner resolver validates the
  * canonical argument and lineage before any executor sees the site. */
 [[nodiscard]] static FuncExpr* batch_join_match_helper_phv_function(
@@ -9566,20 +9568,20 @@ struct batch_join_projection_delta_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 		pg_expression_walk_cursor,
 		pg_node_view node,
-		batch_join_projection_delta& proof) const noexcept {
+		batch_join_projection_delta& validation) const noexcept {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
 			if (!batch_join_is_exact_helper_phv(
-					placeholder, proof.target_relid)) {
-				proof.invalid = true;
+					placeholder, validation.target_relid)) {
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
-			proof.saw_exact_helper_phv = true;
+			validation.saw_exact_helper_phv = true;
 			return pg_walk_step::skip_subtree;
 		}
 		if (Var* var = node.try_as<Var>()) {
 			if (!path_target_has_equal_expression(
-					proof.child_target, reinterpret_cast<Node*>(var))) {
-				proof.invalid = true;
+					validation.child_target, reinterpret_cast<Node*>(var))) {
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 		}
@@ -9587,7 +9589,7 @@ struct batch_join_projection_delta_visitor {
 	}
 };
 
-/* Prove that the complete wrapper-only expression can be evaluated by the
+/* Validate that the complete wrapper-only expression can be evaluated by the
  * BatchJoin parent without changing semantics: it is nonvolatile, every Var
  * is already produced by the child, every PHV is the exact helper-support
  * shape, and at least one such helper PHV explains the wrapper delta. */
@@ -9599,11 +9601,11 @@ struct batch_join_projection_delta_visitor {
 		|| contain_volatile_functions(expression)) {
 		return false;
 	}
-	batch_join_projection_delta proof{
+	batch_join_projection_delta validation{
 		child_target, target_relid, false, false};
 	batch_join_projection_delta_visitor visitor;
-	walk_pg_expression_including_root(expression, proof, visitor);
-	return !proof.invalid && proof.saw_exact_helper_phv;
+	walk_pg_expression_including_root(expression, validation, visitor);
+	return !validation.invalid && validation.saw_exact_helper_phv;
 }
 
 /* A wrapper may also expose an ordinary target attribute needed above the
@@ -9685,7 +9687,7 @@ find_unparameterized_bioseq_custom_path(
 		 * of a projection path.  The projection must not run in the locator
 		 * child: BioseqBatchJoin rewrites those helpers to parent-owned result
 		 * placeholders after the match_result exists.  Look through exactly
-		 * that narrowly proven parent-safe wrapper and retain the underlying scan. */
+		 * that validated parent-safe wrapper and retain the underlying scan. */
 		if (IsA(path, ProjectionPath)) {
 			auto* projection = reinterpret_cast<ProjectionPath*>(path);
 			if (!batch_join_projection_is_parent_safe(
@@ -9716,7 +9718,7 @@ find_unparameterized_bioseq_custom_path(
 }
 
 /*
- * Integration-only proof seam for the exact production eligibility guard.
+ * Integration-only validation seam for the exact production eligibility guard.
  * SQL cannot reliably force an unrelated expression into a base-relation
  * ProjectionPath: PostgreSQL will normally retain it in an upper projection.
  * Construct the dangerous planner shapes directly and pass them through
@@ -10130,35 +10132,35 @@ struct per_row_operand_source_resolution {
 struct per_row_operand_source_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			per_row_operand_source_resolution& proof) const {
+			per_row_operand_source_resolution& resolution) const {
 		if (node.try_as<PlaceHolderVar>() != nullptr) {
 			/* Moving an operand PHV to the post-join recipe can change its
 			 * evaluation/nulling frontier.  No sequence helper requires that
 			 * representation, so decline instead of approximating semantics. */
-			proof.invalid = true;
+			resolution.invalid = true;
 			return pg_walk_step::stop;
 		}
 		Var* var = node.try_as<Var>();
 		if (var == nullptr) return pg_walk_step::descend;
-		if (proof.joinrel == nullptr
+		if (resolution.joinrel == nullptr
 			|| !bioseq_is_concrete_rte_varno(var->varno)
 			|| var->varattno <= 0 || var->varlevelsup != 0
 			|| !bms_is_empty(var->varnullingrels)
 			|| !bms_is_member(static_cast<int>(var->varno),
-				proof.joinrel->relids)) {
-			proof.invalid = true;
+				resolution.joinrel->relids)) {
+			resolution.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (var->vartype == get_cached_stub_oids().bioseq_seq_type_oid) {
 			bool seen = false;
-			for (Node* existing : postgres_list<Node>(proof.sequence_vars)) {
+			for (Node* existing : postgres_list<Node>(resolution.sequence_vars)) {
 				if (equal(existing, var)) {
 					seen = true;
 					break;
 				}
 			}
-			if (!seen) proof.sequence_vars = lappend(
-				proof.sequence_vars, var);
+			if (!seen) resolution.sequence_vars = lappend(
+				resolution.sequence_vars, var);
 		}
 		return pg_walk_step::skip_subtree;
 	}
@@ -10187,7 +10189,7 @@ struct per_row_output_semantic_validation {
 struct per_row_output_semantic_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			per_row_output_semantic_validation& proof) const {
+			per_row_output_semantic_validation& validation) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
 			/* The exact helper PHV is deliberately evaluated by the BatchJoin
 			 * owner after match_result production.  At an intermediate joinrel the
@@ -10206,14 +10208,14 @@ struct per_row_output_semantic_visitor {
 					== get_cached_stub_oids().bioseq_seq_type_oid;
 			if (helper == nullptr
 				|| (!batch_join_match_helper_names_recipe(
-					helper, proof.target_recipe)
+					helper, validation.target_recipe)
 					&& !batch_join_match_helper_names_base_lineage(
-						helper, proof.target_recipe,
+						helper, validation.target_recipe,
 						get_cached_stub_oids())
 					&& !possible_higher_owner)) {
-				proof.invalid = true;
+				validation.invalid = true;
 			}
-			return proof.invalid
+			return validation.invalid
 				? pg_walk_step::stop : pg_walk_step::skip_subtree;
 		}
 		if (Var* var = node.try_as<Var>()) {
@@ -10222,14 +10224,14 @@ struct per_row_output_semantic_visitor {
 			 * inner-join passthrough values, not arbitrary system attributes. */
 			if (per_row_is_exact_row_identity_var(var)
 				&& bms_is_member(
-					static_cast<int>(var->varno), proof.join_relids)) {
+					static_cast<int>(var->varno), validation.join_relids)) {
 				return pg_walk_step::skip_subtree;
 			}
 			if (!bioseq_is_concrete_rte_varno(var->varno)
 				|| var->varattno <= 0
 				|| var->varlevelsup != 0
 				|| !bms_is_empty(var->varnullingrels)) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			return pg_walk_step::skip_subtree;
@@ -10246,14 +10248,14 @@ struct per_row_output_semantic_visitor {
 		return false;
 	}
 	/* Volatile final-output expressions stay in the owner PathTarget and are
-	 * evaluated once by core ProjectionInfo for each emitted match.  This proof
-	 * governs only nodes that would otherwise lose a planner frontier. */
-	per_row_output_semantic_validation proof{
+	 * evaluated once by core ProjectionInfo for each emitted match.  This
+	 * validation governs only nodes that would otherwise lose a planner frontier. */
+	per_row_output_semantic_validation validation{
 		target_relid, join_relids, target_recipe, false};
 	per_row_output_semantic_visitor visitor;
 	for (Node* expression : postgres_list<Node>(target->exprs)) {
-		walk_pg_expression_including_root(expression, proof, visitor);
-		if (proof.invalid) return false;
+		walk_pg_expression_including_root(expression, validation, visitor);
+		if (validation.invalid) return false;
 	}
 	return true;
 }
@@ -10267,7 +10269,7 @@ struct per_row_owner_support_validation {
 	List* helper_identities = NIL;
 	/* Sequence-valued helpers which do not name this owner may still be exact
 	 * outputs of one versioned descendant BatchJoin.  They remain candidates
-	 * until each incumbent path proves that ownership structurally. */
+	 * until each incumbent path validates that ownership structurally. */
 	List* foreign_exact_helper_identities = NIL;
 	List* helper_argument_vars = NIL;
 	bool invalid = false;
@@ -10324,7 +10326,7 @@ static void per_row_append_unique_expression(List*& expressions, Node* node) {
 
 /* Core's upper setrefs pass can descend a plain match-helper FuncExpr before
  * finalized match_result binding.  It then needs the raw Vars below the exact
- * transformed target recipe, plus valid legacy-lineage helper arguments.
+ * transformed target recipe, plus valid base-lineage helper arguments.
  * These are Plan-only resjunk carriers; they must not widen the visible owner
  * PathTarget. */
 [[nodiscard]] static bool per_row_collect_setrefs_carrier_vars(
@@ -10360,7 +10362,7 @@ static void per_row_append_unique_expression(List*& expressions, Node* node) {
  * for a projection-capable CustomPath, overwrite plan.targetlist only after
  * PlanCustomPath has returned.  Collect the narrow support surface up front:
  * level-zero join Vars are passed through, while exact target-owned match
- * helpers are carried as whole descriptor identities.  Their proven single
+ * helpers are carried as whole descriptor identities.  Their validated single
  * target Var is collected separately for reconstructed scan-leaf and Plan-only
  * resjunk setrefs edges; it is never substituted for the final whole-helper
  * output. */
@@ -10368,26 +10370,26 @@ struct per_row_owner_support_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor,
 			pg_node_view node,
-		per_row_owner_support_validation& proof) const {
+		per_row_owner_support_validation& validation) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
-			FuncExpr* helper = proof.oids == nullptr ? nullptr
+			FuncExpr* helper = validation.oids == nullptr ? nullptr
 				: batch_join_match_helper_phv_function(
-					placeholder, *proof.oids);
+					placeholder, *validation.oids);
 			if (helper != nullptr) {
 				const bool names_recipe =
 					batch_join_match_helper_names_recipe(
-						helper, proof.target_recipe);
+						helper, validation.target_recipe);
 				const bool names_lineage =
 					batch_join_match_helper_names_base_lineage(
-						helper, proof.target_recipe, *proof.oids);
+						helper, validation.target_recipe, *validation.oids);
 				Node* argument = batch_join_match_helper_argument(helper);
 				const bool possible_foreign_exact = !names_recipe
 					&& !names_lineage && argument != nullptr
 					&& exprType(argument)
-						== proof.oids->bioseq_seq_type_oid;
+						== validation.oids->bioseq_seq_type_oid;
 				if (!names_recipe && !names_lineage
 					&& !possible_foreign_exact) {
-					proof.invalid = true;
+					validation.invalid = true;
 					return pg_walk_step::stop;
 				}
 				/* PostgreSQL can spell the same helper site as its whole PHV in
@@ -10396,17 +10398,17 @@ struct per_row_owner_support_visitor {
 				 * can bind either spelling to a descriptor-only match_result site;
 				 * never descend into the helper argument Var. */
 				per_row_append_unique_expression(
-					proof.helper_identities,
+					validation.helper_identities,
 					reinterpret_cast<Node*>(placeholder));
 				per_row_append_unique_expression(
-					proof.helper_identities,
+					validation.helper_identities,
 					reinterpret_cast<Node*>(helper));
 				if (possible_foreign_exact) {
 					per_row_append_unique_expression(
-						proof.foreign_exact_helper_identities,
+						validation.foreign_exact_helper_identities,
 						reinterpret_cast<Node*>(placeholder));
 					per_row_append_unique_expression(
-						proof.foreign_exact_helper_identities,
+						validation.foreign_exact_helper_identities,
 						reinterpret_cast<Node*>(helper));
 				}
 				/* Core may retain a Result directly above the target BioseqScan
@@ -10415,49 +10417,49 @@ struct per_row_owner_support_visitor {
 				 * can bind Result's support Var without executing the helper. */
 				if (names_lineage) {
 					per_row_append_unique_expression(
-						proof.helper_argument_vars,
+						validation.helper_argument_vars,
 						batch_join_match_helper_argument(helper));
 				}
 				return pg_walk_step::skip_subtree;
 			}
-			if (proof.oids != nullptr
+			if (validation.oids != nullptr
 				&& batch_join_expression_has_match_helper(
 					reinterpret_cast<Node*>(placeholder->phexpr),
-					*proof.oids)) {
-				proof.invalid = true;
+					*validation.oids)) {
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			/* A generic PHV owns its planner-selected evaluation frontier. */
 			return pg_walk_step::skip_subtree;
 		}
 		if (FuncExpr* function = node.try_as<FuncExpr>();
-			proof.oids != nullptr && function != nullptr
-			&& is_bioseq_projection_funcid(function->funcid, *proof.oids)) {
+			validation.oids != nullptr && function != nullptr
+			&& is_bioseq_projection_funcid(function->funcid, *validation.oids)) {
 			const bool names_recipe = batch_join_match_helper_names_recipe(
-				function, proof.target_recipe);
-			const bool legacy_lineage =
+				function, validation.target_recipe);
+			const bool base_lineage =
 				batch_join_match_helper_names_base_lineage(
-					function, proof.target_recipe, *proof.oids);
+					function, validation.target_recipe, *validation.oids);
 			Node* argument = batch_join_match_helper_argument(function);
 			const bool possible_foreign_exact = !names_recipe
-				&& !legacy_lineage && argument != nullptr
-				&& exprType(argument) == proof.oids->bioseq_seq_type_oid;
-			if (!names_recipe && !legacy_lineage
+				&& !base_lineage && argument != nullptr
+				&& exprType(argument) == validation.oids->bioseq_seq_type_oid;
+			if (!names_recipe && !base_lineage
 				&& !possible_foreign_exact) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			per_row_append_unique_expression(
-				proof.helper_identities,
+				validation.helper_identities,
 				reinterpret_cast<Node*>(function));
 			if (possible_foreign_exact) {
 				per_row_append_unique_expression(
-					proof.foreign_exact_helper_identities,
+					validation.foreign_exact_helper_identities,
 					reinterpret_cast<Node*>(function));
 			}
-			if (legacy_lineage) {
+			if (base_lineage) {
 				per_row_append_unique_expression(
-					proof.helper_argument_vars,
+					validation.helper_argument_vars,
 					batch_join_match_helper_argument(function));
 			}
 			return pg_walk_step::skip_subtree;
@@ -10467,22 +10469,22 @@ struct per_row_owner_support_visitor {
 				return pg_walk_step::skip_subtree;
 			}
 			if (!bioseq_is_concrete_rte_varno(var->varno)) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			if (!bms_is_member(
-					static_cast<int>(var->varno), proof.join_relids)) {
+					static_cast<int>(var->varno), validation.join_relids)) {
 				return pg_walk_step::skip_subtree;
 			}
 			const bool row_identity =
 				per_row_is_exact_row_identity_var(var);
 			if ((var->varattno <= 0 && !row_identity)
 				|| !bms_is_empty(var->varnullingrels)) {
-				proof.invalid = true;
+				validation.invalid = true;
 				return pg_walk_step::stop;
 			}
 			per_row_append_unique_expression(
-				proof.passthrough_vars, reinterpret_cast<Node*>(var));
+				validation.passthrough_vars, reinterpret_cast<Node*>(var));
 			return pg_walk_step::skip_subtree;
 		}
 		return pg_walk_step::descend;
@@ -10492,43 +10494,43 @@ struct per_row_owner_support_visitor {
 [[nodiscard]] static bool per_row_collect_owner_support(
 		PlannerInfo* root, RelOptInfo* joinrel,
 		const Index target_relid, Node* target_recipe,
-		per_row_owner_support_validation& proof) {
+		per_row_owner_support_validation& validation) {
 	if (root == nullptr || joinrel == nullptr
 		|| !bioseq_is_concrete_rte_varno(target_relid)
 		|| joinrel->relids == nullptr || target_recipe == nullptr) {
 		return false;
 	}
-	proof.target_relid = target_relid;
-	proof.join_relids = joinrel->relids;
-	proof.oids = &get_cached_stub_oids();
-	proof.target_recipe = target_recipe;
+	validation.target_relid = target_relid;
+	validation.join_relids = joinrel->relids;
+	validation.oids = &get_cached_stub_oids();
+	validation.target_recipe = target_recipe;
 	per_row_owner_support_visitor visitor;
 	for (TargetEntry* output : postgres_list<TargetEntry>(root->processed_tlist)) {
 		if (output == nullptr || output->expr == nullptr) continue;
 		walk_pg_expression_including_root(
-			reinterpret_cast<Node*>(output->expr), proof, visitor);
-		if (proof.invalid) return false;
+			reinterpret_cast<Node*>(output->expr), validation, visitor);
+		if (validation.invalid) return false;
 	}
 	return true;
 }
 
 [[nodiscard]] static bool per_row_collect_operand_sources(
 		Node* expression, RelOptInfo* joinrel,
-		per_row_operand_source_resolution& proof) {
+		per_row_operand_source_resolution& resolution) {
 	if (expression == nullptr || joinrel == nullptr
 		|| contain_volatile_functions(expression)) return false;
-	proof.joinrel = joinrel;
+	resolution.joinrel = joinrel;
 	per_row_operand_source_visitor visitor;
-	walk_pg_expression_including_root(expression, proof, visitor);
-	return !proof.invalid;
+	walk_pg_expression_including_root(expression, resolution, visitor);
+	return !resolution.invalid;
 }
 
-/* Exact baserel operand proof for BioseqScan-owned mmsearch.  Unlike the join
- * relocation proof above, this expression is not moved across a planner
+/* Exact baserel operand validation for BioseqScan-owned mmsearch.  Unlike the
+ * join relocation validation above, this expression is not moved across a planner
  * frontier: its original post-setrefs ExprState remains authoritative at the
  * scan.  Volatile functions and opaque/erroring CASE/COALESCE arms are thus
- * legal and execute once in PostgreSQL order.  What must still be proven is
- * that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
+ * legal and execute once in PostgreSQL order.  The remaining validation
+ * requires that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
  * Var belongs to this non-nullable scan relation. */
 struct base_local_mmsearch_operand_resolution {
 	Node* expression = nullptr;
@@ -10548,50 +10550,50 @@ struct base_local_mmsearch_operand_walker {
 struct base_local_mmsearch_operand_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			base_local_mmsearch_operand_walker& proof) const {
+			base_local_mmsearch_operand_walker& validation_state) const {
 		Node* raw = node.raw();
-		if (raw == nullptr || proof.rel == nullptr || proof.oids == nullptr) {
-			proof.invalid = true;
+		if (raw == nullptr || validation_state.rel == nullptr || validation_state.oids == nullptr) {
+			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (IsA(raw, PlaceHolderVar) || IsA(raw, Aggref)
 			|| IsA(raw, GroupingFunc) || IsA(raw, WindowFunc)
 			|| IsA(raw, SubPlan) || IsA(raw, AlternativeSubPlan)
 			|| IsA(raw, SubLink)) {
-			proof.invalid = true;
+			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (FuncExpr* function = node.try_as<FuncExpr>()) {
 			if (function->funcretset
-				|| is_mmsearch_funcid(function->funcid, *proof.oids)) {
-				proof.invalid = true;
+				|| is_mmsearch_funcid(function->funcid, *validation_state.oids)) {
+				validation_state.invalid = true;
 				return pg_walk_step::stop;
 			}
 		}
 		if (OpExpr* operation = node.try_as<OpExpr>();
 			operation != nullptr && operation->opretset) {
-			proof.invalid = true;
+			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
 		Var* variable = node.try_as<Var>();
 		if (variable == nullptr) return pg_walk_step::descend;
 		if (!bioseq_is_concrete_rte_varno(variable->varno)
-			|| variable->varno != proof.rel->relid
+			|| variable->varno != validation_state.rel->relid
 			|| variable->varattno <= 0 || variable->varlevelsup != 0
 			|| !bms_is_empty(variable->varnullingrels)) {
-			proof.invalid = true;
+			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
-		if (variable->vartype == proof.oids->bioseq_seq_type_oid) {
+		if (variable->vartype == validation_state.oids->bioseq_seq_type_oid) {
 			bool duplicate = false;
-			for (Var* existing : postgres_list<Var>(proof.sequence_vars)) {
+			for (Var* existing : postgres_list<Var>(validation_state.sequence_vars)) {
 				if (equal(existing, variable)) {
 					duplicate = true;
 					break;
 				}
 			}
-			if (!duplicate) proof.sequence_vars = lappend(
-				proof.sequence_vars, variable);
+			if (!duplicate) validation_state.sequence_vars = lappend(
+				validation_state.sequence_vars, variable);
 		}
 		return pg_walk_step::skip_subtree;
 	}
@@ -10766,7 +10768,7 @@ base_local_sequence_typmod_resolution(
 	}
 
 	/* Raw Vars/Consts/Params and opaque sequence-producing arms are legal
-	 * leaves.  A concrete descriptor proves their dispatch type.  An erased
+	 * leaves.  A concrete descriptor identifies their dispatch type.  An erased
 	 * opaque leaf is neutral only when an enclosing CASE/COALESCE supplies a
 	 * concrete sibling; it cannot be the root of an owned operand. */
 	const int32 descriptor = exprTypmod(expression);
@@ -10776,7 +10778,7 @@ base_local_sequence_typmod_resolution(
 }
 
 [[nodiscard]] static std::optional<base_local_mmsearch_operand_resolution>
-prove_base_local_mmsearch_operand(
+resolve_base_local_mmsearch_operand(
 		Node* expression, RelOptInfo* rel, const bioseq_stub_oids& oids,
 		const bool require_sequence_var) {
 	if (expression == nullptr || rel == nullptr
@@ -10815,7 +10817,7 @@ struct base_local_mmsearch_ownership {
 };
 
 [[nodiscard]] static std::optional<base_local_mmsearch_ownership>
-prove_base_local_mmsearch_ownership(
+resolve_base_local_mmsearch_ownership(
 		FuncExpr* function, RelOptInfo* rel, Relids param_relids,
 		const bioseq_stub_oids& oids) {
 	if (function == nullptr || rel == nullptr
@@ -10823,7 +10825,7 @@ prove_base_local_mmsearch_ownership(
 	pg_first_two_node_arguments arguments = get_pg_first_two_arguments_if_arity_between(
 		*function, 2, 3);
 	if (!arguments.is_present()) return std::nullopt;
-	auto target = prove_base_local_mmsearch_operand(
+	auto target = resolve_base_local_mmsearch_operand(
 		arguments.first_argument, rel, oids,
 		/*require_sequence_var=*/true);
 	if (!target.has_value()) return std::nullopt;
@@ -10873,7 +10875,7 @@ prove_base_local_mmsearch_ownership(
 		result.query_is_outer_var = true;
 		return result;
 	}
-	auto local_query = prove_base_local_mmsearch_operand(
+	auto local_query = resolve_base_local_mmsearch_operand(
 		query, rel, oids, /*require_sequence_var=*/false);
 	if (!local_query.has_value()
 		|| !mmsearch_typmods_share_alphabet(
@@ -11283,11 +11285,11 @@ struct per_row_descendant_ownership {
 	return recipe;
 }
 
-static void per_row_prove_descendant_exact_owner(
+static void per_row_analyze_descendant_exact_owner(
 		Path* path, Node* helper_argument,
-		per_row_descendant_ownership& proof) {
+		per_row_descendant_ownership& ownership) {
 	if (path == nullptr || helper_argument == nullptr
-		|| proof.invalid_owner_abi || proof.unsupported_wrapper) return;
+		|| ownership.invalid_owner_abi || ownership.unsupported_wrapper) return;
 	check_stack_depth();
 	if (IsA(path, CustomPath)) {
 		auto* custom = reinterpret_cast<CustomPath*>(path);
@@ -11295,31 +11297,31 @@ static void per_row_prove_descendant_exact_owner(
 			|| custom->methods == &bioseq_per_row_join_path_methods;
 		if (known_owner) {
 			Node* recipe = per_row_known_path_owner_recipe(
-				custom, proof.invalid_owner_abi);
-			if (proof.invalid_owner_abi) return;
+				custom, ownership.invalid_owner_abi);
+			if (ownership.invalid_owner_abi) return;
 			if (recipe != nullptr && equal(helper_argument, recipe)) {
-				++proof.matches;
-				proof.owner = custom;
+				++ownership.matches;
+				ownership.owner = custom;
 			}
 		} else if (custom->methods != &bioseq_column_scan_path_methods
 			&& custom->methods != &bioseq_slice_project_path_methods()) {
 			/* Unknown CustomPaths can hide an evaluation/projection frontier in
 			 * provider-private state.  Never infer helper provenance through one. */
-			proof.unsupported_wrapper = true;
+			ownership.unsupported_wrapper = true;
 			return;
 		}
 		for (Path* child : postgres_list<Path>(custom->custom_paths)) {
-			per_row_prove_descendant_exact_owner(
-				child, helper_argument, proof);
+			per_row_analyze_descendant_exact_owner(
+				child, helper_argument, ownership);
 		}
 		return;
 	}
-	auto descend_join = [helper_argument, &proof](JoinPath* join) {
+	auto descend_join = [helper_argument, &ownership](JoinPath* join) {
 		if (join == nullptr) return;
-		per_row_prove_descendant_exact_owner(
-			join->outerjoinpath, helper_argument, proof);
-		per_row_prove_descendant_exact_owner(
-			join->innerjoinpath, helper_argument, proof);
+		per_row_analyze_descendant_exact_owner(
+			join->outerjoinpath, helper_argument, ownership);
+		per_row_analyze_descendant_exact_owner(
+			join->innerjoinpath, helper_argument, ownership);
 	};
 	if (IsA(path, NestPath)) {
 		descend_join(&reinterpret_cast<NestPath*>(path)->jpath);
@@ -11333,9 +11335,9 @@ static void per_row_prove_descendant_exact_owner(
 		descend_join(&reinterpret_cast<HashPath*>(path)->jpath);
 		return;
 	}
-	auto descend_one = [helper_argument, &proof](Path* child) {
-		per_row_prove_descendant_exact_owner(
-			child, helper_argument, proof);
+	auto descend_one = [helper_argument, &ownership](Path* child) {
+		per_row_analyze_descendant_exact_owner(
+			child, helper_argument, ownership);
 	};
 	if (IsA(path, ProjectionPath)) {
 		descend_one(reinterpret_cast<ProjectionPath*>(path)->subpath);
@@ -11373,10 +11375,10 @@ static void per_row_prove_descendant_exact_owner(
 		descend_one(reinterpret_cast<GatherMergePath*>(path)->subpath);
 		return;
 	}
-	auto descend_list = [helper_argument, &proof](List* paths) {
+	auto descend_list = [helper_argument, &ownership](List* paths) {
 		for (Path* child : postgres_list<Path>(paths)) {
-			per_row_prove_descendant_exact_owner(
-				child, helper_argument, proof);
+			per_row_analyze_descendant_exact_owner(
+				child, helper_argument, ownership);
 		}
 	};
 	if (IsA(path, AppendPath)) {
@@ -11392,7 +11394,7 @@ static void per_row_prove_descendant_exact_owner(
 	if (path->parent == nullptr
 		|| (path->parent->reloptkind != RELOPT_BASEREL
 			&& path->parent->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
-		proof.unsupported_wrapper = true;
+		ownership.unsupported_wrapper = true;
 	}
 }
 
@@ -11748,10 +11750,10 @@ enum exact_parameterized_bmo_owner_rejection : std::uint32_t {
 };
 
 static inline void reject_exact_parameterized_bmo_owner(
-		exact_parameterized_bmo_ownership& proof,
+		exact_parameterized_bmo_ownership& ownership,
 		const exact_parameterized_bmo_owner_rejection reason) noexcept {
-	proof.invalid = true;
-	proof.rejection_mask |= static_cast<std::uint32_t>(reason);
+	ownership.invalid = true;
+	ownership.rejection_mask |= static_cast<std::uint32_t>(reason);
 }
 
 [[nodiscard]] static bool foreign_known_join_owner_is_valid(
@@ -11861,10 +11863,10 @@ static inline void reject_exact_parameterized_bmo_owner(
 
 static void count_exact_parameterized_bmo_owners(
 		PlannerInfo* root, Path* path, RestrictInfo* restriction,
-		exact_parameterized_bmo_ownership& proof,
+		exact_parameterized_bmo_ownership& ownership,
 		const bool admit_known_wrapper_owner = false) {
 	if (root == nullptr || path == nullptr || restriction == nullptr
-		|| proof.invalid) return;
+		|| ownership.invalid) return;
 	check_stack_depth();
 	if (admit_known_wrapper_owner) {
 		for (Node* expression : postgres_list<Node>(
@@ -11872,7 +11874,7 @@ static void count_exact_parameterized_bmo_owners(
 			if (count_mmsearch_occurrences(
 					expression, get_cached_stub_oids()) != 0u) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_nested_join_clause);
+					ownership, k_exact_bmo_nested_join_clause);
 				return;
 			}
 		}
@@ -11894,7 +11896,7 @@ static void count_exact_parameterized_bmo_owners(
 			}
 			if (!owned_here) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_nested_join_clause);
+					ownership, k_exact_bmo_nested_join_clause);
 				return;
 			}
 		}
@@ -11906,7 +11908,7 @@ static void count_exact_parameterized_bmo_owners(
 			/* A BioseqColumnScan is a leaf.  Children would make the owner count
 			 * incomplete and therefore invalidate this internal path ABI. */
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_base_scan_has_children);
+				ownership, k_exact_bmo_base_scan_has_children);
 			return;
 		}
 		bool owns_expected_restriction = false;
@@ -11923,13 +11925,13 @@ static void count_exact_parameterized_bmo_owners(
 			if (custom->custom_restrictinfo == NIL) {
 				if (recipe != nullptr || invalid_owner_abi) {
 					reject_exact_parameterized_bmo_owner(
-						proof, k_exact_bmo_owner_abi);
+						ownership, k_exact_bmo_owner_abi);
 					return;
 				}
 			} else {
 				if (recipe == nullptr || invalid_owner_abi) {
 					reject_exact_parameterized_bmo_owner(
-						proof, k_exact_bmo_owner_abi);
+						ownership, k_exact_bmo_owner_abi);
 					return;
 				}
 				for (RestrictInfo* owned : postgres_list<RestrictInfo>(
@@ -11940,7 +11942,7 @@ static void count_exact_parameterized_bmo_owners(
 						|| try_cast_pg_node<FuncExpr>(reinterpret_cast<Node*>(
 							owned->clause)) == nullptr) {
 						reject_exact_parameterized_bmo_owner(
-								proof, k_exact_bmo_owner_abi);
+								ownership, k_exact_bmo_owner_abi);
 						return;
 					}
 				}
@@ -11953,13 +11955,13 @@ static void count_exact_parameterized_bmo_owners(
 					|| !std::isfinite(custom->path.total_cost)
 					|| custom->path.total_cost < custom->path.startup_cost) {
 					reject_exact_parameterized_bmo_owner(
-						proof, k_exact_bmo_owner_abi);
+						ownership, k_exact_bmo_owner_abi);
 					return;
 				}
 			}
 			if (list_length(custom->custom_private) < 2) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_owner_abi);
+					ownership, k_exact_bmo_owner_abi);
 				return;
 			}
 			for (int index = 0; index < 2; ++index) {
@@ -11967,7 +11969,7 @@ static void count_exact_parameterized_bmo_owners(
 					list_nth(custom->custom_private, index));
 				if (residual_node != nullptr && !IsA(residual_node, List)) {
 					reject_exact_parameterized_bmo_owner(
-						proof, k_exact_bmo_owner_abi);
+						ownership, k_exact_bmo_owner_abi);
 					return;
 				}
 				for (RestrictInfo* residual : postgres_list<RestrictInfo>(
@@ -11977,7 +11979,7 @@ static void count_exact_parameterized_bmo_owners(
 							reinterpret_cast<Node*>(residual->clause),
 							get_cached_stub_oids()) != 0u) {
 						reject_exact_parameterized_bmo_owner(
-								proof, k_exact_bmo_nested_join_clause);
+								ownership, k_exact_bmo_nested_join_clause);
 						return;
 					}
 				}
@@ -11996,17 +11998,17 @@ static void count_exact_parameterized_bmo_owners(
 				custom, invalid_owner_abi);
 			if (invalid_owner_abi || recipe == nullptr) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_owner_abi);
+					ownership, k_exact_bmo_owner_abi);
 				return;
 			}
 			if (exact_restriction_count != 1u) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_restriction_multiplicity);
+					ownership, k_exact_bmo_restriction_multiplicity);
 				return;
 			}
 			if (custom->path.param_info == nullptr) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_missing_param_info);
+					ownership, k_exact_bmo_missing_param_info);
 				return;
 			}
 			std::size_t ppi_exact_count = 0u;
@@ -12017,12 +12019,12 @@ static void count_exact_parameterized_bmo_owners(
 			}
 			if (ppi_exact_count != 1u) {
 				reject_exact_parameterized_bmo_owner(
-					proof, ppi_exact_count == 0u
+					ownership, ppi_exact_count == 0u
 						? k_exact_bmo_missing_ppi_clause
 						: k_exact_bmo_restriction_multiplicity);
 				return;
 			}
-			++proof.matches;
+			++ownership.matches;
 			return;
 		}
 		if (custom->methods == &bioseq_column_scan_path_methods) return;
@@ -12035,46 +12037,46 @@ static void count_exact_parameterized_bmo_owners(
 		if (!known_join_owner && !known_slice_wrapper) {
 			/* Unknown CustomPaths can hide restrictions or private children. */
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_unknown_custom_path);
+				ownership, k_exact_bmo_unknown_custom_path);
 			return;
 		}
 		if (admit_known_wrapper_owner && known_join_owner
 			&& !foreign_known_join_owner_is_valid(root, custom)) {
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_known_wrapper_abi);
+				ownership, k_exact_bmo_known_wrapper_abi);
 			return;
 		}
 		if (owns_expected_restriction) {
-			++proof.wrapper_owns_expected;
-			proof.wrapper_method_mask |= custom->methods
+			++ownership.wrapper_owns_expected;
+			ownership.wrapper_method_mask |= custom->methods
 				== &bioseq_batch_join_path_methods ? 1u
 				: (custom->methods == &bioseq_per_row_join_path_methods
 					? 2u : (known_slice_wrapper ? 4u : 0u));
-			proof.wrapper_restriction_count += static_cast<std::size_t>(
+			ownership.wrapper_restriction_count += static_cast<std::size_t>(
 				list_length(custom->custom_restrictinfo));
-			proof.wrapper_child_count += static_cast<std::size_t>(
+			ownership.wrapper_child_count += static_cast<std::size_t>(
 				list_length(custom->custom_paths));
 			Node* private_version = custom->custom_private == NIL ? nullptr
 				: reinterpret_cast<Node*>(linitial(custom->custom_private));
-			proof.wrapper_version = private_version != nullptr
+			ownership.wrapper_version = private_version != nullptr
 				&& IsA(private_version, Integer)
 				? static_cast<std::size_t>(intVal(private_version)) : 0u;
-			proof.expected_rinfo_serial = static_cast<std::size_t>(
+			ownership.expected_rinfo_serial = static_cast<std::size_t>(
 				restriction->rinfo_serial);
-			proof.wrapper_parent_relids_low = exact_bmo_audit_relids_low(
+			ownership.wrapper_parent_relids_low = exact_bmo_audit_relids_low(
 				custom->path.parent == nullptr
 					? nullptr : custom->path.parent->relids);
 			if (list_length(custom->custom_paths) >= 1) {
 				Path* child = reinterpret_cast<Path*>(
 					linitial(custom->custom_paths));
-				proof.wrapper_child0_relids_low = exact_bmo_audit_relids_low(
+				ownership.wrapper_child0_relids_low = exact_bmo_audit_relids_low(
 					child == nullptr || child->parent == nullptr
 						? nullptr : child->parent->relids);
 			}
 			if (list_length(custom->custom_paths) >= 2) {
 				Path* child = reinterpret_cast<Path*>(
 					lsecond(custom->custom_paths));
-				proof.wrapper_child1_relids_low = exact_bmo_audit_relids_low(
+				ownership.wrapper_child1_relids_low = exact_bmo_audit_relids_low(
 					child == nullptr || child->parent == nullptr
 						? nullptr : child->parent->relids);
 			}
@@ -12090,9 +12092,9 @@ static void count_exact_parameterized_bmo_owners(
 				: nullptr;
 			Var* expected_target_var = try_cast_pg_node<Var>(expected_target);
 			Var* expected_query_var = try_cast_pg_node<Var>(expected_query);
-			proof.expected_target_varno = expected_target_var == nullptr
+			ownership.expected_target_varno = expected_target_var == nullptr
 				? 0u : static_cast<std::size_t>(expected_target_var->varno);
-			proof.expected_query_varno = expected_query_var == nullptr
+			ownership.expected_query_varno = expected_query_var == nullptr
 				? 0u : static_cast<std::size_t>(expected_query_var->varno);
 			Node* private_target = nullptr;
 			Node* private_query = nullptr;
@@ -12104,30 +12106,30 @@ static void count_exact_parameterized_bmo_owners(
 			}
 			Var* private_target_var = try_cast_pg_node<Var>(private_target);
 			Var* private_query_var = try_cast_pg_node<Var>(private_query);
-			proof.wrapper_private_target_varno = private_target_var == nullptr
+			ownership.wrapper_private_target_varno = private_target_var == nullptr
 				? 0u : static_cast<std::size_t>(private_target_var->varno);
-			proof.wrapper_private_query_varno = private_query_var == nullptr
+			ownership.wrapper_private_query_varno = private_query_var == nullptr
 				? 0u : static_cast<std::size_t>(private_query_var->varno);
-			proof.wrapper_private_target_equal =
+			ownership.wrapper_private_target_equal =
 				private_target != nullptr && equal(private_target, expected_target)
 					? 1u : 0u;
-			proof.wrapper_private_query_equal =
+			ownership.wrapper_private_query_equal =
 				private_query != nullptr && equal(private_query, expected_query)
 					? 1u : 0u;
 			std::size_t owner_index = 0u;
 			for (RestrictInfo* owned : postgres_list<RestrictInfo>(
 					custom->custom_restrictinfo)) {
-				if (owned == restriction) ++proof.wrapper_pointer_matches;
+				if (owned == restriction) ++ownership.wrapper_pointer_matches;
 				if (owned != nullptr && owned->rinfo_serial > 0
 					&& owned->rinfo_serial == restriction->rinfo_serial) {
-					++proof.wrapper_serial_matches;
+					++ownership.wrapper_serial_matches;
 				}
 				if (owned != nullptr
 					&& equal(owned->clause, restriction->clause)) {
-					++proof.wrapper_clause_matches;
+					++ownership.wrapper_clause_matches;
 				}
 				if (same_planner_restriction_identity(owned, restriction)) {
-					proof.wrapper_rinfo_serial = static_cast<std::size_t>(
+					ownership.wrapper_rinfo_serial = static_cast<std::size_t>(
 						owned->rinfo_serial);
 				}
 				FuncExpr* owned_mmsearch = owned == nullptr ? nullptr
@@ -12142,21 +12144,21 @@ static void count_exact_parameterized_bmo_owners(
 					? try_cast_pg_node<Var>(reinterpret_cast<Node*>(
 						lsecond(owned_mmsearch->args))) : nullptr;
 				if (owner_index == 0u) {
-					proof.wrapper_owner0_target_varno = owned_target == nullptr
+					ownership.wrapper_owner0_target_varno = owned_target == nullptr
 						? 0u : static_cast<std::size_t>(owned_target->varno);
-					proof.wrapper_owner0_query_varno = owned_query == nullptr
+					ownership.wrapper_owner0_query_varno = owned_query == nullptr
 						? 0u : static_cast<std::size_t>(owned_query->varno);
 				} else if (owner_index == 1u) {
-					proof.wrapper_owner1_target_varno = owned_target == nullptr
+					ownership.wrapper_owner1_target_varno = owned_target == nullptr
 						? 0u : static_cast<std::size_t>(owned_target->varno);
-					proof.wrapper_owner1_query_varno = owned_query == nullptr
+					ownership.wrapper_owner1_query_varno = owned_query == nullptr
 						? 0u : static_cast<std::size_t>(owned_query->varno);
 				}
 				++owner_index;
 			}
 			if (!admit_known_wrapper_owner || !known_join_owner) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_known_wrapper_owns_clause);
+					ownership, k_exact_bmo_known_wrapper_owns_clause);
 				return;
 			}
 			bool invalid_wrapper_abi = false;
@@ -12254,13 +12256,13 @@ static void count_exact_parameterized_bmo_owners(
 				|| !std::isfinite(custom->path.total_cost)
 				|| custom->path.total_cost < custom->path.startup_cost) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_known_wrapper_abi);
+					ownership, k_exact_bmo_known_wrapper_abi);
 				return;
 			}
-			++proof.matches;
+			++ownership.matches;
 			for (Path* child : postgres_list<Path>(custom->custom_paths)) {
 				count_exact_parameterized_bmo_owners(
-					root, child, restriction, proof,
+					root, child, restriction, ownership,
 					admit_known_wrapper_owner);
 			}
 			return;
@@ -12270,17 +12272,17 @@ static void count_exact_parameterized_bmo_owners(
 			&& per_row_known_path_owner_recipe(
 				custom, invalid_wrapper_abi) == nullptr) {
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_known_wrapper_abi);
+				ownership, k_exact_bmo_known_wrapper_abi);
 			return;
 		}
 		if (known_slice_wrapper && list_length(custom->custom_paths) != 1) {
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_known_wrapper_abi);
+				ownership, k_exact_bmo_known_wrapper_abi);
 			return;
 		}
 		for (Path* child : postgres_list<Path>(custom->custom_paths)) {
 			count_exact_parameterized_bmo_owners(
-				root, child, restriction, proof,
+				root, child, restriction, ownership,
 				admit_known_wrapper_owner);
 		}
 		return;
@@ -12295,7 +12297,7 @@ static void count_exact_parameterized_bmo_owners(
 					reinterpret_cast<Node*>(nested->clause),
 					get_cached_stub_oids()) != 0u) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_nested_join_clause);
+					ownership, k_exact_bmo_nested_join_clause);
 				return;
 			}
 			nested_owns_expected = nested_owns_expected
@@ -12312,21 +12314,21 @@ static void count_exact_parameterized_bmo_owners(
 						reinterpret_cast<Node*>(algorithm_clause->clause),
 						get_cached_stub_oids()) != 0u) {
 					reject_exact_parameterized_bmo_owner(
-						proof, k_exact_bmo_nested_join_clause);
+						ownership, k_exact_bmo_nested_join_clause);
 					return;
 				}
 			}
 		}
 		if (nested_owns_expected) {
 			reject_exact_parameterized_bmo_owner(
-				proof, k_exact_bmo_nested_join_clause);
+				ownership, k_exact_bmo_nested_join_clause);
 			return;
 		}
 		count_exact_parameterized_bmo_owners(
-			root, join->outerjoinpath, restriction, proof,
+			root, join->outerjoinpath, restriction, ownership,
 			admit_known_wrapper_owner);
 		count_exact_parameterized_bmo_owners(
-			root, join->innerjoinpath, restriction, proof,
+			root, join->innerjoinpath, restriction, ownership,
 			admit_known_wrapper_owner);
 		return;
 	}
@@ -12352,14 +12354,14 @@ static void count_exact_parameterized_bmo_owners(
 	}
 	if (unary != nullptr) {
 		count_exact_parameterized_bmo_owners(
-			root, unary, restriction, proof, admit_known_wrapper_owner);
+			root, unary, restriction, ownership, admit_known_wrapper_owner);
 		return;
 	}
 	if (IsA(path, AppendPath)) {
 		for (Path* child : postgres_list<Path>(
 				reinterpret_cast<AppendPath*>(path)->subpaths)) {
 			count_exact_parameterized_bmo_owners(
-				root, child, restriction, proof,
+				root, child, restriction, ownership,
 				admit_known_wrapper_owner);
 		}
 		return;
@@ -12368,7 +12370,7 @@ static void count_exact_parameterized_bmo_owners(
 		for (Path* child : postgres_list<Path>(
 				reinterpret_cast<MergeAppendPath*>(path)->subpaths)) {
 			count_exact_parameterized_bmo_owners(
-				root, child, restriction, proof,
+				root, child, restriction, ownership,
 				admit_known_wrapper_owner);
 		}
 		return;
@@ -12383,19 +12385,19 @@ static void count_exact_parameterized_bmo_owners(
 			if (count_mmsearch_occurrences(
 					qual, get_cached_stub_oids()) != 0u) {
 				reject_exact_parameterized_bmo_owner(
-					proof, k_exact_bmo_nested_join_clause);
+					ownership, k_exact_bmo_nested_join_clause);
 				return;
 			}
 		}
 		return;
 	}
-	/* Closed-world proof: these are the only childless core Path variants
+	/* Closed-world ownership: these are the only childless core Path variants
 	 * admitted as leaves.  Any other tag may hide a child/owner layout this
 	 * narrow fallback does not understand. */
 	if (IsA(path, Path) || IsA(path, IndexPath)
 		|| IsA(path, TidPath) || IsA(path, TidRangePath)) return;
 	reject_exact_parameterized_bmo_owner(
-		proof, k_exact_bmo_unknown_core_path);
+		ownership, k_exact_bmo_unknown_core_path);
 }
 
 enum exact_parameterized_bmo_reconstruction_rejection : std::uint32_t {
@@ -12406,7 +12408,7 @@ enum exact_parameterized_bmo_reconstruction_rejection : std::uint32_t {
 	k_exact_bmo_reconstruct_required_outer = 1u << 4,
 	k_exact_bmo_reconstruct_base_mmsearch = 1u << 5,
 	k_exact_bmo_reconstruct_path_shape = 1u << 6,
-	k_exact_bmo_reconstruct_owner_proof = 1u << 7,
+	k_exact_bmo_reconstruct_owner_analysis = 1u << 7,
 	k_exact_bmo_reconstruct_owner_multiplicity = 1u << 8,
 	k_exact_bmo_reconstruct_ppi = 1u << 9,
 	k_exact_bmo_reconstruct_owner_abi = 1u << 10,
@@ -12582,14 +12584,14 @@ struct exact_parameterized_bmo_reconstruction_audit {
 		|| list_length(custom->custom_private) != 3) {
 		return reject(k_exact_bmo_reconstruct_path_shape);
 	}
-	exact_parameterized_bmo_ownership owner_proof{};
+	exact_parameterized_bmo_ownership owner_analysis{};
 	count_exact_parameterized_bmo_owners(
-		root, candidate, restriction, owner_proof);
-	if (owner_proof.invalid) {
-		audit.rejection_mask |= owner_proof.rejection_mask << 16;
-		return reject(k_exact_bmo_reconstruct_owner_proof);
+		root, candidate, restriction, owner_analysis);
+	if (owner_analysis.invalid) {
+		audit.rejection_mask |= owner_analysis.rejection_mask << 16;
+		return reject(k_exact_bmo_reconstruct_owner_analysis);
 	}
-	if (owner_proof.matches != 1u) {
+	if (owner_analysis.matches != 1u) {
 		return reject(k_exact_bmo_reconstruct_owner_multiplicity);
 	}
 	const std::size_t expected_owner_count = 1u
@@ -12830,7 +12832,7 @@ struct exact_parameterized_bmo_retainer_audit {
 	std::uint32_t target_owner_rejection_mask = 0u;
 	std::uint32_t target_abi_mismatch_mask = 0u;
 	std::uint32_t target_ppi_mismatch_mask = 0u;
-	std::uint32_t target_compatibility_mismatch_mask = 0u;
+	std::uint32_t target_validation_mismatch_mask = 0u;
 	std::uint32_t reconstructed_bmo_rejection_mask = 0u;
 	std::uint32_t reconstructed_owner_abi_mismatch_mask = 0u;
 	std::size_t reconstructed_expected_owner_count = 0u;
@@ -12891,9 +12893,9 @@ enum exact_parameterized_bmo_retainer_ppi_mismatch : std::uint32_t {
 	k_exact_bmo_retainer_multiple_ppi_identities = 1u << 5,
 };
 
-enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
+enum exact_parameterized_bmo_retainer_validation_mismatch : std::uint32_t {
 	k_exact_bmo_retainer_candidate_parent = 1u << 0,
-	k_exact_bmo_retainer_candidate_owner_proof = 1u << 1,
+	k_exact_bmo_retainer_candidate_owner_analysis = 1u << 1,
 	k_exact_bmo_retainer_candidate_owner_multiplicity = 1u << 2,
 	k_exact_bmo_retainer_candidate_unparameterized = 1u << 3,
 	k_exact_bmo_retainer_candidate_missing_query_relid = 1u << 4,
@@ -12964,7 +12966,7 @@ enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
 				if (calls != 1u) foreign_root_mmsearch = true;
 			} else if (calls != 0u) {
 				/* A copied/equivalent rendezvous clause cannot be removed by the
-				 * exact pointer proof, and would remain an executable SQL stub. */
+				 * exact pointer identity, and would remain an executable SQL stub. */
 				foreign_root_mmsearch = true;
 			}
 		}
@@ -13030,52 +13032,52 @@ enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
 		local_audit.outer_rejection_mask |= outer.rejection_mask;
 		local_audit.inner_rejection_mask |= inner.rejection_mask;
 		auto capture_wrapper_audit = [&local_audit](
-				exact_parameterized_bmo_ownership const& proof,
+				exact_parameterized_bmo_ownership const& ownership,
 				const std::uint32_t side) {
-			if (proof.wrapper_owns_expected == 0u) return;
+			if (ownership.wrapper_owns_expected == 0u) return;
 			local_audit.wrapper_side_mask |= side;
-			local_audit.wrapper_owns_expected += proof.wrapper_owns_expected;
-			local_audit.wrapper_method_mask |= proof.wrapper_method_mask;
+			local_audit.wrapper_owns_expected += ownership.wrapper_owns_expected;
+			local_audit.wrapper_method_mask |= ownership.wrapper_method_mask;
 			if (local_audit.wrapper_expected_serial == 0u) {
-				local_audit.wrapper_version = proof.wrapper_version;
+				local_audit.wrapper_version = ownership.wrapper_version;
 				local_audit.wrapper_restriction_count =
-					proof.wrapper_restriction_count;
-				local_audit.wrapper_child_count = proof.wrapper_child_count;
+					ownership.wrapper_restriction_count;
+				local_audit.wrapper_child_count = ownership.wrapper_child_count;
 				local_audit.wrapper_pointer_matches =
-					proof.wrapper_pointer_matches;
+					ownership.wrapper_pointer_matches;
 				local_audit.wrapper_serial_matches =
-					proof.wrapper_serial_matches;
+					ownership.wrapper_serial_matches;
 				local_audit.wrapper_clause_matches =
-					proof.wrapper_clause_matches;
+					ownership.wrapper_clause_matches;
 				local_audit.wrapper_expected_serial =
-					proof.expected_rinfo_serial;
-				local_audit.wrapper_owned_serial = proof.wrapper_rinfo_serial;
+					ownership.expected_rinfo_serial;
+				local_audit.wrapper_owned_serial = ownership.wrapper_rinfo_serial;
 				local_audit.wrapper_expected_target_varno =
-					proof.expected_target_varno;
+					ownership.expected_target_varno;
 				local_audit.wrapper_expected_query_varno =
-					proof.expected_query_varno;
+					ownership.expected_query_varno;
 				local_audit.wrapper_private_target_varno =
-					proof.wrapper_private_target_varno;
+					ownership.wrapper_private_target_varno;
 				local_audit.wrapper_private_query_varno =
-					proof.wrapper_private_query_varno;
+					ownership.wrapper_private_query_varno;
 				local_audit.wrapper_private_target_equal =
-					proof.wrapper_private_target_equal;
+					ownership.wrapper_private_target_equal;
 				local_audit.wrapper_private_query_equal =
-					proof.wrapper_private_query_equal;
+					ownership.wrapper_private_query_equal;
 				local_audit.wrapper_owner0_target_varno =
-					proof.wrapper_owner0_target_varno;
+					ownership.wrapper_owner0_target_varno;
 				local_audit.wrapper_owner0_query_varno =
-					proof.wrapper_owner0_query_varno;
+					ownership.wrapper_owner0_query_varno;
 				local_audit.wrapper_owner1_target_varno =
-					proof.wrapper_owner1_target_varno;
+					ownership.wrapper_owner1_target_varno;
 				local_audit.wrapper_owner1_query_varno =
-					proof.wrapper_owner1_query_varno;
+					ownership.wrapper_owner1_query_varno;
 				local_audit.wrapper_parent_relids_low =
-					proof.wrapper_parent_relids_low;
+					ownership.wrapper_parent_relids_low;
 				local_audit.wrapper_child0_relids_low =
-					proof.wrapper_child0_relids_low;
+					ownership.wrapper_child0_relids_low;
 				local_audit.wrapper_child1_relids_low =
-					proof.wrapper_child1_relids_low;
+					ownership.wrapper_child1_relids_low;
 			}
 		};
 		capture_wrapper_audit(outer, 1u);
@@ -13104,7 +13106,7 @@ enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
 		}
 	}
 	/* Core does not necessarily form a NestPath from a custom parameterized
-	 * baserel path.  If no incumbent proves ownership, construct that exact
+	 * baserel path.  If no incumbent validates ownership, construct that exact
 	 * normal-cost shape from the target input's BMO path and the other input's
 	 * cheapest compatible path. */
 	if (retained.is_empty()) {
@@ -13286,63 +13288,63 @@ enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
 					}
 					(void)candidate_pointer_matches;
 				}
-				exact_parameterized_bmo_ownership candidate_proof{};
+				exact_parameterized_bmo_ownership candidate_analysis{};
 				count_exact_parameterized_bmo_owners(
-					root, candidate, restriction, candidate_proof);
+					root, candidate, restriction, candidate_analysis);
 				local_audit.target_owner_rejection_mask |=
-					candidate_proof.rejection_mask;
-				if (provider_has_query && candidate_proof.matches != 0u) {
+					candidate_analysis.rejection_mask;
+				if (provider_has_query && candidate_analysis.matches != 0u) {
 					++local_audit.available_bmo_paths;
 				}
 				Relids required = candidate == nullptr
 					? nullptr : PATH_REQ_OUTER(candidate);
 				if (candidate_bmo_tags != 0u
-					|| candidate_proof.matches != 0u) {
+					|| candidate_analysis.matches != 0u) {
 					if (candidate == nullptr || candidate->parent != target_input) {
-						local_audit.target_compatibility_mismatch_mask |=
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_parent;
 					}
-					if (candidate_proof.invalid) {
-						local_audit.target_compatibility_mismatch_mask |=
-							k_exact_bmo_retainer_candidate_owner_proof;
+					if (candidate_analysis.invalid) {
+						local_audit.target_validation_mismatch_mask |=
+							k_exact_bmo_retainer_candidate_owner_analysis;
 					}
-					if (candidate_proof.matches != 1u) {
-						local_audit.target_compatibility_mismatch_mask |=
+					if (candidate_analysis.matches != 1u) {
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_owner_multiplicity;
 					}
 					if (required == nullptr) {
-						local_audit.target_compatibility_mismatch_mask |=
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_unparameterized;
 					} else if (provider_has_query) {
 						if (!bms_is_member(
 								static_cast<int>(query_var->varno), required)) {
-							local_audit.target_compatibility_mismatch_mask |=
+							local_audit.target_validation_mismatch_mask |=
 								k_exact_bmo_retainer_candidate_missing_query_relid;
 						}
 						if (!bms_is_subset(required, provider_input->relids)) {
-							local_audit.target_compatibility_mismatch_mask |=
+							local_audit.target_validation_mismatch_mask |=
 								k_exact_bmo_retainer_candidate_foreign_required_outer;
 						}
 					}
 					if (candidate != nullptr && (candidate->parallel_aware
 						|| candidate->parallel_workers != 0)) {
-						local_audit.target_compatibility_mismatch_mask |=
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_parallel;
 					}
 					if (candidate != nullptr
 						&& !std::isfinite(candidate->total_cost)) {
-						local_audit.target_compatibility_mismatch_mask |=
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_nonfinite_cost;
 					}
 					if (candidate != nullptr && candidate->total_cost < 0) {
-						local_audit.target_compatibility_mismatch_mask |=
+						local_audit.target_validation_mismatch_mask |=
 							k_exact_bmo_retainer_candidate_negative_cost;
 					}
 				}
 				if (!provider_has_query
 					|| candidate == nullptr || candidate->parent != target_input
-					|| candidate_proof.invalid
-					|| candidate_proof.matches != 1u
+					|| candidate_analysis.invalid
+					|| candidate_analysis.matches != 1u
 					|| required == nullptr
 					|| !bms_is_member(
 						static_cast<int>(query_var->varno), required)
@@ -13465,42 +13467,42 @@ enum exact_parameterized_bmo_retainer_compatibility_mismatch : std::uint32_t {
 	return true;
 }
 
-static void per_row_prove_descendant_base_helper_owner(
+static void per_row_analyze_descendant_base_helper_owner(
 		Path* path, FuncExpr* helper,
-		per_row_base_helper_ownership& proof) {
-	if (path == nullptr || helper == nullptr || proof.invalid_owner_abi
-		|| proof.unsupported_wrapper) return;
+		per_row_base_helper_ownership& ownership) {
+	if (path == nullptr || helper == nullptr || ownership.invalid_owner_abi
+		|| ownership.unsupported_wrapper) return;
 	check_stack_depth();
 	if (IsA(path, CustomPath)) {
 		auto* custom = reinterpret_cast<CustomPath*>(path);
 		if (custom->methods == &bioseq_column_scan_path_methods) {
 			Node* recipe = per_row_base_scan_owner_recipe(
-				custom, proof.invalid_owner_abi);
-			if (proof.invalid_owner_abi) return;
+				custom, ownership.invalid_owner_abi);
+			if (ownership.invalid_owner_abi) return;
 			if (recipe != nullptr
 				&& (batch_join_match_helper_names_recipe(helper, recipe)
 					|| batch_join_match_helper_names_base_lineage(
 						helper, recipe, get_cached_stub_oids()))) {
-				++proof.matches;
-				proof.owner = custom;
+				++ownership.matches;
+				ownership.owner = custom;
 			}
 		} else if (custom->methods != &bioseq_batch_join_path_methods
 			&& custom->methods != &bioseq_per_row_join_path_methods
 			&& custom->methods != &bioseq_slice_project_path_methods()) {
-			proof.unsupported_wrapper = true;
+			ownership.unsupported_wrapper = true;
 			return;
 		}
 		for (Path* child : postgres_list<Path>(custom->custom_paths)) {
-			per_row_prove_descendant_base_helper_owner(child, helper, proof);
+			per_row_analyze_descendant_base_helper_owner(child, helper, ownership);
 		}
 		return;
 	}
-	auto descend_join = [helper, &proof](JoinPath* join) {
+	auto descend_join = [helper, &ownership](JoinPath* join) {
 		if (join == nullptr) return;
-		per_row_prove_descendant_base_helper_owner(
-			join->outerjoinpath, helper, proof);
-		per_row_prove_descendant_base_helper_owner(
-			join->innerjoinpath, helper, proof);
+		per_row_analyze_descendant_base_helper_owner(
+			join->outerjoinpath, helper, ownership);
+		per_row_analyze_descendant_base_helper_owner(
+			join->innerjoinpath, helper, ownership);
 	};
 	if (IsA(path, NestPath)) {
 		descend_join(&reinterpret_cast<NestPath*>(path)->jpath);
@@ -13535,7 +13537,7 @@ static void per_row_prove_descendant_base_helper_owner(
 		unary = reinterpret_cast<GatherMergePath*>(path)->subpath;
 	}
 	if (unary != nullptr) {
-		per_row_prove_descendant_base_helper_owner(unary, helper, proof);
+		per_row_analyze_descendant_base_helper_owner(unary, helper, ownership);
 		return;
 	}
 	List* children = NIL;
@@ -13546,19 +13548,19 @@ static void per_row_prove_descendant_base_helper_owner(
 	}
 	if (children != NIL) {
 		for (Path* child : postgres_list<Path>(children)) {
-			per_row_prove_descendant_base_helper_owner(child, helper, proof);
+			per_row_analyze_descendant_base_helper_owner(child, helper, ownership);
 		}
 		return;
 	}
 	if (path->parent == nullptr
 		|| (path->parent->reloptkind != RELOPT_BASEREL
 			&& path->parent->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
-		proof.unsupported_wrapper = true;
+		ownership.unsupported_wrapper = true;
 	}
 }
 
 [[nodiscard]] static bool per_row_collect_available_path_helpers(
-		Path* path, List* candidate_helpers, List* proven_inherited_helpers,
+		Path* path, List* candidate_helpers, List* validated_inherited_helpers,
 		List*& available) {
 	available = NIL;
 	if (path == nullptr) return false;
@@ -13570,33 +13572,33 @@ static void per_row_prove_descendant_base_helper_owner(
 		bool supplied = false;
 		std::size_t inherited_owner_matches = 0u;
 		if (per_row_expression_list_contains(
-				proven_inherited_helpers, identity)) {
-			per_row_descendant_ownership proof{};
-			per_row_prove_descendant_exact_owner(path, argument, proof);
-			if (proof.invalid_owner_abi || proof.unsupported_wrapper
-				|| proof.matches > 1u) return false;
-			if (proof.matches == 1u) {
-				if (proof.owner == nullptr
-					|| proof.owner->path.pathtarget == nullptr
+				validated_inherited_helpers, identity)) {
+			per_row_descendant_ownership ownership{};
+			per_row_analyze_descendant_exact_owner(path, argument, ownership);
+			if (ownership.invalid_owner_abi || ownership.unsupported_wrapper
+				|| ownership.matches > 1u) return false;
+			if (ownership.matches == 1u) {
+				if (ownership.owner == nullptr
+					|| ownership.owner->path.pathtarget == nullptr
 					|| !path_target_contains_expression(
-						proof.owner->path.pathtarget,
+						ownership.owner->path.pathtarget,
 						reinterpret_cast<Expr*>(identity))) return false;
 				supplied = true;
 			}
-			inherited_owner_matches = proof.matches;
+			inherited_owner_matches = ownership.matches;
 		}
-		per_row_base_helper_ownership base_proof{};
-		per_row_prove_descendant_base_helper_owner(path, helper, base_proof);
-		if (base_proof.invalid_owner_abi || base_proof.unsupported_wrapper
-			|| base_proof.matches > 1u
-			|| inherited_owner_matches + base_proof.matches > 1u) {
+		per_row_base_helper_ownership base_ownership{};
+		per_row_analyze_descendant_base_helper_owner(path, helper, base_ownership);
+		if (base_ownership.invalid_owner_abi || base_ownership.unsupported_wrapper
+			|| base_ownership.matches > 1u
+			|| inherited_owner_matches + base_ownership.matches > 1u) {
 			return false;
 		}
-		if (base_proof.matches == 1u) {
-			if (base_proof.owner == nullptr
-				|| base_proof.owner->path.pathtarget == nullptr
+		if (base_ownership.matches == 1u) {
+			if (base_ownership.owner == nullptr
+				|| base_ownership.owner->path.pathtarget == nullptr
 				|| !path_target_contains_expression(
-					base_proof.owner->path.pathtarget,
+					base_ownership.owner->path.pathtarget,
 					reinterpret_cast<Expr*>(identity))) return false;
 			supplied = true;
 		}
@@ -14032,12 +14034,12 @@ struct per_row_path_metadata_audit_visitor {
 
 [[nodiscard]] static bool per_row_normalize_private_path_spine(
 		PlannerInfo* root, Path* path, List* candidate_helpers,
-		List* proven_inherited_helpers, List* required_vars) {
+		List* validated_inherited_helpers, List* required_vars) {
 	if (root == nullptr || path == nullptr) return false;
 	check_stack_depth();
 	List* available = NIL;
 	if (!per_row_collect_available_path_helpers(
-			path, candidate_helpers, proven_inherited_helpers, available)
+			path, candidate_helpers, validated_inherited_helpers, available)
 		|| !per_row_pathkeys_use_available_helpers(
 			path, path->pathkeys, available)
 		|| (path->param_info != nullptr
@@ -14068,7 +14070,7 @@ struct per_row_path_metadata_audit_visitor {
 		for (Path* child : postgres_list<Path>(custom->custom_paths)) {
 			if (!per_row_normalize_private_path_spine(
 					root, child, candidate_helpers,
-					proven_inherited_helpers, required_vars)) return false;
+					validated_inherited_helpers, required_vars)) return false;
 		}
 		return true;
 	}
@@ -14092,10 +14094,10 @@ struct per_row_path_metadata_audit_visitor {
 					merge->path_mergeclauses)
 				|| !per_row_collect_available_path_helpers(
 					join->outerjoinpath, candidate_helpers,
-					proven_inherited_helpers, outer_available)
+					validated_inherited_helpers, outer_available)
 				|| !per_row_collect_available_path_helpers(
 					join->innerjoinpath, candidate_helpers,
-					proven_inherited_helpers, inner_available)
+					validated_inherited_helpers, inner_available)
 				|| !per_row_pathkeys_use_available_helpers(
 					join->outerjoinpath, merge->outersortkeys,
 					outer_available)
@@ -14110,10 +14112,10 @@ struct per_row_path_metadata_audit_visitor {
 		path->pathtarget = normalized_target;
 		return per_row_normalize_private_path_spine(
 				root, join->outerjoinpath, candidate_helpers,
-				proven_inherited_helpers, required_vars)
+				validated_inherited_helpers, required_vars)
 			&& per_row_normalize_private_path_spine(
 				root, join->innerjoinpath, candidate_helpers,
-				proven_inherited_helpers, required_vars);
+				validated_inherited_helpers, required_vars);
 	}
 
 	Path* unary = nullptr;
@@ -14156,7 +14158,7 @@ struct per_row_path_metadata_audit_visitor {
 		path->pathtarget = normalized_target;
 		if (!per_row_normalize_private_path_spine(
 				root, unary, candidate_helpers,
-				proven_inherited_helpers, required_vars)) return false;
+				validated_inherited_helpers, required_vars)) return false;
 		return !target_preserving
 			|| per_row_authoritative_targets_match(
 				root, path->pathtarget, unary->pathtarget);
@@ -14173,7 +14175,7 @@ struct per_row_path_metadata_audit_visitor {
 		for (Path* child : postgres_list<Path>(children)) {
 			if (!per_row_normalize_private_path_spine(
 					root, child, candidate_helpers,
-					proven_inherited_helpers, required_vars)) return false;
+					validated_inherited_helpers, required_vars)) return false;
 		}
 		return per_row_append_targets_are_ordinally_compatible(
 			path->pathtarget, children);
@@ -14193,10 +14195,10 @@ struct per_row_path_metadata_audit_visitor {
 /* SQL cannot deterministically retain each of these core wrapper Path types:
  * PostgreSQL commonly folds ProjectionPath, chooses Material/Memoize by cost,
  * and represents SELECT DISTINCT with an upper path rather than UniquePath.
- * This revoked integration seam constructs their real node types and invokes
- * the same exact-owner proof and copy-on-write propagation used by transformed
+ * This integration fixture constructs their real node types and invokes
+ * the same exact-owner analysis and copy-on-write propagation used by transformed
  * mmsearch planning.  A genuine nested sliced-mmsearch execution in the
- * acceptance suite separately proves final setrefs/executor helper binding. */
+ * acceptance suite separately validates final setrefs/executor helper binding. */
 [[nodiscard]] static CustomPathMethods const&
 match_helper_wrapper_probe_unknown_path_methods() noexcept {
 	static const CustomPathMethods methods{
@@ -14350,12 +14352,12 @@ match_helper_wrapper_propagation_probe() {
 	append->first_partial_path = 2;
 	append->limit_tuples = -1.0;
 
-	per_row_descendant_ownership proof{};
-	per_row_prove_descendant_exact_owner(
-		&append->path, recipe, proof);
-	const bool exact_owner_found = proof.matches == 1u
-		&& proof.owner == owner && !proof.invalid_owner_abi
-		&& !proof.unsupported_wrapper;
+	per_row_descendant_ownership ownership{};
+	per_row_analyze_descendant_exact_owner(
+		&append->path, recipe, ownership);
+	const bool exact_owner_found = ownership.matches == 1u
+		&& ownership.owner == owner && !ownership.invalid_owner_abi
+		&& !ownership.unsupported_wrapper;
 
 	bool applied = false;
 	bool invalid = false;
@@ -14449,29 +14451,29 @@ match_helper_wrapper_propagation_probe() {
 	duplicate_append->subpaths = list_make2(owner, second_owner);
 	duplicate_append->first_partial_path = 2;
 	duplicate_append->limit_tuples = -1.0;
-	per_row_descendant_ownership duplicate_proof{};
-	per_row_prove_descendant_exact_owner(
-		&duplicate_append->path, recipe, duplicate_proof);
-	const bool duplicate_owner_rejected = duplicate_proof.matches == 2u
-		&& !duplicate_proof.invalid_owner_abi
-		&& !duplicate_proof.unsupported_wrapper;
+	per_row_descendant_ownership duplicate_ownership{};
+	per_row_analyze_descendant_exact_owner(
+		&duplicate_append->path, recipe, duplicate_ownership);
+	const bool duplicate_owner_rejected = duplicate_ownership.matches == 2u
+		&& !duplicate_ownership.invalid_owner_abi
+		&& !duplicate_ownership.unsupported_wrapper;
 
 	auto* unknown = makeNode(CustomPath);
 	match_helper_wrapper_probe_init_path(
 		&unknown->path, T_CustomScan, join_rel, create_empty_pathtarget());
 	unknown->custom_paths = list_make1(owner);
 	unknown->methods = &match_helper_wrapper_probe_unknown_path_methods();
-	per_row_descendant_ownership unknown_proof{};
-	per_row_prove_descendant_exact_owner(
-		&unknown->path, recipe, unknown_proof);
-	const bool unknown_wrapper_rejected = unknown_proof.matches == 0u
-		&& unknown_proof.unsupported_wrapper
-		&& !unknown_proof.invalid_owner_abi;
+	per_row_descendant_ownership unknown_ownership{};
+	per_row_analyze_descendant_exact_owner(
+		&unknown->path, recipe, unknown_ownership);
+	const bool unknown_wrapper_rejected = unknown_ownership.matches == 0u
+		&& unknown_ownership.unsupported_wrapper
+		&& !unknown_ownership.invalid_owner_abi;
 
 	/* GroupResultPath has no child, but it owns executable bare quals outside
 	 * PathTarget and ParamPathInfo.  Put one hidden mmsearch beside an otherwise
 	 * exact parameterized BioseqScan owner and invoke the production closed-world
-	 * proof: the GroupResult qual must invalidate the unique-owner result. */
+	 * audit: the GroupResult qual must invalidate the unique-owner result. */
 	auto* bmo_target = makeVar(
 		/*varno=*/1, /*varattno=*/1, oids.bioseq_seq_type_oid,
 		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
@@ -14513,13 +14515,13 @@ match_helper_wrapper_propagation_probe() {
 	bmo_append->subpaths = list_make2(bmo_owner, hidden_group);
 	bmo_append->first_partial_path = 2;
 	bmo_append->limit_tuples = -1.0;
-	exact_parameterized_bmo_ownership group_result_proof{};
+	exact_parameterized_bmo_ownership group_result_analysis{};
 	count_exact_parameterized_bmo_owners(
 		planner_root, &bmo_append->path, bmo_restriction,
-		group_result_proof, /*admit_known_wrapper_owner=*/true);
-	const bool group_result_qual_rejected = group_result_proof.matches == 1u
-		&& group_result_proof.invalid
-		&& (group_result_proof.rejection_mask
+		group_result_analysis, /*admit_known_wrapper_owner=*/true);
+	const bool group_result_qual_rejected = group_result_analysis.matches == 1u
+		&& group_result_analysis.invalid
+		&& (group_result_analysis.rejection_mask
 			& static_cast<std::uint32_t>(k_exact_bmo_nested_join_clause)) != 0u;
 
 	return bioseq::postgres::support::named_output{
@@ -14735,7 +14737,7 @@ static void per_row_record_path_identity(
 		/* A provider-only replacement can swap a presorted IndexPath for an
 		 * unordered BioseqScan.  NIL in the incumbent's sort-key fields means its
 		 * original child already supplies the effective order; it does not mean
-		 * an arbitrary replacement is ordered.  Capture that proven contract,
+		 * an arbitrary replacement is ordered.  Capture that validated contract,
 		 * validate it still covers every retained merge clause, and request an
 		 * explicit sort exactly where a replacement no longer satisfies it. */
 		List* effective_outer_pathkeys = merge->outersortkeys != NIL
@@ -14815,31 +14817,31 @@ static void per_row_record_path_identity(
 	postgres_list<Node> operands(mmsearch->args);
 	Node* target_expression = operands.get_first();
 	Node* query_expression = operands.get_second();
-	const auto target_typmod_proof = per_row_sequence_typmod_proof(
+	const auto target_typmod_validation_result = per_row_validate_sequence_typmod(
 		target_expression, oids);
-	const auto query_typmod_proof = per_row_sequence_typmod_proof(
+	const auto query_typmod_validation_result = per_row_validate_sequence_typmod(
 		query_expression, oids);
-	if (target_typmod_proof.has_value()
-		&& query_typmod_proof.has_value()
-		&& batch_join_typmod_is_supported(target_typmod_proof->typmod)
-		&& batch_join_typmod_is_supported(query_typmod_proof->typmod)
+	if (target_typmod_validation_result.has_value()
+		&& query_typmod_validation_result.has_value()
+		&& batch_join_typmod_is_supported(target_typmod_validation_result->typmod)
+		&& batch_join_typmod_is_supported(query_typmod_validation_result->typmod)
 		&& !mmsearch_typmods_share_alphabet(
-			target_typmod_proof->typmod, query_typmod_proof->typmod)) {
+			target_typmod_validation_result->typmod, query_typmod_validation_result->typmod)) {
 		raise_mmsearch_alphabet_mismatch(
 			compact_sequence_stdc_type_params::decode(
-				target_typmod_proof->typmod),
+				target_typmod_validation_result->typmod),
 			compact_sequence_stdc_type_params::decode(
-				query_typmod_proof->typmod),
+				query_typmod_validation_result->typmod),
 			"join planning");
 	}
 	if (exprType(target_expression) != oids.bioseq_seq_type_oid
 		|| exprType(query_expression) != oids.bioseq_seq_type_oid
-		|| !target_typmod_proof.has_value()
-		|| !query_typmod_proof.has_value()
-		|| !batch_join_typmod_is_supported(target_typmod_proof->typmod)
-		|| !batch_join_typmod_is_supported(query_typmod_proof->typmod)
+		|| !target_typmod_validation_result.has_value()
+		|| !query_typmod_validation_result.has_value()
+		|| !batch_join_typmod_is_supported(target_typmod_validation_result->typmod)
+		|| !batch_join_typmod_is_supported(query_typmod_validation_result->typmod)
 		|| !mmsearch_typmods_share_alphabet(
-			target_typmod_proof->typmod, query_typmod_proof->typmod)
+			target_typmod_validation_result->typmod, query_typmod_validation_result->typmod)
 		|| exprCollation(target_expression) != exprCollation(query_expression)
 		|| requirement
 			== bioseq::indexing::index_read_requirement::require_compatible_persisted) {
@@ -15001,7 +15003,7 @@ static void per_row_record_path_identity(
 	for (Path* incumbent : postgres_list<Path>(incumbent_paths)) {
 		Path* helper_ready_incumbent = incumbent;
 		PathTarget* incumbent_required_target = copy_pathtarget(required_target);
-		List* proven_inherited_helpers = NIL;
+		List* validated_inherited_helpers = NIL;
 		bool helper_provenance_invalid = false;
 		for (Node* identity : postgres_list<Node>(owner_support.helper_identities)) {
 			FuncExpr* helper = nullptr;
@@ -15017,17 +15019,17 @@ static void per_row_record_path_identity(
 				helper_provenance_invalid = true;
 				break;
 			}
-			per_row_descendant_ownership proof{};
-			per_row_prove_descendant_exact_owner(
-				helper_ready_incumbent, argument, proof);
-			per_row_base_helper_ownership base_proof{};
-			per_row_prove_descendant_base_helper_owner(
-				helper_ready_incumbent, helper, base_proof);
-			if (proof.invalid_owner_abi || proof.unsupported_wrapper
-				|| base_proof.invalid_owner_abi
-				|| base_proof.unsupported_wrapper
-				|| proof.matches > 1u || base_proof.matches > 1u
-				|| proof.matches + base_proof.matches > 1u) {
+			per_row_descendant_ownership ownership{};
+			per_row_analyze_descendant_exact_owner(
+				helper_ready_incumbent, argument, ownership);
+			per_row_base_helper_ownership base_ownership{};
+			per_row_analyze_descendant_base_helper_owner(
+				helper_ready_incumbent, helper, base_ownership);
+			if (ownership.invalid_owner_abi || ownership.unsupported_wrapper
+				|| base_ownership.invalid_owner_abi
+				|| base_ownership.unsupported_wrapper
+				|| ownership.matches > 1u || base_ownership.matches > 1u
+				|| ownership.matches + base_ownership.matches > 1u) {
 				helper_provenance_invalid = true;
 				break;
 			}
@@ -15036,9 +15038,9 @@ static void per_row_record_path_identity(
 			 * or that its owner will be constructed at a higher join frontier.  In
 			 * both cases it is not inherited here.  A helper with one exact
 			 * descendant remains inherited, while multiplicity still fails above. */
-			if (proof.matches + base_proof.matches == 0u) continue;
-			CustomPath* inherited_owner = proof.matches == 1u
-				? proof.owner : base_proof.owner;
+			if (ownership.matches + base_ownership.matches == 0u) continue;
+			CustomPath* inherited_owner = ownership.matches == 1u
+				? ownership.owner : base_ownership.owner;
 			bool applied = false;
 			bool propagation_invalid = false;
 			helper_ready_incumbent = per_row_clone_path_to_helper_owner(
@@ -15056,7 +15058,7 @@ static void per_row_record_path_identity(
 					reinterpret_cast<Expr*>(copyObject(identity)), 0);
 			}
 			per_row_append_unique_expression(
-				proven_inherited_helpers, identity);
+				validated_inherited_helpers, identity);
 		}
 		if (helper_provenance_invalid) {
 			++reconstruction_rejects.projection_or_leak;
@@ -15077,24 +15079,24 @@ static void per_row_record_path_identity(
 				(errcode(ERRCODE_DATA_CORRUPTED),
 					 errmsg("BioseqPerRowMmsearch reconstructed path retained its owned RestrictInfo")));
 		}
-		for (Node* identity : postgres_list<Node>(proven_inherited_helpers)) {
+		for (Node* identity : postgres_list<Node>(validated_inherited_helpers)) {
 			FuncExpr* helper = try_cast_pg_node<PlaceHolderVar>(identity) != nullptr
 				? batch_join_match_helper_phv_function(
 					try_cast_pg_node<PlaceHolderVar>(identity), oids)
 				: batch_join_well_formed_match_helper(identity, oids);
-			per_row_descendant_ownership proof{};
-			per_row_prove_descendant_exact_owner(
-				reconstructed, batch_join_match_helper_argument(helper), proof);
-			per_row_base_helper_ownership base_proof{};
-			per_row_prove_descendant_base_helper_owner(
-				reconstructed, helper, base_proof);
+			per_row_descendant_ownership ownership{};
+			per_row_analyze_descendant_exact_owner(
+				reconstructed, batch_join_match_helper_argument(helper), ownership);
+			per_row_base_helper_ownership base_ownership{};
+			per_row_analyze_descendant_base_helper_owner(
+				reconstructed, helper, base_ownership);
 			const std::size_t owner_matches =
-				proof.matches + base_proof.matches;
-			CustomPath* inherited_owner = proof.matches == 1u
-				? proof.owner : base_proof.owner;
-			if (proof.invalid_owner_abi || proof.unsupported_wrapper
-				|| base_proof.invalid_owner_abi
-				|| base_proof.unsupported_wrapper
+				ownership.matches + base_ownership.matches;
+			CustomPath* inherited_owner = ownership.matches == 1u
+				? ownership.owner : base_ownership.owner;
+			if (ownership.invalid_owner_abi || ownership.unsupported_wrapper
+				|| base_ownership.invalid_owner_abi
+				|| base_ownership.unsupported_wrapper
 				|| owner_matches != 1u || inherited_owner == nullptr
 				|| inherited_owner->path.pathtarget == nullptr
 				|| !path_target_contains_expression(
@@ -15112,7 +15114,7 @@ static void per_row_record_path_identity(
 		++reconstruction_rejects.cloned;
 		if (!per_row_normalize_private_path_spine(
 				root, private_join, owner_support.helper_identities,
-				proven_inherited_helpers, required_vars)) {
+				validated_inherited_helpers, required_vars)) {
 			++reconstruction_rejects.projection_or_leak;
 			continue;
 		}
@@ -15132,7 +15134,7 @@ static void per_row_record_path_identity(
 		}
 
 		PathTarget* incumbent_recipe_target = copy_pathtarget(recipe_target);
-		for (Node* identity : postgres_list<Node>(proven_inherited_helpers)) {
+		for (Node* identity : postgres_list<Node>(validated_inherited_helpers)) {
 			if (!path_target_contains_expression(
 					incumbent_recipe_target,
 					reinterpret_cast<Expr*>(identity))) {
@@ -15215,7 +15217,7 @@ static void per_row_record_path_identity(
 		owner->custom_paths = list_make1(recipe_path);
 		owner->custom_restrictinfo = list_make1(restriction);
 		const auto typmod = compact_sequence_stdc_type_params::decode(
-			target_typmod_proof->typmod);
+			target_typmod_validation_result->typmod);
 		owner->custom_private = list_make5(
 			makeInteger(k_bioseq_per_row_join_plan_version),
 			makeInteger(static_cast<int>(target_rte->relid)),
@@ -15432,7 +15434,7 @@ bioseq_batch_join_set_join_pathlist_hook(
 				owner_audit.target_owner_rejection_mask,
 				owner_audit.target_abi_mismatch_mask,
 				owner_audit.target_ppi_mismatch_mask,
-				owner_audit.target_compatibility_mismatch_mask,
+				owner_audit.target_validation_mismatch_mask,
 				static_cast<unsigned long long>(
 					owner_audit.joinrel_relids_low),
 				static_cast<unsigned long long>(
@@ -15479,7 +15481,7 @@ bioseq_batch_join_set_join_pathlist_hook(
 		/* A transformed owner may sit above one already-owned join frontier.
 		 * This is the bounded same-PlannerInfo form used when two matches share
 		 * one SQL-visible base.  Raw BatchJoin remains strictly two-baserel
-		 * below.  Reject wider/partition-derived join kinds and prove that this
+		 * below.  Reject wider/partition-derived join kinds and validate that this
 		 * hook invocation describes exactly the output relids before reconstructing
 		 * an incumbent path. */
 		if (!two_base_inputs && !one_join_one_base) return;
@@ -15661,7 +15663,7 @@ bioseq_batch_join_set_join_pathlist_hook(
 				owner_audit.target_owner_rejection_mask,
 				owner_audit.target_abi_mismatch_mask,
 				owner_audit.target_ppi_mismatch_mask,
-				owner_audit.target_compatibility_mismatch_mask,
+				owner_audit.target_validation_mismatch_mask,
 				static_cast<unsigned long long>(
 					owner_audit.joinrel_relids_low),
 				static_cast<unsigned long long>(
@@ -15932,7 +15934,7 @@ bioseq_batch_join_set_join_pathlist_hook(
 		return;
 	}
 
-	/* Retain the best incumbent as EXPLAIN evidence only.  Path selection is
+	/* Retain the best incumbent as EXPLAIN diagnostic context only.  Path selection is
 	 * structural once ownership is established, never a negative sentinel. */
 	Cost incumbent_cost_floor = honest_total_cost;
 	for (Path* incumbent : postgres_list<Path>(joinrel->pathlist)) {
@@ -16425,14 +16427,14 @@ is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe,
 		return false;
 	}
 	Node* arg1 = two_args.second_argument;
-	auto target_proof = prove_base_local_mmsearch_operand(
+	auto target_resolution = resolve_base_local_mmsearch_operand(
 		two_args.first_argument, rel, stub_oids,
 		/*require_sequence_var=*/true);
-	if (!target_proof.has_value()
-		|| target_proof->primary_sequence_var == nullptr) {
+	if (!target_resolution.has_value()
+		|| target_resolution->primary_sequence_var == nullptr) {
 		return false;
 	}
-	Var* col_var = target_proof->primary_sequence_var;
+	Var* col_var = target_resolution->primary_sequence_var;
 	/*
 	 * The first argument is the column to align — it MUST belong to
 	 * `rel`. Cross-table mmsearch with the column on the OTHER side
@@ -16453,20 +16455,19 @@ is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 * Postgres can later turn into a PARAM_EXEC on the parameterised path).
 	 * Without this filter the planner would generate a parameterised path
 	 * carrying a complex-expression mmsearch which BeginCustomScan then
-	 * silently rejects, leaving the buffer inactive and the bioseq.*
-	 * projections back to NULL — the very bug §8 of
-	 * REPORT_POSTGRES_QUERY_BUGFIXING_1.md is meant to fix.
+	 * silently rejects, leaving the buffer inactive and bioseq.* projections
+	 * NULL.
 	 */
 	const bool local_query_recipe = !pg_node_view{arg1}.is<Const>()
 		&& !pg_node_view{arg1}.is<Var>() && !pg_node_view{arg1}.is<Param>()
-		&& prove_base_local_mmsearch_operand(
+		&& resolve_base_local_mmsearch_operand(
 			arg1, rel, stub_oids,
 			/*require_sequence_var=*/false).has_value();
 	if (!pg_node_view{arg1}.is<Const>() && !pg_node_view{arg1}.is<Var>()
 		&& !pg_node_view{arg1}.is<Param>() && !local_query_recipe) return false;
-	/* A volatile function inside a proven base-local query recipe stays at
+	/* A volatile function inside a validated base-local query recipe stays at
 	 * this scan frontier and is evaluated by one retained ExprState exactly
-	 * once per admitted row.  Only an unproven volatile shape is ineligible. */
+	 * once per admitted row.  Only an unvalidated volatile shape is ineligible. */
 	if (contain_volatile_functions(arg1) && !local_query_recipe) {
 		return false;
 	}
@@ -16477,15 +16478,12 @@ is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 *   - same alphabet, diff width → rewidth arg1 to the column width
 	 *   - different bound alphabet  → SQLSTATE 42804 before dispatch
 	 *
-	 * The previous version of this helper rejected any mismatch up
-	 * here, which resulted in the parameterised path never being
-	 * generated for typmod-divergent queries — and BeginCustomScan
-	 * would silently leave bioseq.* projections NULL. Letting the
-	 * planner generate the path and handling coalesce in
-	 * BeginCustomScan is what gives the user useful results.
+	 * Generate the parameterized path for supported sequence types and perform
+	 * coalescing in BeginCustomScan, where the executor has the complete binding
+	 * information needed to produce a value or a precise type error.
 	 */
 	if (col_var->vartype != stub_oids.bioseq_seq_type_oid
-		|| target_proof->typmod < 0) {
+		|| target_resolution->typmod < 0) {
 		return false;
 	}
 	int32 arg1_typmod = -1;
@@ -16500,10 +16498,10 @@ is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe,
 		arg1_typmod = p->paramtypmod;
 		arg1_typoid = p->paramtype;
 	} else if (local_query_recipe) {
-		auto query_proof = prove_base_local_mmsearch_operand(
+		auto query_resolution = resolve_base_local_mmsearch_operand(
 			arg1, rel, stub_oids,
 			/*require_sequence_var=*/false);
-		arg1_typmod = query_proof.has_value() ? query_proof->typmod : -1;
+		arg1_typmod = query_resolution.has_value() ? query_resolution->typmod : -1;
 		arg1_typoid = stub_oids.bioseq_seq_type_oid;
 	}
 	if (arg1_typoid != stub_oids.bioseq_seq_type_oid
@@ -16713,7 +16711,7 @@ extract_pushdown_clause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 			   "columnar planner: cannot push down clause: "
 			   "absolute correlation ({:.3f}) of var attribute {} is "
 			   "smaller than the value configured in "
-			   "\"bioseq.qual_pushdown_correlation_threshold\" "
+			   "\"bioseq.planner.qual_pushdown.correlation_threshold\" "
 			   "({:.3f})", abs_var_correlation, var_side->varattno,
 			   bioseq::settings::planner::qual_pushdown::correlation_threshold);
 		return NULL;
@@ -17357,7 +17355,7 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 			path->param_info == nullptr
 				? NIL : path->param_info->ppi_clauses,
 			param_relids, stub_oids);
-	std::optional<base_local_mmsearch_ownership> owned_mmsearch_proof;
+	std::optional<base_local_mmsearch_ownership> owned_mmsearch_resolution;
 	if (owned_mmsearch.normalized_expr != nullptr) {
 		List* candidate_expressions = list_concat(
 			list_make1(owned_mmsearch.normalized_expr),
@@ -17365,12 +17363,12 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 		bool exact = true;
 		Node* canonical_target = nullptr;
 		for (FuncExpr* candidate : postgres_list<FuncExpr>(candidate_expressions)) {
-			auto proof = prove_base_local_mmsearch_ownership(
+			auto resolution = resolve_base_local_mmsearch_ownership(
 				candidate, rel, param_relids, stub_oids);
 			Node* target = candidate == nullptr
 				|| list_length(candidate->args) < 1 ? nullptr
 				: reinterpret_cast<Node*>(linitial(candidate->args));
-			if (!proof.has_value()
+			if (!resolution.has_value()
 				|| (canonical_target != nullptr
 					&& !equal(canonical_target, target))) {
 				exact = false;
@@ -17382,7 +17380,7 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 				bioseq::indexing::index_read_requirement::allow;
 			(void)apply_aligner_options_override(
 				candidate, option_probe, requirement_probe, stub_oids);
-			if (proof->any_evaluated_operand
+			if (resolution->any_evaluated_operand
 				&& requirement_probe
 					== bioseq::indexing::index_read_requirement::
 						require_compatible_persisted) {
@@ -17391,21 +17389,21 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 			}
 			if (canonical_target == nullptr) {
 				canonical_target = target;
-				owned_mmsearch_proof = *proof;
+				owned_mmsearch_resolution = *resolution;
 			}
 		}
-		/* The legacy two-call fallback has one target capture and one query
+		/* The bounded two-call fallback has one target capture and one query
 		 * configuration.  Effectful/evaluated operands would either be shared
 		 * across SQL occurrences or duplicated, so keep that contract raw-only. */
 		if (exact && list_length(candidate_expressions) > 1
-			&& owned_mmsearch_proof.has_value()
-			&& owned_mmsearch_proof->any_evaluated_operand) {
+			&& owned_mmsearch_resolution.has_value()
+			&& owned_mmsearch_resolution->any_evaluated_operand) {
 			exact = false;
 		}
 		list_free(candidate_expressions);
 		if (!exact) {
 			owned_mmsearch = {};
-			owned_mmsearch_proof.reset();
+			owned_mmsearch_resolution.reset();
 		}
 	}
 
@@ -17442,8 +17440,8 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 		.target_leaf_support_relid = rel->relid,
 		.source_bindings_only = true,
 	};
-	const bool needs_evaluated_operands = owned_mmsearch_proof.has_value()
-		&& owned_mmsearch_proof->any_evaluated_operand;
+	const bool needs_evaluated_operands = owned_mmsearch_resolution.has_value()
+		&& owned_mmsearch_resolution->any_evaluated_operand;
 	auto append_support_var = [&base_operand_sources](Var* variable) {
 		if (variable == nullptr) return;
 		for (Var* existing : postgres_list<Var>(
@@ -17455,18 +17453,18 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 	};
 	if (needs_evaluated_operands) {
 		auto register_operand = [&base_operand_sources, &append_support_var](
-				const base_local_mmsearch_operand_resolution& proof) {
+				const base_local_mmsearch_operand_resolution& operand) {
 			const std::uint32_t producer = slice_project_build_ir_node(
-				base_operand_sources, proof.expression);
+				base_operand_sources, operand.expression);
 			slice_project_note_source_binding(
-				base_operand_sources, proof.expression, producer);
-			for (Var* source : postgres_list<Var>(proof.sequence_vars)) {
+				base_operand_sources, operand.expression, producer);
+			for (Var* source : postgres_list<Var>(operand.sequence_vars)) {
 				append_support_var(source);
 			}
 		};
-		register_operand(owned_mmsearch_proof->target);
-		if (owned_mmsearch_proof->local_query.has_value()) {
-			register_operand(*owned_mmsearch_proof->local_query);
+		register_operand(owned_mmsearch_resolution->target);
+		if (owned_mmsearch_resolution->local_query.has_value()) {
+			register_operand(*owned_mmsearch_resolution->local_query);
 		}
 		/* Residual quals execute before operand ExprStates.  Discover them from
 		 * the full baserestrictinfo + parameterized-clause set, not allClauses:
@@ -17614,8 +17612,8 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 		(void)apply_aligner_options_override(
 			owned_expr, planned_params,
 			planned_requirement, stub_oids);
-		if (owned_mmsearch_proof.has_value()
-			&& owned_mmsearch_proof->any_evaluated_operand) {
+		if (owned_mmsearch_resolution.has_value()
+			&& owned_mmsearch_resolution->any_evaluated_operand) {
 			planned_requirement =
 				bioseq::indexing::index_read_requirement::require_absent;
 		}
@@ -18054,7 +18052,7 @@ bioseq_column_scan_path_plan_custom_path(PlannerInfo *root,
 
 	/* Split the exact edit predicate out before ExecInitQual sees it.  Its
 	 * placeholder has no value until match_results are drained, whereas every
-	 * remaining scan qual is valid in the ordinary pre-alignment phase. */
+	 * remaining scan qual is valid in the ordinary pre-alignment stage. */
 	std::optional<strict_edit_predicate> strict_edit_predicate;
 	{
 		const bioseq_stub_oids& edit_oids = get_cached_stub_oids();
@@ -18398,10 +18396,10 @@ bioseq_column_scan_path_plan_custom_path(PlannerInfo *root,
 }
 
 [[nodiscard]] static List* make_match_owner_descriptor(
-		Node* target_recipe, const Index legacy_target_relid,
+		Node* target_recipe, const Index base_relid,
 		const bioseq_stub_oids& oids) {
 	if (target_recipe == nullptr
-		|| !bioseq_is_concrete_rte_varno(legacy_target_relid)) {
+		|| !bioseq_is_concrete_rte_varno(base_relid)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("Bioseq match owner descriptor input is invalid")));
@@ -18413,7 +18411,7 @@ bioseq_column_scan_path_plan_custom_path(PlannerInfo *root,
 		copyObject(target_recipe),
 		canonical_match_base_lineage(target_recipe, oids));
 	return lappend(
-		descriptor, makeInteger(static_cast<int>(legacy_target_relid)));
+		descriptor, makeInteger(static_cast<int>(base_relid)));
 }
 
 struct batch_join_placeholder_registration {
@@ -18425,7 +18423,7 @@ struct batch_join_placeholder_registration {
 	List** encoded_sites = nullptr;
 	bool invalid = false;
 	bool edit_sequence_mismatch = false;
-	/* Helper identities already supplied as match_result columns by a proven
+	/* Helper identities already supplied as match_result columns by a validated
 	 * descendant BioseqBatchJoin.  An outer owner may pass these through, but
 	 * must neither execute their SQL stubs nor relabel them as its own sites. */
 	List* inherited_helper_identities = NIL;
@@ -18655,7 +18653,7 @@ static void batch_join_register_existing_placeholder_site(
 	CustomScan* scan);
 
 /* Decode only finalized-plan-independent placeholder ownership.  The stable
- * id is deliberately still zero here: this proof runs in PlanCustomPath,
+ * id is deliberately still zero here: this validation runs in PlanCustomPath,
  * before the top-level planner hook assigns final plan_node_id bindings. */
 [[nodiscard]] static bool batch_join_scan_owns_helper_identity(
 		CustomScan* scan, Node* identity) noexcept {
@@ -18758,7 +18756,7 @@ static void batch_join_register_existing_placeholder_site(
 				innerPlan(plan), identity));
 }
 
-[[nodiscard]] static List* batch_join_proven_inherited_helper_identities(
+[[nodiscard]] static List* batch_join_validated_inherited_helper_identities(
 		Plan* child_plan, const bioseq_stub_oids& oids) {
 	List* result = NIL;
 	if (child_plan == nullptr) return result;
@@ -18809,11 +18807,11 @@ struct batch_join_placeholder_registration_visitor {
 				const bool names_recipe =
 					batch_join_match_helper_names_recipe(
 						helper, registration.target_recipe);
-				const bool legacy_lineage =
+				const bool base_lineage =
 					batch_join_match_helper_names_base_lineage(
 						helper, registration.target_recipe,
 						*registration.oids);
-				if (!names_recipe && !legacy_lineage) {
+				if (!names_recipe && !base_lineage) {
 					registration.invalid = true;
 					return pg_walk_step::stop;
 				}
@@ -18857,11 +18855,11 @@ struct batch_join_placeholder_registration_visitor {
 				const bool names_recipe =
 					batch_join_match_helper_names_recipe(
 						function, registration.target_recipe);
-				const bool legacy_lineage =
+				const bool base_lineage =
 					batch_join_match_helper_names_base_lineage(
 						function, registration.target_recipe,
 						*registration.oids);
-				if (!names_recipe && !legacy_lineage) {
+				if (!names_recipe && !base_lineage) {
 					registration.invalid = true;
 					return pg_walk_step::stop;
 				}
@@ -18889,8 +18887,8 @@ struct batch_join_output_setrefs_rewrite {
 		const AttrNumber minimum_resno = 1,
 		const AttrNumber maximum_resno = MaxAttrNumber) noexcept {
 	if (expression == nullptr) return nullptr;
-	/* New sites are appended after inherited child columns.  Search backwards
-	 * within the caller's proven range so an outer owner binds the site it just
+	/* Sites are appended after inherited child columns.  Search backwards
+	 * within the caller's validated range so an outer owner binds the site it just
 	 * registered, never the first equal identity inherited from a descendant. */
 	for (int index = list_length(scan_tlist) - 1; index >= 0; --index) {
 		TargetEntry* entry = reinterpret_cast<TargetEntry*>(
@@ -19641,7 +19639,7 @@ bioseq_batch_join_plan_custom_path(
 	}
 	/* PostgreSQL may pass NIL clauses when a fenced upper UPDATE has already
 	 * consumed the join RestrictInfo while constructing this exact CustomPath.
-	 * In that one case the versioned private recipe is the ownership proof.
+	 * In that one case the versioned private recipe is the ownership identity.
 	 * Never accept a nonempty clause list without the owned predicate, stacked
 	 * copies, or a copy retained anywhere in either executable child tree. */
 	const bool callback_ownership_valid =
@@ -19753,9 +19751,9 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 		reinterpret_cast<Node*>(list_nth(best_path->custom_private, 12)),
 		"incumbent_cost_floor");
 	const bioseq_stub_oids& oids = get_cached_stub_oids();
-	const auto target_typmod_proof = per_row_sequence_typmod_proof(
+	const auto target_typmod_validation_result = per_row_validate_sequence_typmod(
 		target_expression, oids);
-	const auto query_typmod_proof = per_row_sequence_typmod_proof(
+	const auto query_typmod_validation_result = per_row_validate_sequence_typmod(
 		query_expression, oids);
 	const int32 expected_typmod = compact_sequence_stdc_type_params{
 		static_cast<std::uint8_t>(alphabet_code),
@@ -19770,12 +19768,12 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 			reinterpret_cast<Node*>(mmsearch), oids) != 1u
 		|| exprType(target_expression) != oids.bioseq_seq_type_oid
 		|| exprType(query_expression) != oids.bioseq_seq_type_oid
-		|| !target_typmod_proof.has_value()
-		|| !query_typmod_proof.has_value()
-		|| target_typmod_proof->typmod != expected_typmod
-		|| !batch_join_typmod_is_supported(query_typmod_proof->typmod)
+		|| !target_typmod_validation_result.has_value()
+		|| !query_typmod_validation_result.has_value()
+		|| target_typmod_validation_result->typmod != expected_typmod
+		|| !batch_join_typmod_is_supported(query_typmod_validation_result->typmod)
 		|| !mmsearch_typmods_share_alphabet(
-			target_typmod_proof->typmod, query_typmod_proof->typmod)
+			target_typmod_validation_result->typmod, query_typmod_validation_result->typmod)
 		|| alphabet_code < 0 || alphabet_code > UINT8_MAX
 		|| (storage_unit_byte_width != 1 && storage_unit_byte_width != 2
 			&& storage_unit_byte_width != 4
@@ -19841,7 +19839,7 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 	 * Vars are plan-only support, added after core can no longer replace the
 	 * path's sortgroupref storage. */
 	/* build_path_tlist replaces lateral Vars with PARAM_EXEC nodes.  The exact
-	 * no-widening proof belongs to path construction; here validate only the
+	 * no-widening validation belongs to path construction; here validate only the
 	 * callback target's ordinal and SQL type shape. */
 	bool callback_target_consistent = best_path->path.pathtarget != nullptr
 		&& list_length(tlist)
@@ -19878,7 +19876,7 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 	};
 	std::vector<per_row_plan_only_helper_binding> plan_only_helper_bindings;
 	List* inherited_helper_identities =
-		batch_join_proven_inherited_helper_identities(child_plan, oids);
+		batch_join_validated_inherited_helper_identities(child_plan, oids);
 	List* current_owner_helper_identities = NIL;
 	for (Node* identity : postgres_list<Node>(plan_owner_support.helper_identities)) {
 		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
@@ -19902,26 +19900,26 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 		const bool names_recipe = helper != nullptr
 			&& batch_join_match_helper_names_recipe(
 				helper, target_expression);
-		const bool legacy_lineage = helper != nullptr
+		const bool base_lineage = helper != nullptr
 			&& batch_join_match_helper_names_base_lineage(
 				helper, target_expression, oids);
 		/* A helper that names only the shared base lineage deliberately belongs
-		 * to both this transformed owner and the proven descendant base owner.
+		 * to both this transformed owner and the validated descendant base owner.
 		 * Register the current site and let finalized semantic binding reject the
 		 * two candidates with 42702.  Exact-recipe carrier loss is corruption. */
-		const bool deliberate_lineage_ambiguity = legacy_lineage
+		const bool deliberate_lineage_ambiguity = base_lineage
 			&& !names_recipe;
 		if ((!exposed_by_child || !classified_inherited)
 			&& !deliberate_lineage_ambiguity) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("BioseqPerRowMmsearch descendant helper carrier was dropped"),
-				 errdetail("node_type=%d exposed=%s inherited=%s exact_recipe=%s legacy_lineage=%s",
+				 errdetail("node_type=%d exposed=%s inherited=%s exact_recipe=%s base_lineage=%s",
 					static_cast<int>(nodeTag(identity)),
 					exposed_by_child ? "true" : "false",
 					classified_inherited ? "true" : "false",
 					names_recipe ? "true" : "false",
-					legacy_lineage ? "true" : "false")));
+					base_lineage ? "true" : "false")));
 		}
 	}
 	for (Node* support : postgres_list<Node>(plan_owner_support.passthrough_vars)) {
@@ -20125,8 +20123,8 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 	validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
 	/* custom_restrictinfo is planner-lifetime join metadata, primarily used by
 	 * core for pseudoconstant gating; PostgreSQL may legitimately pass NIL in
-	 * `clauses` here.  Executable ownership is instead proved by the validated
-	 * versioned mmsearch recipe above plus the recursive child-plan audit, which
+	 * `clauses` here.  Executable ownership is instead established by the
+	 * validated versioned mmsearch recipe above plus the recursive child-plan audit, which
 	 * rejects every surviving duplicate below this sole owner. */
 	(void)clauses;
 	auto* cscan = makeNode(CustomScan);
@@ -20155,15 +20153,15 @@ static Plan* bioseq_per_row_join_plan_custom_path(
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(storage_unit_byte_width));
 	const auto query_type_params = compact_sequence_stdc_type_params::decode(
-		query_typmod_proof->typmod);
+		query_typmod_validation_result->typmod);
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(query_type_params.alphabet_code));
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(query_type_params.storage_unit_byte_width));
 	cscan->custom_private = lappend(cscan->custom_private,
-		makeInteger(target_typmod_proof->descriptor_erased ? 1 : 0));
+		makeInteger(target_typmod_validation_result->descriptor_erased ? 1 : 0));
 	cscan->custom_private = lappend(cscan->custom_private,
-		makeInteger(query_typmod_proof->descriptor_erased ? 1 : 0));
+		makeInteger(query_typmod_validation_result->descriptor_erased ? 1 : 0));
 	cscan->custom_private = lappend(cscan->custom_private, placeholder_sites);
 	cscan->custom_private = lappend(
 		cscan->custom_private, copyObject(mmsearch));
@@ -20190,7 +20188,7 @@ struct match_owner_finalization {
 	List* sites = NIL;
 	Node* target_recipe = nullptr;
 	List* base_lineage = NIL;
-	Index legacy_target_relid = 0;
+	Index base_relid = 0;
 	Oid target_relation_oid = InvalidOid;
 	int stable_match_id = 0;
 	/* custom_private is deliberately opaque to core setrefs, so Vars stored in
@@ -20211,8 +20209,8 @@ static_assert(std::is_trivially_destructible_v<
 	std::span<match_owner_finalization>>);
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* Backend-local proof that a PostgreSQL ERROR cannot jump across the heap-
- * backed owner vector.  The revoked diagnostic seam reads the balance after
+/* Backend-local audit that a PostgreSQL ERROR cannot jump across the heap-
+ * backed owner vector.  The test hook reads the balance after
  * a user-triggered ambiguous-owner error in the same backend. */
 static std::uint64_t match_owner_finalization_scopes_entered = 0u;
 static std::uint64_t match_owner_finalization_scopes_exited = 0u;
@@ -20280,7 +20278,7 @@ struct match_site_resolution {
 	 * inheritance, partitions, and composite recipes may legitimately expose
 	 * distinct physical relations while retaining one SQL-visible lineage,
 	 * whereas two aliases of one relation must never be conflated. */
-	if (variable->varno == owner.legacy_target_relid) return true;
+	if (variable->varno == owner.base_relid) return true;
 	for (Var* base : postgres_list<Var>(owner.base_lineage)) {
 		if (base != nullptr && base->varno == variable->varno
 			&& base->varlevelsup == variable->varlevelsup) return true;
@@ -20344,9 +20342,9 @@ struct match_site_resolution {
 /* BIOSEQ_TEST_INDEXES has no SQL-visible helper for this invariant on purpose:
  * exposing one would create another executable match-helper surface.  The
  * first real owner finalization in a test backend runs this resolver seam.  It
- * proves both halves of the scope contract with the exact pre-setrefs collision
+ * validates both halves of the scope contract with the exact pre-setrefs collision
  * that nested PlannerInfos can produce: an equal local Var in another scope is
- * ignored, while two owners in one scope remain ambiguous for a legacy key
+ * ignored, while two owners in one scope remain ambiguous for a lineage key
  * Var even when their physical relation OIDs differ.  A second alias of the
  * same physical relation remains distinct by Var identity.  Duplicate exact
  * recipes fail closed rather than selecting by traversal order. */
@@ -20359,7 +20357,7 @@ static void verify_match_owner_scope_resolution(
 	Var* source = makeVar(
 		/*varno=*/1, /*varattno=*/1, oids.bioseq_seq_type_oid,
 		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
-	Var* legacy_key = makeVar(
+	Var* lineage_key = makeVar(
 		/*varno=*/1, /*varattno=*/2, INT4OID,
 		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
 	constexpr Oid fixture_relation_oid = 4242;
@@ -20368,7 +20366,7 @@ static void verify_match_owner_scope_resolution(
 	match_owner_finalization first{};
 	first.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	first.base_lineage = list_make1(copyObject(source));
-	first.legacy_target_relid = 1;
+	first.base_relid = 1;
 	first.target_relation_oid = fixture_relation_oid;
 	first.stable_match_id = 101;
 	first.query_scope_id = 11u;
@@ -20377,14 +20375,14 @@ static void verify_match_owner_scope_resolution(
 	match_owner_finalization unrelated_scope{};
 	unrelated_scope.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	unrelated_scope.base_lineage = list_make1(copyObject(source));
-	unrelated_scope.legacy_target_relid = 1;
+	unrelated_scope.base_relid = 1;
 	unrelated_scope.target_relation_oid = fixture_relation_oid;
 	unrelated_scope.stable_match_id = 102;
 	unrelated_scope.query_scope_id = 12u;
 	fixture[1] = unrelated_scope;
 
 	const match_site_resolution scoped = resolve_match_helper_site(
-		fixture[0], reinterpret_cast<Node*>(legacy_key),
+		fixture[0], reinterpret_cast<Node*>(lineage_key),
 		std::span<match_owner_finalization>{fixture.data(), 2u}, oids);
 	if (scoped.status != match_site_resolution_status::bound
 		|| scoped.kind != match_helper_binding_kind::unique_lineage
@@ -20398,7 +20396,7 @@ static void verify_match_owner_scope_resolution(
 	match_owner_finalization same_scope{};
 	same_scope.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	same_scope.base_lineage = list_make1(copyObject(source));
-	same_scope.legacy_target_relid = 1;
+	same_scope.base_relid = 1;
 	same_scope.target_relation_oid = fixture_relation_oid + 1;
 	same_scope.stable_match_id = 103;
 	same_scope.query_scope_id = 11u;
@@ -20411,14 +20409,14 @@ static void verify_match_owner_scope_resolution(
 	same_relation_alias.target_recipe =
 		reinterpret_cast<Node*>(copyObject(alias_source));
 	same_relation_alias.base_lineage = list_make1(copyObject(alias_source));
-	same_relation_alias.legacy_target_relid = 2;
+	same_relation_alias.base_relid = 2;
 	same_relation_alias.target_relation_oid = fixture_relation_oid;
 	same_relation_alias.stable_match_id = 104;
 	same_relation_alias.query_scope_id = 11u;
 	fixture[3] = same_relation_alias;
 
 	const match_site_resolution ambiguous = resolve_match_helper_site(
-		fixture[0], reinterpret_cast<Node*>(legacy_key),
+		fixture[0], reinterpret_cast<Node*>(lineage_key),
 		std::span<match_owner_finalization>{fixture}, oids);
 	const match_site_resolution duplicate_exact = resolve_match_helper_site(
 		fixture[0], fixture[0].target_recipe,
@@ -20441,14 +20439,14 @@ static void verify_match_owner_scope_resolution(
 	composite.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	composite.base_lineage = list_make2(
 		copyObject(source), copyObject(alias_source));
-	composite.legacy_target_relid = 1;
+	composite.base_relid = 1;
 	composite.stable_match_id = 201;
 	composite.query_scope_id = 21u;
 	composite_fixture[0] = composite;
 	match_owner_finalization secondary{};
 	secondary.target_recipe = reinterpret_cast<Node*>(copyObject(alias_source));
 	secondary.base_lineage = list_make1(copyObject(alias_source));
-	secondary.legacy_target_relid = 2;
+	secondary.base_relid = 2;
 	secondary.stable_match_id = 202;
 	secondary.query_scope_id = 21u;
 	composite_fixture[1] = secondary;
@@ -20613,8 +20611,8 @@ static void collect_match_owner_plan(
 						lineage_node == nullptr ? NIL
 							: reinterpret_cast<List*>(lineage_node),
 						static_cast<Index>(intVal(match_binding_integer(
-							descriptor, k_match_owner_legacy_target_relid,
-							"owner.legacy_target_relid"))),
+							descriptor, k_match_owner_base_relid,
+							"owner.base_relid"))),
 						static_cast<Oid>(intVal(match_binding_integer(
 							custom->custom_private, relation_oid_index,
 							"owner.target_relation_oid"))),
@@ -20660,8 +20658,8 @@ static void collect_match_owner_plan(
 				lineage_node == nullptr ? NIL
 					: reinterpret_cast<List*>(lineage_node),
 				static_cast<Index>(intVal(match_binding_integer(
-					descriptor, k_match_owner_legacy_target_relid,
-					"owner.legacy_target_relid"))),
+					descriptor, k_match_owner_base_relid,
+					"owner.base_relid"))),
 				static_cast<Oid>(intVal(match_binding_integer(
 					base_owner_tag, k_base_match_plan_relation_oid,
 					"owner.target_relation_oid"))),
@@ -21033,7 +21031,7 @@ static void finalize_base_match_owner_executor_image(
 		|| existing_sites != nullptr || planner_target == nullptr
 		|| executor_target == nullptr
 		|| !base_match_target_expression_translation_agrees(
-			planner_target, executor_target, owner.legacy_target_relid,
+			planner_target, executor_target, owner.base_relid,
 			scan->scan.scanrelid, oids)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -21109,7 +21107,7 @@ static void finalize_base_match_owner_executor_image(
 			|| !base_match_site_expression_translation_agrees(
 				planner_argument, executor_argument,
 				planner_target, executor_target,
-				owner.legacy_target_relid, scan->scan.scanrelid,
+				owner.base_relid, scan->scan.scanrelid,
 				binding_kind, oids)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -21146,7 +21144,7 @@ static void finalize_match_owner_bindings(
 			&& bms_is_member(owner.stable_match_id, stable_ids);
 		if (owner.scan == nullptr || owner.descriptor == NIL
 			|| owner.target_recipe == nullptr
-			|| !bioseq_is_concrete_rte_varno(owner.legacy_target_relid)
+			|| !bioseq_is_concrete_rte_varno(owner.base_relid)
 			|| owner.stable_match_id < 0
 			|| owner.query_scope_id == 0u
 			|| duplicate_stable_id) {
@@ -21156,13 +21154,13 @@ static void finalize_match_owner_bindings(
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Bioseq final match owner identity is invalid"),
-				 errdetail("owner_index=%zu custom_name=%s scan_present=%s descriptor_present=%s target_recipe_present=%s legacy_target_relid=%u stable_match_id=%d query_scope_id=" UINT64_FORMAT " duplicate_stable_id=%s",
+				 errdetail("owner_index=%zu custom_name=%s scan_present=%s descriptor_present=%s target_recipe_present=%s base_relid=%u stable_match_id=%d query_scope_id=" UINT64_FORMAT " duplicate_stable_id=%s",
 					owner_index,
 					custom_name == nullptr ? "<none>" : custom_name,
 					owner.scan == nullptr ? "false" : "true",
 					owner.descriptor == NIL ? "false" : "true",
 					owner.target_recipe == nullptr ? "false" : "true",
-					static_cast<unsigned int>(owner.legacy_target_relid),
+					static_cast<unsigned int>(owner.base_relid),
 					owner.stable_match_id,
 					static_cast<uint64>(owner.query_scope_id),
 					duplicate_stable_id ? "true" : "false")));
@@ -21355,8 +21353,8 @@ match_owner_finalization_scope_diagnostics(bool reset) {
 		|| recipe == nullptr || (lineage != nullptr && !IsA(lineage, List))
 		|| !bioseq_is_concrete_rte_varno(static_cast<Index>(intVal(
 			match_binding_integer(descriptor,
-				k_match_owner_legacy_target_relid,
-				"owner.legacy_target_relid"))))) {
+				k_match_owner_base_relid,
+				"owner.base_relid"))))) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("Bioseq finalized match owner descriptor is invalid")));
@@ -21473,17 +21471,17 @@ match_owner_finalization_scope_diagnostics(bool reset) {
 			&& exprType(argument_node) == oids.bioseq_seq_type_oid
 			&& equal(argument_node, target_recipe)
 			&& binding_kind == match_helper_binding_kind::exact_recipe;
-		bool legacy_lineage_argument = argument != nullptr
+		bool base_lineage_argument = argument != nullptr
 			&& argument->varno == scan->scan.scanrelid
 			&& argument->varattno > 0 && argument->varlevelsup == 0
 			&& bms_is_empty(argument->varnullingrels)
 			&& binding_kind == match_helper_binding_kind::unique_lineage;
-		if (legacy_lineage_argument
+		if (base_lineage_argument
 			&& argument->vartype == oids.bioseq_seq_type_oid) {
-			legacy_lineage_argument = false;
+			base_lineage_argument = false;
 			for (Var* source : postgres_list<Var>(target_lineage)) {
 				if (equal(source, argument)) {
-					legacy_lineage_argument = true;
+					base_lineage_argument = true;
 					break;
 				}
 			}
@@ -21491,7 +21489,7 @@ match_owner_finalization_scope_diagnostics(bool reset) {
 		if (resno <= 0 || resno > list_length(scan->scan.plan.targetlist)
 			|| !is_bioseq_projection_funcid(funcid, oids)
 			|| get_func_rettype(funcid) == InvalidOid
-			|| (!exact_sequence_argument && !legacy_lineage_argument)
+			|| (!exact_sequence_argument && !base_lineage_argument)
 			|| intVal(list_nth(site, k_match_site_phid)) != 0
 			|| intVal(list_nth(site, k_match_site_stable_id))
 				!= runtime.stable_match_id) {
@@ -21846,7 +21844,7 @@ finalized_batch_owner_matching_site_count(
 		}
 		/* custom_private retains planner coordinates while custom_scan_tlist and
 		 * the carrier identity are post-setrefs.  Stable site ownership plus the
-		 * exact supplied expression is the cross-domain proof; comparing their
+		 * exact supplied expression is the cross-domain identity; comparing their
 		 * argument Vars directly would reject valid rtable-offset plans. */
 		if (supplied != nullptr && supplied->resno == resno
 			&& equivalent
@@ -21950,17 +21948,17 @@ finalized_base_owner_site_context(
 		&& exprType(canonical_argument) == oids.bioseq_seq_type_oid
 		&& equal(canonical_argument, context.target_recipe)
 		&& binding_kind == match_helper_binding_kind::exact_recipe;
-	bool legacy_lineage_argument = argument != nullptr
+	bool base_lineage_argument = argument != nullptr
 		&& argument->varno == context.target_relid
 		&& argument->varattno > 0 && argument->varlevelsup == 0
 		&& bms_is_empty(argument->varnullingrels)
 		&& binding_kind == match_helper_binding_kind::unique_lineage;
-	if (legacy_lineage_argument
+	if (base_lineage_argument
 		&& argument->vartype == oids.bioseq_seq_type_oid) {
-		legacy_lineage_argument = false;
+		base_lineage_argument = false;
 		for (Var* source : postgres_list<Var>(context.target_lineage)) {
 			if (equal(source, argument)) {
-				legacy_lineage_argument = true;
+				base_lineage_argument = true;
 				break;
 			}
 		}
@@ -21978,7 +21976,7 @@ finalized_base_owner_site_context(
 		&& intVal(list_nth(site, k_match_site_phid)) == 0
 		&& intVal(list_nth(site, k_match_site_stable_id))
 			== context.stable_match_id
-		&& (exact_sequence_argument || legacy_lineage_argument);
+		&& (exact_sequence_argument || base_lineage_argument);
 }
 
 struct finalized_base_targetlist_audit {
@@ -22097,7 +22095,7 @@ base_scan_targetlist_has_only_finalized_match_helpers(
 			 * authoritative carrier sites for one base match_result owner, not two
 			 * competing owners.  This routine feeds owner-counting audits, so
 			 * classify the owner once while the resno-specific targetlist audit
-			 * above continues to prove every individual site. */
+			 * above continues to validate every individual site. */
 			matches = 1u;
 		}
 		if (malformed) return 2u;
@@ -22164,7 +22162,7 @@ finalized_descendant_match_owner_site_count(
 
 /* Diagnostic-only counterpart to finalized_descendant_match_owner_site_count.
  * Keep Batch and Base ownership separate so a rejected finalized carrier can
- * explain which owner class, if either, still proves the raw helper identity.
+ * explain which owner class, if either, still validates the raw helper identity.
  * Counts saturate at two because the audit only distinguishes zero, unique,
  * and ambiguous ownership. */
 [[nodiscard]] static std::size_t
@@ -22664,7 +22662,7 @@ dummy_targetlist_has_only_unique_finalized_owner_helpers(
 				count_child(child);
 			}
 		} else if (IsA(plan, SubqueryScan)) {
-			/* Do not prove a parent helper from a separate query scope. */
+			/* Do not derive a parent helper from a separate query scope. */
 		} else {
 			count_child(outerPlan(plan));
 			if (innerPlan(plan) != outerPlan(plan)) count_child(innerPlan(plan));
@@ -22781,7 +22779,7 @@ static void record_batch_join_plan_helper_audit_failure(
 			first_failure, plan, current_parent, oids,
 			is_projection_capable_plan(plan)
 				? "projection-capable targetlist"
-				: "dummy targetlist ownership proof failed",
+				: "dummy targetlist ownership validation failed",
 			"Plan.targetlist", boundary_encountered, true);
 		return true;
 	}
@@ -22940,7 +22938,7 @@ struct reparameterize_mutator {
  * will be reparameterized on the child table PX3 directly.
  *
  * When that happens, we need to update all Vars in the pushed-down quals to
- * reference PX3, not PX, to match the new parameterization. This method
+	 * reference PX3, not PX, to match the child parameterization. This method
  * notifies us that it needs to be done, and allows us to update the
  * information in custom_private.
  */
@@ -23129,7 +23127,7 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 [[nodiscard]] static mmsearch_parameter_resolution resolve_mmsearch_param_query(
 		bioseq_scan_runtime& runtime,
 		ExprContext* econtext,
-		const char* phase) {
+		const char* stage) {
 	if (!runtime.param_rebind.active || econtext == nullptr
 		|| (runtime.param_rebind.paramkind != PARAM_EXEC
 			&& runtime.param_rebind.paramkind != PARAM_EXTERN)
@@ -23138,8 +23136,8 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("bioseq mmsearch Param rebind metadata is invalid"),
-			 errdetail("phase=%s paramid=%d paramkind=%d",
-				phase,
+			 errdetail("stage=%s paramid=%d paramkind=%d",
+				stage,
 				runtime.param_rebind.paramid,
 				runtime.param_rebind.paramkind)));
 	}
@@ -23155,8 +23153,8 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("bioseq mmsearch Param changed after registration"),
-			 errdetail("phase=%s paramid=%d paramkind=%d",
-				phase,
+			 errdetail("stage=%s paramid=%d paramkind=%d",
+				stage,
 				runtime.param_rebind.paramid,
 				runtime.param_rebind.paramkind)));
 	}
@@ -23169,8 +23167,8 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATATYPE_MISMATCH),
 			 errmsg("bioseq mmsearch Param resolved to an invalid value"),
-			 errdetail("phase=%s paramid=%d paramkind=%d",
-				phase,
+			 errdetail("stage=%s paramid=%d paramkind=%d",
+				stage,
 				runtime.param_rebind.paramid,
 				runtime.param_rebind.paramkind)));
 	}
@@ -23180,7 +23178,7 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 		bioseq_log<logging_level::debug>(
 			"[bioseq] pg: {} mmsearch Param paramid={} kind={} resolved "
 			"to NULL; strict qual matches no rows",
-			phase,
+			stage,
 			runtime.param_rebind.paramid,
 			runtime.param_rebind.paramkind);
 		return mmsearch_parameter_resolution::null_value;
@@ -23211,11 +23209,11 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("bioseq mmsearch Param payload disagrees with its declared typmod"),
 				 errdetail(
-					"phase=%s paramid=%d paramkind=%d paramtypmod=%d "
+					"stage=%s paramid=%d paramkind=%d paramtypmod=%d "
 					"declared_alphabet=%u declared_width=%u "
 					"actual_alphabet=%u actual_width=%u "
 					"target_alphabet=%u target_width=%u",
-					phase,
+					stage,
 					runtime.param_rebind.paramid,
 					runtime.param_rebind.paramkind,
 					runtime.param_rebind.param_typmod,
@@ -23241,7 +23239,7 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 			pfree(query_hdr);
 		}
 		raise_mmsearch_alphabet_mismatch(
-			target_type_params, mismatched_query_type_params, phase);
+			target_type_params, mismatched_query_type_params, stage);
 	}
 	if (!pgseq_supported_storage_unit_byte_widths::contains_runtime(
 			query_type_params.storage_unit_byte_width)) {
@@ -23257,10 +23255,10 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 			(errcode(ERRCODE_DATATYPE_MISMATCH),
 			 errmsg("bioseq mmsearch Param payload typmod is incompatible"),
 			 errdetail(
-				"phase=%s paramid=%d paramkind=%d "
+				"stage=%s paramid=%d paramkind=%d "
 				"expected_alphabet=%u expected_width=%u "
 				"actual_alphabet=%u actual_width=%u",
-				phase,
+				stage,
 				runtime.param_rebind.paramid,
 				runtime.param_rebind.paramkind,
 				static_cast<unsigned>(target_type_params.alphabet_code),
@@ -23317,7 +23315,7 @@ enum class mmsearch_parameter_resolution : std::uint8_t {
 	bioseq_log<logging_level::debug>(
 		"[bioseq] pg: {} rebound mmsearch query bp_size={} extras_count={} "
 		"from Param paramid={} kind={}",
-		phase,
+		stage,
 		bp_size,
 		runtime.buffer.extra_query_count(),
 		runtime.param_rebind.paramid,
@@ -23708,7 +23706,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 		if (pk_var->varattno <= 0) continue;
 		/* Projection helpers are semantically tied to the current match_result,
 		 * not to an int key argument.  The direct-query surface therefore
-		 * permits bioseq.edit(seq) / bioseq.cigar(seq).  Retain the historical
+		 * permits bioseq.edit(seq) / bioseq.cigar(seq).  Retain the
 		 * optional PK capture only when the supplied Var is actually INT4. */
 		if (pk_var->vartype != INT4OID) continue;
 		primary_key_attno = pk_var->varattno;
@@ -23731,7 +23729,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	/* Begin is the only place that should drop extras as part of the
 	 * primary reset — every Begin call repopulates them from scratch
 	 * via the qual loop. ReScan / failure paths must NOT drop extras
-	 * (see clear_mmsearch_context's comment for the §9 review fix). */
+	 * (see clear_mmsearch_context for the retention contract). */
 	runtime.buffer.clear_mmsearch_context(/*clear_extras=*/true);
 	runtime.param_rebind = mmsearch_parameter_rebind{};
 
@@ -23739,7 +23737,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
 
 	/*
-	 * State retained by the legacy classifier/configuration branches. Planner
+	 * State used by the classifier/configuration branches. Planner
 	 * ownership guarantees this loop contains one primary expression and, only
 	 * for the parameterized join shape, at most one same-target Const extra.
 	 *
@@ -23982,10 +23980,10 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 		}
 
 		/*
-		 * Sanity-check the primary key column: must be INT4 for the POC.
+		 * Sanity-check the primary key column: the scan contract requires INT4.
 		 * If it is not INT4 or InvalidAttrNumber we still configure — the
 		 * batch processor will treat the column as null-PK and filter
-		 * those rows out (see TupleDispatchBuffer::run_batch_and_build_cursors).
+		 * those rows out (see tuple_dispatch_buffer::run_batch_and_build_cursors).
 		 */
 		if (primary_key_attno != InvalidAttrNumber
 			&& primary_key_attno <= tuple_descriptor->natts)
@@ -24293,7 +24291,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	 * projections the finalized target list references.  The only live
 	 * aligner GUC read here is performance-only profiling.
 	 *
-	 * The resulting struct is pushed into the TupleDispatchBuffer so every
+	 * The resulting struct is pushed into the tuple_dispatch_buffer so every
 	 * batch row inherits the same parameters, and copied into the per-scan
 	 * runtime.aligner_state so EXPLAIN can reproduce the user-visible
 	 * decision tree without re-walking the plan.
@@ -24407,9 +24405,10 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	const bool executable_scan =
 		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
 	/*
-	 * C1 is deliberately fail-closed: the only currently readable persisted
-	 * MPF/MPS layouts predate the revision-3 READY head+manifest identity.
-	 * They cannot satisfy ordinal 2, and rebuilding pairs or trusting a warm
+	 * C1 is deliberately fail-closed: the readable persisted minimizer-fragment
+	 * and minimizer-sequence
+	 * layouts lack the READY head-and-manifest identity required by ordinal 2.
+	 * Rebuilding pairs or trusting a warm
 	 * assembled/GPU cache would counterfeit a persisted-compatible read.
 	 * Reject executable scans here before Vulkan initialization and retain the
 	 * typed-processor check as defence in depth for non-standard callers. Plain
@@ -24422,7 +24421,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 		ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			 errmsg("required compatible persisted minimizer index unavailable"),
-			 errdetail("ordinal 2 requires a revision-3 READY generation retained by the BatchJoin prepared-reader lifecycle; ordinary column scans have no compatible persisted reader"),
+			 errdetail("ordinal 2 requires a READY generation with the current head-and-manifest identity retained by the BatchJoin prepared-reader lifecycle; ordinary column scans have no compatible persisted reader"),
 			 errhint("Use BioseqBatchJoin with a compatible READY generation, or choose index_read_requirement=allow/require_absent; recompute and cache fallback are forbidden.")));
 	}
 	/* Plain EXPLAIN must describe the selected pipeline without touching the
@@ -24437,15 +24436,15 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	if (executable_vulkan && !aligner_params.vulkan_enabled) {
 		raise_column_scan_vulkan_error_as_cpp(
 			"selected Vulkan execution requires "
-			"bioseq.aligner.vulkan_enabled=on",
-			"Set bioseq.aligner.vulkan_enabled=on, remove the per-call "
+			"bioseq.aligner.vulkan.enabled=on",
+			"Set bioseq.aligner.vulkan.enabled=on, remove the per-call "
 			"standalone Vulkan prefilter request, or select non-Vulkan "
 			"minimizer/chaining algorithms before dispatch.");
 	}
 	if (executable_vulkan && aligner_params.vulkan_enabled) {
 		auto& vulkan_runtime =
 			bioseq::postgres::scheduler::ensure_pg_vulkan_runtime_ready();
-		if (!vulkan_runtime.usable()) {
+		if (!vulkan_runtime.is_usable()) {
 			const std::string diagnostic = fmt::format(
 				"selected Vulkan execution requires a usable Vulkan runtime; "
 				"initialization_error={}",
@@ -25332,7 +25331,7 @@ static void batch_join_materialize_queries(
 			static_cast<std::uint64_t>(
 				MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)
 				+ sizeof(batch_join_query_tuple)
-				+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+				+ sizeof(bioseq::scheduler::dispatch_join_query_ref)
 				+ 256u));
 	const std::uint64_t scratch_metadata_bytes =
 		bioseq::parallelism::saturating_mul(
@@ -25568,7 +25567,7 @@ static void batch_join_materialize_queries(
 			tuple_upper_bound,
 			static_cast<std::uint64_t>(
 				sizeof(batch_join_query_tuple)
-				+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+				+ sizeof(bioseq::scheduler::dispatch_join_query_ref)
 				+ sizeof(TupleTableSlot)
 				+ static_cast<std::size_t>(
 					source->tts_tupleDescriptor->natts)
@@ -25759,7 +25758,7 @@ static void batch_join_materialize_queries(
 						retained_vector_bytes,
 						static_cast<std::uint64_t>(
 							sizeof(batch_join_query_tuple)
-								+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+								+ sizeof(bioseq::scheduler::dispatch_join_query_ref)
 								+ sizeof(TupleTableSlot)
 								+ static_cast<std::size_t>(
 									source->tts_tupleDescriptor->natts)
@@ -25790,7 +25789,7 @@ static void batch_join_materialize_queries(
 	runtime.all_query_refs.reserve(runtime.query_tuples.size());
 	for (batch_join_query_tuple& query : runtime.query_tuples) {
 		runtime.all_query_refs.push_back(
-			bioseq::scheduler::DispatchJoinQueryRef{
+			bioseq::scheduler::dispatch_join_query_ref{
 				.ordinal = query.ordinal,
 				.query_slot = query.slot,
 			});
@@ -25980,7 +25979,7 @@ static void normalize_batch_join_target_sources(
 static TupleTableSlot* batch_join_project_output(
 		CustomScanState* node,
 		batch_join_runtime& runtime,
-		const bioseq::scheduler::DispatchNextOutput& output) {
+		const bioseq::scheduler::dispatch_next_output& output) {
 	if (output.scan_slot_copy == nullptr || output.match == nullptr
 		|| output.query_ordinal >= runtime.query_tuples.size()) {
 		ereport(ERROR,
@@ -26300,7 +26299,7 @@ static void bioseq_batch_join_begin_custom_scan(
 		runtime->explain_only = (eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0;
 
 		/* Re-decode the catalog composite before any child initialization.  This
-		 * catches catalog drift and proves the ordinal marker was not altered
+		 * catches catalog drift and validates that the ordinal marker was not altered
 		 * between planning and execution. */
 		bioseq::simd::minimap2_parameters prevalidated_params =
 			build_params_from_gucs();
@@ -26316,12 +26315,12 @@ static void bioseq_batch_join_begin_custom_scan(
 				 errmsg("BioseqBatchJoin index requirement marker disagrees with options")));
 		}
 		/* A selected Vulkan BatchJoin is allowed to initialize its children and
-		 * reach TupleDispatchBuffer's production Format-5 preparation path.  That
-		 * path opens the exact PostgreSQL-owned MPS generation, validates READY,
+		 * reach tuple_dispatch_buffer's production persisted-target preparation path.  That
+		 * path opens the PostgreSQL-owned minimizer-sequence generation, validates READY,
 		 * revision/ABI/source/device identity, and retains its three resident GPU
 		 * buffers.  Missing or incompatible data still fails there before typed
 		 * dispatch; the typed processor independently requires that exact GPU
-		 * prepared target and has no CPU/SIMD/recompute fallback.  The older
+		 * prepared target and has no CPU/SIMD/recompute fallback.  The ordinary
 		 * column-scan path remains rejected separately because it has no such
 		 * prepared-target owner. */
 
@@ -26832,7 +26831,7 @@ static TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(
 			const std::size_t batch_end = std::min(
 				runtime->all_query_refs.size(),
 				runtime->next_query_batch + k_bioseq_runtime_buffer_reserve);
-			const std::span<const bioseq::scheduler::DispatchJoinQueryRef> batch{
+			const std::span<const bioseq::scheduler::dispatch_join_query_ref> batch{
 				runtime->all_query_refs.data() + runtime->next_query_batch,
 				batch_end - runtime->next_query_batch};
 			runtime->buffer.set_join_query_batch(batch);
@@ -26880,7 +26879,7 @@ static TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(
 		runtime->current_target_slot = target;
 		runtime->buffer.begin_join_target(target);
 		runtime->buffer.prepare_join_target_queries(
-			std::span<const bioseq::scheduler::DispatchJoinQueryRef>{
+			std::span<const bioseq::scheduler::dispatch_join_query_ref>{
 				runtime->all_query_refs});
 		runtime->target_active = true;
 		++runtime->distinct_targets;
@@ -27274,9 +27273,9 @@ static void bioseq_per_row_join_begin_custom_scan_impl(
 	const int raw_query_width = private_integer(
 		k_per_row_query_storage_unit_byte_width);
 	const int target_typmod_erased = private_integer(
-		k_per_row_target_typmod_erased_proof);
+		k_per_row_target_typmod_erased);
 	const int query_typmod_erased = private_integer(
-		k_per_row_query_typmod_erased_proof);
+		k_per_row_query_typmod_erased);
 	const int raw_requirement = private_integer(k_per_row_index_read_requirement);
 	runtime->honest_startup_cost = batch_join_cost_from_node(
 		reinterpret_cast<Node*>(list_nth(cscan->custom_private,
@@ -27348,7 +27347,7 @@ static void bioseq_per_row_join_begin_custom_scan_impl(
 		runtime->query_storage_unit_byte_width}.encode();
 	const std::array<AttrNumber, 2> operand_resnos{
 		runtime->target_slot_resno, runtime->query_slot_resno};
-	const std::array<int, 2> erased_proofs{
+	const std::array<int, 2> typmod_erased_flags{
 		target_typmod_erased, query_typmod_erased};
 	for (std::size_t index = 0u; index < operand_resnos.size(); ++index) {
 		const AttrNumber resno = operand_resnos[index];
@@ -27356,7 +27355,7 @@ static void bioseq_per_row_join_begin_custom_scan_impl(
 		if (attribute->atttypid
 				!= get_cached_stub_oids().bioseq_seq_type_oid
 			|| attribute->atttypmod
-				!= (erased_proofs[index] != 0
+				!= (typmod_erased_flags[index] != 0
 					? -1
 					: (index == 0u
 						? expected_typmod : expected_query_typmod))) {
@@ -27611,7 +27610,7 @@ static void bioseq_per_row_join_begin_custom_scan(
 
 [[nodiscard]] static TupleTableSlot* per_row_join_project_output(
 		CustomScanState* node, per_row_join_runtime& runtime,
-		bioseq::scheduler::DispatchNextOutput const& output) {
+		bioseq::scheduler::dispatch_next_output const& output) {
 	if (output.scan_slot_copy == nullptr || output.match == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
@@ -27915,7 +27914,7 @@ static void bioseq_per_row_join_explain_custom_scan(
  * Per-tuple population for every `bioseq.symbol_count(Var, 'L')`
  * placeholder. For the current output row (resolved by columnar rowno) it
  * random-access reads the SEQ column header, then for each site:
- *   (2) if bioseq.read_sequence_index = on, tries the stored INLINE
+ *   (2) if bioseq.index.sequence_read.enabled = on, tries the stored INLINE
  *       SymbolCountsIndex chunk (one heap PK lookup, the only thing the GUC
  *       gates here);
  *   (3) otherwise UNCONDITIONALLY recomputes tally_symbol_counts over the row
@@ -28173,16 +28172,17 @@ populate_symbol_count_placeholders(placeholder_constants& consts,
 				[stub, rid, column_attno = site.column_attno,
 				 rank = site.rank, loc, registered_snapshot,
 				 caches = resources->caches, scratch = resources->scratch,
-				 &cnt, hdr]<class S>() {
+				 &cnt, hdr]<class p_sequence>() {
 				if (stub) {
 					using source_binding_type =
-						bioseq::storage::postgres_lazy_sequence_binding<S>;
+						bioseq::storage::postgres_lazy_sequence_binding<
+							p_sequence>;
 					const source_binding_type source_binding{
 						rid.db_oid, rid.tablespace_oid, rid.relfilenode,
 						column_attno, loc,
 						source_binding_type::expected_last_fragment_padding(loc),
 						registered_snapshot, caches, scratch};
-					bioseq::storage::with_postgres_lazy_sequence<S>(
+					bioseq::storage::with_postgres_lazy_sequence<p_sequence>(
 						source_binding, [rank, &cnt](auto lazy_view) {
 							auto counts =
 								bioseq::indexing::tally_symbol_counts(lazy_view);
@@ -28190,7 +28190,7 @@ populate_symbol_count_placeholders(placeholder_constants& consts,
 								cnt = counts[rank];
 						});
 				} else {
-					compact_sequence_range<S> range{*hdr};
+					compact_sequence_range<p_sequence> range{*hdr};
 					auto lazy = bioseq::storage::make_resident_lazy_sequence(range);
 					const auto lazy_view =
 						bioseq::storage::make_lazy_sequence_view(lazy);
@@ -28891,13 +28891,13 @@ struct mmsearch_row_evaluation {
 	}
 
 	/*
-	 * Two-phase state machine:
+	 * Two-stage state machine:
 	 *
-	 *   Phase 1 (writing): pull tuples from the access method, run qual,
+	 *   Writing stage: pull tuples from the access method, run qual,
 	 *                      buffer passing tuples via buffer.submit_scan.
 	 *                      When source is exhausted, run batch processor
 	 *                      and transition.
-	 *   Phase 2 (reading): drain buffered output entries, setting
+	 *   Reading stage: drain buffered output entries, setting
 	 *                      placeholder const nodes from match_results and
 	 *                      projecting via ExecProject.
 	 *
@@ -28906,7 +28906,7 @@ struct mmsearch_row_evaluation {
 	 */
 	for (;;)
 	{
-		/* ---- Phase 2: drain buffered output ---- */
+		/* ---- Reading stage: drain buffered output ---- */
 		if (runtime.buffer.has_finished_writing())
 		{
 			bioseq_log<logging_level::debug>("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
@@ -29044,7 +29044,7 @@ struct mmsearch_row_evaluation {
 			return projected;
 		}
 
-		/* ---- Phase 1: writing ---- */
+		/* ---- Writing stage ---- */
 		TupleTableSlot *slot = NULL;
 
 		/*
@@ -29064,7 +29064,7 @@ struct mmsearch_row_evaluation {
 						runtime.alignment_registration,
 						runtime.buffer.execution_stats());
 				}
-				continue; /* Next iteration enters Phase 2. */
+				continue; /* Next iteration enters the reading stage. */
 			}
 		}
 		/*
@@ -29268,8 +29268,7 @@ struct mmsearch_row_evaluation {
 				 * symbol_count fast-path requires the row number; the
 				 * access method set it on slot->tts_tid above. Convert
 				 * once per projected row rather than stashing a
-				 * (relid, rowno) in a shared struct (which was the
-				 * anti-pattern this module used to carry).
+				 * (relid, rowno) in shared state.
 				 */
 				{
 					int64_t row_number = -1;
@@ -29794,8 +29793,8 @@ bioseq_column_scan_rescan_custom_scan(CustomScanState *node)
 	/*
 	 * Drop every buffered tuple, output cursor and match map left over
 	 * from the previous scan iteration. Without this, an inner-side
-	 * scan that drained its cursor on iteration N would re-enter Phase
-	 * 2 immediately on iteration N+1 (because output_position stayed
+	 * scan that drained its cursor on iteration N would re-enter the reading
+	 * stage immediately on iteration N+1 (because output_position stayed
 	 * pointing past the cursor end) and return EOF without ever pulling
 	 * a tuple from the access method. ReScan is the natural reset
 	 * point: BeginCustomScan only fires once per query, so we cannot
@@ -29821,7 +29820,7 @@ bioseq_column_scan_rescan_custom_scan(CustomScanState *node)
 	{
 		/* The stashed FuncExpr identifies the exact primary Param even when
 		 * planner qual ordering puts a Const extra first.  NULL clears only
-		 * the primary context; BMO v2 rejects NULL Const extras during planning,
+			 * the primary context; BMO rejects NULL Const extras during planning,
 		 * while registered non-NULL extras survive for a later non-NULL rescan. */
 		(void)resolve_mmsearch_param_query(
 			runtime, node->ss.ps.ps_ExprContext,
@@ -29970,13 +29969,13 @@ highway_kernels_for_explain_stage(
 		: bioseq::simd_dispatch::highway_kernel_mask{};
 }
 
-template <class visitor>
+template <class p_visitor>
 static void
 visit_planned_highway_functions(
 		const bioseq::simd_dispatch::highway_kernel_mask&
 			top_level_query_kernels,
 		const bioseq::simd::pipe::pipeline_description* pipeline_desc,
-		visitor&& visitor)
+		p_visitor&& visitor)
 {
 	const auto visit_kernel_set = [&visitor](
 			const bioseq::simd_dispatch::highway_kernel_mask& kernels,
@@ -30068,7 +30067,7 @@ explain_pipeline_execution_stats(
 		/* Complete every fail-closed plan check before constructing strings:
 		 * ereport(ERROR) longjmps and cannot unwind nontrivial C++ locals. */
 		const auto highway_plan =
-			bioseq::scheduler::highway_dispatch_info_for_plan();
+			bioseq::scheduler::highway_dispatch_plan_for_plan();
 		const std::string planned =
 			highway_target_name(highway_plan.planned_target);
 		const std::string supported =
@@ -30083,11 +30082,11 @@ explain_pipeline_execution_stats(
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str, "%s: %s\n", name, value.c_str());
 			};
-			print_plan_property("Highway Planned Architecture", planned);
+			print_plan_property("Planned Architecture", planned);
 			print_plan_property(
-				"Highway CPU-Supported Architectures", supported);
-			print_plan_property("Highway Compiled Architectures", compiled);
-			print_plan_property("Highway Runnable Architectures", runnable);
+				"CPU-Supported Targets", supported);
+			print_plan_property("Highway Compiled Targets", compiled);
+			print_plan_property("Runnable Targets", runnable);
 			visit_planned_highway_functions(
 				top_level_query_kernels, pipeline_desc,
 				[es, &planned](
@@ -30105,13 +30104,13 @@ explain_pipeline_execution_stats(
 			if (stats.environment.is_highway_executed_target_mixed) {
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfoString(es->str,
-					"* Highway Executed Architecture: mixed\n");
+					"* Executed Architecture: mixed\n");
 			} else if (stats.environment.highway_executed_target != 0) {
 				const std::string executed = highway_target_name(
 					stats.environment.highway_executed_target);
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"* Highway Executed Architecture: %s\n",
+					"* Executed Architecture: %s\n",
 					executed.c_str());
 			}
 		} else {
@@ -30119,11 +30118,11 @@ explain_pipeline_execution_stats(
 				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
 			ExplainPropertyText("Planned Architecture", planned.c_str(), es);
 			ExplainPropertyText(
-				"CPU-Supported Architectures", supported.c_str(), es);
+				"CPU-Supported Targets", supported.c_str(), es);
 			ExplainPropertyText(
-				"Compiled Architectures", compiled.c_str(), es);
+				"Highway Compiled Targets", compiled.c_str(), es);
 			ExplainPropertyText(
-				"Runnable Architectures", runnable.c_str(), es);
+				"Runnable Targets", runnable.c_str(), es);
 			if (all_planned_kernels.any()) {
 				ExplainOpenGroup(
 					"Planned Highway Functions",
@@ -30230,7 +30229,7 @@ explain_pipeline_execution_stats(
 			operational.gpu_coordinate_vote_dispatches, es);
 		appendStringInfoSpaces(es->str, es->indent * 2);
 		appendStringInfo(es->str,
-			"* Host evidence [query_sketch_ns=%llu target_index_build_ns=%llu "
+			"* Host stats [query_sketch_ns=%llu target_index_build_ns=%llu "
 			"query_hash_readbacks=%llu query_symbol_packing=%llu "
 			"target_symbol_packing=%llu alignment_classification=%llu "
 			"cigar_construction=%llu]\n",
@@ -30459,8 +30458,7 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 	 *      list is gated by params.do_cigar / compute_divergence /
 	 *      compute_mapq so users see exactly what will (or will not) run.
 	 *
-	 * The distinction from the previous implementation is that the
-	 * sidecar/recomputed line never prints for a pass-through scan. Plans
+	 * The sidecar/recomputed line never prints for a pass-through scan. Plans
 	 * that only use symbol_count/meta projections still show the "Fetched
 	 * From Meta" line above but never a minimizer-index line — because
 	 * they never consult index_sidecar.
@@ -30536,9 +30534,7 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 		/*
 		 * Only the WHERE mmsearch(...) pipeline consults the minimizer
 		 * index. A bare SELECT with only symbol_count/metadata projections
-		 * stays on the meta-sidecar side and should not see a minimizer
-		 * line at all (the previous behaviour printed one unconditionally
-		 * and was misleading).
+		 * stays on the meta-sidecar side and does not emit a minimizer line.
 		 */
 		if (features.has_mmsearch)
 		{
@@ -30653,9 +30649,8 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 							// mmsearch_storage_unit_byte_width() returns the
 							// storage unit width in BYTES (1/2/4/8), so the
 							// typmod width in bits is byte_width * 8 (e.g. 4
-							// bytes -> seq('dna4', 32)). The previous
-							// `8u << byte_width` formula treated the byte count
-							// as a log2 code and rendered 4 bytes as 128.
+							// bytes -> seq('dna4', 32)); the byte count is not
+							// a log2-encoded width.
 							const auto width_to_bits = [](uint8_t byte_width) {
 								return static_cast<unsigned>(byte_width) * 8u;
 							};
@@ -30735,7 +30730,7 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 		const auto& params = aligner_snapshot->params;
 		const auto& features = aligner_snapshot->features;
 		const auto highway_plan =
-			bioseq::scheduler::highway_dispatch_info_for_plan();
+			bioseq::scheduler::highway_dispatch_plan_for_plan();
 		const std::string highway_planned_architecture =
 			highway_target_name(highway_plan.planned_target);
 		const std::string highway_cpu_supported_architectures =
@@ -30746,9 +30741,8 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 			highway_target_names(highway_plan.runnable_targets);
 		/*
 		 * Renderer driven by the structured `pipeline_description` populated at
-		 * `BeginCustomScan`. The renderer no longer hardcodes
-		 * which parameters belong to which stage — adding a new stage / new
-		 * algorithm trait surfaces automatically once it appears in
+		 * `BeginCustomScan`. The structured description maps parameters to stages,
+		 * and algorithm traits surface automatically once they appear in
 		 * `pipeline_description::stages`.
 		 *
 		 * When the describe path did not populate a description (e.g. a
@@ -30771,7 +30765,7 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 			}
 			/*
 			 * A structured QuerySketchStage owns its exact function set. The
-			 * top-level list is solely the cold/legacy fallback for descriptions
+			 * top-level list is solely the cold fallback for descriptions
 			 * that could not represent that semantic stage.
 			 */
 			const auto top_level_query_highway_kernels =
@@ -30817,19 +30811,19 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 				++es->indent;
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"Highway Planned Architecture: %s\n",
+					"Planned Architecture: %s\n",
 					highway_planned_architecture.c_str());
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"Highway CPU-Supported Architectures: %s\n",
+					"CPU-Supported Targets: %s\n",
 					highway_cpu_supported_architectures.c_str());
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"Highway Compiled Architectures: %s\n",
+					"Highway Compiled Targets: %s\n",
 					highway_compiled_architectures.c_str());
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"Highway Runnable Architectures: %s\n",
+					"Runnable Targets: %s\n",
 					highway_runnable_architectures.c_str());
 				for (std::size_t kernel_index = 0;
 					 kernel_index < bioseq::simd_dispatch::highway_kernel_count;
@@ -30852,13 +30846,13 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 					if (environment.is_highway_executed_target_mixed) {
 						appendStringInfoSpaces(es->str, es->indent * 2);
 						appendStringInfoString(es->str,
-							"* Highway Executed Architecture: mixed\n");
+							"* Executed Architecture: mixed\n");
 					} else if (environment.highway_executed_target != 0) {
 						const std::string executed = highway_target_name(
 							environment.highway_executed_target);
 						appendStringInfoSpaces(es->str, es->indent * 2);
 						appendStringInfo(es->str,
-							"* Highway Executed Architecture: %s\n",
+							"* Executed Architecture: %s\n",
 							executed.c_str());
 					}
 				}
@@ -31043,11 +31037,11 @@ bioseq_column_scan_explain_custom_scan(CustomScanState *node, List *ancestors,
 				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
 			ExplainPropertyText("Planned Architecture",
 				highway_planned_architecture.c_str(), es);
-			ExplainPropertyText("CPU-Supported Architectures",
+			ExplainPropertyText("CPU-Supported Targets",
 				highway_cpu_supported_architectures.c_str(), es);
-			ExplainPropertyText("Compiled Architectures",
+			ExplainPropertyText("Highway Compiled Targets",
 				highway_compiled_architectures.c_str(), es);
-			ExplainPropertyText("Runnable Architectures",
+			ExplainPropertyText("Runnable Targets",
 				highway_runnable_architectures.c_str(), es);
 			if (top_level_query_highway_kernels.any()) {
 				ExplainOpenGroup(

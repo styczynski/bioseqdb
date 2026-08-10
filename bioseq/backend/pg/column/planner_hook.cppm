@@ -87,10 +87,10 @@ struct plan_tree_mutator_context
 }
 
 /// @brief Allocates a shallow PostgreSQL-memory-context copy of a plan node.
-template<typename plan_node_type>
-[[nodiscard]] inline plan_node_type* copy_plan_node(const plan_node_type* source) {
-	plan_node_type* cloned = static_cast<plan_node_type*>(palloc(sizeof(plan_node_type)));
-	memcpy(cloned, source, sizeof(plan_node_type));
+template<typename p_plan_node>
+[[nodiscard]] inline p_plan_node* copy_plan_node(const p_plan_node* source) {
+	p_plan_node* cloned = static_cast<p_plan_node*>(palloc(sizeof(p_plan_node)));
+	memcpy(cloned, source, sizeof(p_plan_node));
 	return cloned;
 }
 

@@ -1,5 +1,5 @@
 # The isolated code generator is provisioned once at the repository root via
-# bioseq_add_codegen (cmake/BioseqCodegen.cmake). This directory only
+# bioseq_add_codegen (cmake/bioseq_codegen.cmake). This directory only
 # consumes the imported bioseq_codegen executable and the bioseq_codegen_project
 # build target; it never creates another ExternalProject or discovers the GCC/
 # Clang toolchain itself.
@@ -149,7 +149,7 @@ foreach(_bioseq_descriptor IN LISTS _bioseq_external_descriptors_api_client)
   list(APPEND _bioseq_generated_byproducts
     "${_bioseq_client_root}/CMakeLists.txt"
     "${_bioseq_client_root}/client/index.cppm"
-    "${_bioseq_client_root}/integration_tests/test_${_bioseq_client_name}_client.cpp"
+    "${_bioseq_client_root}/tests/integration/${_bioseq_client_name}_client_test.cpp"
     "${_bioseq_client_root}/manifest.tsv"
     "${_bioseq_client_root}/provenance.txt")
 endforeach()
@@ -361,7 +361,7 @@ target_link_libraries(bioseq_external_io PRIVATE
 
 # Provider-core + adapter tests run inside the existing external integration exec
 # so the `external-api` MCP mode builds and runs them without a sequence/PG target.
-if(TARGET bioseq_external_integration_tests_exec)
+if(TARGET bioseq_external_api_integration_tests)
   # This target keeps the reusable rank-pack core, checked fixed-span writer,
   # and admitted-region adapter outside PostgreSQL. Keep the checked closure
   # explicit so an unrelated PostgreSQL-facing source cannot weaken the
@@ -390,18 +390,28 @@ if(TARGET bioseq_external_integration_tests_exec)
       endif()
     endforeach()
   endforeach()
-  target_compile_definitions(bioseq_external_integration_tests_exec PRIVATE
+  target_compile_definitions(bioseq_external_api_integration_tests PRIVATE
     BIOSEQ_PG_PACK_DENYLIST_ENABLED=1)
 
-  file(GLOB _bioseq_provider_test_sources CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
-  target_sources(bioseq_external_integration_tests_exec PRIVATE
+  set(_bioseq_provider_test_sources
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/archive_source_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/fasta_stream_benchmark_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/gzip_decode_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/lazy_adapter_no_pg_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/sequence_stream_live_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/streaming_live_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/core_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/rate_limit_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/run_live_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/ucsc_live_test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/transport/transfer_service_test.cpp")
+  target_sources(bioseq_external_api_integration_tests PRIVATE
     ${_bioseq_provider_test_sources})
-  target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
+  target_link_libraries(bioseq_external_api_integration_tests PRIVATE
     bioseq_external_provider_core
     bioseq_external_io)
   if(TARGET bioseq_external_provider_adapters)
-    target_link_libraries(bioseq_external_integration_tests_exec PRIVATE
+    target_link_libraries(bioseq_external_api_integration_tests PRIVATE
       bioseq_external_provider_adapters)
   endif()
 endif()

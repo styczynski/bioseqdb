@@ -13,7 +13,8 @@ from unittest import mock
 BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
 
 
 class CMakeConfigureFreshnessTest(unittest.TestCase):
@@ -76,7 +77,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
         }
         if extra_environment is not None:
             environment.update(extra_environment)
-        return server._cmake_configure_stamp_document(
+        return build_worker._cmake_configure_stamp_document(
             "selected",
             mode_cache_variables={"MODE": "cache"},
             managed_arguments=["-DMANAGED=one"],
@@ -109,7 +110,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             )
             first = self._document(presets)
             self.assertEqual(
-                server._resolved_cmake_preset_cache_variables(
+                build_presets._resolved_cmake_preset_cache_variables(
                     "selected",
                     presets_file=presets,
                     environment={
@@ -305,10 +306,10 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             )
             executable.chmod(0o755)
             with mock.patch.object(
-                    server.shutil,
+                    build_worker.shutil,
                     "which",
                     return_value=str(executable)):
-                identity = server._cmake_executable_identity(
+                identity = build_worker._cmake_executable_identity(
                     {"PATH": "/irrelevant"},
                 )
 
@@ -330,19 +331,19 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 encoding="utf-8",
             )
             document = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {},
                 "inputs_sha256": "a" * 64,
             }
-            server._publish_cmake_configure_stamp(
+            build_worker._publish_cmake_configure_stamp(
                 build_dir,
                 document,
             )
             with mock.patch.object(
-                    server,
+                    build_worker,
                     "_run_cmake_preset_configure") as configure:
-                changed = server._ensure_cmake_preset_tree_fresh(
+                changed = build_worker._ensure_cmake_preset_tree_fresh(
                     build_dir=build_dir,
                     preset="selected",
                     configure_stamp=document,
@@ -358,6 +359,32 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
 
         self.assertFalse(changed)
         configure.assert_not_called()
+
+    def test_configure_stamp_rejects_legacy_revision_and_unknown_keys(self) -> None:
+        current = {
+            "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+            "schema_revision": 1,
+            "inputs": {},
+            "inputs_sha256": "a" * 64,
+        }
+        mutations = {
+            "legacy": lambda value: value.update(
+                schema_version=value.pop("schema_revision")),
+            "legacy-kind": lambda value: value.update(
+                artifact_kind="bioseq-build-mcp-configure-v1"),
+            "wrong": lambda value: value.update(schema_revision=2),
+            "boolean": lambda value: value.update(schema_revision=True),
+            "unknown": lambda value: value.update(unexpected=True),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    invalid = dict(current)
+                    mutate(invalid)
+                    with self.assertRaisesRegex(RuntimeError, "invalid configure stamp"):
+                        build_worker._publish_cmake_configure_stamp(
+                            build_dir, invalid)
 
     def test_missing_stamp_clears_cache_and_reconfigures_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -376,8 +403,8 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 encoding="utf-8",
             )
             document = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {},
                 "inputs_sha256": "b" * 64,
             }
@@ -393,10 +420,10 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 return 0
 
             with mock.patch.object(
-                    server,
+                    build_worker,
                     "_run_cmake_preset_configure",
                     side_effect=configure) as configure_mock:
-                changed = server._ensure_cmake_preset_tree_fresh(
+                changed = build_worker._ensure_cmake_preset_tree_fresh(
                     build_dir=build_dir,
                     preset="selected",
                     configure_stamp=document,
@@ -436,7 +463,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 "INCLUDED:STRING=one\n",
                 encoding="utf-8",
             )
-            server._publish_cmake_configure_stamp(build_dir, before)
+            build_worker._publish_cmake_configure_stamp(build_dir, before)
 
             self._write_base_include(parent, value=None)
             after = self._document(presets)
@@ -454,10 +481,10 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 return 0
 
             with mock.patch.object(
-                    server,
+                    build_worker,
                     "_run_cmake_preset_configure",
                     side_effect=configure):
-                server._ensure_cmake_preset_tree_fresh(
+                build_worker._ensure_cmake_preset_tree_fresh(
                     build_dir=build_dir,
                     preset="selected",
                     configure_stamp=after,
@@ -480,26 +507,26 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             build_dir = Path(temporary)
             document = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {},
                 "inputs_sha256": "9" * 64,
             }
-            server._publish_cmake_configure_stamp(
+            build_worker._publish_cmake_configure_stamp(
                 build_dir,
                 document,
             )
-            stamp = build_dir / server._CMAKE_CONFIGURE_STAMP_NAME
+            stamp = build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME
 
             def run(*_args: object, **_kwargs: object) -> int:
                 self.assertFalse(stamp.exists())
                 return 0
 
             with mock.patch.object(
-                    server,
+                    build_worker,
                     "_stream_subprocess",
                     side_effect=run) as subprocess_mock:
-                result = server._run_cmake_preset_configure(
+                result = build_worker._run_cmake_preset_configure(
                     ["cmake", "--preset", "selected", "-DREPAIR=one"],
                     build_dir=build_dir,
                     log_handle=io.StringIO(),
@@ -518,21 +545,21 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 encoding="utf-8",
             )
             old = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {"old": True},
                 "inputs_sha256": "c" * 64,
             }
             new = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {"new": True},
                 "inputs_sha256": "d" * 64,
             }
-            server._publish_cmake_configure_stamp(build_dir, old)
+            build_worker._publish_cmake_configure_stamp(build_dir, old)
             with (
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_run_cmake_preset_configure",
                     return_value=1,
                 ),
@@ -541,7 +568,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                     "cmake configure exited with code 1",
                 ),
             ):
-                server._ensure_cmake_preset_tree_fresh(
+                build_worker._ensure_cmake_preset_tree_fresh(
                     build_dir=build_dir,
                     preset="selected",
                     configure_stamp=new,
@@ -556,15 +583,15 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 )
 
             self.assertFalse(
-                (build_dir / server._CMAKE_CONFIGURE_STAMP_NAME).exists(),
+                (build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME).exists(),
             )
 
     def test_mutation_during_configure_fails_before_resealing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build_dir = Path(temporary)
             before = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {"value": "before"},
                 "inputs_sha256": "e" * 64,
             }
@@ -573,10 +600,10 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 "inputs": {"value": "after"},
                 "inputs_sha256": "f" * 64,
             }
-            server._publish_cmake_configure_stamp(build_dir, before)
+            build_worker._publish_cmake_configure_stamp(build_dir, before)
             with self.assertRaisesRegex(
                     RuntimeError, "refusing a mixed configuration"):
-                server._finalize_cmake_configure_stamp(
+                build_worker._finalize_cmake_configure_stamp(
                     build_dir,
                     before,
                     after,
@@ -584,33 +611,33 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 )
 
             self.assertFalse(
-                (build_dir / server._CMAKE_CONFIGURE_STAMP_NAME).exists(),
+                (build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME).exists(),
             )
 
     def test_failed_directory_fsync_leaves_no_published_stamp(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             build_dir = Path(temporary)
             document = {
-                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                "schema_version": 1,
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
                 "inputs": {},
                 "inputs_sha256": "8" * 64,
             }
             with (
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_fsync_cmake_configure_stamp_directory",
                     side_effect=RuntimeError("fsync failed"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "fsync failed"),
             ):
-                server._publish_cmake_configure_stamp(
+                build_worker._publish_cmake_configure_stamp(
                     build_dir,
                     document,
                 )
 
             self.assertFalse(
-                (build_dir / server._CMAKE_CONFIGURE_STAMP_NAME).exists(),
+                (build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME).exists(),
             )
 
 

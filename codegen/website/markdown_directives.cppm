@@ -15,7 +15,7 @@ module bioseq.codegen.website:markdown_directives;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
-// Bioseq Markdown extensions over MD4C's typed events (§10.3-10.7): admonition
+// Bioseq Markdown extensions over MD4C's typed events: admonition
 // classification, entity-reference parsing (both `[[sql:...]]` wikilinks and
 // `entity:` links), and the runnable-SQL fence grammar. Source-neutral helpers
 // shared by the markdown driver and the tutorial planner.
@@ -45,7 +45,7 @@ namespace bioseq::codegen::website {
     return {};
 }
 
-/// @brief Parses an entity-reference target into a typed query (§10.4).
+/// @brief Parses an entity-reference target into a typed query.
 ///
 /// Accepts an optional `entity:` prefix (link form) and a bare domain prefix
 /// (`sql:`/`cpp:`/`id:`) as produced by `[[sql:...]]` wikilinks. A trailing
@@ -85,7 +85,7 @@ namespace bioseq::codegen::website {
     return query;
 }
 
-/// @brief Parsed attributes of a runnable SQL fence info string (§10.7).
+/// @brief Parsed attributes of a runnable SQL fence info string.
 struct runnable_fence_attributes {
     std::string local_id;
     std::chrono::milliseconds timeout{15'000};
@@ -96,7 +96,7 @@ struct runnable_fence_attributes {
 namespace {
 
 [[nodiscard]] std::chrono::milliseconds parse_timeout(std::string_view value) {
-    // Unsigned decimal integer followed by ms or s; 100ms-60s (§10.7).
+    // Unsigned decimal integer followed by ms or s; 100ms-60s.
     std::size_t digits = 0;
     while (digits < value.size() && value[digits] >= '0' && value[digits] <= '9') {
         ++digits;
@@ -141,7 +141,7 @@ namespace {
 }
 
 // One token of a fenced info string: the head language/kind word, a `key=value`
-// attribute, or a bare boolean flag (§10.5).
+// attribute, or a bare boolean flag.
 struct info_token {
     std::string key;                   // head word, attribute key, or flag name
     std::optional<std::string> value;  // present only for key=value
@@ -149,7 +149,7 @@ struct info_token {
 };
 
 // Tokenizes a fenced info string honoring double-quoted values with \\ \" \t \n
-// escapes (§10.5); bare values end at ASCII whitespace. A quote may only open a
+// escapes; bare values end at ASCII whitespace. A quote may only open a
 // value (immediately after `=`); a stray or unterminated quote is fatal, so a
 // signature containing commas/spaces can be carried verbatim as one value.
 [[nodiscard]] std::vector<info_token> tokenize_info(std::string_view info) {
@@ -226,10 +226,10 @@ struct info_token {
 
 }  // namespace
 
-/// @brief Closed classification of a fenced code block (§10.5).
+/// @brief Closed classification of a fenced code block.
 enum class fence_kind { ordinary, annotation, runnable };
 
-/// @brief Parsed, validated attributes of any fenced block's info string (§10.5).
+/// @brief Parsed, validated attributes of any fenced block's info string.
 struct fence_descriptor {
     fence_kind kind{fence_kind::ordinary};
     std::string language;               // head word (ordinary/runnable)
@@ -245,7 +245,7 @@ struct fence_descriptor {
     std::optional<std::size_t> occurrence;
 };
 
-/// @brief Parses any fenced info string against the closed §10.5 attribute table.
+/// @brief Parses any fenced info string against the closed attribute table.
 ///
 /// Duplicate scalar attributes and unknown attributes/flags are fatal; `entity=` is
 /// the one repeatable attribute; quoted values may carry commas/spaces (an overload
@@ -403,25 +403,25 @@ struct fence_descriptor {
         .expected_sqlstate = descriptor.expected_sqlstate};
 }
 
-/// @brief The setup/visible/teardown text of a runnable example (§10.7).
-struct sql_phase_bodies {
+/// @brief The setup/visible/teardown text of a runnable example.
+struct sql_example_sections {
     std::string setup;
     std::string visible;
     std::string teardown;
 };
 
-/// @brief Splits fenced SQL into phases on the exact marker lines (§10.7).
+/// @brief Splits fenced SQL into sections on the exact marker lines.
 ///
 /// Each of `-- bioseq:setup`, `-- bioseq:visible`, `-- bioseq:teardown` must
 /// occur exactly once, alone on a line, in order. Markers are removed and each
-/// phase is trimmed of surrounding blank lines.
+/// section is trimmed of surrounding blank lines.
 /// @param code Raw fenced SQL body.
-/// @return The three phase bodies.
-[[nodiscard]] sql_phase_bodies parse_sql_phase_bodies(std::string_view code) {
+/// @return The three SQL sections.
+[[nodiscard]] sql_example_sections parse_sql_example_sections(std::string_view code) {
     constexpr std::string_view markers[] = {
         "-- bioseq:setup", "-- bioseq:visible", "-- bioseq:teardown"};
-    int phase = -1;
-    std::string bodies[3];
+    int active_section = -1;
+    std::string sections[3];
     bool seen[3] = {false, false, false};
     std::size_t position = 0;
     while (position <= code.size()) {
@@ -441,16 +441,16 @@ struct sql_phase_bodies {
             }
         }
         if (matched >= 0) {
-            if (seen[matched] || matched != phase + 1) {
+            if (seen[matched] || matched != active_section + 1) {
                 throw std::runtime_error(
                     "runnable SQL requires setup/visible/teardown markers exactly "
                     "once in order");
             }
             seen[matched] = true;
-            phase = matched;
-        } else if (phase >= 0) {
-            bodies[phase].append(line);
-            bodies[phase].push_back('\n');
+            active_section = matched;
+        } else if (active_section >= 0) {
+            sections[active_section].append(line);
+            sections[active_section].push_back('\n');
         }
         if (newline == std::string_view::npos) {
             break;
@@ -461,10 +461,10 @@ struct sql_phase_bodies {
         throw std::runtime_error(
             "runnable SQL requires all three bioseq markers");
     }
-    return sql_phase_bodies{
-        .setup = trim_ascii_whitespace(bodies[0]),
-        .visible = trim_ascii_whitespace(bodies[1]),
-        .teardown = trim_ascii_whitespace(bodies[2])};
+    return sql_example_sections{
+        .setup = trim_ascii_whitespace(sections[0]),
+        .visible = trim_ascii_whitespace(sections[1]),
+        .teardown = trim_ascii_whitespace(sections[2])};
 }
 
 }  // namespace bioseq::codegen::website

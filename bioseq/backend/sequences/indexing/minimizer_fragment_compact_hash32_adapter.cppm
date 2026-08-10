@@ -238,9 +238,9 @@ private:
             return direct_inverted_index_error::posting;
         case minimizer_generation_encoding_error::admission:
             return direct_inverted_index_error::allocation;
-        case minimizer_generation_encoding_error::compatibility_mismatch:
-        case minimizer_generation_encoding_error::format_revision:
-            return direct_inverted_index_error::compatibility;
+        case minimizer_generation_encoding_error::storage_contract_mismatch:
+        case minimizer_generation_encoding_error::unsupported_storage_layout:
+            return direct_inverted_index_error::storage_contract_mismatch;
         default:
             return direct_inverted_index_error::source_read;
         }
@@ -759,7 +759,7 @@ public:
             || generation.directory == nullptr
             || options.emission_chunk_positions == 0u) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const minimizer_generation_head& head = *generation.head;
         const minimizer_generation_manifest& manifest = *generation.manifest;
@@ -774,7 +774,7 @@ public:
                 != manifest.source_content_checksum
             || head.generation_id == 0u
             || head.source_identity == 0u
-            || head.compatibility_checksum == 0u
+            || head.storage_contract_checksum == 0u
             || generation.directory->profile() != *profile
             || generation.mapped_payload.size() != manifest.payload_bytes
             || profile->max_hash
@@ -783,7 +783,7 @@ public:
             || profile->max_occ_cap
                 > (std::numeric_limits<std::uint32_t>::max)()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::uint32_t max_hash =
             static_cast<std::uint32_t>(profile->max_hash);
@@ -795,7 +795,7 @@ public:
             : (std::uint64_t{1u} << hash_bits) - 1u;
         if (hash_bits < 9u || profile->max_hash != expected_max_hash) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
 
         minimizer_fragment_compact_hash32_adapter adapter;
@@ -1040,13 +1040,13 @@ public:
         if (!ready_ || persisted_max_occ_cap == 0u
             || persisted_max_occ_cap > profile_.max_occ_cap) {
             return std::unexpected(
-                direct_inverted_index_error::compatibility);
+                direct_inverted_index_error::storage_contract_mismatch);
         }
         return compact_hash32_build_options{
             .identity = direct_index_identity{
                 .generation_id = head_.generation_id,
                 .source_identity = head_.source_identity,
-                .compatibility_checksum = head_.compatibility_checksum,
+                .storage_contract_checksum = head_.storage_contract_checksum,
                 .target_length = manifest_.target_length,
             },
             .max_occ_cap = persisted_max_occ_cap,

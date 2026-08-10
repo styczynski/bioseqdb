@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_revision": 1,
   "postgresql_majors": [
     17
   ],

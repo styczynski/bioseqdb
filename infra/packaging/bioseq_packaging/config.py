@@ -21,7 +21,7 @@ from .model import (
 
 
 PACKAGE_VERSION = "4.2.3"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_REVISION = 1
 PACKAGE_NAME_PREFIX = "bioseq-postgresql"
 PACKAGE_MAINTAINER = "Bioseq Packaging <packages@bioseq.dev>"
 PACKAGE_HOMEPAGE = "https://github.com/bioseq/bioseq"

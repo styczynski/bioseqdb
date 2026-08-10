@@ -227,7 +227,7 @@ inline void collect_minimizers_simd(
     // matching buffer slot — exactly mirroring the scalar `collector.collect(el)`
     // behaviour where the buffer slot's full sketch (including its own strand) is
     // emitted, not the running current_min's strand.
-    auto submit_results = [&]<bool ignore_distance>(
+    auto submit_results = [&]<bool p_ignore_distance>(
         const input_simd_tag_type& d,
         auto const& offsets,
         const size_t distance,
@@ -236,7 +236,7 @@ inline void collect_minimizers_simd(
     ){
         hn::StoreU(current_min, d, temp_buffer1);
         hn::StoreU(hn::VecFromMask(d, min_mask), d, temp_buffer2);
-        if constexpr (ignore_distance) {
+        if constexpr (p_ignore_distance) {
             hn::StoreU(current_min_pos, d, temp_buffer3);
         }
         hn::StoreU(strand_to_emit, d, temp_buffer4);
@@ -254,7 +254,7 @@ inline void collect_minimizers_simd(
                 // lane.
                 const uint64_t strand_bit =
                     static_cast<uint64_t>(temp_buffer4[i]) & 0x1ULL;
-                if constexpr (ignore_distance) {
+                if constexpr (p_ignore_distance) {
                     // The current_min for lane `i` was stored at buffer slot `temp_buffer3[i]` in a
                     // PREVIOUS iteration. `current_pos` is the slot just written in THIS iteration.
                     // The number of iterations since current_min was stored is therefore always in
@@ -666,7 +666,7 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 /** Generated representation leaf for 63-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u64(
@@ -774,7 +774,7 @@ requires (
                         invocation, result);
                 }
                 break;
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
             case minimizer_output_layout::sequence_log2_7_kmer_7_uint32:
                 if constexpr (std::same_as<p_storage_unit, std::uint32_t>) {
                     is_internally_consistent = minimap2_reference_repr_l7_k7_u32(

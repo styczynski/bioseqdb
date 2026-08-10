@@ -31,24 +31,24 @@ export module bioseq.postgres.support.sql_boundary:vector;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
-import bioseq.pg_sql_boundary;
-import bioseq.postgres.support.runtime_test_counters;
+import bioseq.postgres.sql_boundary;
+import bioseq.postgres.support.runtime_diagnostics;
 import bioseq.postgres.vectorization.types;
 
 export namespace bioseq::postgres::support {
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 struct vector_lane_traits;
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_column;
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_operand;
 
 class vector_null_mask;
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_result;
 
 namespace detail {
@@ -100,14 +100,14 @@ public:
     }
 
 private:
-    template<auto, class>
+    template<auto p_sql_type, class p_lane>
     friend struct vector_lane_traits;
 
     [[nodiscard]] static bpchar_view from_datum(
             Datum source,
             Oid collation) {
         const Pointer raw = DatumGetPointer(source);
-        using enum runtime_test_counters::bpchar_source_form;
+        using enum runtime_diagnostics::bpchar_source_form;
         auto source_form = unknown;
         if (raw != nullptr) {
             if (VARATT_IS_EXTERNAL_ONDISK(raw)) {
@@ -120,9 +120,9 @@ private:
                 source_form = short_header;
             }
         }
-        runtime_test_counters::note_bpchar_source_form(
+        runtime_diagnostics::record_bpchar_source_form(
             source_form,
-            runtime_test_counters::
+            runtime_diagnostics::
                 bpchar_source_site::view_decode);
         BpChar* const packed = invoke_pg_as_cpp(
             [source] {
@@ -130,7 +130,7 @@ private:
             });
         const bool owns_packed_copy =
             reinterpret_cast<Pointer>(packed) != DatumGetPointer(source);
-        runtime_test_counters::note_view_construction(
+        runtime_diagnostics::record_view_construction(
             owns_packed_copy);
         return bpchar_view{
             source,
@@ -156,7 +156,7 @@ private:
 
     void reset() noexcept {
         if (packed_ != nullptr) {
-            runtime_test_counters::note_view_destruction(
+            runtime_diagnostics::record_view_destruction(
                 owns_packed_copy_);
         }
         if (owns_packed_copy_ && packed_ != nullptr) {
@@ -178,19 +178,19 @@ private:
 
 namespace detail {
 
-template<class Storage, class Lane>
+template<class p_storage, class p_lane>
 struct fixed_vector_lane_traits {
-    using storage_type = Storage;
-    static constexpr std::size_t expected_type_length = sizeof(Storage);
+    using storage_type = p_storage;
+    static constexpr std::size_t expected_type_length = sizeof(p_storage);
     static constexpr bool expected_column_is_val = true;
     static constexpr bool is_contiguous = true;
     static constexpr vector_storage_kind expected_storage_kind =
         vector_storage_kind::inline_fixed;
 
-    [[nodiscard]] static Lane decode(
-            Storage value,
+    [[nodiscard]] static p_lane decode(
+            p_storage value,
             Oid) noexcept {
-        return static_cast<Lane>(value);
+        return static_cast<p_lane>(value);
     }
 };
 
@@ -319,29 +319,29 @@ struct vector_lane_traits<
     }
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 concept registered_vector_lane =
     requires(
-        typename vector_lane_traits<SqlType, Lane>::storage_type stored,
+        typename vector_lane_traits<p_sql_type, p_lane>::storage_type stored,
         Datum datum,
         Oid collation) {
-        typename vector_lane_traits<SqlType, Lane>::storage_type;
+        typename vector_lane_traits<p_sql_type, p_lane>::storage_type;
         {
-            vector_lane_traits<SqlType, Lane>::expected_type_length
+            vector_lane_traits<p_sql_type, p_lane>::expected_type_length
         } -> std::convertible_to<std::size_t>;
         {
-            vector_lane_traits<SqlType, Lane>::expected_column_is_val
+            vector_lane_traits<p_sql_type, p_lane>::expected_column_is_val
         } -> std::convertible_to<bool>;
         {
-            vector_lane_traits<SqlType, Lane>::is_contiguous
+            vector_lane_traits<p_sql_type, p_lane>::is_contiguous
         } -> std::convertible_to<bool>;
         {
-            vector_lane_traits<SqlType, Lane>::decode(stored, collation)
-        } -> std::same_as<Lane>;
+            vector_lane_traits<p_sql_type, p_lane>::decode(stored, collation)
+        } -> std::same_as<p_lane>;
         {
-            vector_lane_traits<SqlType, Lane>::decode_constant(
+            vector_lane_traits<p_sql_type, p_lane>::decode_constant(
                 datum, collation)
-        } -> std::same_as<Lane>;
+        } -> std::same_as<p_lane>;
     };
 
 enum class vector_operand_kind : std::uint8_t {
@@ -349,13 +349,13 @@ enum class vector_operand_kind : std::uint8_t {
     column,
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_column final {
-    static_assert(registered_vector_lane<SqlType, Lane>);
+    static_assert(registered_vector_lane<p_sql_type, p_lane>);
 
 public:
-    using lane_type = Lane;
-    static constexpr auto sql_type = SqlType;
+    using lane_type = p_lane;
+    static constexpr auto sql_type = p_sql_type;
 
     [[nodiscard]] std::size_t size() const noexcept {
         return column_->lane_count;
@@ -370,24 +370,25 @@ public:
         return column_->is_null[lane_index];
     }
 
-    [[nodiscard]] Lane value(std::size_t lane_index) const {
+    [[nodiscard]] p_lane value(std::size_t lane_index) const {
         require_lane(lane_index);
         if (column_->is_null[lane_index]) {
             throw scalar_conversion_error{
                 "a vector NULL lane has no decoded value"};
         }
-        using traits = vector_lane_traits<SqlType, Lane>;
+        using traits = vector_lane_traits<p_sql_type, p_lane>;
         const auto* const values =
             reinterpret_cast<const typename traits::storage_type*>(
                 column_->data);
         return traits::decode(values[lane_index], collation_);
     }
 
-    template<class T = Lane>
-    [[nodiscard]] std::span<const T> contiguous_values() const
-        requires vector_lane_traits<SqlType, T>::is_contiguous {
+    template<class p_contiguous_lane = p_lane>
+    [[nodiscard]] std::span<const p_contiguous_lane> contiguous_values() const
+        requires vector_lane_traits<
+            p_sql_type, p_contiguous_lane>::is_contiguous {
         return {
-            reinterpret_cast<const T*>(column_->data),
+            reinterpret_cast<const p_contiguous_lane*>(column_->data),
             column_->lane_count};
     }
 
@@ -397,7 +398,7 @@ public:
 
 private:
     friend struct detail::vector_boundary_access;
-    template<auto, class>
+    template<auto p_operand_sql_type, class p_operand_lane>
     friend class vector_operand;
 
     explicit vector_column(
@@ -449,13 +450,13 @@ private:
     ::vector_column_storage* column_ = nullptr;
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_operand final {
-    static_assert(registered_vector_lane<SqlType, Lane>);
+    static_assert(registered_vector_lane<p_sql_type, p_lane>);
 
 public:
-    using lane_type = Lane;
-    static constexpr auto sql_type = SqlType;
+    using lane_type = p_lane;
+    static constexpr auto sql_type = p_sql_type;
 
     [[nodiscard]] vector_operand_kind kind() const noexcept {
         return argument_->kind == vector_operand_storage_kind::constant
@@ -471,21 +472,21 @@ public:
         return kind() == vector_operand_kind::column;
     }
 
-    [[nodiscard]] Lane constant() const {
+    [[nodiscard]] p_lane constant() const {
         if (!is_constant()) {
             throw scalar_conversion_error{
                 "a vector column operand has no scalar constant"};
         }
-        return vector_lane_traits<SqlType, Lane>::decode_constant(
+        return vector_lane_traits<p_sql_type, p_lane>::decode_constant(
             argument_->datum, collation_);
     }
 
-    [[nodiscard]] vector_column<SqlType, Lane> column() const {
+    [[nodiscard]] vector_column<p_sql_type, p_lane> column() const {
         if (!is_column()) {
             throw scalar_conversion_error{
                 "a vector constant operand has no column"};
         }
-        return vector_column<SqlType, Lane>{
+        return vector_column<p_sql_type, p_lane>{
             reinterpret_cast<::vector_column_storage*>(
                 DatumGetPointer(argument_->datum)),
             collation_};
@@ -507,9 +508,9 @@ private:
     Oid collation_ = InvalidOid;
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 class vector_result final {
-    static_assert(registered_vector_lane<SqlType, Lane>);
+    static_assert(registered_vector_lane<p_sql_type, p_lane>);
 
 public:
     vector_result(const vector_result&) = delete;
@@ -540,20 +541,20 @@ public:
                 return allocate_vector_column(
                     static_cast<std::int16_t>(
                         vector_lane_traits<
-                            SqlType, Lane>::expected_type_length),
+                            p_sql_type, p_lane>::expected_type_length),
                     vector_lane_traits<
-                        SqlType, Lane>::expected_column_is_val,
+                        p_sql_type, p_lane>::expected_column_is_val,
                     nullptr,
                     vector_lane_traits<
-                        SqlType, Lane>::expected_storage_kind);
+                        p_sql_type, p_lane>::expected_storage_kind);
             });
         column->lane_count = static_cast<std::uint32_t>(lane_count);
         return vector_result{column};
     }
 
-    [[nodiscard]] std::span<Lane> values() noexcept {
+    [[nodiscard]] std::span<p_lane> values() noexcept {
         return {
-            reinterpret_cast<Lane*>(column_->data),
+            reinterpret_cast<p_lane*>(column_->data),
             column_->lane_count};
     }
 
@@ -588,25 +589,25 @@ private:
 namespace detail {
 
 struct vector_boundary_access final {
-    template<auto SqlType, class Lane>
-    [[nodiscard]] static vector_column<SqlType, Lane>
+    template<auto p_sql_type, class p_lane>
+    [[nodiscard]] static vector_column<p_sql_type, p_lane>
     make_column(
             ::vector_column_storage* column,
             Oid collation) noexcept {
-        return vector_column<SqlType, Lane>{column, collation};
+        return vector_column<p_sql_type, p_lane>{column, collation};
     }
 
-    template<auto SqlType, class Lane>
-    [[nodiscard]] static vector_operand<SqlType, Lane>
+    template<auto p_sql_type, class p_lane>
+    [[nodiscard]] static vector_operand<p_sql_type, p_lane>
     make_operand(
             ::vector_operand_storage* argument,
             Oid collation) noexcept {
-        return vector_operand<SqlType, Lane>{argument, collation};
+        return vector_operand<p_sql_type, p_lane>{argument, collation};
     }
 
-    template<auto SqlType, class Lane>
+    template<auto p_sql_type, class p_lane>
     [[nodiscard]] static Datum release_result(
-            vector_result<SqlType, Lane>&& result) noexcept {
+            vector_result<p_sql_type, p_lane>&& result) noexcept {
         return std::move(result).release_to_datum();
     }
 
@@ -616,43 +617,43 @@ struct vector_boundary_access final {
     }
 };
 
-template<class T>
+template<class p_column>
 struct vector_column_descriptor {
     static constexpr bool registered = false;
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 struct vector_column_descriptor<
-        vector_column<SqlType, Lane>> {
+        vector_column<p_sql_type, p_lane>> {
     static constexpr bool registered = true;
-    static constexpr auto sql_type = SqlType;
-    using lane_type = Lane;
+    static constexpr auto sql_type = p_sql_type;
+    using lane_type = p_lane;
 };
 
-template<class T>
+template<class p_column>
 concept registered_vector_column =
-    vector_column_descriptor<T>::registered;
+    vector_column_descriptor<p_column>::registered;
 
-template<class T>
+template<class p_operand>
 struct vector_operand_descriptor {
     static constexpr bool registered = false;
 };
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 struct vector_operand_descriptor<
-        vector_operand<SqlType, Lane>> {
+        vector_operand<p_sql_type, p_lane>> {
     static constexpr bool registered = true;
-    static constexpr auto sql_type = SqlType;
-    using lane_type = Lane;
+    static constexpr auto sql_type = p_sql_type;
+    using lane_type = p_lane;
 };
 
-template<class T>
+template<class p_operand>
 concept registered_vector_operand =
-    vector_operand_descriptor<T>::registered;
+    vector_operand_descriptor<p_operand>::registered;
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 inline void validate_vector_column(::vector_column_storage* column) {
-    using traits = vector_lane_traits<SqlType, Lane>;
+    using traits = vector_lane_traits<p_sql_type, p_lane>;
     if (column == nullptr) {
         throw scalar_conversion_error{
             "vector variable operand contains a null column pointer"};
@@ -688,9 +689,9 @@ inline void validate_vector_null_mask(::vector_column_storage* column) {
 
 }  // namespace detail
 
-template<class T>
-    requires detail::registered_vector_column<T>
-[[nodiscard]] inline T read_argument(
+template<class p_argument>
+    requires detail::registered_vector_column<p_argument>
+[[nodiscard]] inline p_argument read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -700,7 +701,7 @@ template<class T>
     }
     auto* const column = reinterpret_cast<::vector_column_storage*>(
         DatumGetPointer(call->args[zero_based_index].value));
-    using descriptor = detail::vector_column_descriptor<T>;
+    using descriptor = detail::vector_column_descriptor<p_argument>;
     detail::validate_vector_column<
         descriptor::sql_type,
         typename descriptor::lane_type>(column);
@@ -710,33 +711,33 @@ template<class T>
             column, call->fncollation);
 }
 
-template<class T>
-    requires detail::registered_vector_column<T>
-[[nodiscard]] inline std::optional<T> read_argument(
+template<class p_argument>
+    requires detail::registered_vector_column<p_argument>
+[[nodiscard]] inline std::optional<p_argument> read_argument(
         FunctionCallInfo call,
         int zero_based_index,
-        std::type_identity<std::optional<T>>) {
+        std::type_identity<std::optional<p_argument>>) {
     detail::require_argument(call, zero_based_index);
     if (call->args[zero_based_index].isnull) {
         return std::nullopt;
     }
-    return read_argument<T>(call, zero_based_index);
+    return read_argument<p_argument>(call, zero_based_index);
 }
 
-template<class T>
+template<class p_argument>
     requires requires {
-        typename T::value_type;
-    } && detail::registered_vector_column<typename T::value_type>
-[[nodiscard]] inline T read_argument(
+        typename p_argument::value_type;
+    } && detail::registered_vector_column<typename p_argument::value_type>
+[[nodiscard]] inline p_argument read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     return read_argument(
-        call, zero_based_index, std::type_identity<T>{});
+        call, zero_based_index, std::type_identity<p_argument>{});
 }
 
-template<class T>
-    requires std::same_as<T, vector_null_mask>
-[[nodiscard]] inline T read_argument(
+template<class p_argument>
+    requires std::same_as<p_argument, vector_null_mask>
+[[nodiscard]] inline p_argument read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -750,9 +751,10 @@ template<class T>
     return detail::vector_boundary_access::make_null_mask(column);
 }
 
-template<class T>
-    requires std::same_as<T, std::optional<vector_null_mask>>
-[[nodiscard]] inline T read_argument(
+template<class p_argument>
+    requires std::same_as<
+        p_argument, std::optional<vector_null_mask>>
+[[nodiscard]] inline p_argument read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -762,9 +764,9 @@ template<class T>
     return read_argument<vector_null_mask>(call, zero_based_index);
 }
 
-template<class T>
-    requires detail::registered_vector_operand<T>
-[[nodiscard]] inline T read_argument(
+template<class p_argument>
+    requires detail::registered_vector_operand<p_argument>
+[[nodiscard]] inline p_argument read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -784,7 +786,7 @@ template<class T>
             "generated vector boundary received an invalid operand kind"};
     }
 
-    using descriptor = detail::vector_operand_descriptor<T>;
+    using descriptor = detail::vector_operand_descriptor<p_argument>;
     if (argument->kind == vector_operand_storage_kind::column) {
         detail::validate_vector_column<
             descriptor::sql_type,
@@ -798,10 +800,10 @@ template<class T>
             argument, call->fncollation);
 }
 
-template<auto SqlType, class Lane>
+template<auto p_sql_type, class p_lane>
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        vector_result<SqlType, Lane>&& value) noexcept {
+        vector_result<p_sql_type, p_lane>&& value) noexcept {
     call->isnull = false;
     return detail::vector_boundary_access::release_result(
         std::move(value));

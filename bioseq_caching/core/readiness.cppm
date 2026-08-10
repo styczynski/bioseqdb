@@ -13,13 +13,13 @@ export namespace bioseq::cache {
 
 /** Reject unknown readiness values before ordinal comparisons. */
 [[nodiscard]] constexpr bool known_readiness(
-    CacheCorrectnessReadiness readiness) noexcept {
+    cache_correctness_readiness readiness) noexcept {
     switch (readiness) {
-        case CacheCorrectnessReadiness::PassthroughOnly:
-        case CacheCorrectnessReadiness::RelationFreeOnly:
-        case CacheCorrectnessReadiness::GenericMvccReady:
-        case CacheCorrectnessReadiness::ProviderCompleteReady:
-        case CacheCorrectnessReadiness::ReusableCoverageReady:
+        case cache_correctness_readiness::passthrough_only:
+        case cache_correctness_readiness::relation_free_only:
+        case cache_correctness_readiness::generic_mvcc_ready:
+        case cache_correctness_readiness::provider_complete_ready:
+        case cache_correctness_readiness::reusable_coverage_ready:
             return true;
     }
     return false;
@@ -27,12 +27,12 @@ export namespace bioseq::cache {
 
 /** Reject unknown observability values before readiness comparisons. */
 [[nodiscard]] constexpr bool known_observability(
-    WriteObservability observability) noexcept {
+    write_observability observability) noexcept {
     switch (observability) {
-        case WriteObservability::None:
-        case WriteObservability::ProviderComplete:
-        case WriteObservability::ExecutorUtilityOnly:
-        case WriteObservability::DatabaseWideFallback:
+        case write_observability::none:
+        case write_observability::provider_complete:
+        case write_observability::executor_utility_only:
+        case write_observability::database_wide_fallback:
             return true;
     }
     return false;
@@ -40,36 +40,36 @@ export namespace bioseq::cache {
 
 /** Apply the normative readiness/kind/observability safety matrix. */
 [[nodiscard]] constexpr bool readiness_allows(
-    CacheCorrectnessReadiness readiness,
-    CacheEntryKind kind,
-    WriteObservability observability,
+    cache_correctness_readiness readiness,
+    cache_entry_kind kind,
+    write_observability observability,
     bool relation_free_builtin_safe,
     bool provider_backed) noexcept {
     if (!known_readiness(readiness) || !known_observability(observability)) {
         return false;
     }
-    if (kind == CacheEntryKind::ReusableCoverage) {
+    if (kind == cache_entry_kind::reusable_coverage) {
         return !relation_free_builtin_safe
             && provider_backed
-            && readiness >= CacheCorrectnessReadiness::ReusableCoverageReady
-            && observability == WriteObservability::ProviderComplete;
+            && readiness >= cache_correctness_readiness::reusable_coverage_ready
+            && observability == write_observability::provider_complete;
     }
-    if (kind != CacheEntryKind::ExactFinalResult) {
+    if (kind != cache_entry_kind::exact_final_result) {
         return false;
     }
     if (provider_backed) {
         return !relation_free_builtin_safe
-            && readiness >= CacheCorrectnessReadiness::ProviderCompleteReady
-            && observability == WriteObservability::ProviderComplete;
+            && readiness >= cache_correctness_readiness::provider_complete_ready
+            && observability == write_observability::provider_complete;
     }
     if (relation_free_builtin_safe) {
-        return observability == WriteObservability::None
-            && readiness >= CacheCorrectnessReadiness::RelationFreeOnly;
+        return observability == write_observability::none
+            && readiness >= cache_correctness_readiness::relation_free_only;
     }
     const bool conservative_generic =
-        observability == WriteObservability::ExecutorUtilityOnly
-        || observability == WriteObservability::DatabaseWideFallback;
-    return readiness >= CacheCorrectnessReadiness::GenericMvccReady
+        observability == write_observability::executor_utility_only
+        || observability == write_observability::database_wide_fallback;
+    return readiness >= cache_correctness_readiness::generic_mvcc_ready
         && conservative_generic;
 }
 

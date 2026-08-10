@@ -60,7 +60,7 @@ class SigningMaterialTests(unittest.TestCase):
         workspace_home: Path | None = None
         environment_before = dict(os.environ)
         try:
-            with signing.signing_workspace(key) as workspace:
+            with signing.isolated_signing_workspace(key) as workspace:
                 workspace_home = workspace.home
                 self.assertEqual(stat.S_IMODE(workspace.home.stat().st_mode), 0o700)
                 self.assertIsNotNone(workspace.private_key_path)

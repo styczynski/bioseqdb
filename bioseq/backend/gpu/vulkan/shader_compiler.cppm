@@ -76,9 +76,9 @@ enum class shader_kind : std::uint8_t {
     // and segment-local position streams without host-side control decoding.
     grouped_soa_seed_count = 51,
     grouped_soa_seed_emit = 52,
-    // Rank-buffer SneakySnake prefilter.
+    // Rank-buffer sneaky_snake_buffer prefilter.
     sneaky_snake_rank_batch = 53,
-    // Rank-buffer GateKeeper threshold prefilter.
+    // Rank-buffer gatekeeper_buffer threshold prefilter.
     gatekeeper_rank_batch = 54,
     // Compile-time production geometries reduce the generic kernel's fixed-DP
     // and cross-geometry register footprint for homogeneous small-seed runs.
@@ -104,7 +104,7 @@ enum class shader_kind : std::uint8_t {
     }
 }
 
-/// @brief Descriptor-set layouts shared by compatible shader families.
+/// @brief Descriptor-set layouts shared by shader families with one binding contract.
 enum class descriptor_layout_kind : std::uint8_t {
     chain_tiled_dp = 0,
     seed_lookup = 1,
@@ -248,9 +248,9 @@ enum class descriptor_layout_kind : std::uint8_t {
         case shader_kind::seq_sort_dense_scatter_generic:
         case shader_kind::seq_sort_prefix_check_dna4:
         case shader_kind::seq_sort_prefix_check_generic:
-            return 40;  // SeqSortPush (10 × u32)
-        case shader_kind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
-        case shader_kind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
+            return 40;  // sequence_sort_push_constants (10 × u32)
+        case shader_kind::align_extend_banded_affine:  return 44;  // alignment_extension_push_constants
+        case shader_kind::align_extend_simple_cigar:   return 60;  // alignment_cigar_push_constants
         case shader_kind::sneaky_snake_rank_batch:
         case shader_kind::gatekeeper_rank_batch:
         case shader_kind::gatekeeper_rank_batch_l32_e2:
@@ -265,7 +265,7 @@ enum class descriptor_layout_kind : std::uint8_t {
 /// @brief One shader-compilation request. `tile_size`, `local_size`, and `max_span`
 /// are substituted as compile-time `#define`s before glslang runs. A shader may
 /// intentionally bake a fixed workgroup geometry instead of consuming
-/// `LOCAL_SIZE_X`; `expected_shader_workgroup_size()` is the authoritative
+/// `compile_time_workgroup_size_x`; `expected_shader_workgroup_size()` is the authoritative
 /// compile/cache/runtime ABI for that distinction. The remaining fields
 /// describe runtime push-constant routing and are carried for the pipeline
 /// cache key.
@@ -290,7 +290,7 @@ struct shader_workgroup_size {
 };
 
 /// @brief Resolve compile-time execution geometry encoded in SPIR-V. Most kernels consume the
-/// request's LOCAL_SIZE_X macro. The radix kernels deliberately keep their
+/// request's compile_time_workgroup_size_x macro. The radix kernels deliberately keep their
 /// established cache-key sentinel (`local_size == 1`) while their algorithm
 /// requires one lane per radix bin. Keep this mapping explicit: treating a key
 /// selector as reflected execution metadata rejects valid AOT artifacts and
@@ -350,52 +350,49 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
-/// @brief The tiled DP score-generation kernel body, beginning right after the two
-/// `#define`s the compiler injects. Ported from G3SA's
-/// `mm_compute_chain_long_tiled` (chaining_kernel.cu) but adapted to bioseq's
-/// 24-byte `Anchor` ABI: full 64-bit ref/query positions, per-anchor
-/// `query_span` instead of the hard-coded `MM_QSPAN=15`, runtime `max_iter`
-/// instead of `MAX_ITER_CHAIN=5000`, and absolute predecessor indices instead
-/// of G3SA's parent-distance encoding (so `backtrack_chains` consumes them
-/// directly). One workgroup owns one independent hard range, so no atomics are
-/// needed for the tail sweep.
+/// @brief Tiled DP score-generation kernel body, beginning after the injected
+/// compile-time constants. It consumes the 24-byte `gpu_anchor_wire` ABI with
+/// full 64-bit reference/query positions and per-anchor `query_span`, accepts
+/// `max_iter` at runtime, and emits absolute predecessor indices for
+/// `backtrack_chains`. One workgroup owns one independent hard range, so the
+/// tail sweep needs no atomics.
 constexpr std::string_view k_chain_tiled_dp_body = R"GLSL(
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_ballot : require
 
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-const uint SUBGROUP_LANES_U = 32u;
-const uint NO_PARENT = 0xffffffffu;
-const int INVALID_SCORE = -2147483647 - 1;
+const uint k_subgroup_lane_count = 32u;
+const uint k_no_parent = 0xffffffffu;
+const int k_invalid_score = -2147483647 - 1;
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-struct ChainRangeWire {
+struct gpu_chain_range_wire {
     uint begin;
     uint range_len;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Anchors {
-    AnchorWire anchors[];
+layout(std430, set = 0, binding = 0) readonly buffer anchors_buffer {
+    gpu_anchor_wire anchors[];
 };
-layout(std430, set = 0, binding = 1) readonly buffer Ranges {
-    ChainRangeWire ranges[];
+layout(std430, set = 0, binding = 1) readonly buffer ranges_buffer {
+    gpu_chain_range_wire ranges[];
 };
-layout(std430, set = 0, binding = 2) buffer BestScores {
+layout(std430, set = 0, binding = 2) buffer best_scores_buffer {
     coherent int best_scores[];
 };
-layout(std430, set = 0, binding = 3) buffer Predecessors {
+layout(std430, set = 0, binding = 3) buffer predecessors_buffer {
     int64_t predecessors[];
 };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint anchor_count;
     uint range_count;
     int max_dist_x;
@@ -407,8 +404,8 @@ layout(push_constant) uniform Params {
     int max_chain_skip;
 } pc;
 
-bool anchor_reverse(AnchorWire a) { return a.is_reverse != 0u; }
-uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+bool anchor_reverse(gpu_anchor_wire a) { return a.is_reverse != 0u; }
+uint anchor_span(gpu_anchor_wire a) { return a.span_flags_segment & 0xffu; }
 
 float fast_log2(float x) {
     uint z = floatBitsToUint(x);
@@ -419,21 +416,21 @@ float fast_log2(float x) {
     return log_2 + (-0.34484843 * f + 2.02466578) * f - 0.67487759;
 }
 
-int chain_score(AnchorWire current, AnchorWire pred) {
-    if (anchor_reverse(current) != anchor_reverse(pred)) return INVALID_SCORE;
-    if (current.query_position <= pred.query_position) return INVALID_SCORE;
-    if (current.ref_position <= pred.ref_position) return INVALID_SCORE;
+int chain_score(gpu_anchor_wire current, gpu_anchor_wire pred) {
+    if (anchor_reverse(current) != anchor_reverse(pred)) return k_invalid_score;
+    if (current.query_position <= pred.query_position) return k_invalid_score;
+    if (current.ref_position <= pred.ref_position) return k_invalid_score;
 
     uint64_t dq64 = current.query_position - pred.query_position;
     uint64_t dr64 = current.ref_position - pred.ref_position;
-    if (dq64 > uint64_t(pc.max_dist_x)) return INVALID_SCORE;
-    if (dr64 == uint64_t(0) || dq64 > uint64_t(pc.max_dist_y)) return INVALID_SCORE;
-    if (dr64 > uint64_t(pc.max_dist_x)) return INVALID_SCORE;
+    if (dq64 > uint64_t(pc.max_dist_x)) return k_invalid_score;
+    if (dr64 == uint64_t(0) || dq64 > uint64_t(pc.max_dist_y)) return k_invalid_score;
+    if (dr64 > uint64_t(pc.max_dist_x)) return k_invalid_score;
 
     int dq = int(dq64);
     int dr = int(dr64);
     int dd = dr > dq ? dr - dq : dq - dr;
-    if (dd > pc.bandwidth) return INVALID_SCORE;
+    if (dd > pc.bandwidth) return k_invalid_score;
 
     int dg = dr < dq ? dr : dq;
     int q_span = int(anchor_span(pred));
@@ -455,19 +452,19 @@ void main() {
 
     for (uint range_id = gl_WorkGroupID.x; range_id < pc.range_count;
          range_id += gl_NumWorkGroups.x) {
-        ChainRangeWire r = ranges[range_id];
+        gpu_chain_range_wire r = ranges[range_id];
         uint begin = r.begin;
         uint end = min(pc.anchor_count, r.begin + r.range_len);
         if (begin >= end) continue;
 
         for (uint global_i = begin; global_i < end; ++global_i) {
-            AnchorWire a = anchors[global_i];
+            gpu_anchor_wire a = anchors[global_i];
             int best = max(best_scores[global_i], int(anchor_span(a)));
-            uint best_parent = NO_PARENT;
+            uint best_parent = k_no_parent;
             uint64_t scanned = uint64_t(0);
             uint no_improve_batches = 0u;
             uint max_no_improve_batches = pc.max_chain_skip > 0
-                ? (uint(pc.max_chain_skip) / SUBGROUP_LANES_U + 1u)
+                ? (uint(pc.max_chain_skip) / k_subgroup_lane_count + 1u)
                 : 0xffffffffu;
 
             while (true) {
@@ -476,28 +473,28 @@ void main() {
                 bool in_range = offset <= remaining;
 
                 uint pred = begin;
-                AnchorWire pa = a;
+                gpu_anchor_wire pa = a;
                 if (in_range) {
                     pred = global_i - uint(offset);
                     pa = anchors[pred];
                 }
 
-                uint first_out = subgroupMin(!in_range ? lane : SUBGROUP_LANES_U);
+                uint first_out = subgroupMin(!in_range ? lane : k_subgroup_lane_count);
                 uint first_iter = subgroupMin(
-                    (in_range && offset > uint64_t(uint(pc.max_iter))) ? lane : SUBGROUP_LANES_U);
+                    (in_range && offset > uint64_t(uint(pc.max_iter))) ? lane : k_subgroup_lane_count);
                 uint first_ref = subgroupMin(
                     (in_range
                      && anchor_reverse(a) == anchor_reverse(pa)
                      && a.ref_position > pa.ref_position
                      && a.ref_position - pa.ref_position > uint64_t(pc.max_dist_x))
-                        ? lane : SUBGROUP_LANES_U);
+                        ? lane : k_subgroup_lane_count);
                 uint first_stop = min(first_out, min(first_iter, first_ref));
                 bool lane_active = in_range && lane < first_stop;
 
-                int candidate_total = INVALID_SCORE;
+                int candidate_total = k_invalid_score;
                 if (lane_active) {
                     int pair = chain_score(a, pa);
-                    if (pair != INVALID_SCORE) {
+                    if (pair != k_invalid_score) {
                         candidate_total = pair + best_scores[pred];
                     }
                 }
@@ -505,11 +502,11 @@ void main() {
                 uint candidate_score_key = signed_score_key(candidate_total);
                 uint max_score_key = subgroupMax(candidate_score_key);
                 bool is_max_score_lane = candidate_score_key == max_score_key;
-                int batch_score = subgroupMax(is_max_score_lane ? candidate_total : INVALID_SCORE);
+                int batch_score = subgroupMax(is_max_score_lane ? candidate_total : k_invalid_score);
                 uint batch_parent = subgroupMax(
-                    (is_max_score_lane && lane_active && candidate_total != INVALID_SCORE) ? pred : 0u);
+                    (is_max_score_lane && lane_active && candidate_total != k_invalid_score) ? pred : 0u);
 
-                bool stop_after_batch = first_stop < SUBGROUP_LANES_U;
+                bool stop_after_batch = first_stop < k_subgroup_lane_count;
                 if (batch_score > best) {
                     best = batch_score;
                     best_parent = batch_parent;
@@ -522,12 +519,12 @@ void main() {
                 }
 
                 if (stop_after_batch) break;
-                scanned += uint64_t(SUBGROUP_LANES_U);
+                scanned += uint64_t(k_subgroup_lane_count);
             }
 
             if (subgroupElect()) {
                 best_scores[global_i] = best;
-                predecessors[global_i] = best_parent == NO_PARENT
+                predecessors[global_i] = best_parent == k_no_parent
                     ? int64_t(-1) : int64_t(best_parent);
             }
             memoryBarrierBuffer();
@@ -538,89 +535,93 @@ void main() {
 )GLSL";
 
 constexpr std::string_view k_seed_lookup_anchors_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct GpuMinimizerSlot {
+struct gpu_minimizer_slot {
     uint64_t hash;
     uint pos_offset;
     uint pos_count;
 };
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment; // span | flags<<8 | segment_id<<16
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
-layout(std430, set = 0, binding = 1) readonly buffer Slots { GpuMinimizerSlot slots[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Positions { uint64_t positions[]; };
-layout(std430, set = 0, binding = 3) readonly buffer PrefixCounts { uint prefix_counts[]; };
-layout(std430, set = 0, binding = 4) buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 5) buffer AnchorKeys { uint64_t anchor_keys[]; };
+layout(std430, set = 0, binding = 0) readonly buffer minimizer_words_buffer {
+    uint minimizer_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer slots_buffer { gpu_minimizer_slot slots[]; };
+layout(std430, set = 0, binding = 2) readonly buffer positions_buffer { uint64_t positions[]; };
+layout(std430, set = 0, binding = 3) readonly buffer prefix_counts_buffer { uint prefix_counts[]; };
+layout(std430, set = 0, binding = 4) buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 5) buffer anchor_keys_buffer { uint64_t anchor_keys[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint minimizer_count;
     uint words32_per_minimizer;
     uint word_kind;
     uint hash_shift;
     uint pos_bits;
-    uint query_len;
+    uint query_length;
     uint kmer_size;
     uint slot_mask;
-    uint bucket_count;
+    uint hash_major_control_count;
     uint exact_anchor_count;
     uint target_ref_bits;
 } pc;
 
-uint64_t anchor_sort_key(uint rev, uint64_t ref_position) {
-    return (uint64_t(rev) << pc.target_ref_bits) | ref_position;
+uint64_t anchor_sort_key(uint reverse, uint64_t ref_position) {
+    return (uint64_t(reverse) << pc.target_ref_bits) | ref_position;
 }
 
-uint64_t read_min_hash(uint i) {
+uint64_t minimizer_fragment_hash(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[i >> 1u];
-        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        uint packed = minimizer_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
         return uint64_t(raw) >> pc.hash_shift;
     }
-    uint base = i * pc.words32_per_minimizer;
+    uint base = index * pc.words32_per_minimizer;
     if (pc.word_kind == 1u) {
-        return uint64_t(min_words[base]) >> pc.hash_shift;
+        return uint64_t(minimizer_words[base]) >> pc.hash_shift;
     }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base])
-                     | (uint64_t(min_words[base + 1u]) << 32);
+        uint64_t raw = uint64_t(minimizer_words[base])
+                     | (uint64_t(minimizer_words[base + 1u]) << 32);
         return raw >> pc.hash_shift;
     }
-    uint64_t high = uint64_t(min_words[base + 2u])
-                  | (uint64_t(min_words[base + 3u]) << 32);
+    uint64_t high = uint64_t(minimizer_words[base + 2u])
+                  | (uint64_t(minimizer_words[base + 3u]) << 32);
     return high >> 8;
 }
 
-uint64_t read_min_pos_strand(uint i) {
+uint64_t minimizer_fragment_position(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[i >> 1u];
-        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
-        uint mask = (pc.pos_bits >= 15u) ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        uint packed = minimizer_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        uint mask = pc.pos_bits >= 15u
+            ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
         return uint64_t(raw & mask);
     }
-    uint base = i * pc.words32_per_minimizer;
+    uint base = index * pc.words32_per_minimizer;
     if (pc.word_kind == 1u) {
-        uint raw = min_words[base];
-        uint mask = (pc.pos_bits >= 31u) ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        uint raw = minimizer_words[base];
+        uint mask = pc.pos_bits >= 31u
+            ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
         return uint64_t(raw & mask);
     }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base])
-                     | (uint64_t(min_words[base + 1u]) << 32);
+        uint64_t raw = uint64_t(minimizer_words[base])
+                     | (uint64_t(minimizer_words[base + 1u]) << 32);
         uint64_t mask = pc.pos_bits >= 63u
             ? ~uint64_t(0)
             : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
         return raw & mask;
     }
-    return uint64_t(min_words[base])
-         | (uint64_t(min_words[base + 1u]) << 32);
+    return uint64_t(minimizer_words[base])
+         | (uint64_t(minimizer_words[base + 1u]) << 32);
 }
 
 uint64_t splitmix64(uint64_t x) {
@@ -630,107 +631,114 @@ uint64_t splitmix64(uint64_t x) {
     return x ^ (x >> 31);
 }
 
-uint find_slot(uint64_t hash) {
-    if (pc.bucket_count != 0u) {
+uint find_hash_slot(uint64_t hash) {
+    if (pc.hash_major_control_count != 0u) {
         uint lo = 0u;
-        uint hi = pc.bucket_count;
+        uint hi = pc.hash_major_control_count;
         while (lo < hi) {
             uint mid = lo + ((hi - lo) >> 1u);
             if (slots[mid].hash < hash) lo = mid + 1u; else hi = mid;
         }
-        if (lo < pc.bucket_count && slots[lo].hash == hash) return lo;
+        if (lo < pc.hash_major_control_count && slots[lo].hash == hash) {
+            return lo;
+        }
         return 0xffffffffu;
     }
-    uint p = uint(splitmix64(hash)) & pc.slot_mask;
+    uint slot_index = uint(splitmix64(hash)) & pc.slot_mask;
     for (uint step = 0u; step <= pc.slot_mask; ++step) {
-        GpuMinimizerSlot s = slots[p];
-        if (s.pos_count == 0u) return 0xffffffffu;
-        if (s.hash == hash) return p;
-        p = (p + 1u) & pc.slot_mask;
+        gpu_minimizer_slot candidate = slots[slot_index];
+        if (candidate.pos_count == 0u) return 0xffffffffu;
+        if (candidate.hash == hash) return slot_index;
+        slot_index = (slot_index + 1u) & pc.slot_mask;
     }
     return 0xffffffffu;
 }
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.minimizer_count) return;
+    uint minimizer_index = gl_GlobalInvocationID.x;
+    if (minimizer_index >= pc.minimizer_count) return;
 
-    uint64_t hash = read_min_hash(i);
-    uint slot_idx = find_slot(hash);
-    if (slot_idx == 0xffffffffu) return;
+    uint64_t hash = minimizer_fragment_hash(minimizer_index);
+    uint slot_index = find_hash_slot(hash);
+    if (slot_index == 0xffffffffu) return;
 
-    GpuMinimizerSlot slot = slots[slot_idx];
-    uint begin = prefix_counts[i];
-    uint end = prefix_counts[i + 1u];
+    gpu_minimizer_slot slot = slots[slot_index];
+    uint begin = prefix_counts[minimizer_index];
+    uint end = prefix_counts[minimizer_index + 1u];
     if (slot.pos_count == 0u || begin == end) return;
 
-    uint64_t q_encoded = read_min_pos_strand(i);
-    uint64_t q_pos = q_encoded >> 1;
-    uint q_strand = uint(q_encoded & uint64_t(1));
-    uint64_t reverse_base = uint64_t(pc.query_len - 2u + pc.kmer_size);
+    uint64_t query_encoded = minimizer_fragment_position(minimizer_index);
+    uint64_t query_position_bp = query_encoded >> 1;
+    uint query_strand = uint(query_encoded & uint64_t(1));
+    uint64_t reverse_base = uint64_t(pc.query_length - 2u + pc.kmer_size);
     uint span_flags_segment = pc.kmer_size & 0xffu;
 
-    for (uint j = 0u; j < slot.pos_count; ++j) {
-        uint dst = begin + j;
-        if (dst >= pc.exact_anchor_count) return;
-        uint64_t target = positions[slot.pos_offset + j]; // (pos<<1)|strand
-        uint t_strand = uint(target & uint64_t(1));
-        uint rev = t_strand ^ q_strand;
-        uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
-        anchors[dst].ref_position = target >> 1;
-        anchors[dst].query_position = query_position;
-        anchors[dst].is_reverse = rev;
-        anchors[dst].span_flags_segment = span_flags_segment;
-        anchor_keys[dst] = anchor_sort_key(rev, target >> 1);
+    for (uint occurrence_index = 0u;
+         occurrence_index < slot.pos_count;
+         ++occurrence_index) {
+        uint output_index = begin + occurrence_index;
+        if (output_index >= pc.exact_anchor_count) return;
+        uint64_t target_encoded =
+            positions[slot.pos_offset + occurrence_index];
+        uint target_strand = uint(target_encoded & uint64_t(1));
+        uint reverse = target_strand ^ query_strand;
+        uint64_t query_position = reverse != 0u
+            ? reverse_base - query_position_bp : query_position_bp;
+        uint64_t ref_position = target_encoded >> 1;
+        anchors[output_index].ref_position = ref_position;
+        anchors[output_index].query_position = query_position;
+        anchors[output_index].is_reverse = reverse;
+        anchors[output_index].span_flags_segment = span_flags_segment;
+        anchor_keys[output_index] = anchor_sort_key(reverse, ref_position);
     }
 }
 )GLSL";
 
 /// @brief Per-query bitonic anchor sort. One workgroup sorts up to
-/// LOCAL_SIZE_X anchors by `ref_bits()` in shared memory. Larger anchor sets
+/// compile_time_workgroup_size_x anchors by `ref_bits()` in shared memory. Larger anchor sets
 /// are routed to the stable device radix path; host sorting is forbidden.
 constexpr std::string_view k_sort_anchors_bitonic_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-struct SortRange {
+struct sort_range {
     uint begin;
     uint range_len;  // NB: not 'length' — that clashes with GLSL's .length() builtin
 };
 
-layout(std430, set = 0, binding = 0) buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) readonly buffer SortRanges { SortRange ranges[]; };
+layout(std430, set = 0, binding = 0) buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer sort_ranges_buffer { sort_range ranges[]; };
 
-shared AnchorWire sh_anchor[LOCAL_SIZE_X];
-shared uint sh_orig[LOCAL_SIZE_X];
+shared gpu_anchor_wire sh_anchor[compile_time_workgroup_size_x];
+shared uint sh_orig[compile_time_workgroup_size_x];
 
-uint64_t ref_bits(AnchorWire a) {
+uint64_t ref_bits(gpu_anchor_wire a) {
     return (uint64_t(a.is_reverse != 0u ? 1u : 0u) << 63)
          | (a.ref_position & 0x7fffffffffffffffUL);
 }
 
-bool anchor_less(AnchorWire a, AnchorWire b, uint ia, uint ib) {
+bool anchor_less(gpu_anchor_wire a, gpu_anchor_wire b, uint ia, uint ib) {
     uint64_t ka = ref_bits(a);
     uint64_t kb = ref_bits(b);
     if (ka != kb) return ka < kb;
     return ia < ib;
 }
 
-AnchorWire max_anchor() {
-    return AnchorWire(0x7fffffffffffffffUL, 0xffffffffffffffffUL, 1u, 0xffffffffu);
+gpu_anchor_wire max_anchor() {
+    return gpu_anchor_wire(0x7fffffffffffffffUL, 0xffffffffffffffffUL, 1u, 0xffffffffu);
 }
 
 void main() {
     uint range_id = gl_WorkGroupID.x;
     uint tid = gl_LocalInvocationID.x;
-    SortRange r = ranges[range_id];
-    if (r.range_len > LOCAL_SIZE_X) return;
+    sort_range r = ranges[range_id];
+    if (r.range_len > compile_time_workgroup_size_x) return;
 
     if (tid < r.range_len) {
         sh_anchor[tid] = anchors[r.begin + tid];
@@ -741,13 +749,13 @@ void main() {
     }
     barrier();
 
-    for (uint size = 2u; size <= LOCAL_SIZE_X; size <<= 1u) {
+    for (uint size = 2u; size <= compile_time_workgroup_size_x; size <<= 1u) {
         for (uint stride = size >> 1u; stride > 0u; stride >>= 1u) {
             uint other = tid ^ stride;
             if (other > tid) {
                 bool up = (tid & size) == 0u;
-                AnchorWire a = sh_anchor[tid];
-                AnchorWire b = sh_anchor[other];
+                gpu_anchor_wire a = sh_anchor[tid];
+                gpu_anchor_wire b = sh_anchor[other];
                 uint ia = sh_orig[tid];
                 uint ib = sh_orig[other];
                 bool should_swap = up
@@ -780,13 +788,13 @@ void main() {
 /// position falls in this tile's owned window interval `[tile_lo, tile_hi)`.
 /// The left-context overlap (`tile_lo - replay_lo`) reconstructs the ring buffer
 /// and the valid-base/init state so the concatenation across tiles in tile
-/// order equals the single serial pass — but it is parallel across tiles (never
+/// order equals the single serial traversal — but it is parallel across tiles (never
 /// a one-workgroup-per-sequence serial emit). `emit_mode==0` counts per tile;
 /// `emit_mode==1` writes raw `MinimizerRepr` words at `out_base + local`.
 constexpr std::string_view k_ordered_sketch_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct TileC {
+struct sketch_tile {
     uint seq_word_offset;
     uint bp_count;
     uint replay_lo;
@@ -795,20 +803,20 @@ struct TileC {
     uint out_base;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer SeqWords { uint seq_words[]; };
-layout(std430, set = 0, binding = 1) readonly buffer RankLut {
+layout(std430, set = 0, binding = 0) readonly buffer sequence_words_buffer { uint seq_words[]; };
+layout(std430, set = 0, binding = 1) readonly buffer rank_lookup_buffer {
     uint rank_to_code[256];
     uint rank_to_rc_code[256];
 };
-layout(std430, set = 0, binding = 2) readonly buffer Tiles { TileC tiles[]; };
-layout(std430, set = 0, binding = 3) buffer TileCounts { uint tile_counts[]; };
-layout(std430, set = 0, binding = 4) buffer OutWords { uint out_words[]; };
-layout(std430, set = 0, binding = 5) buffer Counters { uint counters[]; };
-layout(std430, set = 0, binding = 6) readonly buffer TileOffsets { uint tile_offsets[]; };
-layout(std430, set = 0, binding = 7) buffer OutPairVals { uint64_t out_pair_vals[]; };
-layout(std430, set = 0, binding = 8) readonly buffer QueryGate { uint query_gate_words[]; };
+layout(std430, set = 0, binding = 2) readonly buffer tiles_buffer { sketch_tile tiles[]; };
+layout(std430, set = 0, binding = 3) buffer tile_counts_buffer { uint tile_counts[]; };
+layout(std430, set = 0, binding = 4) buffer output_words_buffer { uint out_words[]; };
+layout(std430, set = 0, binding = 5) buffer counters_buffer { uint counters[]; };
+layout(std430, set = 0, binding = 6) readonly buffer tile_offsets_buffer { uint tile_offsets[]; };
+layout(std430, set = 0, binding = 7) buffer output_pair_values_buffer { uint64_t out_pair_vals[]; };
+layout(std430, set = 0, binding = 8) readonly buffer query_gate_buffer { uint query_gate_words[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint emit_mode;
     uint window_size;
     uint kmer_size;
@@ -886,12 +894,12 @@ uint64_t hash_field_mask() {
                                : ((uint64_t(1) << pc.hash_bits) - uint64_t(1));
 }
 
-// Sketch element mirrors the scalar minimizer state machine element.
-struct Sketch { uint64_t hash; uint pos; uint strand; uint is_max; };
-Sketch max_sketch() { return Sketch(hash_field_mask(), 0u, 0u, 1u); }
-bool sketch_leq(Sketch a, Sketch b) { return a.hash <= b.hash; }
-bool sketch_geq(Sketch a, Sketch b) { return a.hash >= b.hash; }
-bool sketch_match_diff(Sketch a, Sketch b) {
+// sketch element mirrors the scalar minimizer state machine element.
+struct sketch { uint64_t hash; uint pos; uint strand; uint is_max; };
+sketch max_sketch() { return sketch(hash_field_mask(), 0u, 0u, 1u); }
+bool sketch_leq(sketch a, sketch b) { return a.hash <= b.hash; }
+bool sketch_geq(sketch a, sketch b) { return a.hash >= b.hash; }
+bool sketch_match_diff(sketch a, sketch b) {
     return a.is_max == 0u && b.is_max == 0u && a.hash == b.hash
         && (a.pos != b.pos || a.strand != b.strand);
 }
@@ -905,10 +913,10 @@ bool query_gate_accepts(uint64_t hash) {
     return (query_gate_words[word] & (1u << (bit & 31u))) != 0u;
 }
 
-		const uint SKETCH_CAND_MAX = 384u;            // small shared footprint -> high core occupancy
-	const uint TARGET_EMIT_COMPLETE = 0x80000000u;
-	const uint TARGET_EMIT_STATUS_CAPACITY = 1u;
-	const uint TARGET_EMIT_STATUS_PARITY = 2u;
+		const uint k_maximum_sketch_candidates = 384u;            // small shared footprint -> high core occupancy
+	const uint k_target_emit_complete = 0x80000000u;
+	const uint k_target_emit_status_capacity = 1u;
+	const uint k_target_emit_status_parity = 2u;
 	uint g_seq_word_offset;
 	uint g_local_count;
 	uint g_out_base;
@@ -924,7 +932,7 @@ void fail_target_emit(uint status) {
     g_target_emit_failed = true;
 }
 
-void write_minimizer(uint dst, Sketch s) {
+void write_minimizer(uint dst, sketch s) {
     // dst is tile-local; the global minimizer index is g_out_base + dst.
     uint gmin = g_out_base + dst;
     if (pc.word_kind == 0u) {
@@ -955,27 +963,27 @@ void write_minimizer(uint dst, Sketch s) {
     }
 }
 
-	bool owns_emit_position(TileC t, uint emit_pos) {
+	bool owns_emit_position(sketch_tile t, uint emit_pos) {
 	    return emit_pos >= g_owned_lo && emit_pos < g_owned_hi;
 	}
 
 	uint replay_overlap_bp() {
 	    uint trigger_span = pc.kmer_size + pc.window_size + 1u;
-	    return min(trigger_span, SKETCH_CAND_MAX - 1u);
+	    return min(trigger_span, k_maximum_sketch_candidates - 1u);
 	}
 
 	uint ownership_guard_bp() {
 	    return 0u;
 	}
 
-void emit_one(TileC t, Sketch s, uint emit_pos) {
+void emit_one(sketch_tile t, sketch s, uint emit_pos) {
     if (s.is_max != 0u || !owns_emit_position(t, emit_pos)) return;
     if (!query_gate_accepts(s.hash)) return;
     uint dst = g_local_count;
     g_local_count = g_local_count + 1u;
-    // emit_mode 2 is retained for the independent sorted-pair API. Target-index
-    // construction uses mode 0 tile counts + prefix scan followed by mode 1;
-    // it never enters this global append-atomic branch.
+    // emit_mode 2 serves the independent sorted-pair API. Target-index
+    // construction uses mode 0 tile counts + prefix scan followed by mode 1 and
+    // does not enter this global append-atomic branch.
     if (pc.emit_mode == 2u) {
         uint gmin = atomicAdd(counters[0], 1u);
         if (gmin >= counters[1]) return;
@@ -988,14 +996,14 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
         if (pc.emit_pairs == 1u) {
             // Target index path: every tile owns exactly the half-open prefix
             // range [offset, offset + counted). Never let a divergent second
-            // pass overwrite a neighbouring tile or exceed exact capacity T.
+            // stage overwrite a neighbouring tile or exceed exact capacity T.
             if (g_target_emit_failed || dst >= g_expected_count) {
-                fail_target_emit(TARGET_EMIT_STATUS_PARITY);
+                fail_target_emit(k_target_emit_status_parity);
                 return;
             }
             uint64_t gmin64 = uint64_t(g_out_base) + uint64_t(dst);
             if (gmin64 >= uint64_t(counters[1])) {
-                fail_target_emit(TARGET_EMIT_STATUS_CAPACITY);
+                fail_target_emit(k_target_emit_status_capacity);
                 return;
             }
             uint gmin = uint(gmin64);
@@ -1010,20 +1018,18 @@ void emit_one(TileC t, Sketch s, uint emit_pos) {
 
 )GLSL"
 R"GLSL(
-// Rolling-hash ordered minimizer sketch (DOC0353). Each invocation owns ONE tile
+// Rolling-hash ordered minimizer sketch. Each invocation owns one tile
 // and runs minimap2's ordered window-minimum state machine over [replay_lo,
 // loop_hi), emitting only for owned positions [tile_lo, tile_hi). The canonical
-// k-mer hash is maintained INCREMENTALLY (forward/reverse rolled one base per
-// step) instead of recomputed O(k) per position, and EVERY invocation runs the
-// emit (no lane-0 serialization) — together these replace the prior
-// parallel-hash-into-shared + single-lane-emit scheme that left 63/64 lanes idle
-// and re-read each k-mer O(k) times. Output is bit-identical to
-// `collect_minimizers_view`: `valid_since_reset` (forward-code validity) gates
-// the state machine exactly as before, and a separate `valid_rc` counter
+// k-mer hash is maintained incrementally (forward/reverse rolled one base per
+// step), and every invocation runs the emit without lane-0 serialization.
+// Output is bit-identical to `collect_minimizers_view`:
+// `valid_since_reset` (forward-code validity) gates the state machine, while a
+// separate `valid_rc` counter
 // suppresses the candidate while a reverse-complement-invalid base sits in the
 // window (a no-op for dna4/dna5 where rc-invalid implies fwd-invalid).
 void process_tile(uint tile_id) {
-    TileC t = tiles[tile_id];
+    sketch_tile t = tiles[tile_id];
     g_seq_word_offset = t.seq_word_offset;
     g_owned_lo = t.tile_lo;
     g_owned_hi = tile_id + 1u >= pc.tile_count ? t.bp_count : t.tile_hi;
@@ -1036,9 +1042,9 @@ void process_tile(uint tile_id) {
         g_expected_count = tile_counts[tile_id];
         uint64_t range_end =
             uint64_t(g_out_base) + uint64_t(g_expected_count);
-        if ((g_expected_count & TARGET_EMIT_COMPLETE) != 0u
+        if ((g_expected_count & k_target_emit_complete) != 0u
             || range_end > uint64_t(counters[1])) {
-            fail_target_emit(TARGET_EMIT_STATUS_CAPACITY);
+            fail_target_emit(k_target_emit_status_capacity);
         }
     }
 
@@ -1056,11 +1062,11 @@ void process_tile(uint tile_id) {
     uint64_t reverse = uint64_t(0);
     uint valid_rc = 0u;   // consecutive bases whose rc code < 4 (palindrome-safety vs candidate_at)
 
-    Sketch ring[MAX_SPAN];
+    sketch ring[compile_time_maximum_span];
     uint buf_pos = 0u;
     uint valid_since_reset = 0u;
     bool init_mode = (t.replay_lo == 0u);
-    Sketch current_min = max_sketch();
+    sketch current_min = max_sketch();
     uint current_min_pos = 0u;
 
     for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
@@ -1084,9 +1090,9 @@ void process_tile(uint tile_id) {
             reverse = uint64_t(0);
             valid_rc = 0u;
         }
-        Sketch cand = max_sketch();
+        sketch cand = max_sketch();
 
-        Sketch pushed = max_sketch();
+        sketch pushed = max_sketch();
         if (!base_valid) {
             valid_since_reset = 0u;
         } else {
@@ -1095,7 +1101,7 @@ void process_tile(uint tile_id) {
                 && forward != reverse) {
                 uint64_t canonical = forward < reverse ? forward : reverse;
                 uint64_t h = minimap_scramble(canonical, scramble_mask) & hmask;
-                if (h != hmask) cand = Sketch(h, seq_pos, forward < reverse ? 0u : 1u, 0u);
+                if (h != hmask) cand = sketch(h, seq_pos, forward < reverse ? 0u : 1u, 0u);
             }
             if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
         }
@@ -1159,16 +1165,16 @@ void process_tile(uint tile_id) {
         // agrees with the adjacent prefix offsets and exact T.
         if (!g_target_emit_failed
             && g_local_count == g_expected_count
-            && (g_local_count & TARGET_EMIT_COMPLETE) == 0u) {
-            tile_counts[tile_id] = TARGET_EMIT_COMPLETE | g_local_count;
+            && (g_local_count & k_target_emit_complete) == 0u) {
+            tile_counts[tile_id] = k_target_emit_complete | g_local_count;
         } else {
-            fail_target_emit(TARGET_EMIT_STATUS_PARITY);
+            fail_target_emit(k_target_emit_status_parity);
         }
     }
 }
 
 void main() {
-    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
+    if (pc.window_size == 0u || pc.window_size > compile_time_maximum_span || pc.kmer_size == 0u) return;
     // One invocation per tile, grid-strided so the dispatch workgroup count is
     // free to be ceil(tile_count / local_size) (every lane active) yet still
     // correct for any larger dispatch.
@@ -1181,19 +1187,19 @@ void main() {
 
 /// @brief Generic exclusive prefix scan over a `uint` array, producing block totals.
 /// Each workgroup exclusive-scans its block into `out_prefix` and writes the
-/// block total to `block_sums[wg]`. A second `add` pass adds the scanned block
-/// offsets back. Two-level scan (block size = LOCAL_SIZE_X handled serially by
+/// block total to `block_sums[wg]`. A second `add` stage adds the scanned block
+/// offsets back. Two-level scan (block size = compile_time_workgroup_size_x handled serially by
 /// invocation 0 to stay portable on MoltenVK without subgroup ops).
 constexpr std::string_view k_prefix_scan_block_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 0) readonly buffer InData { uint in_data[]; };
-layout(std430, set = 0, binding = 1) buffer OutData { uint out_prefix[]; };
-layout(std430, set = 0, binding = 2) buffer BlockSums { uint block_sums[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
+layout(std430, set = 0, binding = 1) buffer output_data_buffer { uint out_prefix[]; };
+layout(std430, set = 0, binding = 2) buffer block_sums_buffer { uint block_sums[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint block_size;
     uint num_blocks;
-    uint pass;
+    uint stage;
 } pc;
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
@@ -1217,20 +1223,20 @@ void main() {
 /// @brief Prefix-scan offset addition. Invocation 0 of workgroup 0 exclusive-
 /// scans `block_sums` in place, then every element adds its block's offset.
 constexpr std::string_view k_prefix_scan_add_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 0) readonly buffer InData { uint in_data[]; };
-layout(std430, set = 0, binding = 1) buffer OutData { uint out_prefix[]; };
-layout(std430, set = 0, binding = 2) buffer BlockSums { uint block_sums[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer input_data_buffer { uint in_data[]; };
+layout(std430, set = 0, binding = 1) buffer output_data_buffer { uint out_prefix[]; };
+layout(std430, set = 0, binding = 2) buffer block_sums_buffer { uint block_sums[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint block_size;
     uint num_blocks;
-    uint pass;
+    uint stage;
 } pc;
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    // pass 0: single invocation exclusive-scans block_sums into block offsets.
-    if (pc.pass == 0u) {
+    // stage 0: single invocation exclusive-scans block_sums into block offsets.
+    if (pc.stage == 0u) {
         if (gid != 0u) return;
         uint running = 0u;
         for (uint b = 0u; b < pc.num_blocks; ++b) {
@@ -1240,7 +1246,7 @@ void main() {
         }
         return;
     }
-    // pass 1: add the scanned block offset to every element.
+    // stage 1: add the scanned block offset to every element.
     uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint i = gid; i < pc.element_count; i += stride) {
         uint block = i / pc.block_size;
@@ -1252,25 +1258,34 @@ void main() {
 /// @brief GPU seed count/emit. One workgroup per query record; local
 /// invocations stride over that record's minimizers. `emit_mode==0` writes the
 /// per-minimizer anchor count (clamped by `max_occ`) to `counts`; `emit_mode==1`
-/// reads the exclusive `prefix` and emits `GpuAnchorWire` records plus their
+/// reads the exclusive `prefix` and emits `gpu_anchor_wire` records plus their
 /// compact `(strand, ref)` sort key.
 constexpr std::string_view k_seed_count_emit_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct GpuMinimizerSlot { uint64_t hash; uint pos_offset; uint pos_count; };
-struct QRec { uint min_offset; uint min_count; uint query_len; uint flags; };
-struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+struct gpu_minimizer_slot { uint64_t hash; uint pos_offset; uint pos_count; };
+struct minimizer_fragment_query_record {
+    uint minimizer_offset;
+    uint minimizer_count;
+    uint query_length;
+    uint flags;
+};
+struct gpu_anchor_wire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
 
-layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
-layout(std430, set = 0, binding = 1) readonly buffer Slots { GpuMinimizerSlot slots[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Positions { uint64_t positions[]; };
-layout(std430, set = 0, binding = 3) readonly buffer QueryRecords { QRec qrecs[]; };
-layout(std430, set = 0, binding = 4) buffer Counts { uint counts[]; };
-layout(std430, set = 0, binding = 5) readonly buffer PrefixCounts { uint prefix[]; };
-layout(std430, set = 0, binding = 6) buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 7) buffer AnchorKeys { uint64_t anchor_keys[]; };
+layout(std430, set = 0, binding = 0) readonly buffer minimizer_words_buffer {
+    uint minimizer_words[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer slots_buffer { gpu_minimizer_slot slots[]; };
+layout(std430, set = 0, binding = 2) readonly buffer positions_buffer { uint64_t positions[]; };
+layout(std430, set = 0, binding = 3) readonly buffer query_records_buffer {
+    minimizer_fragment_query_record query_records[];
+};
+layout(std430, set = 0, binding = 4) buffer counts_buffer { uint counts[]; };
+layout(std430, set = 0, binding = 5) readonly buffer prefix_counts_buffer { uint prefix[]; };
+layout(std430, set = 0, binding = 6) buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 7) buffer anchor_keys_buffer { uint64_t anchor_keys[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint words32_per_minimizer;
     uint word_kind;
     uint hash_shift;
@@ -1279,58 +1294,69 @@ layout(push_constant) uniform Params {
     uint slot_mask;
     uint max_occ;
     uint emit_mode;
-    uint record_count;
-    uint bucket_count;   // >0 ⇒ Slots[] is a hash-sorted dense bucket array (binary search)
+    uint query_record_count;
+    uint hash_major_control_count;
     uint target_pos_offset_lo;
     uint target_pos_offset_hi;
     uint target_ref_bits;
 } pc;
 
-uint64_t target_pos_offset() {
-    return uint64_t(pc.target_pos_offset_lo) | (uint64_t(pc.target_pos_offset_hi) << 32);
+uint64_t target_position_offset() {
+    return uint64_t(pc.target_pos_offset_lo)
+        | (uint64_t(pc.target_pos_offset_hi) << 32);
 }
 
-uint64_t anchor_sort_key(uint rev, uint64_t ref_position) {
+uint64_t anchor_sort_key(uint reverse, uint64_t ref_position) {
     if (pc.target_ref_bits >= 63u) {
-        return (uint64_t(rev) << 63) | ref_position;
+        return (uint64_t(reverse) << 63) | ref_position;
     }
-    return (uint64_t(rev) << pc.target_ref_bits) | ref_position;
+    return (uint64_t(reverse) << pc.target_ref_bits) | ref_position;
 }
 
-uint64_t read_min_hash(uint i) {
+uint64_t minimizer_fragment_hash(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[i >> 1u];
-        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        uint packed = minimizer_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
         return uint64_t(raw) >> pc.hash_shift;
     }
-    uint base = i * pc.words32_per_minimizer;
-    if (pc.word_kind == 1u) return uint64_t(min_words[base]) >> pc.hash_shift;
+    uint base = index * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        return uint64_t(minimizer_words[base]) >> pc.hash_shift;
+    }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
+        uint64_t raw = uint64_t(minimizer_words[base])
+            | (uint64_t(minimizer_words[base + 1u]) << 32);
         return raw >> pc.hash_shift;
     }
-    uint64_t high = uint64_t(min_words[base + 2u]) | (uint64_t(min_words[base + 3u]) << 32);
+    uint64_t high = uint64_t(minimizer_words[base + 2u])
+        | (uint64_t(minimizer_words[base + 3u]) << 32);
     return high >> 8;
 }
-uint64_t read_min_pos_strand(uint i) {
+uint64_t minimizer_fragment_position(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[i >> 1u];
-        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
-        uint mask = (pc.pos_bits >= 15u) ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        uint packed = minimizer_words[index >> 1u];
+        uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+        uint mask = pc.pos_bits >= 15u
+            ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
         return uint64_t(raw & mask);
     }
-    uint base = i * pc.words32_per_minimizer;
+    uint base = index * pc.words32_per_minimizer;
     if (pc.word_kind == 1u) {
-        uint raw = min_words[base];
-        uint mask = (pc.pos_bits >= 31u) ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        uint raw = minimizer_words[base];
+        uint mask = pc.pos_bits >= 31u
+            ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
         return uint64_t(raw & mask);
     }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
-        uint64_t mask = pc.pos_bits >= 63u ? ~uint64_t(0) : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
+        uint64_t raw = uint64_t(minimizer_words[base])
+            | (uint64_t(minimizer_words[base + 1u]) << 32);
+        uint64_t mask = pc.pos_bits >= 63u
+            ? ~uint64_t(0)
+            : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
         return raw & mask;
     }
-    return uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
+    return uint64_t(minimizer_words[base])
+        | (uint64_t(minimizer_words[base + 1u]) << 32);
 }
 uint64_t splitmix64(uint64_t x) {
     x += 0x9e3779b97f4a7c15UL;
@@ -1338,111 +1364,137 @@ uint64_t splitmix64(uint64_t x) {
     x = (x ^ (x >> 27)) * 0x94d049bb133111ebUL;
     return x ^ (x >> 31);
 }
-uint find_slot(uint64_t hash) {
-    if (pc.bucket_count != 0u) {
-        // Hash-sorted dense representation → binary search. It may be built
-        // by the GPU index builder or selected explicitly by the bounded
-        // legacy materializer; bucket_count attests the representation.
+uint find_hash_slot(uint64_t hash) {
+    if (pc.hash_major_control_count != 0u) {
+        // Hash-major dense controls use binary search. The nonzero control
+        // count selects this representation explicitly.
         uint lo = 0u;
-        uint hi = pc.bucket_count;
+        uint hi = pc.hash_major_control_count;
         while (lo < hi) {
             uint mid = lo + ((hi - lo) >> 1u);
             if (slots[mid].hash < hash) lo = mid + 1u; else hi = mid;
         }
-        if (lo < pc.bucket_count && slots[lo].hash == hash) return lo;
+        if (lo < pc.hash_major_control_count && slots[lo].hash == hash) {
+            return lo;
+        }
         return 0xffffffffu;
     }
     // Open-addressed representation → linear probe.
-    uint p = uint(splitmix64(hash)) & pc.slot_mask;
+    uint slot_index = uint(splitmix64(hash)) & pc.slot_mask;
     for (uint step = 0u; step <= pc.slot_mask; ++step) {
-        GpuMinimizerSlot s = slots[p];
-        if (s.pos_count == 0u) return 0xffffffffu;
-        if (s.hash == hash) return p;
-        p = (p + 1u) & pc.slot_mask;
+        gpu_minimizer_slot candidate = slots[slot_index];
+        if (candidate.pos_count == 0u) return 0xffffffffu;
+        if (candidate.hash == hash) return slot_index;
+        slot_index = (slot_index + 1u) & pc.slot_mask;
     }
     return 0xffffffffu;
 }
 
 void main() {
-    // Fast fused-MPF path: Runtime binds one QRec per problem. The QRec points
-    // into a concatenated minimizer-word buffer, while counts/prefix are local
-    // to the current problem.
-    if (pc.record_count == 1u) {
-        QRec q = qrecs[0];
-        uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
+    // The fused minimizer-fragment path binds one query record per problem.
+    // Each record selects a slice of the concatenated minimizer-word buffer,
+    // while counts and prefix offsets remain local to that problem.
+    if (pc.query_record_count == 1u) {
+        minimizer_fragment_query_record record = query_records[0];
+        uint64_t reverse_base = uint64_t(
+            record.query_length - 2u + pc.kmer_size);
         uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-        for (uint local = gl_GlobalInvocationID.x; local < q.min_count; local += stride) {
-            uint gi = q.min_offset + local;
-            uint64_t hash = read_min_hash(gi);
-            uint slot_idx = find_slot(hash);
-            uint cnt = 0u;
-            if (slot_idx != 0xffffffffu) {
-                GpuMinimizerSlot slot = slots[slot_idx];
-                if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
+        for (uint local_index = gl_GlobalInvocationID.x;
+             local_index < record.minimizer_count;
+             local_index += stride) {
+            uint minimizer_index = record.minimizer_offset + local_index;
+            uint64_t hash = minimizer_fragment_hash(minimizer_index);
+            uint slot_index = find_hash_slot(hash);
+            uint accepted_count = 0u;
+            if (slot_index != 0xffffffffu) {
+                gpu_minimizer_slot slot = slots[slot_index];
+                if (slot.pos_count <= pc.max_occ) {
+                    accepted_count = slot.pos_count;
+                }
             }
             if (pc.emit_mode == 0u) {
-                counts[local] = cnt;
+                counts[local_index] = accepted_count;
                 continue;
             }
-            if (cnt == 0u) continue;
-            GpuMinimizerSlot slot = slots[slot_idx];
-            uint dst = prefix[local];
-            uint64_t q_encoded = read_min_pos_strand(gi);
-            uint64_t q_pos = q_encoded >> 1;
-            uint q_strand = uint(q_encoded & uint64_t(1));
+            if (accepted_count == 0u) continue;
+            gpu_minimizer_slot slot = slots[slot_index];
+            uint destination = prefix[local_index];
+            uint64_t query_encoded =
+                minimizer_fragment_position(minimizer_index);
+            uint64_t query_position_bp = query_encoded >> 1;
+            uint query_strand = uint(query_encoded & uint64_t(1));
             uint span_flags_segment = pc.kmer_size & 0xffu;
-            for (uint j = 0u; j < cnt; ++j) {
-                uint64_t target = positions[slot.pos_offset + j];
-                uint t_strand = uint(target & uint64_t(1));
-                uint rev = t_strand ^ q_strand;
-                uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
-                uint64_t ref_position = (target >> 1) + target_pos_offset();
-                anchors[dst + j].ref_position = ref_position;
-                anchors[dst + j].query_position = query_position;
-                anchors[dst + j].is_reverse = rev;
-                anchors[dst + j].span_flags_segment = span_flags_segment;
-                anchor_keys[dst + j] = anchor_sort_key(rev, ref_position);
+            for (uint occurrence_index = 0u;
+                 occurrence_index < accepted_count;
+                 ++occurrence_index) {
+                uint64_t target_encoded =
+                    positions[slot.pos_offset + occurrence_index];
+                uint target_strand = uint(target_encoded & uint64_t(1));
+                uint reverse = target_strand ^ query_strand;
+                uint64_t query_position = reverse != 0u
+                    ? reverse_base - query_position_bp : query_position_bp;
+                uint64_t ref_position = (target_encoded >> 1)
+                    + target_position_offset();
+                uint output_index = destination + occurrence_index;
+                anchors[output_index].ref_position = ref_position;
+                anchors[output_index].query_position = query_position;
+                anchors[output_index].is_reverse = reverse;
+                anchors[output_index].span_flags_segment = span_flags_segment;
+                anchor_keys[output_index] =
+                    anchor_sort_key(reverse, ref_position);
             }
         }
         return;
     }
 
-    // General multi-record fallback, kept for ABI completeness.
-    uint rec = gl_WorkGroupID.x;
-    if (rec >= pc.record_count) return;
-    QRec q = qrecs[rec];
-    uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
-    for (uint local = gl_LocalInvocationID.x; local < q.min_count; local += gl_WorkGroupSize.x) {
-        uint gi = q.min_offset + local;
-        uint64_t hash = read_min_hash(gi);
-        uint slot_idx = find_slot(hash);
-        uint cnt = 0u;
-        if (slot_idx != 0xffffffffu) {
-            GpuMinimizerSlot slot = slots[slot_idx];
-            if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
+    // Multi-record execution assigns one workgroup to each query record.
+    uint record_index = gl_WorkGroupID.x;
+    if (record_index >= pc.query_record_count) return;
+    minimizer_fragment_query_record record = query_records[record_index];
+    uint64_t reverse_base = uint64_t(
+        record.query_length - 2u + pc.kmer_size);
+    for (uint local_index = gl_LocalInvocationID.x;
+         local_index < record.minimizer_count;
+         local_index += gl_WorkGroupSize.x) {
+        uint minimizer_index = record.minimizer_offset + local_index;
+        uint64_t hash = minimizer_fragment_hash(minimizer_index);
+        uint slot_index = find_hash_slot(hash);
+        uint accepted_count = 0u;
+        if (slot_index != 0xffffffffu) {
+            gpu_minimizer_slot slot = slots[slot_index];
+            if (slot.pos_count <= pc.max_occ) {
+                accepted_count = slot.pos_count;
+            }
         }
         if (pc.emit_mode == 0u) {
-            counts[gi] = cnt;
+            counts[minimizer_index] = accepted_count;
             continue;
         }
-        if (cnt == 0u) continue;
-        GpuMinimizerSlot slot = slots[slot_idx];
-        uint dst = prefix[gi];
-        uint64_t q_encoded = read_min_pos_strand(gi);
-        uint64_t q_pos = q_encoded >> 1;
-        uint q_strand = uint(q_encoded & uint64_t(1));
+        if (accepted_count == 0u) continue;
+        gpu_minimizer_slot slot = slots[slot_index];
+        uint destination = prefix[minimizer_index];
+        uint64_t query_encoded =
+            minimizer_fragment_position(minimizer_index);
+        uint64_t query_position_bp = query_encoded >> 1;
+        uint query_strand = uint(query_encoded & uint64_t(1));
         uint span_flags_segment = pc.kmer_size & 0xffu;
-        for (uint j = 0u; j < cnt; ++j) {
-            uint64_t target = positions[slot.pos_offset + j];
-            uint t_strand = uint(target & uint64_t(1));
-            uint rev = t_strand ^ q_strand;
-            uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
-            uint64_t ref_position = (target >> 1) + target_pos_offset();
-            anchors[dst + j].ref_position = ref_position;
-            anchors[dst + j].query_position = query_position;
-            anchors[dst + j].is_reverse = rev;
-            anchors[dst + j].span_flags_segment = span_flags_segment;
-            anchor_keys[dst + j] = anchor_sort_key(rev, ref_position);
+        for (uint occurrence_index = 0u;
+             occurrence_index < accepted_count;
+             ++occurrence_index) {
+            uint64_t target_encoded =
+                positions[slot.pos_offset + occurrence_index];
+            uint target_strand = uint(target_encoded & uint64_t(1));
+            uint reverse = target_strand ^ query_strand;
+            uint64_t query_position = reverse != 0u
+                ? reverse_base - query_position_bp : query_position_bp;
+            uint64_t ref_position = (target_encoded >> 1)
+                + target_position_offset();
+            uint output_index = destination + occurrence_index;
+            anchors[output_index].ref_position = ref_position;
+            anchors[output_index].query_position = query_position;
+            anchors[output_index].is_reverse = reverse;
+            anchors[output_index].span_flags_segment = span_flags_segment;
+            anchor_keys[output_index] = anchor_sort_key(reverse, ref_position);
         }
     }
 }
@@ -1456,17 +1508,17 @@ void main() {
 /// prefix ranges and variable-width segment-local positions directly; it never
 /// constructs a CPU-decoded slot table or a widened/globalized position array.
 constexpr std::string_view k_grouped_soa_seed_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-const uint SHAPE_V5_ABI_VERSION = 3u;
-const uint SHAPE_V5_REQUIRED_FLAGS = 7u;
-const uint SHAPE_V5_STATUS_CONTRACT = 1u;
-const uint SHAPE_V5_STATUS_QUERY = 2u;
-const uint SHAPE_V5_STATUS_CONTROL = 4u;
-const uint SHAPE_V5_STATUS_POSITION = 8u;
-const uint SHAPE_V5_STATUS_EMISSION = 16u;
+const uint k_grouped_soa_abi_revision = 3u;
+const uint k_grouped_soa_partition_required_flags = 7u;
+const uint k_grouped_soa_status_validation = 1u;
+const uint k_grouped_soa_status_query = 2u;
+const uint k_grouped_soa_status_control = 4u;
+const uint k_grouped_soa_status_position = 8u;
+const uint k_grouped_soa_status_emission = 16u;
 
-struct ShapeV5Partition {
+struct grouped_soa_partition_descriptor {
     uint partition_id;
     uint directory_ordinal;
     uint position_segment;
@@ -1486,49 +1538,49 @@ struct ShapeV5Partition {
     uint64_t segment_base_bp;
     uint64_t segment_end_bp;
 };
-struct ShapeV5QueryRecord {
+struct minimizer_fragment_query_record {
     uint minimizer_offset;
     uint minimizer_count;
-    uint query_len;
+    uint query_length;
     uint flags;
 };
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer MinWords {
-    uint min_words[];
+layout(std430, set = 0, binding = 0) readonly buffer minimizer_words_buffer {
+    uint minimizer_words[];
 };
-layout(std430, set = 0, binding = 1) readonly buffer Partitions {
-    ShapeV5Partition partitions[];
+layout(std430, set = 0, binding = 1) readonly buffer partitions_buffer {
+    grouped_soa_partition_descriptor partitions[];
 };
-layout(std430, set = 0, binding = 2) readonly buffer RawControls {
+layout(std430, set = 0, binding = 2) readonly buffer raw_controls_buffer {
     uint control_words[];
 };
-layout(std430, set = 0, binding = 3) readonly buffer RawPositions {
+layout(std430, set = 0, binding = 3) readonly buffer raw_positions_buffer {
     uint position_words[];
 };
-layout(std430, set = 0, binding = 4) readonly buffer QueryRecords {
-    ShapeV5QueryRecord query_records[];
+layout(std430, set = 0, binding = 4) readonly buffer query_records_buffer {
+    minimizer_fragment_query_record query_records[];
 };
-layout(std430, set = 0, binding = 5) buffer Counts {
+layout(std430, set = 0, binding = 5) buffer counts_buffer {
     uint counts[];
 };
-layout(std430, set = 0, binding = 6) readonly buffer PrefixCounts {
+layout(std430, set = 0, binding = 6) readonly buffer prefix_counts_buffer {
     uint prefix[];
 };
-layout(std430, set = 0, binding = 7) buffer Anchors {
-    AnchorWire anchors[];
+layout(std430, set = 0, binding = 7) buffer anchors_buffer {
+    gpu_anchor_wire anchors[];
 };
-layout(std430, set = 0, binding = 8) buffer AnchorKeys {
+layout(std430, set = 0, binding = 8) buffer anchor_keys_buffer {
     uint64_t anchor_keys[];
 };
 
-layout(push_constant) uniform Params {
-    uint abi_version;
+layout(push_constant) uniform push_constants {
+    uint abi_revision;
     uint words32_per_minimizer;
     uint word_kind;
     uint hash_shift;
@@ -1537,7 +1589,7 @@ layout(push_constant) uniform Params {
     uint partition_count;
     uint max_occ;
     uint emit_mode;
-    uint record_count;
+    uint query_record_count;
     uint target_ref_bits;
     uint query_minimizer_count;
     uint control_word_count;
@@ -1548,33 +1600,33 @@ layout(push_constant) uniform Params {
     uint status_index;
 } pc;
 
-void shape_signal_status(uint status_bit) {
+void grouped_soa_signal_status(uint status_bit) {
     if (pc.status_index < uint(counts.length())) {
         atomicOr(counts[pc.status_index], status_bit);
     }
 }
 
-bool shape_width_valid(uint width) {
+bool grouped_soa_scalar_width_valid(uint width) {
     return width == 2u || width == 4u || width == 8u;
 }
 
-bool shape_aligned(uint64_t byte_offset, uint width) {
-    return shape_width_valid(width)
+bool grouped_soa_scalar_aligned(uint64_t byte_offset, uint width) {
+    return grouped_soa_scalar_width_valid(width)
         && (byte_offset & uint64_t(width - 1u)) == uint64_t(0);
 }
 
-bool shape_byte_range_valid(
+bool grouped_soa_scalar_range_valid(
     uint64_t byte_offset,
     uint width,
     uint word_count)
 {
-    if (!shape_aligned(byte_offset, width)) return false;
+    if (!grouped_soa_scalar_aligned(byte_offset, width)) return false;
     uint64_t byte_limit = uint64_t(word_count) * uint64_t(4u);
     return byte_offset <= byte_limit
         && uint64_t(width) <= byte_limit - byte_offset;
 }
 
-bool shape_scalar_address(
+bool grouped_soa_scalar_address(
     uint64_t base,
     uint index,
     uint width,
@@ -1585,13 +1637,13 @@ bool shape_scalar_address(
     return byte_offset >= base;
 }
 
-bool shape_read_control_scalar(
+bool grouped_soa_read_control_scalar(
     uint64_t byte_offset,
     uint width,
     out uint64_t value)
 {
     value = uint64_t(0);
-    if (!shape_byte_range_valid(
+    if (!grouped_soa_scalar_range_valid(
             byte_offset, width, pc.control_word_count)) {
         return false;
     }
@@ -1610,13 +1662,13 @@ bool shape_read_control_scalar(
     return true;
 }
 
-bool shape_read_position_scalar(
+bool grouped_soa_read_position_scalar(
     uint64_t byte_offset,
     uint width,
     out uint64_t value)
 {
     value = uint64_t(0);
-    if (!shape_byte_range_valid(
+    if (!grouped_soa_scalar_range_valid(
             byte_offset, width, pc.position_word_count)) {
         return false;
     }
@@ -1635,28 +1687,30 @@ bool shape_read_position_scalar(
     return true;
 }
 
-uint64_t shape_max_occ_cap() {
+uint64_t grouped_soa_max_occ_cap() {
     return uint64_t(pc.max_occ_cap_lo)
         | (uint64_t(pc.max_occ_cap_hi) << 32u);
 }
 
-bool shape_partition_valid(ShapeV5Partition descriptor) {
-    if (descriptor.flags != SHAPE_V5_REQUIRED_FLAGS
+bool grouped_soa_partition_descriptor_valid(
+    grouped_soa_partition_descriptor descriptor)
+{
+    if (descriptor.flags != k_grouped_soa_partition_required_flags
         || descriptor.control_count == 0u
         || descriptor.position_count == 0u
         || descriptor.low_hash > descriptor.high_hash
         || descriptor.segment_base_bp >= descriptor.segment_end_bp
-        || !shape_width_valid(descriptor.hash_width)
-        || !shape_width_valid(descriptor.offset_width)
-        || !shape_width_valid(descriptor.count_width)
-        || !shape_width_valid(descriptor.position_width)
-        || !shape_aligned(
+        || !grouped_soa_scalar_width_valid(descriptor.hash_width)
+        || !grouped_soa_scalar_width_valid(descriptor.offset_width)
+        || !grouped_soa_scalar_width_valid(descriptor.count_width)
+        || !grouped_soa_scalar_width_valid(descriptor.position_width)
+        || !grouped_soa_scalar_aligned(
             descriptor.hash_byte_offset, descriptor.hash_width)
-        || !shape_aligned(
+        || !grouped_soa_scalar_aligned(
             descriptor.prefix_byte_offset, descriptor.offset_width)
-        || !shape_aligned(
+        || !grouped_soa_scalar_aligned(
             descriptor.count_byte_offset, descriptor.count_width)
-        || !shape_aligned(
+        || !grouped_soa_scalar_aligned(
             descriptor.position_byte_offset, descriptor.position_width)) {
         return false;
     }
@@ -1667,29 +1721,29 @@ bool shape_partition_valid(ShapeV5Partition descriptor) {
         <= maximum_segment_span;
 }
 
-uint64_t shape_read_min_hash(uint index) {
+uint64_t minimizer_fragment_hash(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[index >> 1u];
+        uint packed = minimizer_words[index >> 1u];
         uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
         return uint64_t(raw) >> pc.hash_shift;
     }
     uint base = index * pc.words32_per_minimizer;
     if (pc.word_kind == 1u) {
-        return uint64_t(min_words[base]) >> pc.hash_shift;
+        return uint64_t(minimizer_words[base]) >> pc.hash_shift;
     }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base])
-            | (uint64_t(min_words[base + 1u]) << 32u);
+        uint64_t raw = uint64_t(minimizer_words[base])
+            | (uint64_t(minimizer_words[base + 1u]) << 32u);
         return raw >> pc.hash_shift;
     }
-    uint64_t high = uint64_t(min_words[base + 2u])
-        | (uint64_t(min_words[base + 3u]) << 32u);
+    uint64_t high = uint64_t(minimizer_words[base + 2u])
+        | (uint64_t(minimizer_words[base + 3u]) << 32u);
     return high >> 8u;
 }
 
-uint64_t shape_read_min_position(uint index) {
+uint64_t minimizer_fragment_position(uint index) {
     if (pc.word_kind == 0u) {
-        uint packed = min_words[index >> 1u];
+        uint packed = minimizer_words[index >> 1u];
         uint raw = (packed >> ((index & 1u) * 16u)) & 0xffffu;
         uint mask = pc.pos_bits >= 15u
             ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
@@ -1699,38 +1753,38 @@ uint64_t shape_read_min_position(uint index) {
     if (pc.word_kind == 1u) {
         uint mask = pc.pos_bits >= 31u
             ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
-        return uint64_t(min_words[base] & mask);
+        return uint64_t(minimizer_words[base] & mask);
     }
     if (pc.word_kind == 2u) {
-        uint64_t raw = uint64_t(min_words[base])
-            | (uint64_t(min_words[base + 1u]) << 32u);
+        uint64_t raw = uint64_t(minimizer_words[base])
+            | (uint64_t(minimizer_words[base + 1u]) << 32u);
         uint64_t mask = pc.pos_bits >= 63u
             ? ~uint64_t(0)
             : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
         return raw & mask;
     }
-    return uint64_t(min_words[base])
-        | (uint64_t(min_words[base + 1u]) << 32u);
+    return uint64_t(minimizer_words[base])
+        | (uint64_t(minimizer_words[base + 1u]) << 32u);
 }
 
-bool shape_query_words_valid(uint index) {
+bool minimizer_fragment_words_valid(uint index) {
     if (pc.word_kind > 3u || pc.words32_per_minimizer == 0u) return false;
     if (pc.word_kind == 0u) {
-        return uint64_t(index >> 1u) < uint64_t(min_words.length());
+        return uint64_t(index >> 1u) < uint64_t(minimizer_words.length());
     }
     uint required_words = pc.word_kind == 1u
         ? 1u : pc.word_kind == 2u ? 2u : 4u;
     if (pc.words32_per_minimizer < required_words) return false;
     uint64_t end = (uint64_t(index) + uint64_t(1u))
         * uint64_t(pc.words32_per_minimizer);
-    return end <= uint64_t(min_words.length());
+    return end <= uint64_t(minimizer_words.length());
 }
 
 // Returns 0 for no hash in this partition, 1 for an admitted range, and 2 for
 // malformed bytes.  The terminal prefix is authoritative; the saturated count
 // is checked against it and the persisted generation cap before use.
-uint shape_find_control(
-    ShapeV5Partition descriptor,
+uint grouped_soa_find_control(
+    grouped_soa_partition_descriptor descriptor,
     uint64_t wanted_hash,
     out uint64_t position_begin,
     out uint64_t position_end,
@@ -1739,7 +1793,7 @@ uint shape_find_control(
     position_begin = uint64_t(0);
     position_end = uint64_t(0);
     saturated_count = uint64_t(0);
-    if (!shape_partition_valid(descriptor)) return 2u;
+    if (!grouped_soa_partition_descriptor_valid(descriptor)) return 2u;
     if (wanted_hash < descriptor.low_hash
         || wanted_hash > descriptor.high_hash) {
         return 0u;
@@ -1750,12 +1804,12 @@ uint shape_find_control(
         uint mid = lo + ((hi - lo) >> 1u);
         uint64_t address;
         uint64_t stored_hash;
-        if (!shape_scalar_address(
+        if (!grouped_soa_scalar_address(
                 descriptor.hash_byte_offset,
                 mid,
                 descriptor.hash_width,
                 address)
-            || !shape_read_control_scalar(
+            || !grouped_soa_read_control_scalar(
                 address, descriptor.hash_width, stored_hash)) {
             return 2u;
         }
@@ -1764,12 +1818,12 @@ uint shape_find_control(
     if (lo >= descriptor.control_count) return 0u;
     uint64_t hash_address;
     uint64_t stored_hash;
-    if (!shape_scalar_address(
+    if (!grouped_soa_scalar_address(
             descriptor.hash_byte_offset,
             lo,
             descriptor.hash_width,
             hash_address)
-        || !shape_read_control_scalar(
+        || !grouped_soa_read_control_scalar(
             hash_address, descriptor.hash_width, stored_hash)) {
         return 2u;
     }
@@ -1778,40 +1832,40 @@ uint shape_find_control(
     uint64_t begin_address;
     uint64_t end_address;
     uint64_t count_address;
-    if (!shape_scalar_address(
+    if (!grouped_soa_scalar_address(
             descriptor.prefix_byte_offset,
             lo,
             descriptor.offset_width,
             begin_address)
-        || !shape_scalar_address(
+        || !grouped_soa_scalar_address(
             descriptor.prefix_byte_offset,
             lo + 1u,
             descriptor.offset_width,
             end_address)
-        || !shape_scalar_address(
+        || !grouped_soa_scalar_address(
             descriptor.count_byte_offset,
             lo,
             descriptor.count_width,
             count_address)
-        || !shape_read_control_scalar(
+        || !grouped_soa_read_control_scalar(
             begin_address, descriptor.offset_width, position_begin)
-        || !shape_read_control_scalar(
+        || !grouped_soa_read_control_scalar(
             end_address, descriptor.offset_width, position_end)
-        || !shape_read_control_scalar(
+        || !grouped_soa_read_control_scalar(
             count_address, descriptor.count_width, saturated_count)
         || position_begin >= position_end
         || position_end > uint64_t(descriptor.position_count)) {
         return 2u;
     }
     uint64_t exact_count = position_end - position_begin;
-    uint64_t cap = shape_max_occ_cap();
+    uint64_t cap = grouped_soa_max_occ_cap();
     if (cap == ~uint64_t(0)) return 2u;
     uint64_t expected_saturated = exact_count > cap
         ? cap + uint64_t(1u) : exact_count;
     return saturated_count == expected_saturated ? 1u : 2u;
 }
 
-bool shape_count_hash(uint64_t hash, out uint accepted_count) {
+bool grouped_soa_count_hash(uint64_t hash, out uint accepted_count) {
     accepted_count = 0u;
     uint64_t total = uint64_t(0);
     uint64_t threshold = uint64_t(pc.max_occ);
@@ -1821,7 +1875,7 @@ bool shape_count_hash(uint64_t hash, out uint accepted_count) {
         uint64_t position_begin;
         uint64_t position_end;
         uint64_t saturated_count;
-        uint status = shape_find_control(
+        uint status = grouped_soa_find_control(
             partitions[partition_index],
             hash,
             position_begin,
@@ -1844,16 +1898,16 @@ bool shape_count_hash(uint64_t hash, out uint accepted_count) {
     return true;
 }
 
-uint64_t shape_anchor_sort_key(uint reverse, uint64_t ref_position) {
+uint64_t grouped_soa_anchor_sort_key(uint reverse, uint64_t ref_position) {
     if (pc.target_ref_bits >= 63u) {
         return (uint64_t(reverse) << 63u) | ref_position;
     }
     return (uint64_t(reverse) << pc.target_ref_bits) | ref_position;
 }
 
-bool shape_global_contract_valid() {
-    uint64_t cap = shape_max_occ_cap();
-    return pc.abi_version == SHAPE_V5_ABI_VERSION
+bool grouped_soa_dispatch_valid() {
+    uint64_t cap = grouped_soa_max_occ_cap();
+    return pc.abi_revision == k_grouped_soa_abi_revision
         && pc.emit_mode <= 1u
         && pc.kmer_size != 0u
         && pc.kmer_size <= 255u
@@ -1864,7 +1918,7 @@ bool shape_global_contract_valid() {
         && uint64_t(pc.max_occ) <= cap
         && pc.partition_count != 0u
         && pc.partition_count <= uint(partitions.length())
-        && pc.record_count == 1u
+        && pc.query_record_count == 1u
         && uint(query_records.length()) >= 1u
         && pc.query_minimizer_count != 0u
         && pc.status_index != 0u
@@ -1878,20 +1932,20 @@ bool shape_global_contract_valid() {
 
 void main() {
     uint record_index = gl_WorkGroupID.x;
-    bool contract_valid = shape_global_contract_valid();
-    if (!contract_valid || record_index != 0u) {
-        shape_signal_status(SHAPE_V5_STATUS_CONTRACT);
+    bool dispatch_valid = grouped_soa_dispatch_valid();
+    if (!dispatch_valid || record_index != 0u) {
+        grouped_soa_signal_status(k_grouped_soa_status_validation);
         return;
     }
-    ShapeV5QueryRecord record = query_records[record_index];
+    minimizer_fragment_query_record record = query_records[record_index];
     uint64_t query_end = uint64_t(record.minimizer_offset)
         + uint64_t(record.minimizer_count);
     bool record_valid = query_end <= uint64_t(pc.query_minimizer_count)
         && record.minimizer_count == pc.status_index
-        && record.query_len >= pc.kmer_size
+        && record.query_length >= pc.kmer_size
         && record.flags == 0u;
     if (!record_valid) {
-        shape_signal_status(SHAPE_V5_STATUS_QUERY);
+        grouped_soa_signal_status(k_grouped_soa_status_query);
         return;
     }
 
@@ -1901,15 +1955,15 @@ void main() {
         uint minimizer_index = record.minimizer_offset + local_index;
         if (pc.emit_mode == 0u) counts[local_index] = 0u;
         if (minimizer_index >= pc.query_minimizer_count
-            || !shape_query_words_valid(minimizer_index)) {
-            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            || !minimizer_fragment_words_valid(minimizer_index)) {
+            grouped_soa_signal_status(k_grouped_soa_status_query);
             continue;
         }
 
-        uint64_t hash = shape_read_min_hash(minimizer_index);
+        uint64_t hash = minimizer_fragment_hash(minimizer_index);
         uint accepted_count = 0u;
-        if (!shape_count_hash(hash, accepted_count)) {
-            shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+        if (!grouped_soa_count_hash(hash, accepted_count)) {
+            grouped_soa_signal_status(k_grouped_soa_status_control);
             continue;
         }
         if (pc.emit_mode == 0u) {
@@ -1917,7 +1971,7 @@ void main() {
             continue;
         }
         if (counts[local_index] != accepted_count) {
-            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            grouped_soa_signal_status(k_grouped_soa_status_emission);
             continue;
         }
         if (accepted_count == 0u) continue;
@@ -1926,36 +1980,37 @@ void main() {
         if (destination > uint64_t(pc.anchor_capacity)
             || uint64_t(accepted_count)
                 > uint64_t(pc.anchor_capacity) - destination) {
-            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            grouped_soa_signal_status(k_grouped_soa_status_emission);
             continue;
         }
-        uint64_t query_encoded = shape_read_min_position(minimizer_index);
+        uint64_t query_encoded = minimizer_fragment_position(minimizer_index);
         uint64_t query_bp = query_encoded >> 1u;
         uint query_strand = uint(query_encoded & uint64_t(1u));
-        if (query_bp >= uint64_t(record.query_len)
+        if (query_bp >= uint64_t(record.query_length)
             || query_bp + uint64_t(1u) < uint64_t(pc.kmer_size)) {
-            shape_signal_status(SHAPE_V5_STATUS_QUERY);
+            grouped_soa_signal_status(k_grouped_soa_status_query);
             continue;
         }
-        uint64_t reverse_base = uint64_t(record.query_len)
+        uint64_t reverse_base = uint64_t(record.query_length)
             + uint64_t(pc.kmer_size) - uint64_t(2u);
         uint emitted = 0u;
         bool emission_valid = true;
         for (uint partition_index = 0u;
              emission_valid && partition_index < pc.partition_count;
              ++partition_index) {
-            ShapeV5Partition descriptor = partitions[partition_index];
+            grouped_soa_partition_descriptor descriptor =
+                partitions[partition_index];
             uint64_t position_begin;
             uint64_t position_end;
             uint64_t saturated_count;
-            uint status = shape_find_control(
+            uint status = grouped_soa_find_control(
                 descriptor,
                 hash,
                 position_begin,
                 position_end,
                 saturated_count);
             if (status == 2u) {
-                shape_signal_status(SHAPE_V5_STATUS_CONTROL);
+                grouped_soa_signal_status(k_grouped_soa_status_control);
                 emission_valid = false;
                 break;
             }
@@ -1965,16 +2020,16 @@ void main() {
                  ++position_index) {
                 uint64_t position_address;
                 uint64_t target_encoded;
-                if (!shape_scalar_address(
+                if (!grouped_soa_scalar_address(
                         descriptor.position_byte_offset,
                         uint(position_index),
                         descriptor.position_width,
                         position_address)
-                    || !shape_read_position_scalar(
+                    || !grouped_soa_read_position_scalar(
                         position_address,
                         descriptor.position_width,
                         target_encoded)) {
-                    shape_signal_status(SHAPE_V5_STATUS_POSITION);
+                    grouped_soa_signal_status(k_grouped_soa_status_position);
                     emission_valid = false;
                     break;
                 }
@@ -1982,10 +2037,10 @@ void main() {
                 uint64_t segment_span = descriptor.segment_end_bp
                     - descriptor.segment_base_bp;
                 if (local_bp >= segment_span || emitted >= accepted_count) {
-                    shape_signal_status(
+                    grouped_soa_signal_status(
                         local_bp >= segment_span
-                            ? SHAPE_V5_STATUS_POSITION
-                            : SHAPE_V5_STATUS_EMISSION);
+                            ? k_grouped_soa_status_position
+                            : k_grouped_soa_status_emission);
                     emission_valid = false;
                     break;
                 }
@@ -2001,7 +2056,7 @@ void main() {
                 anchors[uint(output_index)].span_flags_segment =
                     pc.kmer_size & 0xffu;
                 anchor_keys[uint(output_index)] =
-                    shape_anchor_sort_key(reverse, ref_position);
+                    grouped_soa_anchor_sort_key(reverse, ref_position);
                 ++emitted;
             }
         }
@@ -2009,7 +2064,7 @@ void main() {
         // deterministic between count and emit.  No CPU/SIMD repair path is
         // provided if the resident bytes change or fail validation.
         if (!emission_valid || emitted != accepted_count) {
-            shape_signal_status(SHAPE_V5_STATUS_EMISSION);
+            grouped_soa_signal_status(k_grouped_soa_status_emission);
         }
     }
 }
@@ -2018,19 +2073,18 @@ void main() {
 /// @brief Device radix sort over parallel (key:uint64, value:uint64)
 /// arrays. One 256-lane workgroup processes each contiguous chunk; lane 0
 /// assigns stable scatter destinations and all lanes move the values. Histogram
-/// pass: per-chunk 256-bin counts of digit `(key >> radix_shift) & 0xff`.
+/// stage: per-chunk 256-bin counts of digit `(key >> radix_shift) & 0xff`.
 constexpr std::string_view k_radix_sort_histogram_body = R"GLSL(
 // Cooperative per-workgroup histogram: 256 threads (one per bin) zero and write
 // the shared histogram; all threads count this workgroup's chunk into it with
-// shared atomics. Replaces the 1-thread-per-workgroup version whose serial reads
-// were a large fraction of the GPU index build's sort cost (DOC0311).
+// shared atomics, so every lane contributes to reading the chunk.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
-layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
-layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
-layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
-layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
-layout(push_constant) uniform Params {
+layout(std430, set = 0, binding = 0) readonly buffer keys_in_buffer { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer values_in_buffer { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer keys_out_buffer { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer values_out_buffer { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer histogram_buffer { uint histogram[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint radix_shift;
     uint num_workgroups;
@@ -2070,14 +2124,14 @@ constexpr std::string_view k_radix_sort_scan_body = R"GLSL(
 // reduces its column of the per-workgroup histograms and then writes that
 // column's per-workgroup global offsets. This keeps the scan O(num_workgroups)
 // per thread (256-way parallel) instead of O(num_workgroups * 256) on a single
-// lane, which was the dominant fixed cost of the GPU index build.
+// lane and keeps work distributed across all radix bins.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
-layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
-layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
-layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
-layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
-layout(push_constant) uniform Params {
+layout(std430, set = 0, binding = 0) readonly buffer keys_in_buffer { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer values_in_buffer { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer keys_out_buffer { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer values_out_buffer { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer histogram_buffer { uint histogram[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint radix_shift;
     uint num_workgroups;
@@ -2114,21 +2168,20 @@ constexpr std::string_view k_radix_sort_scatter_body = R"GLSL(
 // Cooperative stable scatter. Lane 0 walks the workgroup's chunk in order to
 // assign each element its destination (= the per-bin global offset, advanced
 // stably), which keeps the radix sort STABLE. All 256 lanes then perform the
-// actual (uncoalesced) key/value writes in parallel — those scattered global
-// writes were the dominant cost of the 1-lane scatter (DOC0311). The chunk is
-// processed in SUB-BLOCKS of 512 so the stable-destination array sh_dst[512] is
+// actual (uncoalesced) key/value writes in parallel. The chunk is processed in
+// SUB-BLOCKS of 512 so the stable-destination array sh_dst[512] is
 // never overrun even when elems_per_wg > 512 — which occurs once num_workgroups
 // is clamped to the device maxComputeWorkGroupCount[0] (the Vulkan minimum is
 // 65535; Apple Silicon reports ~1e9 so a single block usually suffices, but the
 // loop keeps it correct on any device). The per-bin cursor persists across
 // sub-blocks, so LSD stability holds across the whole chunk.
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
-layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
-layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
-layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
-layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
-layout(push_constant) uniform Params {
+layout(std430, set = 0, binding = 0) readonly buffer keys_in_buffer { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer values_in_buffer { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer keys_out_buffer { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer values_out_buffer { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer histogram_buffer { uint histogram[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint radix_shift;
     uint num_workgroups;
@@ -2174,23 +2227,23 @@ void main() {
 /// @brief GPU target-index run marking. `flags[i] = 1` where a
 /// new hash run begins in the sorted key array.
 constexpr std::string_view k_index_mark_runs_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
-struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
-layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
-layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
-layout(std430, set = 0, binding = 3) buffer Buckets { BucketRec buckets[]; };
-layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
-layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
-layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
+struct serialized_bucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer sorted_keys_buffer { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer flags_buffer { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer scanned_buffer { uint scanned[]; };
+layout(std430, set = 0, binding = 3) buffer buckets_buffer { bucket_record buckets[]; };
+layout(std430, set = 0, binding = 4) buffer slot_claims_buffer { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer slots_buffer { serialized_bucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer bucket_slot_buffer { uint bucket_slot[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint slot_mask;
     uint slot_capacity;
     uint num_buckets;
     uint probe_cap;
-    uint pass;
+    uint stage;
 } pc;
 void main() {
     uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -2207,23 +2260,23 @@ void main() {
 /// `pos_count`; run starts set the bucket `hash`/`pos_offset` (the sorted
 /// position index). `bucket_index = inclusive_scan(flags) - 1`.
 constexpr std::string_view k_index_emit_buckets_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
-struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
-layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
-layout(std430, set = 0, binding = 1) readonly buffer Flags { uint flags[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
-layout(std430, set = 0, binding = 3) buffer Buckets { BucketRec buckets[]; };
-layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
-layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
-layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
+struct serialized_bucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer sorted_keys_buffer { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) readonly buffer flags_buffer { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer scanned_buffer { uint scanned[]; };
+layout(std430, set = 0, binding = 3) buffer buckets_buffer { bucket_record buckets[]; };
+layout(std430, set = 0, binding = 4) buffer slot_claims_buffer { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer slots_buffer { serialized_bucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer bucket_slot_buffer { uint bucket_slot[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint slot_mask;
     uint slot_capacity;
     uint num_buckets;
     uint probe_cap;
-    uint pass;
+    uint stage;
 } pc;
 void main() {
     uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -2242,23 +2295,23 @@ void main() {
 
 /// @brief Race-free slot claim via a 32-bit atomicCompSwap linear probe.
 constexpr std::string_view k_index_claim_slots_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
-struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
-layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
-layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
-layout(std430, set = 0, binding = 3) readonly buffer Buckets { BucketRec buckets[]; };
-layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
-layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
-layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
+struct serialized_bucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer sorted_keys_buffer { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer flags_buffer { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer scanned_buffer { uint scanned[]; };
+layout(std430, set = 0, binding = 3) readonly buffer buckets_buffer { bucket_record buckets[]; };
+layout(std430, set = 0, binding = 4) buffer slot_claims_buffer { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer slots_buffer { serialized_bucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer bucket_slot_buffer { uint bucket_slot[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint slot_mask;
     uint slot_capacity;
     uint num_buckets;
     uint probe_cap;
-    uint pass;
+    uint stage;
 } pc;
 uint64_t splitmix64(uint64_t x) {
     x += 0x9e3779b97f4a7c15UL;
@@ -2279,25 +2332,25 @@ void main() {
 }
 )GLSL";
 
-/// @brief Write a SerializedBucket into its claimed slot.
+/// @brief Write a serialized_bucket into its claimed slot.
 constexpr std::string_view k_index_emit_slots_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
-struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
-struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
-layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
-layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
-layout(std430, set = 0, binding = 3) readonly buffer Buckets { BucketRec buckets[]; };
-layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
-layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
-layout(std430, set = 0, binding = 6) readonly buffer BucketSlot { uint bucket_slot[]; };
-layout(push_constant) uniform Params {
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
+struct bucket_record { uint64_t hash; uint pos_offset; uint pos_count; };
+struct serialized_bucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer sorted_keys_buffer { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer flags_buffer { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer scanned_buffer { uint scanned[]; };
+layout(std430, set = 0, binding = 3) readonly buffer buckets_buffer { bucket_record buckets[]; };
+layout(std430, set = 0, binding = 4) buffer slot_claims_buffer { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer slots_buffer { serialized_bucket slots[]; };
+layout(std430, set = 0, binding = 6) readonly buffer bucket_slot_buffer { uint bucket_slot[]; };
+layout(push_constant) uniform push_constants {
     uint element_count;
     uint slot_mask;
     uint slot_capacity;
     uint num_buckets;
     uint probe_cap;
-    uint pass;
+    uint stage;
 } pc;
 void main() {
     uint b = gl_GlobalInvocationID.x;
@@ -2319,31 +2372,31 @@ void main() {
 /// dense ranges into DP.
 constexpr std::string_view k_chain_range_build_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
-struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
-struct ChainRangeWire { uint begin; uint range_len; };
-struct QuerySpan { uint anchor_lo; uint anchor_hi; uint range_lo; uint range_out; };
-layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) buffer Counts { uint counts[]; };
-layout(std430, set = 0, binding = 2) buffer RangesOut { ChainRangeWire ranges[]; };
-layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
-layout(std430, set = 0, binding = 4) buffer CompactedAnchors { AnchorWire compacted_anchors[]; };
-layout(std430, set = 0, binding = 5) readonly buffer QuerySpans { QuerySpan spans[]; };
-layout(push_constant) uniform Params {
+struct gpu_anchor_wire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+struct gpu_chain_range_wire { uint begin; uint range_len; };
+struct query_span { uint anchor_lo; uint anchor_hi; uint range_lo; uint range_out; };
+layout(std430, set = 0, binding = 0) readonly buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 1) buffer counts_buffer { uint counts[]; };
+layout(std430, set = 0, binding = 2) buffer output_ranges_buffer { gpu_chain_range_wire ranges[]; };
+layout(std430, set = 0, binding = 3) buffer unused_3_buffer { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer compacted_anchors_buffer { gpu_anchor_wire compacted_anchors[]; };
+layout(std430, set = 0, binding = 5) readonly buffer query_spans_buffer { query_span spans[]; };
+layout(push_constant) uniform push_constants {
     uint query_count;
     uint max_ref_gap;
 } pc;
-const uint COMPACT_RANGE_THRESHOLD = 131072u;
-const uint COMPACT_RANGE_TARGET = 65536u;
-uint chrom_key(AnchorWire a) { return (a.is_reverse != 0u) ? 1u : 0u; }
-bool range_break(AnchorWire prev, AnchorWire cur) {
+const uint k_compact_range_threshold = 131072u;
+const uint k_compact_range_target = 65536u;
+uint chrom_key(gpu_anchor_wire a) { return (a.is_reverse != 0u) ? 1u : 0u; }
+bool range_break(gpu_anchor_wire prev, gpu_anchor_wire cur) {
     bool key_changed = chrom_key(cur) != chrom_key(prev);
     bool hard_gap = (cur.ref_position > prev.ref_position)
         && ((cur.ref_position - prev.ref_position) > uint64_t(pc.max_ref_gap));
     return key_changed || hard_gap;
 }
 uint compact_stride(uint range_len) {
-    if (range_len <= COMPACT_RANGE_THRESHOLD) return 1u;
-    uint stride = (range_len + COMPACT_RANGE_TARGET - 1u) / COMPACT_RANGE_TARGET;
+    if (range_len <= k_compact_range_threshold) return 1u;
+    uint stride = (range_len + k_compact_range_target - 1u) / k_compact_range_target;
     return max(stride, 1u);
 }
 uint emit_compacted_range(uint src_begin, uint src_end, uint range_index, uint anchor_out) {
@@ -2363,7 +2416,7 @@ uint emit_compacted_range(uint src_begin, uint src_end, uint range_index, uint a
 void main() {
     uint qi = gl_WorkGroupID.x;
     if (qi >= pc.query_count) return;
-    QuerySpan s = spans[qi];
+    query_span s = spans[qi];
     uint lo = s.anchor_lo;
     uint hi = s.anchor_hi;
     uint out_idx = s.range_lo;
@@ -2377,11 +2430,11 @@ void main() {
     uint begin = lo;
     bool needs_compaction = false;
     for (uint i = lo + 1u; i < hi; ++i) {
-        AnchorWire prev = anchors[i - 1u];
-        AnchorWire cur = anchors[i];
+        gpu_anchor_wire prev = anchors[i - 1u];
+        gpu_anchor_wire cur = anchors[i];
         if (range_break(prev, cur)) {
             uint range_len = i - begin;
-            needs_compaction = needs_compaction || range_len > COMPACT_RANGE_THRESHOLD;
+            needs_compaction = needs_compaction || range_len > k_compact_range_threshold;
             ranges[out_idx + produced].begin = begin;
             ranges[out_idx + produced].range_len = range_len;
             produced += 1u;
@@ -2389,7 +2442,7 @@ void main() {
         }
     }
     uint last_len = hi - begin;
-    needs_compaction = needs_compaction || last_len > COMPACT_RANGE_THRESHOLD;
+    needs_compaction = needs_compaction || last_len > k_compact_range_threshold;
     ranges[out_idx + produced].begin = begin;
     ranges[out_idx + produced].range_len = last_len;
     produced += 1u;
@@ -2402,8 +2455,8 @@ void main() {
     uint anchor_out = s.range_out;
     begin = lo;
     for (uint i = lo + 1u; i < hi; ++i) {
-        AnchorWire prev = anchors[i - 1u];
-        AnchorWire cur = anchors[i];
+        gpu_anchor_wire prev = anchors[i - 1u];
+        gpu_anchor_wire cur = anchors[i];
         if (range_break(prev, cur)) {
             anchor_out = emit_compacted_range(
                 begin, i, out_idx + produced, anchor_out);
@@ -2419,16 +2472,16 @@ void main() {
 /// @brief Resident coordinate-only finalizer. It mirrors the bounded top-k CPU
 /// coordinate extractor, but downloads only one compact mapping record.
 constexpr std::string_view k_coordinate_reduce_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-struct CoordinateResult {
+struct coordinate_result {
     uint64_t query_start;
     uint64_t query_end;
     uint64_t target_start;
@@ -2441,14 +2494,14 @@ struct CoordinateResult {
     uint valid;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) readonly buffer BestScores { int best_scores[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Predecessors { int64_t predecessors[]; };
-layout(std430, set = 0, binding = 3) buffer Visited { uint visited[]; };
-layout(std430, set = 0, binding = 4) buffer Trace { uint trace[]; };
-layout(std430, set = 0, binding = 5) buffer Result { CoordinateResult result; };
+layout(std430, set = 0, binding = 0) readonly buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer best_scores_buffer { int best_scores[]; };
+layout(std430, set = 0, binding = 2) readonly buffer predecessors_buffer { int64_t predecessors[]; };
+layout(std430, set = 0, binding = 3) buffer visited_buffer { uint visited[]; };
+layout(std430, set = 0, binding = 4) buffer trace_buffer { uint trace[]; };
+layout(std430, set = 0, binding = 5) buffer result_buffer { coordinate_result result; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint anchor_count;
     uint query_len_lo;
     uint query_len_hi;
@@ -2458,14 +2511,14 @@ layout(push_constant) uniform Params {
     uint reserved;
 } pc;
 
-shared int sh_score[LOCAL_SIZE_X];
-shared uint sh_index[LOCAL_SIZE_X];
+shared int sh_score[compile_time_workgroup_size_x];
+shared uint sh_index[compile_time_workgroup_size_x];
 shared int selected_score;
 shared uint selected_anchor;
 shared uint selected_valid;
 shared uint done;
 
-uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+uint anchor_span(gpu_anchor_wire a) { return a.span_flags_segment & 0xffu; }
 
 uint64_t query_len() {
     return uint64_t(pc.query_len_lo) | (uint64_t(pc.query_len_hi) << 32);
@@ -2478,8 +2531,8 @@ bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
 void write_result(uint chain_len, int candidate_score) {
     uint first_idx = trace[chain_len - 1u];
     uint last_idx = trace[0u];
-    AnchorWire first_anchor = anchors[first_idx];
-    AnchorWire last_anchor = anchors[last_idx];
+    gpu_anchor_wire first_anchor = anchors[first_idx];
+    gpu_anchor_wire last_anchor = anchors[last_idx];
     uint first_span_u = anchor_span(first_anchor);
     int64_t first_span = int64_t(first_span_u);
 
@@ -2508,8 +2561,8 @@ void write_result(uint chain_len, int candidate_score) {
     int t = int(chain_len) - 2;
     while (t >= 0) {
         uint cur_idx = trace[uint(t)];
-        AnchorWire prev = anchors[prev_idx];
-        AnchorWire cur = anchors[cur_idx];
+        gpu_anchor_wire prev = anchors[prev_idx];
+        gpu_anchor_wire cur = anchors[cur_idx];
         int span = int(anchor_span(cur));
         int target_gap = int(cur.ref_position - prev.ref_position);
         int query_gap = int(cur.query_position - prev.query_position);
@@ -2546,7 +2599,7 @@ void main() {
 
         int local_score = pc.min_chain_score - 1;
         uint local_idx = 0u;
-        for (uint i = lane; i < pc.anchor_count; i += LOCAL_SIZE_X) {
+        for (uint i = lane; i < pc.anchor_count; i += compile_time_workgroup_size_x) {
             int score = best_scores[i];
             if (visited[i] == 0u && better_candidate(score, i, local_score, local_idx)) {
                 local_score = score;
@@ -2561,7 +2614,7 @@ void main() {
             int best_score = pc.min_chain_score - 1;
             uint best_idx = 0u;
             uint valid = 0u;
-            for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+            for (uint i = 0u; i < compile_time_workgroup_size_x; ++i) {
                 if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
                     best_score = sh_score[i];
                     best_idx = sh_index[i];
@@ -2621,16 +2674,16 @@ void main() {
 )GLSL";
 
 constexpr std::string_view k_coordinate_vote_reduce_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-struct CoordinateResult {
+struct coordinate_result {
     uint64_t query_start;
     uint64_t query_end;
     uint64_t target_start;
@@ -2643,14 +2696,14 @@ struct CoordinateResult {
     uint valid;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) readonly buffer Unused1 { int unused1[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Unused2 { int64_t unused2[]; };
-layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
-layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
-layout(std430, set = 0, binding = 5) buffer Result { CoordinateResult result; };
+layout(std430, set = 0, binding = 0) readonly buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer unused_1_buffer { int unused1[]; };
+layout(std430, set = 0, binding = 2) readonly buffer unused_2_buffer { int64_t unused2[]; };
+layout(std430, set = 0, binding = 3) buffer unused_3_buffer { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer unused_4_buffer { uint unused4[]; };
+layout(std430, set = 0, binding = 5) buffer result_buffer { coordinate_result result; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint anchor_count;
     uint query_len_lo;
     uint query_len_hi;
@@ -2660,18 +2713,18 @@ layout(push_constant) uniform Params {
     uint reserved;
 } pc;
 
-shared int sh_score[LOCAL_SIZE_X];
-shared uint sh_index[LOCAL_SIZE_X];
+shared int sh_score[compile_time_workgroup_size_x];
+shared uint sh_index[compile_time_workgroup_size_x];
 shared int selected_score;
 shared uint selected_anchor;
 
-uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+uint anchor_span(gpu_anchor_wire a) { return a.span_flags_segment & 0xffu; }
 
 uint64_t query_len() {
     return uint64_t(pc.query_len_lo) | (uint64_t(pc.query_len_hi) << 32);
 }
 
-int64_t anchor_diag(AnchorWire a) {
+int64_t anchor_diag(gpu_anchor_wire a) {
     return int64_t(a.ref_position) - int64_t(a.query_position);
 }
 
@@ -2680,7 +2733,7 @@ bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
 }
 
 void write_vote_result(uint idx, int score) {
-    AnchorWire a = anchors[idx];
+    gpu_anchor_wire a = anchors[idx];
     uint span = anchor_span(a);
     int64_t diag = anchor_diag(a);
     if (diag < int64_t(0)) {
@@ -2711,12 +2764,12 @@ void main() {
 
     int local_score = 0;
     uint local_idx = 0u;
-    for (uint i = lane; i < pc.anchor_count; i += LOCAL_SIZE_X) {
-        AnchorWire cand = anchors[i];
+    for (uint i = lane; i < pc.anchor_count; i += compile_time_workgroup_size_x) {
+        gpu_anchor_wire cand = anchors[i];
         int64_t cand_diag = anchor_diag(cand);
         int score = 0;
         for (uint j = 0u; j < pc.anchor_count; ++j) {
-            AnchorWire other = anchors[j];
+            gpu_anchor_wire other = anchors[j];
             if (other.is_reverse != cand.is_reverse) {
                 continue;
             }
@@ -2740,7 +2793,7 @@ void main() {
     if (lane == 0u) {
         int best_score = 0;
         uint best_idx = 0u;
-        for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+        for (uint i = 0u; i < compile_time_workgroup_size_x; ++i) {
             if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
                 best_score = sh_score[i];
                 best_idx = sh_index[i];
@@ -2762,16 +2815,16 @@ void main() {
 )GLSL";
 
 constexpr std::string_view k_coordinate_vote_reduce_batch_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-struct AnchorWire {
+struct gpu_anchor_wire {
     uint64_t ref_position;
     uint64_t query_position;
     uint is_reverse;
     uint span_flags_segment;
 };
 
-struct CoordinateResult {
+struct coordinate_result {
     uint64_t query_start;
     uint64_t query_end;
     uint64_t target_start;
@@ -2784,21 +2837,21 @@ struct CoordinateResult {
     uint valid;
 };
 
-struct VoteJob {
+struct vote_job {
     uint anchor_offset;
     uint anchor_count;
     uint query_len_lo;
     uint query_len_hi;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
-layout(std430, set = 0, binding = 1) readonly buffer VoteJobs { VoteJob jobs[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Unused2 { int unused2[]; };
-layout(std430, set = 0, binding = 3) buffer Unused3 { uint unused3[]; };
-layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
-layout(std430, set = 0, binding = 5) buffer Results { CoordinateResult results[]; };
+layout(std430, set = 0, binding = 0) readonly buffer anchors_buffer { gpu_anchor_wire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer vote_jobs_buffer { vote_job jobs[]; };
+layout(std430, set = 0, binding = 2) readonly buffer unused_2_buffer { int unused2[]; };
+layout(std430, set = 0, binding = 3) buffer unused_3_buffer { uint unused3[]; };
+layout(std430, set = 0, binding = 4) buffer unused_4_buffer { uint unused4[]; };
+layout(std430, set = 0, binding = 5) buffer results_buffer { coordinate_result results[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint job_count;
     uint unused_query_len_lo;
     uint unused_query_len_hi;
@@ -2808,24 +2861,24 @@ layout(push_constant) uniform Params {
     uint reserved;
 } pc;
 
-const uint VOTE_SAMPLE_LIMIT = 32u;
+const uint k_vote_sample_limit = 32u;
 
-shared int sh_score[LOCAL_SIZE_X];
-shared uint sh_index[LOCAL_SIZE_X];
+shared int sh_score[compile_time_workgroup_size_x];
+shared uint sh_index[compile_time_workgroup_size_x];
 shared int selected_score;
 shared uint selected_anchor;
 
-uint anchor_span(AnchorWire a) { return a.span_flags_segment & 0xffu; }
+uint anchor_span(gpu_anchor_wire a) { return a.span_flags_segment & 0xffu; }
 
-uint64_t query_len(VoteJob job) {
+uint64_t query_len(vote_job job) {
     return uint64_t(job.query_len_lo) | (uint64_t(job.query_len_hi) << 32);
 }
 
-AnchorWire job_anchor(VoteJob job, uint idx) {
+gpu_anchor_wire job_anchor(vote_job job, uint idx) {
     return anchors[job.anchor_offset + idx];
 }
 
-int64_t anchor_diag(AnchorWire a) {
+int64_t anchor_diag(gpu_anchor_wire a) {
     return int64_t(a.ref_position) - int64_t(a.query_position);
 }
 
@@ -2833,8 +2886,8 @@ bool better_candidate(int score, uint idx, int best_score, uint best_idx) {
     return score > best_score || (score == best_score && idx < best_idx);
 }
 
-void write_vote_result(uint job_id, VoteJob job, uint idx, int score) {
-    AnchorWire a = job_anchor(job, idx);
+void write_vote_result(uint job_id, vote_job job, uint idx, int score) {
+    gpu_anchor_wire a = job_anchor(job, idx);
     uint span = anchor_span(a);
     int64_t diag = anchor_diag(a);
     if (diag < int64_t(0)) {
@@ -2858,7 +2911,7 @@ void main() {
     uint job_id = gl_WorkGroupID.x;
     if (job_id >= pc.job_count) return;
 
-    VoteJob job = jobs[job_id];
+    vote_job job = jobs[job_id];
     uint lane = gl_LocalInvocationID.x;
     if (lane == 0u) {
         results[job_id].valid = 0u;
@@ -2867,16 +2920,16 @@ void main() {
     }
     barrier();
 
-    uint sample_count = min(job.anchor_count, VOTE_SAMPLE_LIMIT);
+    uint sample_count = min(job.anchor_count, k_vote_sample_limit);
     int local_score = 0;
     uint local_idx = 0u;
-    for (uint i = lane; i < job.anchor_count; i += LOCAL_SIZE_X) {
-        AnchorWire cand = job_anchor(job, i);
+    for (uint i = lane; i < job.anchor_count; i += compile_time_workgroup_size_x) {
+        gpu_anchor_wire cand = job_anchor(job, i);
         int64_t cand_diag = anchor_diag(cand);
         int score = 0;
         for (uint s = 0u; s < sample_count; ++s) {
             uint j = (s * job.anchor_count) / sample_count;
-            AnchorWire other = job_anchor(job, j);
+            gpu_anchor_wire other = job_anchor(job, j);
             if (other.is_reverse != cand.is_reverse) {
                 continue;
             }
@@ -2900,7 +2953,7 @@ void main() {
     if (lane == 0u) {
         int best_score = 0;
         uint best_idx = 0u;
-        for (uint i = 0u; i < LOCAL_SIZE_X; ++i) {
+        for (uint i = 0u; i < compile_time_workgroup_size_x; ++i) {
             if (better_candidate(sh_score[i], sh_index[i], best_score, best_idx)) {
                 best_score = sh_score[i];
                 best_idx = sh_index[i];
@@ -2930,13 +2983,13 @@ void main() {
 /// 16-byte push block. Every load helper checks the exact logical byte count;
 /// algorithm bodies still reject a malformed job before making any load.
 constexpr std::string_view k_rank_prefilter_preamble = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-const uint STATUS_OK = 0u;
-const uint STATUS_LENGTH_DIFFERENCE_ONLY = 1u;
-const uint STATUS_UNSUPPORTED = 2u;
+const uint k_status_ok = 0u;
+const uint k_status_length_difference_only = 1u;
+const uint k_status_unsupported = 2u;
 
-struct PrefilterJob {
+struct prefilter_job {
     uint query_offset;
     uint target_offset;
     uint query_length;
@@ -2944,27 +2997,27 @@ struct PrefilterJob {
     uint max_edits;
 };
 
-struct PrefilterResult {
+struct prefilter_result {
     uint lower_bound;
     uint status;
-    uint accepted;
-    uint reserved;
+    uint is_accepted;
+    uint diagnostics;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer QueryRanks {
+layout(std430, set = 0, binding = 0) readonly buffer query_ranks_buffer {
     uint query_rank_words[];
 };
-layout(std430, set = 0, binding = 1) readonly buffer TargetRanks {
+layout(std430, set = 0, binding = 1) readonly buffer target_ranks_buffer {
     uint target_rank_words[];
 };
-layout(std430, set = 0, binding = 2) readonly buffer Jobs {
-    PrefilterJob jobs[];
+layout(std430, set = 0, binding = 2) readonly buffer jobs_buffer {
+    prefilter_job jobs[];
 };
-layout(std430, set = 0, binding = 3) buffer Results {
-    PrefilterResult results[];
+layout(std430, set = 0, binding = 3) buffer results_buffer {
+    prefilter_result results[];
 };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint job_count;
     uint mode;
     uint query_rank_count;
@@ -2975,7 +3028,7 @@ bool rank_slice_is_in_bounds(uint offset, uint length, uint rank_count) {
     return offset <= rank_count && length <= rank_count - offset;
 }
 
-bool prefilter_job_is_in_bounds(PrefilterJob job) {
+bool prefilter_job_is_in_bounds(prefilter_job job) {
     return rank_slice_is_in_bounds(
                job.query_offset, job.query_length, pc.query_rank_count)
         && rank_slice_is_in_bounds(
@@ -2995,9 +3048,9 @@ uint target_rank(uint rank_index) {
 }
 
 // These unchecked readers are only used after prefilter_job_is_in_bounds has
-// accepted the complete slice and an algorithm has proved its relative index
-// is inside that slice. Keeping that proof at the job boundary avoids repeating
-// four push-constant comparisons for every byte/quad in short hot kernels.
+// validated the complete slice and the algorithm has bounded its relative index
+// to that slice. Centralized validation avoids repeating four push-constant
+// comparisons for every byte/quad in short hot kernels.
 uint query_rank_unchecked(uint rank_index) {
     uint word = query_rank_words[rank_index >> 2u];
     return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
@@ -3060,37 +3113,37 @@ void write_prefilter_result(
     uint job_index,
     uint lower_bound,
     uint status,
-    bool accepted,
-    uint diagnostic)
+    bool is_accepted,
+    uint diagnostics)
 {
     results[job_index].lower_bound = lower_bound;
     results[job_index].status = status;
-    results[job_index].accepted = accepted ? 1u : 0u;
-    results[job_index].reserved = diagnostic;
+    results[job_index].is_accepted = is_accepted ? 1u : 0u;
+    results[job_index].diagnostics = diagnostics;
 }
 )GLSL";
 
-/// @brief Rank-buffer SneakySnake lower-bound filter. A uniform push-constant mode
+/// @brief Rank-buffer sneaky_snake_buffer lower-bound filter. A uniform push-constant mode
 /// keeps low-edit batches on independent scalar invocations and assigns high-
 /// edit batches to fixed eight-lane logical teams. Equal-length inputs use
-/// bounded MAX_SPAN-symbol submazes; unequal and unsupported shapes remain
+/// bounded compile_time_maximum_span-symbol submazes; unequal and unsupported shapes remain
 /// conservative. Team-mode barriers are uniform and the implementation has no
 /// subgroup-size assumption or atomics.
 constexpr std::string_view k_sneaky_snake_rank_batch_body = R"GLSL(
-const uint MAX_SUPPORTED_EDITS = 31u;
-const uint TEAM_SIZE = 8u;
-const uint TEAM_COUNT = LOCAL_SIZE_X / TEAM_SIZE;
-shared PrefilterJob sh_job[TEAM_COUNT];
-shared uint sh_position[TEAM_COUNT];
-shared uint sh_submaze_end[TEAM_COUNT];
-shared uint sh_escape_round[TEAM_COUNT];
-shared uint sh_lower_bound[TEAM_COUNT];
-shared uint sh_active[TEAM_COUNT];
-shared uint sh_lane_best[LOCAL_SIZE_X];
+const uint k_maximum_supported_edits = 31u;
+const uint k_team_size = 8u;
+const uint k_team_count = compile_time_workgroup_size_x / k_team_size;
+shared prefilter_job sh_job[k_team_count];
+shared uint sh_position[k_team_count];
+shared uint sh_submaze_end[k_team_count];
+shared uint sh_escape_round[k_team_count];
+shared uint sh_lower_bound[k_team_count];
+shared uint sh_active[k_team_count];
+shared uint sh_lane_best[compile_time_workgroup_size_x];
 shared uint sh_any_active;
 
 uint matching_run(
-    PrefilterJob job,
+    prefilter_job job,
     uint position,
     uint submaze_end,
     uint query_cursor)
@@ -3131,17 +3184,17 @@ void write_result(
     uint job_index,
     uint lower_bound,
     uint status,
-    bool accepted)
+    bool is_accepted)
 {
     write_prefilter_result(
-        job_index, lower_bound, status, accepted, 0u);
+        job_index, lower_bound, status, is_accepted, 0u);
 }
 
 void solve_job_scalar(uint job_index) {
-    PrefilterJob job = jobs[job_index];
+    prefilter_job job = jobs[job_index];
     if (!prefilter_job_is_in_bounds(job)
-        || job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
-        write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
+        || job.max_edits > k_maximum_supported_edits || compile_time_maximum_span == 0) {
+        write_result(job_index, 0u, k_status_unsupported, true);
         return;
     }
 
@@ -3152,7 +3205,7 @@ void solve_job_scalar(uint job_index) {
         write_result(
             job_index,
             length_difference,
-            STATUS_LENGTH_DIFFERENCE_ONLY,
+            k_status_length_difference_only,
             length_difference <= job.max_edits);
         return;
     }
@@ -3161,11 +3214,11 @@ void solve_job_scalar(uint job_index) {
     uint submaze_begin = 0u;
     while (submaze_begin < job.query_length) {
         uint submaze_end = submaze_begin + min(
-            uint(MAX_SPAN), job.query_length - submaze_begin);
+            uint(compile_time_maximum_span), job.query_length - submaze_begin);
         uint position = submaze_begin;
         uint escape_round = 0u;
 
-        while (position < submaze_end && escape_round < uint(MAX_SPAN)) {
+        while (position < submaze_end && escape_round < uint(compile_time_maximum_span)) {
             uint remaining_in_submaze = submaze_end - position;
             uint best_run = matching_run(
                 job, position, submaze_end, position);
@@ -3201,7 +3254,7 @@ void solve_job_scalar(uint job_index) {
 
             ++lower_bound;
             if (lower_bound > job.max_edits) {
-                write_result(job_index, lower_bound, STATUS_OK, false);
+                write_result(job_index, lower_bound, k_status_ok, false);
                 return;
             }
             position += best_run + 1u;
@@ -3210,11 +3263,11 @@ void solve_job_scalar(uint job_index) {
         submaze_begin = submaze_end;
     }
 
-    write_result(job_index, lower_bound, STATUS_OK, true);
+    write_result(job_index, lower_bound, k_status_ok, true);
 }
 
 void main() {
-    if (pc.mode != TEAM_SIZE) {
+    if (pc.mode != k_team_size) {
         uint64_t stride = uint64_t(gl_NumWorkGroups.x)
             * uint64_t(gl_WorkGroupSize.x);
         if (stride == uint64_t(0)) return;
@@ -3227,14 +3280,14 @@ void main() {
     }
 
     uint lane = gl_LocalInvocationID.x;
-    uint team = lane / TEAM_SIZE;
-    uint team_lane = lane & (TEAM_SIZE - 1u);
+    uint team = lane / k_team_size;
+    uint team_lane = lane & (k_team_size - 1u);
     uint64_t block_stride = uint64_t(gl_NumWorkGroups.x)
-        * uint64_t(TEAM_COUNT);
+        * uint64_t(k_team_count);
     if (block_stride == uint64_t(0)) return;
 
     for (uint64_t block = uint64_t(gl_WorkGroupID.x)
-             * uint64_t(TEAM_COUNT);
+             * uint64_t(k_team_count);
          block < uint64_t(pc.job_count);
          block += block_stride) {
         uint64_t job_wide = block + uint64_t(team);
@@ -3244,12 +3297,12 @@ void main() {
         if (team_lane == 0u) {
             sh_active[team] = 0u;
             if (team_has_job) {
-                PrefilterJob job = jobs[job_index];
+                prefilter_job job = jobs[job_index];
                 sh_job[team] = job;
                 if (!prefilter_job_is_in_bounds(job)
-                    || job.max_edits > MAX_SUPPORTED_EDITS
-                    || MAX_SPAN == 0) {
-                    write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
+                    || job.max_edits > k_maximum_supported_edits
+                    || compile_time_maximum_span == 0) {
+                    write_result(job_index, 0u, k_status_unsupported, true);
                 } else if (job.query_length != job.target_length) {
                     uint length_difference = job.query_length > job.target_length
                         ? job.query_length - job.target_length
@@ -3257,14 +3310,14 @@ void main() {
                     write_result(
                         job_index,
                         length_difference,
-                        STATUS_LENGTH_DIFFERENCE_ONLY,
+                        k_status_length_difference_only,
                         length_difference <= job.max_edits);
                 } else if (job.query_length == 0u) {
-                    write_result(job_index, 0u, STATUS_OK, true);
+                    write_result(job_index, 0u, k_status_ok, true);
                 } else {
                     sh_position[team] = 0u;
                     sh_submaze_end[team] = min(
-                        uint(MAX_SPAN), job.query_length);
+                        uint(compile_time_maximum_span), job.query_length);
                     sh_escape_round[team] = 0u;
                     sh_lower_bound[team] = 0u;
                     sh_active[team] = 1u;
@@ -3276,7 +3329,7 @@ void main() {
         while (true) {
             if (lane == 0u) {
                 sh_any_active = 0u;
-                for (uint slot = 0u; slot < TEAM_COUNT; ++slot) {
+                for (uint slot = 0u; slot < k_team_count; ++slot) {
                     sh_any_active |= sh_active[slot];
                 }
             }
@@ -3285,13 +3338,13 @@ void main() {
 
             uint local_best = 0u;
             if (sh_active[team] != 0u) {
-                PrefilterJob job = sh_job[team];
+                prefilter_job job = sh_job[team];
                 uint position = sh_position[team];
                 uint submaze_end = sh_submaze_end[team];
                 uint diagonal_count = 2u * job.max_edits + 1u;
                 for (uint ordinal = team_lane;
                      ordinal < diagonal_count;
-                     ordinal += TEAM_SIZE) {
+                     ordinal += k_team_size) {
                     uint query_cursor = position;
                     bool valid = true;
                     if (ordinal != 0u) {
@@ -3327,14 +3380,14 @@ void main() {
 
             if (team_lane == 0u && sh_active[team] != 0u) {
                 uint best_run = 0u;
-                uint first_lane = team * TEAM_SIZE;
-                for (uint offset = 0u; offset < TEAM_SIZE; ++offset) {
+                uint first_lane = team * k_team_size;
+                for (uint offset = 0u; offset < k_team_size; ++offset) {
                     best_run = max(
                         best_run,
                         sh_lane_best[first_lane + offset]);
                 }
 
-                PrefilterJob job = sh_job[team];
+                prefilter_job job = sh_job[team];
                 uint position = sh_position[team];
                 uint submaze_end = sh_submaze_end[team];
                 uint remaining_in_submaze = submaze_end - position;
@@ -3345,7 +3398,7 @@ void main() {
                     sh_lower_bound[team] = lower_bound;
                     if (lower_bound > job.max_edits) {
                         write_result(
-                            job_index, lower_bound, STATUS_OK, false);
+                            job_index, lower_bound, k_status_ok, false);
                         sh_active[team] = 0u;
                     } else {
                         sh_position[team] = position + best_run + 1u;
@@ -3355,19 +3408,19 @@ void main() {
 
                 if (sh_active[team] != 0u
                     && (sh_position[team] >= submaze_end
-                        || sh_escape_round[team] >= uint(MAX_SPAN))) {
+                        || sh_escape_round[team] >= uint(compile_time_maximum_span))) {
                     uint next_begin = submaze_end;
                     if (next_begin >= job.query_length) {
                         write_result(
                             job_index,
                             sh_lower_bound[team],
-                            STATUS_OK,
+                            k_status_ok,
                             true);
                         sh_active[team] = 0u;
                     } else {
                         sh_position[team] = next_begin;
                         sh_submaze_end[team] = next_begin + min(
-                            uint(MAX_SPAN),
+                            uint(compile_time_maximum_span),
                             job.query_length - next_begin);
                         sh_escape_round[team] = 0u;
                     }
@@ -3383,12 +3436,12 @@ void main() {
 /// One invocation owns one job. Mismatch masks stream through four uint words;
 /// a mask rejection is authoritative only after the exact fixed-band guard.
 constexpr std::string_view k_gatekeeper_rank_batch_body = R"GLSL(
-const uint MAX_GATEKEEPER_LENGTH = 128u;
-const uint MAX_GATEKEEPER_EDITS = 8u;
-const uint MASK_REJECTION_CANDIDATE_MASK = 0x00010000u;
-const uint EXACT_GUARD_ACTIVATED_MASK = 0x00020000u;
-const uint GUARD_CONFIRMED_REJECTION_MASK = 0x00040000u;
-const uint HAMMING_EXACT_REJECTION_MASK = 0x00080000u;
+const uint k_maximum_gatekeeper_length = 128u;
+const uint k_maximum_gatekeeper_edits = 8u;
+const uint k_mask_rejection_candidate_mask = 0x00010000u;
+const uint k_exact_guard_activated_mask = 0x00020000u;
+const uint k_guard_confirmed_rejection_mask = 0x00040000u;
+const uint k_hamming_exact_rejection_mask = 0x00080000u;
 
 uint packed_byte_mismatch_bits(uint difference) {
     // Fold every byte independently to its low bit, then compact byte-low bits
@@ -3422,7 +3475,7 @@ void append_mismatch_quad(
 }
 
 uvec4 mismatch_mask_segment(
-    PrefilterJob job,
+    prefilter_job job,
     uint query_relative,
     uint target_relative,
     uint count,
@@ -3454,15 +3507,15 @@ uvec4 mismatch_mask_segment(
 }
 
 // Aligned production jobs load each rank word exactly once. Diagonal masks are
-// then formed from register-resident packed bytes in four-word vectors. This
-// replaces 5/9 complete SSBO rereads for E2/E4 with 16/32 total scalar loads.
-// Unaligned direct-API jobs retain the generic bounds-aware path below.
-struct PackedRanks32 {
+// then formed from register-resident packed bytes in four-word vectors; the E2
+// and E4 paths perform 16 and 32 total scalar loads, respectively. Unaligned
+// direct-API jobs use the generic bounds-aware path below.
+struct packed_ranks_32 {
     uvec4 first;
     uvec4 second;
 };
 
-struct PackedRanks64 {
+struct packed_ranks_64 {
     uvec4 first;
     uvec4 second;
     uvec4 third;
@@ -3471,7 +3524,7 @@ struct PackedRanks64 {
 
 // Raw (unamended, boundary-free) mismatch masks indexed by exact wavefront
 // diagonal k=query_position-target_position. L32 uses only the low component.
-struct ExactDiagonalMasks {
+struct exact_diagonal_masks {
     uvec2 negative_two;
     uvec2 negative_one;
     uvec2 zero;
@@ -3495,9 +3548,9 @@ uint pack_mismatch_nibbles(uvec4 nibbles) {
         | (nibbles.z << 8u) | (nibbles.w << 12u);
 }
 
-PackedRanks32 load_query_ranks_32(PrefilterJob job) {
+packed_ranks_32 load_query_ranks_32(prefilter_job job) {
     uint base = job.query_offset >> 2u;
-    PackedRanks32 ranks;
+    packed_ranks_32 ranks;
     ranks.first = uvec4(
         query_rank_words[base], query_rank_words[base + 1u],
         query_rank_words[base + 2u], query_rank_words[base + 3u]);
@@ -3507,9 +3560,9 @@ PackedRanks32 load_query_ranks_32(PrefilterJob job) {
     return ranks;
 }
 
-PackedRanks32 load_target_ranks_32(PrefilterJob job) {
+packed_ranks_32 load_target_ranks_32(prefilter_job job) {
     uint base = job.target_offset >> 2u;
-    PackedRanks32 ranks;
+    packed_ranks_32 ranks;
     ranks.first = uvec4(
         target_rank_words[base], target_rank_words[base + 1u],
         target_rank_words[base + 2u], target_rank_words[base + 3u]);
@@ -3519,9 +3572,9 @@ PackedRanks32 load_target_ranks_32(PrefilterJob job) {
     return ranks;
 }
 
-PackedRanks64 load_query_ranks_64(PrefilterJob job) {
+packed_ranks_64 load_query_ranks_64(prefilter_job job) {
     uint base = job.query_offset >> 2u;
-    PackedRanks64 ranks;
+    packed_ranks_64 ranks;
     ranks.first = uvec4(
         query_rank_words[base], query_rank_words[base + 1u],
         query_rank_words[base + 2u], query_rank_words[base + 3u]);
@@ -3537,9 +3590,9 @@ PackedRanks64 load_query_ranks_64(PrefilterJob job) {
     return ranks;
 }
 
-PackedRanks64 load_target_ranks_64(PrefilterJob job) {
+packed_ranks_64 load_target_ranks_64(prefilter_job job) {
     uint base = job.target_offset >> 2u;
-    PackedRanks64 ranks;
+    packed_ranks_64 ranks;
     ranks.first = uvec4(
         target_rank_words[base], target_rank_words[base + 1u],
         target_rank_words[base + 2u], target_rank_words[base + 3u]);
@@ -3555,15 +3608,15 @@ PackedRanks64 load_target_ranks_64(PrefilterJob job) {
     return ranks;
 }
 
-PackedRanks32 shift_rank_bytes_32(PackedRanks32 ranks, uint shift) {
-    PackedRanks32 next_words;
+packed_ranks_32 shift_rank_bytes_32(packed_ranks_32 ranks, uint shift) {
+    packed_ranks_32 next_words;
     next_words.first = uvec4(
         ranks.first.y, ranks.first.z, ranks.first.w, ranks.second.x);
     next_words.second = uvec4(
         ranks.second.y, ranks.second.z, ranks.second.w, 0u);
     if (shift == 4u) return next_words;
     uint bits = shift << 3u;
-    PackedRanks32 shifted;
+    packed_ranks_32 shifted;
     shifted.first = (ranks.first >> bits)
         | (next_words.first << (32u - bits));
     shifted.second = (ranks.second >> bits)
@@ -3571,8 +3624,8 @@ PackedRanks32 shift_rank_bytes_32(PackedRanks32 ranks, uint shift) {
     return shifted;
 }
 
-PackedRanks64 shift_rank_bytes_64(PackedRanks64 ranks, uint shift) {
-    PackedRanks64 next_words;
+packed_ranks_64 shift_rank_bytes_64(packed_ranks_64 ranks, uint shift) {
+    packed_ranks_64 next_words;
     next_words.first = uvec4(
         ranks.first.y, ranks.first.z, ranks.first.w, ranks.second.x);
     next_words.second = uvec4(
@@ -3583,7 +3636,7 @@ PackedRanks64 shift_rank_bytes_64(PackedRanks64 ranks, uint shift) {
         ranks.fourth.y, ranks.fourth.z, ranks.fourth.w, 0u);
     if (shift == 4u) return next_words;
     uint bits = shift << 3u;
-    PackedRanks64 shifted;
+    packed_ranks_64 shifted;
     shifted.first = (ranks.first >> bits)
         | (next_words.first << (32u - bits));
     shifted.second = (ranks.second >> bits)
@@ -3595,14 +3648,14 @@ PackedRanks64 shift_rank_bytes_64(PackedRanks64 ranks, uint shift) {
     return shifted;
 }
 
-uint mismatch_mask_32(PackedRanks32 query, PackedRanks32 target) {
+uint mismatch_mask_32(packed_ranks_32 query, packed_ranks_32 target) {
     uvec4 first = compact_mismatch_nibbles(query.first ^ target.first);
     uvec4 second = compact_mismatch_nibbles(query.second ^ target.second);
     return pack_mismatch_nibbles(first)
         | (pack_mismatch_nibbles(second) << 16u);
 }
 
-uvec2 mismatch_mask_64(PackedRanks64 query, PackedRanks64 target) {
+uvec2 mismatch_mask_64(packed_ranks_64 query, packed_ranks_64 target) {
     uvec4 first = compact_mismatch_nibbles(query.first ^ target.first);
     uvec4 second = compact_mismatch_nibbles(query.second ^ target.second);
     uvec4 third = compact_mismatch_nibbles(query.third ^ target.third);
@@ -3617,8 +3670,8 @@ uvec2 mismatch_mask_64(PackedRanks64 query, PackedRanks64 target) {
 uvec2 shift_left_64(uvec2 value, uint shift);
 
 uint diagonal_mismatch_mask_32(
-    PackedRanks32 query,
-    PackedRanks32 target,
+    packed_ranks_32 query,
+    packed_ranks_32 target,
     uint shift,
     bool shift_target)
 {
@@ -3630,8 +3683,8 @@ uint diagonal_mismatch_mask_32(
 }
 
 uvec2 diagonal_mismatch_mask_64(
-    PackedRanks64 query,
-    PackedRanks64 target,
+    packed_ranks_64 query,
+    packed_ranks_64 target,
     uint shift,
     bool shift_target)
 {
@@ -3681,8 +3734,8 @@ uvec2 amend_internal_short_zero_runs_64(uvec2 mismatch) {
 }
 
 void intersect_shift_32(
-    PackedRanks32 query,
-    PackedRanks32 target,
+    packed_ranks_32 query,
+    packed_ranks_32 target,
     uint shift,
     out uint negative_raw,
     out uint positive_raw,
@@ -3702,8 +3755,8 @@ void intersect_shift_32(
 }
 
 void intersect_shift_64(
-    PackedRanks64 query,
-    PackedRanks64 target,
+    packed_ranks_64 query,
+    packed_ranks_64 target,
     uint shift,
     out uvec2 negative_raw,
     out uvec2 positive_raw,
@@ -3807,17 +3860,17 @@ uint capped_mask_estimate_64(uvec2 mask, uint max_edits) {
 }
 
 uint gatekeeper_mask_estimate_32(
-    PrefilterJob job,
+    prefilter_job job,
     out uint hamming_distance,
-    out ExactDiagonalMasks exact_masks)
+    out exact_diagonal_masks exact_masks)
 {
-#ifdef GATEKEEPER_SPECIALIZED_EDITS
-    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+#ifdef gatekeeper_specialized_edits
+    const uint active_max_edits = uint(gatekeeper_specialized_edits);
 #else
     uint active_max_edits = job.max_edits;
 #endif
-    PackedRanks32 query = load_query_ranks_32(job);
-    PackedRanks32 target = load_target_ranks_32(job);
+    packed_ranks_32 query = load_query_ranks_32(job);
+    packed_ranks_32 target = load_target_ranks_32(job);
     uint hamming = mismatch_mask_32(query, target);
     exact_masks.zero = uvec2(hamming, 0u);
     hamming_distance = uint(bitCount(hamming));
@@ -3834,8 +3887,8 @@ uint gatekeeper_mask_estimate_32(
         query, target, 2u, negative_raw, positive_raw, final_mask);
     exact_masks.negative_two = uvec2(negative_raw, 0u);
     exact_masks.positive_two = uvec2(positive_raw, 0u);
-#ifdef GATEKEEPER_SPECIALIZED_EDITS
-#if GATEKEEPER_SPECIALIZED_EDITS == 4
+#ifdef gatekeeper_specialized_edits
+#if gatekeeper_specialized_edits == 4
     intersect_shift_32(
         query, target, 3u, negative_raw, positive_raw, final_mask);
     intersect_shift_32(
@@ -3853,17 +3906,17 @@ uint gatekeeper_mask_estimate_32(
 }
 
 uint gatekeeper_mask_estimate_64(
-    PrefilterJob job,
+    prefilter_job job,
     out uint hamming_distance,
-    out ExactDiagonalMasks exact_masks)
+    out exact_diagonal_masks exact_masks)
 {
-#ifdef GATEKEEPER_SPECIALIZED_EDITS
-    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+#ifdef gatekeeper_specialized_edits
+    const uint active_max_edits = uint(gatekeeper_specialized_edits);
 #else
     uint active_max_edits = job.max_edits;
 #endif
-    PackedRanks64 query = load_query_ranks_64(job);
-    PackedRanks64 target = load_target_ranks_64(job);
+    packed_ranks_64 query = load_query_ranks_64(job);
+    packed_ranks_64 target = load_target_ranks_64(job);
     uvec2 hamming = mismatch_mask_64(query, target);
     exact_masks.zero = hamming;
     hamming_distance = uint(bitCount(hamming.x) + bitCount(hamming.y));
@@ -3880,8 +3933,8 @@ uint gatekeeper_mask_estimate_64(
         query, target, 2u, negative_raw, positive_raw, final_mask);
     exact_masks.negative_two = negative_raw;
     exact_masks.positive_two = positive_raw;
-#ifdef GATEKEEPER_SPECIALIZED_EDITS
-#if GATEKEEPER_SPECIALIZED_EDITS == 4
+#ifdef gatekeeper_specialized_edits
+#if gatekeeper_specialized_edits == 4
     intersect_shift_64(
         query, target, 3u, negative_raw, positive_raw, final_mask);
     intersect_shift_64(
@@ -3911,14 +3964,14 @@ uint capped_mask_estimate(uvec4 mask, uint length, uint max_edits) {
     return estimate;
 }
 
-#ifndef GATEKEEPER_SPECIALIZED_LENGTH
+#ifndef gatekeeper_specialized_length
 uint saturated_increment(uint value, uint cap) {
     return value >= cap ? cap : value + 1u;
 }
 #endif
 
 uvec2 exact_mask_for_diagonal(
-    ExactDiagonalMasks masks,
+    exact_diagonal_masks masks,
     int diagonal)
 {
     if (diagonal <= -2) return masks.negative_two;
@@ -3954,8 +4007,8 @@ uint mismatch_distance_from_target_position(
 }
 
 uint exact_matching_run_from_masks(
-    PrefilterJob job,
-    ExactDiagonalMasks masks,
+    prefilter_job job,
+    exact_diagonal_masks masks,
     uint query_position,
     uint target_position)
 {
@@ -3970,7 +4023,7 @@ uint exact_matching_run_from_masks(
 }
 
 int bounded_wavefront_position(
-    PrefilterJob job,
+    prefilter_job job,
     int diagonal,
     int query_position)
 {
@@ -3985,8 +4038,8 @@ int bounded_wavefront_position(
 }
 
 int extend_wavefront_position(
-    PrefilterJob job,
-    ExactDiagonalMasks masks,
+    prefilter_job job,
+    exact_diagonal_masks masks,
     int diagonal,
     int query_position)
 {
@@ -4004,8 +4057,8 @@ int extend_wavefront_position(
 // the farthest valid query position dominates every shorter path on that same
 // diagonal before a packed exact-match extension.
 int next_wavefront_position(
-    PrefilterJob job,
-    ExactDiagonalMasks masks,
+    prefilter_job job,
+    exact_diagonal_masks masks,
     int diagonal,
     int substitution,
     int deletion,
@@ -4034,8 +4087,8 @@ int next_wavefront_position(
 // retains the fixed-band DP
 // below for E1/E3/E5..E8.
 bool exact_edit_distance_e2_or_e4_is_above_threshold(
-    PrefilterJob job,
-    ExactDiagonalMasks masks)
+    prefilter_job job,
+    exact_diagonal_masks masks)
 {
     const int invalid = -1;
     const int length = int(job.query_length);
@@ -4053,12 +4106,12 @@ bool exact_edit_distance_e2_or_e4_is_above_threshold(
 
     int score2_0 = next_wavefront_position(
         job, masks, 0, score1_0, score1_m1, score1_p1);
-#if defined(GATEKEEPER_SPECIALIZED_EDITS) \
-    && GATEKEEPER_SPECIALIZED_EDITS == 2
+#if defined(gatekeeper_specialized_edits) \
+    && gatekeeper_specialized_edits == 2
     return score2_0 < length;
 #else
     if (score2_0 >= length) return false;
-#ifndef GATEKEEPER_SPECIALIZED_EDITS
+#ifndef gatekeeper_specialized_edits
     if (job.max_edits == 2u) {
         return score2_0 < length;
     }
@@ -4086,8 +4139,8 @@ bool exact_edit_distance_e2_or_e4_is_above_threshold(
 #endif
 }
 
-#ifndef GATEKEEPER_SPECIALIZED_LENGTH
-bool exact_edit_distance_is_above_threshold(PrefilterJob job) {
+#ifndef gatekeeper_specialized_length
+bool exact_edit_distance_is_above_threshold(prefilter_job job) {
     uint query_length = job.query_length;
     uint target_length = job.target_length;
     uint max_edits = job.max_edits;
@@ -4139,12 +4192,12 @@ bool exact_edit_distance_is_above_threshold(PrefilterJob job) {
 }
 #endif
 
-#ifndef GATEKEEPER_SPECIALIZED_LENGTH
+#ifndef gatekeeper_specialized_length
 void solve_gatekeeper_job(uint job_index) {
-    PrefilterJob job = jobs[job_index];
+    prefilter_job job = jobs[job_index];
     if (!prefilter_job_is_in_bounds(job)) {
         write_prefilter_result(
-            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+            job_index, 0u, k_status_unsupported, true, 0u);
         return;
     }
     if (job.query_length != job.target_length) {
@@ -4154,20 +4207,20 @@ void solve_gatekeeper_job(uint job_index) {
         write_prefilter_result(
             job_index,
             length_difference,
-            STATUS_LENGTH_DIFFERENCE_ONLY,
+            k_status_length_difference_only,
             length_difference <= job.max_edits,
             0u);
         return;
     }
     if (job.query_length == 0u) {
-        write_prefilter_result(job_index, 0u, STATUS_OK, true, 0u);
+        write_prefilter_result(job_index, 0u, k_status_ok, true, 0u);
         return;
     }
-    if (pc.mode != 0u || uint(MAX_SPAN) != MAX_GATEKEEPER_LENGTH
-        || job.query_length > MAX_GATEKEEPER_LENGTH
-        || job.max_edits > MAX_GATEKEEPER_EDITS) {
+    if (pc.mode != 0u || uint(compile_time_maximum_span) != k_maximum_gatekeeper_length
+        || job.query_length > k_maximum_gatekeeper_length
+        || job.max_edits > k_maximum_gatekeeper_edits) {
         write_prefilter_result(
-            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+            job_index, 0u, k_status_unsupported, true, 0u);
         return;
     }
 
@@ -4177,16 +4230,16 @@ void solve_gatekeeper_job(uint job_index) {
     uint hamming_distance = mask_popcount(hamming);
     if (hamming_distance <= job.max_edits) {
         write_prefilter_result(
-            job_index, 0u, STATUS_OK, true, hamming_distance);
+            job_index, 0u, k_status_ok, true, hamming_distance);
         return;
     }
     if (job.max_edits == 0u) {
         write_prefilter_result(
             job_index,
             1u,
-            STATUS_OK,
+            k_status_ok,
             false,
-            1u | HAMMING_EXACT_REJECTION_MASK);
+            1u | k_hamming_exact_rejection_mask);
         return;
     }
 
@@ -4214,30 +4267,30 @@ void solve_gatekeeper_job(uint job_index) {
         final_mask, length, job.max_edits);
     if (estimate <= job.max_edits) {
         write_prefilter_result(
-            job_index, 0u, STATUS_OK, true, estimate);
+            job_index, 0u, k_status_ok, true, estimate);
         return;
     }
 
-    uint diagnostic = estimate | MASK_REJECTION_CANDIDATE_MASK
-        | EXACT_GUARD_ACTIVATED_MASK;
+    uint diagnostics = estimate | k_mask_rejection_candidate_mask
+        | k_exact_guard_activated_mask;
     if (exact_edit_distance_is_above_threshold(job)) {
         write_prefilter_result(
             job_index,
             job.max_edits + 1u,
-            STATUS_OK,
+            k_status_ok,
             false,
-            diagnostic | GUARD_CONFIRMED_REJECTION_MASK);
+            diagnostics | k_guard_confirmed_rejection_mask);
         return;
     }
     write_prefilter_result(
-        job_index, 0u, STATUS_OK, true, diagnostic);
+        job_index, 0u, k_status_ok, true, diagnostics);
 }
 #else
 void solve_gatekeeper_job(uint job_index) {
-    PrefilterJob job = jobs[job_index];
+    prefilter_job job = jobs[job_index];
     if (!prefilter_job_is_in_bounds(job)) {
         write_prefilter_result(
-            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+            job_index, 0u, k_status_unsupported, true, 0u);
         return;
     }
     if (job.query_length != job.target_length) {
@@ -4247,29 +4300,29 @@ void solve_gatekeeper_job(uint job_index) {
         write_prefilter_result(
             job_index,
             length_difference,
-            STATUS_LENGTH_DIFFERENCE_ONLY,
+            k_status_length_difference_only,
             length_difference <= job.max_edits,
             0u);
         return;
     }
     if (job.query_length == 0u) {
-        write_prefilter_result(job_index, 0u, STATUS_OK, true, 0u);
+        write_prefilter_result(job_index, 0u, k_status_ok, true, 0u);
         return;
     }
-    if (pc.mode != 0u || uint(MAX_SPAN) != MAX_GATEKEEPER_LENGTH
-        || job.query_length != uint(GATEKEEPER_SPECIALIZED_LENGTH)
-        || job.max_edits != uint(GATEKEEPER_SPECIALIZED_EDITS)
+    if (pc.mode != 0u || uint(compile_time_maximum_span) != k_maximum_gatekeeper_length
+        || job.query_length != uint(gatekeeper_specialized_length)
+        || job.max_edits != uint(gatekeeper_specialized_edits)
         || (job.query_offset & 3u) != 0u
         || (job.target_offset & 3u) != 0u) {
         write_prefilter_result(
-            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+            job_index, 0u, k_status_unsupported, true, 0u);
         return;
     }
 
-    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+    const uint active_max_edits = uint(gatekeeper_specialized_edits);
     uint hamming_distance = 0u;
-    ExactDiagonalMasks exact_masks;
-#if GATEKEEPER_SPECIALIZED_LENGTH == 32
+    exact_diagonal_masks exact_masks;
+#if gatekeeper_specialized_length == 32
     uint estimate = gatekeeper_mask_estimate_32(
         job, hamming_distance, exact_masks);
 #else
@@ -4278,29 +4331,29 @@ void solve_gatekeeper_job(uint job_index) {
 #endif
     if (hamming_distance <= active_max_edits) {
         write_prefilter_result(
-            job_index, 0u, STATUS_OK, true, hamming_distance);
+            job_index, 0u, k_status_ok, true, hamming_distance);
         return;
     }
     if (estimate <= active_max_edits) {
         write_prefilter_result(
-            job_index, 0u, STATUS_OK, true, estimate);
+            job_index, 0u, k_status_ok, true, estimate);
         return;
     }
 
-    uint diagnostic = estimate | MASK_REJECTION_CANDIDATE_MASK
-        | EXACT_GUARD_ACTIVATED_MASK;
+    uint diagnostics = estimate | k_mask_rejection_candidate_mask
+        | k_exact_guard_activated_mask;
     if (exact_edit_distance_e2_or_e4_is_above_threshold(
             job, exact_masks)) {
         write_prefilter_result(
             job_index,
             active_max_edits + 1u,
-            STATUS_OK,
+            k_status_ok,
             false,
-            diagnostic | GUARD_CONFIRMED_REJECTION_MASK);
+            diagnostics | k_guard_confirmed_rejection_mask);
         return;
     }
     write_prefilter_result(
-        job_index, 0u, STATUS_OK, true, diagnostic);
+        job_index, 0u, k_status_ok, true, diagnostics);
 }
 #endif
 
@@ -4323,11 +4376,11 @@ void main() {
 constexpr std::string_view k_alignment_extension_banded_affine_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
-const int NEG_INF = -1073741824;
-const uint STATUS_OK = 0u;
-const uint STATUS_UNSUPPORTED_GEOMETRY = 1u;
+const int k_negative_infinity = -1073741824;
+const uint k_status_ok = 0u;
+const uint k_status_unsupported_geometry = 1u;
 
-struct AlignmentExtensionJob {
+struct alignment_extension_job {
     uint query_offset;
     uint target_offset;
     uint query_len;
@@ -4338,19 +4391,19 @@ struct AlignmentExtensionJob {
     uint reserved1;
 };
 
-struct AlignmentExtensionResult {
+struct alignment_extension_result {
     int score;
     uint query_end;
     uint target_end;
     uint status;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer QuerySymbols { uint query_symbols[]; };
-layout(std430, set = 0, binding = 1) readonly buffer TargetSymbols { uint target_symbols[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Jobs { AlignmentExtensionJob jobs[]; };
-layout(std430, set = 0, binding = 3) buffer Results { AlignmentExtensionResult results[]; };
+layout(std430, set = 0, binding = 0) readonly buffer query_symbols_buffer { uint query_symbols[]; };
+layout(std430, set = 0, binding = 1) readonly buffer target_symbols_buffer { uint target_symbols[]; };
+layout(std430, set = 0, binding = 2) readonly buffer jobs_buffer { alignment_extension_job jobs[]; };
+layout(std430, set = 0, binding = 3) buffer results_buffer { alignment_extension_result results[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint job_count;
     uint max_query_len;
     uint max_target_len;
@@ -4376,11 +4429,11 @@ void reject_job(uint job_index) {
     results[job_index].score = 0;
     results[job_index].query_end = 0u;
     results[job_index].target_end = 0u;
-    results[job_index].status = STATUS_UNSUPPORTED_GEOMETRY;
+    results[job_index].status = k_status_unsupported_geometry;
 }
 
 void solve_job(uint job_index) {
-    AlignmentExtensionJob job = jobs[job_index];
+    alignment_extension_job job = jobs[job_index];
     if (job.query_len > pc.max_query_len || job.target_len > pc.max_target_len
         || job.band_width > pc.max_band_width || job.flags != 0u
         || job.reserved0 != 0u || job.reserved1 != 0u
@@ -4389,20 +4442,20 @@ void solve_job(uint job_index) {
         return;
     }
 
-    int prev_m[MAX_SPAN + 1];
-    int prev_i[MAX_SPAN + 1];
-    int prev_d[MAX_SPAN + 1];
-    int curr_m[MAX_SPAN + 1];
-    int curr_i[MAX_SPAN + 1];
-    int curr_d[MAX_SPAN + 1];
+    int prev_m[compile_time_maximum_span + 1];
+    int prev_i[compile_time_maximum_span + 1];
+    int prev_d[compile_time_maximum_span + 1];
+    int curr_m[compile_time_maximum_span + 1];
+    int curr_i[compile_time_maximum_span + 1];
+    int curr_d[compile_time_maximum_span + 1];
 
     for (uint j = 0u; j <= job.target_len; ++j) {
         prev_m[j] = 0;
-        prev_i[j] = NEG_INF;
-        prev_d[j] = NEG_INF;
+        prev_i[j] = k_negative_infinity;
+        prev_d[j] = k_negative_infinity;
         curr_m[j] = 0;
-        curr_i[j] = NEG_INF;
-        curr_d[j] = NEG_INF;
+        curr_i[j] = k_negative_infinity;
+        curr_d[j] = k_negative_infinity;
     }
 
     int best_score = 0;
@@ -4412,8 +4465,8 @@ void solve_job(uint job_index) {
 
     for (uint i = 1u; i <= job.query_len; ++i) {
         curr_m[0] = 0;
-        curr_i[0] = NEG_INF;
-        curr_d[0] = NEG_INF;
+        curr_i[0] = k_negative_infinity;
+        curr_d[0] = k_negative_infinity;
         uint query_symbol = query_symbols[job.query_offset + i - 1u];
         if (query_symbol >= pc.alphabet_size) {
             reject_job(job_index);
@@ -4423,8 +4476,8 @@ void solve_job(uint job_index) {
             uint delta = i > j ? (i - j) : (j - i);
             if (delta > job.band_width) {
                 curr_m[j] = 0;
-                curr_i[j] = NEG_INF;
-                curr_d[j] = NEG_INF;
+                curr_i[j] = k_negative_infinity;
+                curr_d[j] = k_negative_infinity;
                 continue;
             }
 
@@ -4464,7 +4517,7 @@ void solve_job(uint job_index) {
     results[job_index].score = best_score;
     results[job_index].query_end = best_query_end;
     results[job_index].target_end = best_target_end;
-    results[job_index].status = STATUS_OK;
+    results[job_index].status = k_status_ok;
 }
 
 void main() {
@@ -4477,20 +4530,20 @@ void main() {
 )GLSL";
 
 constexpr std::string_view k_alignment_extension_simple_cigar_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-const int NEG_INF = -1073741824;
-const uint STATUS_OK = 0u;
-const uint STATUS_UNSUPPORTED_GEOMETRY = 1u;
-const uint STATUS_CIGAR_OVERFLOW = 2u;
-const uint CIGAR_MATCH = 0u;
-const uint CIGAR_INS = 1u;
-const uint CIGAR_DEL = 2u;
-const uint SIMPLE_GAP_MAX = 256u;
-const uint SIMPLE_GAP_OP_MAX = 64u;
-const uint SIMPLE_GAP_ANCHOR_MIN = 8u;
+const int k_negative_infinity = -1073741824;
+const uint k_status_ok = 0u;
+const uint k_status_unsupported_geometry = 1u;
+const uint k_status_cigar_overflow = 2u;
+const uint k_cigar_match = 0u;
+const uint k_cigar_insert = 1u;
+const uint k_cigar_delete = 2u;
+const uint k_maximum_simple_gap = 256u;
+const uint k_maximum_simple_gap_operations = 64u;
+const uint k_minimum_simple_gap_anchors = 8u;
 
-struct AlignmentCigarJob {
+struct alignment_cigar_job {
     uint query_symbol_offset;
     uint target_symbol_offset;
     uint query_len;
@@ -4505,7 +4558,7 @@ struct AlignmentCigarJob {
     uint traceback_tile_count;
 };
 
-struct AlignmentCigarResult {
+struct alignment_cigar_result {
     int score;
     int max_score;
     uint query_start;
@@ -4518,14 +4571,14 @@ struct AlignmentCigarResult {
     uint reserved;
 };
 
-layout(std430, set = 0, binding = 0) readonly buffer QuerySymbols { uint query_symbols[]; };
-layout(std430, set = 0, binding = 1) readonly buffer TargetSymbols { uint target_symbols[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Jobs { AlignmentCigarJob jobs[]; };
-layout(std430, set = 0, binding = 3) buffer Results { AlignmentCigarResult results[]; };
-layout(std430, set = 0, binding = 4) buffer PackedCigar { uint packed_cigar[]; };
-layout(std430, set = 0, binding = 5) buffer Traceback { uint traceback[]; };
+layout(std430, set = 0, binding = 0) readonly buffer query_symbols_buffer { uint query_symbols[]; };
+layout(std430, set = 0, binding = 1) readonly buffer target_symbols_buffer { uint target_symbols[]; };
+layout(std430, set = 0, binding = 2) readonly buffer jobs_buffer { alignment_cigar_job jobs[]; };
+layout(std430, set = 0, binding = 3) buffer results_buffer { alignment_cigar_result results[]; };
+layout(std430, set = 0, binding = 4) buffer packed_cigar_buffer { uint packed_cigar[]; };
+layout(std430, set = 0, binding = 5) buffer traceback_buffer { uint traceback[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint job_count;
     uint alphabet_size;
     uint max_band_width;
@@ -4568,7 +4621,7 @@ int gap_cost_long(uint len) {
     return pc.gap_open_long + pc.gap_extend_long * int(len);
 }
 
-uint traceback_index(AlignmentCigarJob job, uint target_cols, uint query_i, uint target_j) {
+uint traceback_index(alignment_cigar_job job, uint target_cols, uint query_i, uint target_j) {
     return job.traceback_tile_offset + query_i * target_cols + target_j;
 }
 
@@ -4583,7 +4636,7 @@ uint best_gap_state(uint len, bool insertion) {
 
 void write_success(
     uint job_index,
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     int score,
     uint cigar_length) {
     results[job_index].score = score;
@@ -4594,11 +4647,11 @@ void write_success(
     results[job_index].target_end = job.target_global_start + job.target_len;
     results[job_index].cigar_offset = job.cigar_offset;
     results[job_index].cigar_length = cigar_length;
-    results[job_index].status = STATUS_OK;
+    results[job_index].status = k_status_ok;
     results[job_index].reserved = 0u;
 }
 
-bool append_reverse_cigar(AlignmentCigarJob job, inout uint cigar_length, uint op) {
+bool append_reverse_cigar(alignment_cigar_job job, inout uint cigar_length, uint op) {
     if (cigar_length > 0u) {
         uint last_index = job.cigar_offset + cigar_length - 1u;
         if ((packed_cigar[last_index] & 15u) == op) {
@@ -4614,7 +4667,7 @@ bool append_reverse_cigar(AlignmentCigarJob job, inout uint cigar_length, uint o
     return true;
 }
 
-void reverse_cigar_slice(AlignmentCigarJob job, uint cigar_length) {
+void reverse_cigar_slice(alignment_cigar_job job, uint cigar_length) {
     for (uint i = 0u; i < cigar_length / 2u; ++i) {
         uint left_index = job.cigar_offset + i;
         uint right_index = job.cigar_offset + cigar_length - 1u - i;
@@ -4631,7 +4684,7 @@ int best_gap_cost_value(uint len) {
 }
 
 bool append_forward_cigar(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     inout uint cigar_length,
     uint len,
     uint op) {
@@ -4653,7 +4706,7 @@ bool append_forward_cigar(
     return true;
 }
 
-uint common_match_run(AlignmentCigarJob job, uint query_pos, uint target_pos) {
+uint common_match_run(alignment_cigar_job job, uint query_pos, uint target_pos) {
     uint run = 0u;
     while (query_pos + run < job.query_len
            && target_pos + run < job.target_len
@@ -4665,7 +4718,7 @@ uint common_match_run(AlignmentCigarJob job, uint query_pos, uint target_pos) {
 }
 
 bool try_one_gap_script(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint gap_op,
     uint gap_len,
     out uint prefix_len,
@@ -4673,7 +4726,7 @@ bool try_one_gap_script(
     prefix_len = common_match_run(job, 0u, 0u);
     uint query_pos = prefix_len;
     uint target_pos = prefix_len;
-    if (gap_op == CIGAR_INS) {
+    if (gap_op == k_cigar_insert) {
         query_pos += gap_len;
     } else {
         target_pos += gap_len;
@@ -4687,7 +4740,7 @@ bool try_one_gap_script(
 }
 
 bool try_two_gap_script(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint first_op,
     uint first_len,
     uint second_op,
@@ -4698,7 +4751,7 @@ bool try_two_gap_script(
     prefix_len = common_match_run(job, 0u, 0u);
     uint query_pos = prefix_len;
     uint target_pos = prefix_len;
-    if (first_op == CIGAR_INS) {
+    if (first_op == k_cigar_insert) {
         query_pos += first_len;
     } else {
         target_pos += first_len;
@@ -4709,7 +4762,7 @@ bool try_two_gap_script(
     mid_len = common_match_run(job, query_pos, target_pos);
     query_pos += mid_len;
     target_pos += mid_len;
-    if (second_op == CIGAR_INS) {
+    if (second_op == k_cigar_insert) {
         query_pos += second_len;
     } else {
         target_pos += second_len;
@@ -4735,7 +4788,7 @@ bool better_greedy_gap_candidate(
                 || (gap_len == best_len && op < best_op)));
 }
 
-bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
+bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
     uint query_pos = 0u;
     uint target_pos = 0u;
     uint cigar_length = 0u;
@@ -4749,8 +4802,8 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
             run_len = common_match_run(job, query_pos, target_pos);
         }
         if (run_len != 0u) {
-            if (!append_forward_cigar(job, cigar_length, run_len, CIGAR_MATCH)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, run_len, k_cigar_match)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             query_pos += run_len;
@@ -4759,14 +4812,14 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
             continue;
         }
 
-        if (gap_count >= SIMPLE_GAP_OP_MAX) {
+        if (gap_count >= k_maximum_simple_gap_operations) {
             return false;
         }
 
         if (query_pos == job.query_len) {
             uint gap_len = job.target_len - target_pos;
-            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_DEL)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_delete)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
@@ -4776,8 +4829,8 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
         }
         if (target_pos == job.target_len) {
             uint gap_len = job.query_len - query_pos;
-            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_INS)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_insert)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
@@ -4789,8 +4842,8 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
         if (target_pos + 1u < job.target_len
             && query_symbols[job.query_symbol_offset + query_pos]
                 == target_symbols[job.target_symbol_offset + target_pos + 1u]) {
-            if (!append_forward_cigar(job, cigar_length, 1u, CIGAR_DEL)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_delete)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(1u));
@@ -4801,8 +4854,8 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
         if (query_pos + 1u < job.query_len
             && query_symbols[job.query_symbol_offset + query_pos + 1u]
                 == target_symbols[job.target_symbol_offset + target_pos]) {
-            if (!append_forward_cigar(job, cigar_length, 1u, CIGAR_INS)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_insert)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(1u));
@@ -4819,7 +4872,7 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, AlignmentCigarJob job) {
     return true;
 }
 
-bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
+bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
     uint query_pos = 0u;
     uint target_pos = 0u;
     uint cigar_length = 0u;
@@ -4833,8 +4886,8 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
             run_len = common_match_run(job, query_pos, target_pos);
         }
         if (run_len != 0u) {
-            if (!append_forward_cigar(job, cigar_length, run_len, CIGAR_MATCH)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, run_len, k_cigar_match)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             query_pos += run_len;
@@ -4845,8 +4898,8 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
 
         if (query_pos == job.query_len) {
             uint gap_len = job.target_len - target_pos;
-            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_DEL)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_delete)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
@@ -4856,8 +4909,8 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
         }
         if (target_pos == job.target_len) {
             uint gap_len = job.query_len - query_pos;
-            if (!append_forward_cigar(job, cigar_length, gap_len, CIGAR_INS)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_forward_cigar(job, cigar_length, gap_len, k_cigar_insert)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             gap_cost += uint(best_gap_cost_value(gap_len));
@@ -4869,18 +4922,18 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
         uint best_op = 99u;
         uint best_len = 0u;
         uint best_run = 0u;
-        for (uint gap_len = 1u; gap_len <= SIMPLE_GAP_MAX; ++gap_len) {
+        for (uint gap_len = 1u; gap_len <= k_maximum_simple_gap; ++gap_len) {
             if (target_pos + gap_len < job.target_len
                 && query_symbols[job.query_symbol_offset + query_pos]
                     == target_symbols[job.target_symbol_offset + target_pos + gap_len]) {
                 uint candidate_run =
                     common_match_run(job, query_pos, target_pos + gap_len);
                 if (better_greedy_gap_candidate(
-                        candidate_run, gap_len, CIGAR_DEL,
+                        candidate_run, gap_len, k_cigar_delete,
                         best_run, best_len, best_op)) {
                     best_run = candidate_run;
                     best_len = gap_len;
-                    best_op = CIGAR_DEL;
+                    best_op = k_cigar_delete;
                 }
             }
             if (query_pos + gap_len < job.query_len
@@ -4889,26 +4942,26 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
                 uint candidate_run =
                     common_match_run(job, query_pos + gap_len, target_pos);
                 if (better_greedy_gap_candidate(
-                        candidate_run, gap_len, CIGAR_INS,
+                        candidate_run, gap_len, k_cigar_insert,
                         best_run, best_len, best_op)) {
                     best_run = candidate_run;
                     best_len = gap_len;
-                    best_op = CIGAR_INS;
+                    best_op = k_cigar_insert;
                 }
             }
         }
 
-        if (best_len == 0u || best_run < SIMPLE_GAP_ANCHOR_MIN
-            || gap_count >= SIMPLE_GAP_OP_MAX) {
+        if (best_len == 0u || best_run < k_minimum_simple_gap_anchors
+            || gap_count >= k_maximum_simple_gap_operations) {
             return false;
         }
         if (!append_forward_cigar(job, cigar_length, best_len, best_op)) {
-            write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            write_reject(job_index, k_status_cigar_overflow);
             return true;
         }
         gap_cost += uint(best_gap_cost_value(best_len));
         ++gap_count;
-        if (best_op == CIGAR_INS) {
+        if (best_op == k_cigar_insert) {
             query_pos += best_len;
         } else {
             target_pos += best_len;
@@ -4922,7 +4975,7 @@ bool try_emit_greedy_gap_cigar(uint job_index, AlignmentCigarJob job) {
 
 bool emit_simple_script_success(
     uint job_index,
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint prefix_len,
     uint first_op,
     uint first_len,
@@ -4932,13 +4985,13 @@ bool emit_simple_script_success(
     uint suffix_len,
     uint gap_count) {
     uint cigar_length = 0u;
-    if (!append_forward_cigar(job, cigar_length, prefix_len, CIGAR_MATCH)
+    if (!append_forward_cigar(job, cigar_length, prefix_len, k_cigar_match)
         || (gap_count >= 1u
             && !append_forward_cigar(job, cigar_length, first_len, first_op))
-        || !append_forward_cigar(job, cigar_length, mid_len, CIGAR_MATCH)
+        || !append_forward_cigar(job, cigar_length, mid_len, k_cigar_match)
         || (gap_count >= 2u
             && !append_forward_cigar(job, cigar_length, second_len, second_op))
-        || !append_forward_cigar(job, cigar_length, suffix_len, CIGAR_MATCH)) {
+        || !append_forward_cigar(job, cigar_length, suffix_len, k_cigar_match)) {
         return false;
     }
 
@@ -4953,9 +5006,9 @@ bool emit_simple_script_success(
     return true;
 }
 
-bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
+bool try_emit_simple_cigar(uint job_index, alignment_cigar_job job) {
     if (job.cigar_capacity == 0u) {
-        write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+        write_reject(job_index, k_status_cigar_overflow);
         return true;
     }
 
@@ -4963,14 +5016,14 @@ bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
     if (exact_len == job.query_len && exact_len == job.target_len) {
         return emit_simple_script_success(
             job_index, job,
-            exact_len, CIGAR_MATCH, 0u,
-            0u, CIGAR_MATCH, 0u,
+            exact_len, k_cigar_match, 0u,
+            0u, k_cigar_match, 0u,
             0u, 0u);
     }
 
     int net_query = int(job.query_len) - int(job.target_len);
     int abs_net_query = net_query < 0 ? -net_query : net_query;
-    if (abs_net_query > int(SIMPLE_GAP_MAX)) {
+    if (abs_net_query > int(k_maximum_simple_gap)) {
         return false;
     }
 
@@ -4979,11 +5032,11 @@ bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
         uint suffix_len = 0u;
         uint gap_len = uint(net_query);
         if (try_one_gap_script(
-                job, CIGAR_INS, gap_len, prefix_len, suffix_len)) {
+                job, k_cigar_insert, gap_len, prefix_len, suffix_len)) {
             return emit_simple_script_success(
                 job_index, job,
-                prefix_len, CIGAR_INS, gap_len,
-                suffix_len, CIGAR_MATCH, 0u,
+                prefix_len, k_cigar_insert, gap_len,
+                suffix_len, k_cigar_match, 0u,
                 0u, 1u);
         }
     } else if (net_query < 0) {
@@ -4991,18 +5044,18 @@ bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
         uint suffix_len = 0u;
         uint gap_len = uint(-net_query);
         if (try_one_gap_script(
-                job, CIGAR_DEL, gap_len, prefix_len, suffix_len)) {
+                job, k_cigar_delete, gap_len, prefix_len, suffix_len)) {
             return emit_simple_script_success(
                 job_index, job,
-                prefix_len, CIGAR_DEL, gap_len,
-                suffix_len, CIGAR_MATCH, 0u,
+                prefix_len, k_cigar_delete, gap_len,
+                suffix_len, k_cigar_match, 0u,
                 0u, 1u);
         }
     }
 
-    for (uint del_len = 1u; del_len <= SIMPLE_GAP_MAX; ++del_len) {
+    for (uint del_len = 1u; del_len <= k_maximum_simple_gap; ++del_len) {
         int ins_len_i = int(del_len) + net_query;
-        if (ins_len_i <= 0 || ins_len_i > int(SIMPLE_GAP_MAX)) {
+        if (ins_len_i <= 0 || ins_len_i > int(k_maximum_simple_gap)) {
             continue;
         }
         uint ins_len = uint(ins_len_i);
@@ -5012,13 +5065,13 @@ bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
         uint suffix_len = 0u;
         if (try_two_gap_script(
                 job,
-                CIGAR_DEL, del_len,
-                CIGAR_INS, ins_len,
+                k_cigar_delete, del_len,
+                k_cigar_insert, ins_len,
                 prefix_len, mid_len, suffix_len)) {
             return emit_simple_script_success(
                 job_index, job,
-                prefix_len, CIGAR_DEL, del_len,
-                mid_len, CIGAR_INS, ins_len,
+                prefix_len, k_cigar_delete, del_len,
+                mid_len, k_cigar_insert, ins_len,
                 suffix_len, 2u);
         }
 
@@ -5027,13 +5080,13 @@ bool try_emit_simple_cigar(uint job_index, AlignmentCigarJob job) {
         suffix_len = 0u;
         if (try_two_gap_script(
                 job,
-                CIGAR_INS, ins_len,
-                CIGAR_DEL, del_len,
+                k_cigar_insert, ins_len,
+                k_cigar_delete, del_len,
                 prefix_len, mid_len, suffix_len)) {
             return emit_simple_script_success(
                 job_index, job,
-                prefix_len, CIGAR_INS, ins_len,
-                mid_len, CIGAR_DEL, del_len,
+                prefix_len, k_cigar_insert, ins_len,
+                mid_len, k_cigar_delete, del_len,
                 suffix_len, 2u);
         }
     }
@@ -5058,11 +5111,11 @@ uint min_u(uint a, uint b) {
     return a < b ? a : b;
 }
 
-uint gridded_query_tiles(AlignmentCigarJob job) {
+uint gridded_query_tiles(alignment_cigar_job job) {
     return ceil_div_u(job.query_len, pc.tile_query);
 }
 
-uint gridded_target_tiles(AlignmentCigarJob job) {
+uint gridded_target_tiles(alignment_cigar_job job) {
     return ceil_div_u(job.target_len, pc.tile_target);
 }
 
@@ -5070,7 +5123,7 @@ uint gridded_record_words() {
     return 5u * ((pc.tile_query + 1u) + (pc.tile_target + 1u));
 }
 
-uint gridded_boundary_words(AlignmentCigarJob job) {
+uint gridded_boundary_words(alignment_cigar_job job) {
     return gridded_query_tiles(job) * gridded_target_tiles(job)
         * gridded_record_words();
 }
@@ -5087,14 +5140,14 @@ int decode_score(uint value) {
     return int(value) - 1073741824;
 }
 
-uint tile_base(AlignmentCigarJob job, uint tile_row, uint tile_col) {
+uint tile_base(alignment_cigar_job job, uint tile_row, uint tile_col) {
     return job.traceback_tile_offset
         + (tile_row * gridded_target_tiles(job) + tile_col)
             * gridded_record_words();
 }
 
 uint bottom_state_index(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_target,
@@ -5104,7 +5157,7 @@ uint bottom_state_index(
 }
 
 uint right_state_index(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_query,
@@ -5114,12 +5167,12 @@ uint right_state_index(
         + local_query * 5u + state_index;
 }
 
-uint gridded_scratch_offset(AlignmentCigarJob job) {
+uint gridded_scratch_offset(alignment_cigar_job job) {
     return job.traceback_tile_offset + gridded_boundary_words(job);
 }
 
 uint gridded_scratch_index(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint local_query,
     uint local_target,
     uint scratch_cols) {
@@ -5136,37 +5189,37 @@ void init_axis_state(
     out int d2) {
     if (query_pos == 0u && target_pos == 0u) {
         h = 0;
-        i1 = NEG_INF;
-        i2 = NEG_INF;
-        d1 = NEG_INF;
-        d2 = NEG_INF;
+        i1 = k_negative_infinity;
+        i2 = k_negative_infinity;
+        d1 = k_negative_infinity;
+        d2 = k_negative_infinity;
         return;
     }
     if (target_pos == 0u) {
         i1 = -gap_cost_short(query_pos);
         i2 = -gap_cost_long(query_pos);
         h = i2 > i1 ? i2 : i1;
-        d1 = NEG_INF;
-        d2 = NEG_INF;
+        d1 = k_negative_infinity;
+        d2 = k_negative_infinity;
         return;
     }
     if (query_pos == 0u) {
         d1 = -gap_cost_short(target_pos);
         d2 = -gap_cost_long(target_pos);
         h = d2 > d1 ? d2 : d1;
-        i1 = NEG_INF;
-        i2 = NEG_INF;
+        i1 = k_negative_infinity;
+        i2 = k_negative_infinity;
         return;
     }
-    h = NEG_INF;
-    i1 = NEG_INF;
-    i2 = NEG_INF;
-    d1 = NEG_INF;
-    d2 = NEG_INF;
+    h = k_negative_infinity;
+    i1 = k_negative_infinity;
+    i2 = k_negative_infinity;
+    d1 = k_negative_infinity;
+    d2 = k_negative_infinity;
 }
 
 void load_top_state(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_target,
@@ -5189,7 +5242,7 @@ void load_top_state(
 }
 
 void load_left_state(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_query,
@@ -5212,7 +5265,7 @@ void load_left_state(
 }
 
 void store_bottom_state(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_target,
@@ -5229,7 +5282,7 @@ void store_bottom_state(
 }
 
 void store_right_state(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     uint local_query,
@@ -5246,7 +5299,7 @@ void store_right_state(
 }
 
 void compute_gridded_tile(
-    AlignmentCigarJob job,
+    alignment_cigar_job job,
     uint tile_row,
     uint tile_col,
     bool store_boundaries,
@@ -5257,17 +5310,17 @@ void compute_gridded_tile(
     uint target_cols_active = min_u(pc.tile_target, job.target_len - target_origin);
     uint scratch_cols = target_cols_active + 1u;
 
-    int h_prev[MAX_SPAN + 1];
-    int h_cur[MAX_SPAN + 1];
-    int i1_prev[MAX_SPAN + 1];
-    int i1_cur[MAX_SPAN + 1];
-    int i2_prev[MAX_SPAN + 1];
-    int i2_cur[MAX_SPAN + 1];
-    int d1_cur[MAX_SPAN + 1];
-    int d2_cur[MAX_SPAN + 1];
+    int h_prev[compile_time_maximum_span + 1];
+    int h_cur[compile_time_maximum_span + 1];
+    int i1_prev[compile_time_maximum_span + 1];
+    int i1_cur[compile_time_maximum_span + 1];
+    int i2_prev[compile_time_maximum_span + 1];
+    int i2_cur[compile_time_maximum_span + 1];
+    int d1_cur[compile_time_maximum_span + 1];
+    int d2_cur[compile_time_maximum_span + 1];
 
-    int unused_d1 = NEG_INF;
-    int unused_d2 = NEG_INF;
+    int unused_d1 = k_negative_infinity;
+    int unused_d2 = k_negative_infinity;
     for (uint local_target = 0u; local_target <= target_cols_active; ++local_target) {
         load_top_state(job, tile_row, tile_col, local_target,
                        h_prev[local_target], i1_prev[local_target],
@@ -5275,11 +5328,11 @@ void compute_gridded_tile(
     }
 
     if (store_boundaries) {
-        int top_h = NEG_INF;
-        int top_i1 = NEG_INF;
-        int top_i2 = NEG_INF;
-        int top_d1 = NEG_INF;
-        int top_d2 = NEG_INF;
+        int top_h = k_negative_infinity;
+        int top_i1 = k_negative_infinity;
+        int top_i2 = k_negative_infinity;
+        int top_d1 = k_negative_infinity;
+        int top_d2 = k_negative_infinity;
         load_top_state(job, tile_row, tile_col, target_cols_active,
                        top_h, top_i1, top_i2, top_d1, top_d2);
         store_right_state(job, tile_row, tile_col, 0u,
@@ -5373,15 +5426,15 @@ void compute_gridded_tile(
     }
 }
 
-bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
-    if (pc.tile_query == 0u || pc.tile_query > MAX_SPAN
-        || pc.tile_target == 0u || pc.tile_target > MAX_SPAN) {
-        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
+    if (pc.tile_query == 0u || pc.tile_query > compile_time_maximum_span
+        || pc.tile_target == 0u || pc.tile_target > compile_time_maximum_span) {
+        write_reject(job_index, k_status_unsupported_geometry);
         return true;
     }
     uint required_words = gridded_boundary_words(job) + gridded_scratch_words();
     if (job.traceback_tile_count < required_words) {
-        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+        write_reject(job_index, k_status_unsupported_geometry);
         return true;
     }
 
@@ -5406,16 +5459,16 @@ bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
 
     while (global_query > 0u || global_target > 0u) {
         if (global_query == 0u) {
-            if (!append_reverse_cigar(job, cigar_length, CIGAR_DEL)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_reverse_cigar(job, cigar_length, k_cigar_delete)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             --global_target;
             continue;
         }
         if (global_target == 0u) {
-            if (!append_reverse_cigar(job, cigar_length, CIGAR_INS)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_reverse_cigar(job, cigar_length, k_cigar_insert)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return true;
             }
             --global_query;
@@ -5441,8 +5494,8 @@ bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
             if (state == 0u) {
                 uint source = trace & 7u;
                 if (source == 0u) {
-                    if (!append_reverse_cigar(job, cigar_length, CIGAR_MATCH)) {
-                        write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                    if (!append_reverse_cigar(job, cigar_length, k_cigar_match)) {
+                        write_reject(job_index, k_status_cigar_overflow);
                         return true;
                     }
                     --global_query;
@@ -5452,12 +5505,12 @@ bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
                 } else if (source == 2u || source == 4u) {
                     state = source;
                 } else {
-                    write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+                    write_reject(job_index, k_status_unsupported_geometry);
                     return true;
                 }
             } else if (state == 1u || state == 3u) {
-                if (!append_reverse_cigar(job, cigar_length, CIGAR_INS)) {
-                    write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                if (!append_reverse_cigar(job, cigar_length, k_cigar_insert)) {
+                    write_reject(job_index, k_status_cigar_overflow);
                     return true;
                 }
                 bool cont = state == 1u ? ((trace & (1u << 3u)) != 0u)
@@ -5465,8 +5518,8 @@ bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
                 --global_query;
                 state = cont ? state : 0u;
             } else {
-                if (!append_reverse_cigar(job, cigar_length, CIGAR_DEL)) {
-                    write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                if (!append_reverse_cigar(job, cigar_length, k_cigar_delete)) {
+                    write_reject(job_index, k_status_cigar_overflow);
                     return true;
                 }
                 bool cont = state == 2u ? ((trace & (1u << 4u)) != 0u)
@@ -5483,27 +5536,27 @@ bool solve_gridded_dp(uint job_index, AlignmentCigarJob job) {
 }
 
 void solve_bounded_dp(uint job_index) {
-    AlignmentCigarJob job = jobs[job_index];
+    alignment_cigar_job job = jobs[job_index];
     if (pc.alphabet_size == 0u || pc.flags != 0u || pc.reserved != 0u
         || job.flags != 0u || job.query_len == 0u || job.target_len == 0u
         || job.band_width > pc.max_band_width) {
-        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+        write_reject(job_index, k_status_unsupported_geometry);
         return;
     }
     if (job.cigar_capacity == 0u) {
-        write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+        write_reject(job_index, k_status_cigar_overflow);
         return;
     }
 
     for (uint i = 0u; i < job.query_len; ++i) {
         if (query_symbols[job.query_symbol_offset + i] >= pc.alphabet_size) {
-            write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+            write_reject(job_index, k_status_unsupported_geometry);
             return;
         }
     }
     for (uint i = 0u; i < job.target_len; ++i) {
         if (target_symbols[job.target_symbol_offset + i] >= pc.alphabet_size) {
-            write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+            write_reject(job_index, k_status_unsupported_geometry);
             return;
         }
     }
@@ -5514,35 +5567,35 @@ void solve_bounded_dp(uint job_index) {
 
     uint target_cols = job.target_len + 1u;
     uint traceback_cells = (job.query_len + 1u) * target_cols;
-    if (job.query_len > MAX_SPAN || job.target_len > MAX_SPAN) {
+    if (job.query_len > compile_time_maximum_span || job.target_len > compile_time_maximum_span) {
         solve_gridded_dp(job_index, job);
         return;
     }
     if (job.traceback_tile_count < traceback_cells) {
-        write_reject(job_index, STATUS_UNSUPPORTED_GEOMETRY);
+        write_reject(job_index, k_status_unsupported_geometry);
         return;
     }
 
-    int h_prev[MAX_SPAN + 1];
-    int h_cur[MAX_SPAN + 1];
-    int i1_prev[MAX_SPAN + 1];
-    int i1_cur[MAX_SPAN + 1];
-    int i2_prev[MAX_SPAN + 1];
-    int i2_cur[MAX_SPAN + 1];
-    int d1_cur[MAX_SPAN + 1];
-    int d2_cur[MAX_SPAN + 1];
+    int h_prev[compile_time_maximum_span + 1];
+    int h_cur[compile_time_maximum_span + 1];
+    int i1_prev[compile_time_maximum_span + 1];
+    int i1_cur[compile_time_maximum_span + 1];
+    int i2_prev[compile_time_maximum_span + 1];
+    int i2_cur[compile_time_maximum_span + 1];
+    int d1_cur[compile_time_maximum_span + 1];
+    int d2_cur[compile_time_maximum_span + 1];
 
     h_prev[0] = 0;
-    i1_prev[0] = NEG_INF;
-    i2_prev[0] = NEG_INF;
+    i1_prev[0] = k_negative_infinity;
+    i2_prev[0] = k_negative_infinity;
     traceback[traceback_index(job, target_cols, 0u, 0u)] = 0u;
     for (uint j = 1u; j <= job.target_len; ++j) {
         int short_score = -gap_cost_short(j);
         int long_score = -gap_cost_long(j);
         bool use_long = long_score > short_score;
         h_prev[j] = use_long ? long_score : short_score;
-        i1_prev[j] = NEG_INF;
-        i2_prev[j] = NEG_INF;
+        i1_prev[j] = k_negative_infinity;
+        i2_prev[j] = k_negative_infinity;
         uint source = use_long ? 4u : 2u;
         uint cont_bit = j > 1u ? (use_long ? (1u << 6u) : (1u << 4u)) : 0u;
         traceback[traceback_index(job, target_cols, 0u, j)] = source | cont_bit;
@@ -5555,8 +5608,8 @@ void solve_bounded_dp(uint job_index) {
         h_cur[0] = use_long ? long_score : short_score;
         i1_cur[0] = short_score;
         i2_cur[0] = long_score;
-        d1_cur[0] = NEG_INF;
-        d2_cur[0] = NEG_INF;
+        d1_cur[0] = k_negative_infinity;
+        d2_cur[0] = k_negative_infinity;
         uint source = use_long ? 3u : 1u;
         uint cont_bit = i > 1u ? (use_long ? (1u << 5u) : (1u << 3u)) : 0u;
         traceback[traceback_index(job, target_cols, i, 0u)] = source | cont_bit;
@@ -5628,8 +5681,8 @@ void solve_bounded_dp(uint job_index) {
         if (state == 0u) {
             uint source = trace & 7u;
             if (source == 0u && i > 0u && j > 0u) {
-                if (!append_reverse_cigar(job, cigar_length, CIGAR_MATCH)) {
-                    write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+                if (!append_reverse_cigar(job, cigar_length, k_cigar_match)) {
+                    write_reject(job_index, k_status_cigar_overflow);
                     return;
                 }
                 --i;
@@ -5646,8 +5699,8 @@ void solve_bounded_dp(uint job_index) {
                 break;
             }
         } else if (state == 1u || state == 3u) {
-            if (!append_reverse_cigar(job, cigar_length, CIGAR_INS)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_reverse_cigar(job, cigar_length, k_cigar_insert)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return;
             }
             bool cont = state == 1u ? ((trace & (1u << 3u)) != 0u)
@@ -5655,8 +5708,8 @@ void solve_bounded_dp(uint job_index) {
             --i;
             state = cont ? state : 0u;
         } else {
-            if (!append_reverse_cigar(job, cigar_length, CIGAR_DEL)) {
-                write_reject(job_index, STATUS_CIGAR_OVERFLOW);
+            if (!append_reverse_cigar(job, cigar_length, k_cigar_delete)) {
+                write_reject(job_index, k_status_cigar_overflow);
                 return;
             }
             bool cont = state == 2u ? ((trace & (1u << 4u)) != 0u)
@@ -5680,19 +5733,19 @@ void main() {
 )GLSL";
 
 constexpr std::string_view k_generate_units_body = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-#define UNIT_BITS MAX_SPAN
-#if UNIT_BITS == 64
-  #define UNIT uint64_t
+#define storage_unit_bits compile_time_maximum_span
+#if storage_unit_bits == 64
+  #define storage_unit uint64_t
 #else
-  #define UNIT uint
+  #define storage_unit uint
 #endif
 
-layout(std430, set = 0, binding = 0) writeonly buffer OutUnits { UNIT out_units[]; };
-layout(std430, set = 0, binding = 1) readonly  buffer Cdf      { uint cdf[]; };
+layout(std430, set = 0, binding = 0) writeonly buffer output_units_buffer { storage_unit out_units[]; };
+layout(std430, set = 0, binding = 1) readonly  buffer cdf_buffer      { uint cdf[]; };
 
-layout(push_constant) uniform Params {
+layout(push_constant) uniform push_constants {
     uint symbols_per_seq;
     uint units_per_seq;
     uint chunks_per_seq;
@@ -5761,10 +5814,10 @@ void main() {
         if (local_unit >= pc.units_per_seq) break;
         uint sym0 = local_unit * pc.letters_per_unit;
         uint valid = min(pc.letters_per_unit, pc.symbols_per_seq - sym0);
-        UNIT acc = UNIT(0);
+        storage_unit acc = storage_unit(0);
         for (uint slot = 0u; slot < valid; ++slot) {
             uint r = sample_rank(next_u32(st));
-            acc |= UNIT(r) << (slot * pc.bits_per_char);
+            acc |= storage_unit(r) << (slot * pc.bits_per_char);
         }
         out_units[seq_unit0 + local_unit] = acc;
     }
@@ -5774,19 +5827,18 @@ void main() {
 // ===========================================================================
 // GPU sequence-sort kernels (dna4-optimized and generic)
 //
-// Each kind's body is composed (in shader_body_for) as:
-//   k_sequence_sort_push + kSeqSortCommon + (dna4?k_dna4_canonicalizer:k_generic_canonicalizer)
-//                + one stage main
-// so the dna4/generic canonicalizer is chosen BY shader_kind (no request
-// threading). Storage width is runtime via pc.unit_bits + read_storage_unit64
-// (the verbatim helper copied from the candidate body — it is function-local
-// there, not a shared symbol). LOCAL_SIZE_X comes from the injected prelude.
+// Each kind's body is composed in shader_body_for from k_sequence_sort_push,
+// k_sequence_sort_readers, the selected canonicalizer,
+// k_sequence_sort_key_compare, and one stage main. shader_kind selects the
+// canonicalizer. Storage width is runtime via pc.unit_bits and
+// read_storage_unit64. compile_time_workgroup_size_x comes from the injected
+// prelude.
 // ===========================================================================
 
-/// @brief Push-constant block (40 bytes == SeqSortPush in runtime.cppm). Identical for
+/// @brief Push-constant block (40 bytes). Identical for
 /// all seq-sort kinds so one struct serves every stage.
 constexpr std::string_view k_sequence_sort_push = R"GLSL(
-layout(push_constant) uniform P {
+layout(push_constant) uniform sequence_sort_push_constants {
     uint count;              // row_count (key stage) / range_count (tiebreak stage)
     uint unit_bits;          // 8/16/32/64
     uint bits_per_char;      // generic only (dna4 uses const 2)
@@ -5802,14 +5854,14 @@ layout(push_constant) uniform P {
 
 /// @brief Descriptor bindings + packed-sequence reader + low_symbol_mask. Declared
 /// BEFORE the canonicalizer so it can call low_symbol_mask, and before the
-/// key/compare snippet which needs SeqDesc + read_unit. read_unit() forward-uses
+/// key/compare snippet which needs sequence_descriptor + read_unit. read_unit() forward-uses
 /// unit_bits() (defined in the canon snippet that follows), which is fine in
 /// GLSL because the canon snippet is concatenated between this and k_sequence_sort_key_compare.
 constexpr std::string_view k_sequence_sort_readers = R"GLSL(
-struct SeqDesc { uint word_offset; uint unit_count; uint bp_size; uint pad; };  // std430, 16B
+struct sequence_descriptor { uint word_offset; uint unit_count; uint bp_size; uint pad; };  // std430, 16B
 
-layout(std430, set=0, binding=0) readonly buffer SeqWords { uint    seq_words[]; };
-layout(std430, set=0, binding=1) readonly buffer Descs    { SeqDesc descs[];     };
+layout(std430, set=0, binding=0) readonly buffer sequence_words_buffer { uint    seq_words[]; };
+layout(std430, set=0, binding=1) readonly buffer descriptors_buffer { sequence_descriptor descs[]; };
 
 uint read_u32_word(uint word_index) { return seq_words[word_index]; }
 
@@ -5847,12 +5899,12 @@ uint64_t low_symbol_mask(uint valid_syms, uint bpc) {
 /// @brief Canonical key + full canonical compare. Uses canon()/lpu()/unit_bits() from
 /// the canonicalizer snippet (concatenated immediately before this).
 constexpr std::string_view k_sequence_sort_key_compare = R"GLSL(
-uint64_t read_unit(SeqDesc d, uint j) {
+uint64_t read_unit(sequence_descriptor d, uint j) {
     return read_storage_unit64(j, unit_bits(), d.word_offset);
 }
 
 // 64-bit lexicographic radix key = first 64 canonical bits (zero-filled tail).
-uint64_t canon_key(SeqDesc d) {
+uint64_t canon_key(sequence_descriptor d) {
     uint64_t key = 0ul; uint filled = 0u;
     uint ub = unit_bits();
     for (uint j = 0u; j < d.unit_count && filled < 64u; ++j) {
@@ -5867,9 +5919,9 @@ uint64_t canon_key(SeqDesc d) {
 }
 
 // 64-bit lexicographic radix key starting at a unit offset. This is used by the
-// dense scatter fast path after a GPU common-prefix proof has established that
-// earlier units are identical across the whole batch.
-uint64_t canon_key_at(SeqDesc d, uint start_unit) {
+// dense scatter fast path after common-prefix validation establishes that all
+// earlier units are identical across the batch.
+uint64_t canon_key_at(sequence_descriptor d, uint start_unit) {
     uint64_t key = 0ul; uint filled = 0u;
     uint ub = unit_bits();
     for (uint j = start_unit; j < d.unit_count && filled < 64u; ++j) {
@@ -5885,7 +5937,7 @@ uint64_t canon_key_at(SeqDesc d, uint start_unit) {
 }
 
 // Full canonical compare: -1 / 0 / +1 (matches compare_sequences_scalar exactly).
-int canon_cmp(SeqDesc a, SeqDesc b) {
+int canon_cmp(sequence_descriptor a, sequence_descriptor b) {
     uint units = min(a.unit_count, b.unit_count);
     for (uint j = 0u; j < units; ++j) {
         uint base0 = j * lpu();
@@ -5955,9 +6007,9 @@ uint64_t canon(uint64_t raw, uint valid) {
 
 /// @brief Kernel A main: one invocation per row -> (key:uint64, value:uint64=row index).
 constexpr std::string_view k_sequence_sort_key_main = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X) in;
-layout(std430, set=0, binding=2) writeonly buffer Keys { uint64_t keys[]; };
-layout(std430, set=0, binding=3) writeonly buffer Vals { uint64_t vals[]; };
+layout(local_size_x = compile_time_workgroup_size_x) in;
+layout(std430, set=0, binding=2) writeonly buffer keys_buffer { uint64_t keys[]; };
+layout(std430, set=0, binding=3) writeonly buffer values_buffer { uint64_t vals[]; };
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
@@ -5968,19 +6020,19 @@ void main() {
 
 /// @brief Kernel B main: one workgroup per equal-key run; bitonic over canon_cmp.
 constexpr std::string_view k_sequence_sort_tiebreak_main = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X) in;
-layout(std430, set=0, binding=2) buffer Index           { uint index[];  };       // radix-sorted row ids (in/out)
-struct SeqSortRange { uint begin; uint len; };
-layout(std430, set=0, binding=3) readonly buffer Ranges { SeqSortRange ranges[]; };
-shared uint sh_idx[LOCAL_SIZE_X];
+layout(local_size_x = compile_time_workgroup_size_x) in;
+layout(std430, set=0, binding=2) buffer index_buffer           { uint index[];  };       // radix-sorted row ids (in/out)
+struct sequence_sort_range { uint begin; uint len; };
+layout(std430, set=0, binding=3) readonly buffer ranges_buffer { sequence_sort_range ranges[]; };
+shared uint sh_idx[compile_time_workgroup_size_x];
 void main() {
     uint rid = gl_WorkGroupID.x; uint t = gl_LocalInvocationID.x;
     if (rid >= pc.count) return;
-    SeqSortRange r = ranges[rid];
-    if (r.len > LOCAL_SIZE_X) return;                       // global GPU pass handles oversized runs
+    sequence_sort_range r = ranges[rid];
+    if (r.len > compile_time_workgroup_size_x) return;                       // global GPU stage handles oversized runs
     sh_idx[t] = (t < r.len) ? index[r.begin + t] : 0xffffffffu;   // sentinel sorts last
     barrier();
-    for (uint size = 2u; size <= LOCAL_SIZE_X; size <<= 1u)
+    for (uint size = 2u; size <= compile_time_workgroup_size_x; size <<= 1u)
       for (uint stride = size >> 1u; stride > 0u; stride >>= 1u) {
         uint o = t ^ stride;
         if (o > t) {
@@ -5998,13 +6050,13 @@ void main() {
 }
 )GLSL";
 
-/// @brief Kernel C main: one global bitonic compare-swap pass over the padded index
+/// @brief Kernel C main: one global bitonic compare-swap stage over the padded index
 /// buffer. Used only when a 64-bit key collision run is too large for the
 /// per-workgroup tiebreak kernel.
 constexpr std::string_view k_sequence_sort_global_compare_main = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X) in;
-layout(std430, set=0, binding=2) buffer Index { uint index[]; };
-layout(std430, set=0, binding=3) readonly buffer UnusedRanges { uint unused_ranges[]; };
+layout(local_size_x = compile_time_workgroup_size_x) in;
+layout(std430, set=0, binding=2) buffer index_buffer { uint index[]; };
+layout(std430, set=0, binding=3) readonly buffer unused_ranges_buffer { uint unused_ranges[]; };
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
@@ -6031,17 +6083,17 @@ void main() {
 
 /// @brief Kernel D main: dense-rank scatter. This is a verified fast path for batches
 /// whose selected 64-bit canonical key is exactly a permutation of [0,count).
-/// For non-zero key offsets the shader also proves, on device, that all earlier
+/// For non-zero key offsets the shader also validates on device that all earlier
 /// units match row 0; otherwise sorting by a later key would not be lexicographic.
 constexpr std::string_view k_sequence_sort_dense_scatter_main = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X) in;
-layout(std430, set=0, binding=2) buffer Index { uint index[]; };
-layout(std430, set=0, binding=3) buffer Status { uint status[]; };
+layout(local_size_x = compile_time_workgroup_size_x) in;
+layout(std430, set=0, binding=2) buffer index_buffer { uint index[]; };
+layout(std430, set=0, binding=3) buffer status_buffer { uint status[]; };
 
-bool prefix_matches_first(SeqDesc d) {
+bool prefix_matches_first(sequence_descriptor d) {
     if (pc.key_unit_offset == 0u) return true;
-    if (pc.sort_size != 0u) return true;  // prefix_check stage already proved it
-    SeqDesc first = descs[0];
+    if (pc.sort_size != 0u) return true;  // prefix_check stage already validated it
+    sequence_descriptor first = descs[0];
     if (d.bp_size != first.bp_size || d.unit_count != first.unit_count) return false;
     if (pc.key_unit_offset > d.unit_count) return false;
     for (uint j = 0u; j < pc.key_unit_offset; ++j) {
@@ -6058,7 +6110,7 @@ bool prefix_matches_first(SeqDesc d) {
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.count) return;
-    SeqDesc d = descs[i];
+    sequence_descriptor d = descs[i];
     if (!prefix_matches_first(d)) {
         atomicOr(status[0], 2u);
         return;
@@ -6081,9 +6133,9 @@ void main() {
 /// status word on any mismatch. Dense scatter then runs after a command-buffer
 /// barrier with pc.sort_size != 0 to avoid rechecking the prefix serially.
 constexpr std::string_view k_sequence_sort_prefix_check_main = R"GLSL(
-layout(local_size_x = LOCAL_SIZE_X) in;
-layout(std430, set=0, binding=2) readonly buffer UnusedIndex { uint unused_index[]; };
-layout(std430, set=0, binding=3) buffer Status { uint status[]; };
+layout(local_size_x = compile_time_workgroup_size_x) in;
+layout(std430, set=0, binding=2) readonly buffer unused_index_buffer { uint unused_index[]; };
+layout(std430, set=0, binding=3) buffer status_buffer { uint status[]; };
 
 void main() {
     if (pc.key_unit_offset == 0u) return;
@@ -6092,8 +6144,8 @@ void main() {
     uint j = linear_id - row * pc.key_unit_offset;
     if (row >= pc.count) return;
 
-    SeqDesc d = descs[row];
-    SeqDesc first = descs[0];
+    sequence_descriptor d = descs[row];
+    sequence_descriptor first = descs[0];
     if (d.bp_size != first.bp_size || d.unit_count != first.unit_count
         || pc.key_unit_offset > d.unit_count) {
         atomicOr(status[0], 2u);
@@ -6138,8 +6190,8 @@ enum class sequence_sort_stage : std::uint8_t {
         k_rank_prefilter_preamble.size() + k_gatekeeper_rank_batch_body.size() + 96u);
     body += k_rank_prefilter_preamble;
     body += fmt::format(
-        "#define GATEKEEPER_SPECIALIZED_LENGTH {}\n"
-        "#define GATEKEEPER_SPECIALIZED_EDITS {}\n",
+        "#define gatekeeper_specialized_length {}\n"
+        "#define gatekeeper_specialized_edits {}\n",
         length,
         max_edits);
     body += k_gatekeeper_rank_batch_body;
@@ -6421,9 +6473,9 @@ std::vector<std::uint32_t> compile_shader_spirv(const shader_compile_request& re
     const std::string source = fmt::format(
         "#version 460\n"
         "#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require\n"
-        "#define LOCAL_SIZE_X {}\n"
-        "#define TILE_SIZE {}\n"
-        "#define MAX_SPAN {}\n"
+        "#define compile_time_workgroup_size_x {}\n"
+        "#define compile_time_tile_size {}\n"
+        "#define compile_time_maximum_span {}\n"
         "{}",
         request.local_size, request.tile_size, request.max_span,
         shader_body_for(request.kind));

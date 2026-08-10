@@ -473,7 +473,7 @@ class UniquePrivateCluster:
             "PGUSER": self.database_user,
             # The core integration executable predates the generic private-PG
             # spelling below. Publish both exact ABIs from the same owned
-            # values so an MCP server can run unit+integration inside this
+            # values so an MCP server can run unit-integration inside this
             # cluster without a shell adapter or ambient connection fallback.
             "BIOSEQ_TEST_PGHOST": str(self.socket_dir),
             "BIOSEQ_TEST_PGPORT": str(self.port),

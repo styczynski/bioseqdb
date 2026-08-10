@@ -104,20 +104,20 @@ enum class reader_backend : std::uint8_t {
 
 /// View of one record's packed sequence inside a batch's shared
 /// `_sequence_storage`. Models the same surface used by
-/// `compact_sequence_range<C>`: `size()` (storage-unit count),
+/// `compact_sequence_range<p_range>`: `size()` (storage-unit count),
 /// `padding()` (count of trailing dummy letters), and a const
 /// random-access iterator pair so range-based `for` over storage
-/// units works unchanged. Templated on the same `C` (custom alphabet
-/// config) as `compact_sequence_range<C>` so callers can use the same
+/// units works unchanged. Templated on the same custom alphabet range as
+/// `compact_sequence_range<p_range>` so callers can use the same
 /// `traits` typedef.
 ///
 /// The view is non-owning — its lifetime is bound to the batch that
 /// produced it. Once the batch is destroyed the view is dangling.
 /// In practice the handler always processes the batch in scope.
-template <supports_compact_sequence_range R>
+template <supports_compact_sequence_range p_range>
 class compact_sequence_view {
 public:
-    using traits = typename compact_sequence_range<R>::traits;
+    using traits = typename compact_sequence_range<p_range>::traits;
     using storage_unit = typename traits::storage_unit;
     using iterator = const storage_unit*;
     using const_iterator = const storage_unit*;
@@ -165,9 +165,9 @@ private:
 /// (i.e. `words.size()*letters_per_unit - logical_length`). This is the surface that
 /// lets a 6 Gbp FASTA record be loaded
 /// without ever materialising a whole-record `sequence_batch`.
-template <typename storage_unit_t>
+template <typename p_storage_unit>
 struct packed_sequence_chunk {
-    std::span<const storage_unit_t> words;          // column-unit-packed, naturally aligned
+    std::span<const p_storage_unit> words;          // column-unit-packed, naturally aligned
     std::uint64_t                   logical_length = 0;    // valid bases in this chunk
     bool                            end_of_record = false;
 };
@@ -179,14 +179,14 @@ struct packed_sequence_chunk {
 /// allocations that dominated short-read throughput.
 ///
 /// The accessors `header(i)` / `sequence(i)` / `quality(i)` return
-/// non-owning views (`std::string_view`, `compact_sequence_view<C>`,
+/// non-owning views (`std::string_view`, `compact_sequence_view<p_range>`,
 /// `std::span<const std::uint8_t>`) into the batch's shared storage.
 /// Returned views remain valid as long as the batch.
-template <supports_compact_sequence_range R>
+template <supports_compact_sequence_range p_range>
 class sequence_batch {
 public:
-    using sequence_range = compact_sequence_range<R>;
-    using sequence_view = compact_sequence_view<R>;
+    using sequence_range = compact_sequence_range<p_range>;
+    using sequence_view = compact_sequence_view<p_range>;
     using storage_unit = typename sequence_view::storage_unit;
 
     [[nodiscard]] std::size_t size() const noexcept { return _sequence_paddings.size(); }
@@ -283,8 +283,8 @@ private:
 
 /// Concept matching the spec §3.5: a handler that accepts a batch
 /// rvalue.
-template <typename handler_fn_t, typename batch_t>
-concept sequence_batch_handler = std::invocable<handler_fn_t, batch_t&&>;
+template <typename p_handler, typename p_batch>
+concept sequence_batch_handler = std::invocable<p_handler, p_batch&&>;
 
 namespace detail {
 
@@ -292,26 +292,30 @@ namespace detail {
 /// path: the same thread reads bytes, parses records, and invokes the
 /// user's handler. Spec §12.6 + Appendix M.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    io_source source_t,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    io_source p_source,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> run_sync_pipeline(
-    source_t source,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_source source,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options) {
 
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using batch_t = sequence_batch<alphabet_config>;
-    using sequence_traits = typename compact_sequence_range<alphabet_config>::traits;
+    using alphabet_config_type =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using batch_type = sequence_batch<alphabet_config_type>;
+    using sequence_traits_type =
+        typename compact_sequence_range<alphabet_config_type>::traits;
 
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
 
     buffer_slab slab(options.io.initial_buffer_size);
-    batch_t batch;
+    batch_type batch;
     std::size_t records_emitted = 0;
     bool aborted = false;
     std::string captured_error;
@@ -330,7 +334,8 @@ template <
             ? options.concurrency.batch_target_record_count
             : 4096;
 
-    constexpr bool is_fastq_format = (file_type == sequence_file_format::fastq);
+    constexpr bool is_fastq_format =
+        p_file_format == sequence_file_format::fastq;
     auto prepare_fresh_batch = [&]() {
         batch.prepare(flush_record_threshold, is_fastq_format);
         // Generous up-front reservations sized for ~256 bp records.
@@ -344,13 +349,13 @@ template <
     auto flush_batch = [&]() {
         if (batch.empty()) return;
         handler_fn(std::move(batch));
-        batch = batch_t{};
+        batch = batch_type{};
         prepare_fresh_batch();
     };
 
     prepare_fresh_batch();
 
-    if constexpr (file_type == sequence_file_format::fasta) {
+    if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(batch.header_storage(),
                                      batch.sequence_storage());
@@ -405,7 +410,9 @@ template <
                 // the (header_offset, seq_offset, padding) triple.
                 parser_state.attach_to_batch(batch.header_storage(),
                                              batch.sequence_storage());
-                const auto step = parse_one_fasta_record<alphabet_t, std::uint64_t>(
+                const auto step = parse_one_fasta_record<
+                    p_alphabet,
+                    std::uint64_t>(
                     parser_state,
                     slab.raw(),
                     slab.fill_size,
@@ -490,7 +497,9 @@ template <
                 parser_state.attach_to_batch(batch.header_storage(),
                                              batch.sequence_storage(),
                                              batch.quality_storage());
-                const auto step = parse_one_fastq_record<alphabet_t, std::uint64_t>(
+                const auto step = parse_one_fastq_record<
+                    p_alphabet,
+                    std::uint64_t>(
                     parser_state,
                     slab.raw(),
                     slab.fill_size,
@@ -555,29 +564,33 @@ template <
 /// the ~9 geometric reallocs that would otherwise fire while encoding
 /// a 234 MiB body.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string>
 run_sync_pipeline_mmap_direct(
     mmap_source source,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options) {
 
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using batch_t = sequence_batch<alphabet_config>;
-    using sequence_traits =
-        typename compact_sequence_range<alphabet_config>::traits;
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
-    constexpr bool is_fastq_format = (file_type == sequence_file_format::fastq);
+    using alphabet_config_type =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using batch_type = sequence_batch<alphabet_config_type>;
+    using sequence_traits_type =
+        typename compact_sequence_range<alphabet_config_type>::traits;
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
+    constexpr bool is_fastq_format =
+        p_file_format == sequence_file_format::fastq;
 
     const std::size_t file_size = source.mapped_size();
     auto [base_ptr, view_size] = source.direct_view();
 
-    batch_t batch;
+    batch_type batch;
     std::size_t records_emitted = 0;
     bool aborted = false;
     std::string captured_error;
@@ -614,13 +627,13 @@ run_sync_pipeline_mmap_direct(
     auto flush_batch = [&]() {
         if (batch.empty()) return;
         handler_fn(std::move(batch));
-        batch = batch_t{};
+        batch = batch_type{};
         prepare_fresh_batch();
     };
 
     prepare_fresh_batch();
 
-    if constexpr (file_type == sequence_file_format::fasta) {
+    if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(batch.header_storage(),
                                      batch.sequence_storage());
@@ -641,7 +654,9 @@ run_sync_pipeline_mmap_direct(
         while (cursor < view_size && !aborted) {
             parser_state.attach_to_batch(batch.header_storage(),
                                          batch.sequence_storage());
-            const auto step = parse_one_fasta_record<alphabet_t, std::uint64_t>(
+            const auto step = parse_one_fasta_record<
+                p_alphabet,
+                std::uint64_t>(
                 parser_state,
                 base_ptr,
                 view_size,
@@ -690,7 +705,9 @@ run_sync_pipeline_mmap_direct(
             parser_state.attach_to_batch(batch.header_storage(),
                                          batch.sequence_storage(),
                                          batch.quality_storage());
-            const auto step = parse_one_fastq_record<alphabet_t, std::uint64_t>(
+            const auto step = parse_one_fastq_record<
+                p_alphabet,
+                std::uint64_t>(
                 parser_state,
                 base_ptr,
                 view_size,
@@ -828,25 +845,29 @@ run_sync_pipeline_mmap_direct(
 /// real handlers (alignment, indexing) consume per-batch with no
 /// cross-batch ordering requirement.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string>
 run_sync_pipeline_mmap_parallel(
     mmap_source source,
     std::size_t shard_count,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options) {
 
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using batch_t = sequence_batch<alphabet_config>;
-    using sequence_traits =
-        typename compact_sequence_range<alphabet_config>::traits;
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
-    constexpr bool is_fastq_format = (file_type == sequence_file_format::fastq);
+    using alphabet_config_type =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using batch_type = sequence_batch<alphabet_config_type>;
+    using sequence_traits_type =
+        typename compact_sequence_range<alphabet_config_type>::traits;
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
+    constexpr bool is_fastq_format =
+        p_file_format == sequence_file_format::fastq;
 
     auto [base_ptr, view_size] = source.direct_view();
     auto& pool = bioseq::parallelism::global_pool::instance();
@@ -864,10 +885,10 @@ run_sync_pipeline_mmap_parallel(
         shard_count, pool.maximum_concurrency());
     if (view_size == 0 || shard_count <= 1) {
         // Fall back to the sequential direct path.
-        return run_sync_pipeline_mmap_direct<alphabet_t, file_type>(
+        return run_sync_pipeline_mmap_direct<p_alphabet, p_file_format>(
             std::move(source),
-            std::forward<handler_fn_t>(handler_fn),
-            std::forward<failure_fn_t>(failure_fn),
+            std::forward<p_handler>(handler_fn),
+            std::forward<p_failure>(failure_fn),
             options);
     }
 
@@ -878,7 +899,8 @@ run_sync_pipeline_mmap_parallel(
     for (std::size_t shard_index = 1; shard_index < shard_count; ++shard_index) {
         const std::size_t target =
             (view_size * shard_index) / shard_count;
-        std::size_t actual = (file_type == sequence_file_format::fasta)
+        std::size_t actual =
+            p_file_format == sequence_file_format::fasta
             ? find_fasta_record_boundary(base_ptr, view_size, target)
             : find_fastq_record_boundary(base_ptr, view_size, target);
         // Monotonicity: if a shard's adjusted start lands past the
@@ -943,7 +965,7 @@ run_sync_pipeline_mmap_parallel(
         // The `flush_record_threshold * X` floors handle the SHORT
         // synthetic cells that fall below the parallel threshold but
         // would otherwise reserve too little for one batch.
-        batch_t batch;
+        batch_type batch;
         const std::size_t shard_seq_words_hint = std::max<std::size_t>(
             shard_size / 16, flush_record_threshold * 8);
         const std::size_t shard_header_bytes_hint = std::max<std::size_t>(
@@ -973,11 +995,11 @@ run_sync_pipeline_mmap_parallel(
                 std::lock_guard guard{emit_mutex};
                 handler_fn(std::move(batch));
             }
-            batch = batch_t{};
+            batch = batch_type{};
             prepare_fresh_batch();
         };
 
-        if constexpr (file_type == sequence_file_format::fasta) {
+        if constexpr (p_file_format == sequence_file_format::fasta) {
             fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit>
                 parser_state;
             parser_state.attach_to_batch(batch.header_storage(),
@@ -999,7 +1021,7 @@ run_sync_pipeline_mmap_parallel(
                 parser_state.attach_to_batch(batch.header_storage(),
                                              batch.sequence_storage());
                 const auto step =
-                    parse_one_fasta_record<alphabet_t, std::uint64_t>(
+                    parse_one_fasta_record<p_alphabet, std::uint64_t>(
                         parser_state,
                         base_ptr,
                         shard_end,
@@ -1041,7 +1063,7 @@ run_sync_pipeline_mmap_parallel(
                                              batch.sequence_storage(),
                                              batch.quality_storage());
                 const auto step =
-                    parse_one_fastq_record<alphabet_t, std::uint64_t>(
+                    parse_one_fastq_record<p_alphabet, std::uint64_t>(
                         parser_state,
                         base_ptr,
                         shard_end,
@@ -1080,20 +1102,21 @@ run_sync_pipeline_mmap_parallel(
 /// are configured, otherwise to the async pipeline. mmap source goes
 /// through the zero-copy direct path when sync.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    io_source source_t,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    io_source p_source,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> run_pipeline_for_source(
-    source_t source,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_source source,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options) {
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using batch_t = sequence_batch<alphabet_config>;
+    using alphabet_config_type =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using batch_type = sequence_batch<alphabet_config_type>;
     if (options.concurrency.worker_count == 0) {
-        if constexpr (std::is_same_v<source_t, mmap_source>) {
+        if constexpr (std::is_same_v<p_source, mmap_source>) {
             if (options.io.mmap_zero_copy) {
                 // Pick shard count: explicit option wins, else
                 // hardware_concurrency capped at mmap_parallel_max_shards.
@@ -1112,37 +1135,43 @@ template <
                     source.mapped_size() >=
                         options.concurrency.mmap_parallel_min_bytes) {
                     return run_sync_pipeline_mmap_parallel<
-                        alphabet_t, file_type>(
+                        p_alphabet, p_file_format>(
                         std::move(source),
                         requested_shards,
-                        std::forward<handler_fn_t>(handler_fn),
-                        std::forward<failure_fn_t>(failure_fn),
+                        std::forward<p_handler>(handler_fn),
+                        std::forward<p_failure>(failure_fn),
                         options);
                 }
-                return run_sync_pipeline_mmap_direct<alphabet_t, file_type>(
+                return run_sync_pipeline_mmap_direct<
+                    p_alphabet,
+                    p_file_format>(
                     std::move(source),
-                    std::forward<handler_fn_t>(handler_fn),
-                    std::forward<failure_fn_t>(failure_fn),
+                    std::forward<p_handler>(handler_fn),
+                    std::forward<p_failure>(failure_fn),
                     options);
             }
         }
-        return run_sync_pipeline<alphabet_t, file_type, source_t>(
+        return run_sync_pipeline<p_alphabet, p_file_format, p_source>(
             std::move(source),
-            std::forward<handler_fn_t>(handler_fn),
-            std::forward<failure_fn_t>(failure_fn),
+            std::forward<p_handler>(handler_fn),
+            std::forward<p_failure>(failure_fn),
             options);
     }
-    return run_async_pipeline<alphabet_t, file_type, source_t, batch_t>(
+    return run_async_pipeline<
+        p_alphabet,
+        p_file_format,
+        p_source,
+        batch_type>(
         std::move(source),
-        std::forward<handler_fn_t>(handler_fn),
-        std::forward<failure_fn_t>(failure_fn),
+        std::forward<p_handler>(handler_fn),
+        std::forward<p_failure>(failure_fn),
         options);
 }
 
 /// single-threaded streaming read loop. Mirrors
 /// `run_sync_pipeline`'s slab/refill/FSM cycle, but instead of accumulating a
 /// whole `sequence_batch` it drives the per-record FSM with bounded scratch
-/// buffers and emits `packed_sequence_chunk<storage_unit_t>` values to the
+/// buffers and emits `packed_sequence_chunk<p_storage_unit>` values to the
 /// caller's `sink`. The FSM is storage-unit-parametric, so the chunk words are
 /// already in the caller's native column layout (no re-pack). Peak memory is
 /// one slab + one record header + one bounded packed window — never a whole
@@ -1154,22 +1183,26 @@ template <
 /// `end_of_record == true` and `logical_length` ≤ that), then `sink.end_record()`
 /// once. The `words` span is valid ONLY during the `chunk` call.
 template <
-    sequence_alphabet alphabet_t,
-    typename storage_unit_t,
-    sequence_file_format file_type,
-    io_source source_t,
-    typename sink_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    typename p_storage_unit,
+    sequence_file_format p_file_format,
+    io_source p_source,
+    typename p_sink,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> run_sync_stream(
-    source_t source,
-    sink_fn_t&& sink,
-    failure_fn_t&& failure_fn,
+    p_source source,
+    p_sink&& sink,
+    p_failure&& failure_fn,
     const reader_options& options) {
 
-    using stream_config = sequence_custom_alphabet<alphabet_t, storage_unit_t>;
-    using stream_traits = typename compact_sequence_range<stream_config>::traits;
-    constexpr std::size_t bits_per_char    = stream_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = stream_traits::letters_per_unit;
+    using stream_config_type =
+        sequence_custom_alphabet<p_alphabet, p_storage_unit>;
+    using stream_traits_type =
+        typename compact_sequence_range<stream_config_type>::traits;
+    constexpr std::size_t bits_per_char =
+        stream_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        stream_traits_type::letters_per_unit;
 
     buffer_slab slab(options.io.initial_buffer_size);
     std::size_t records_emitted = 0;
@@ -1189,7 +1222,7 @@ template <
     // encoder stays 0 because every record starts (and every mid-record drain
     // leaves) `seq_scratch` empty.
     std::vector<char>           header_scratch;
-    std::vector<storage_unit_t> seq_scratch;
+    std::vector<p_storage_unit> seq_scratch;
     std::vector<std::uint8_t>   quality_scratch;     // FASTQ; content ignored
 
     bool          record_open      = false;          // begin_record already called
@@ -1210,8 +1243,8 @@ template <
 
     auto emit_stream_chunk = [&](std::uint64_t chunk_bp, bool end_of_record) {
         if constexpr (requires (
-                sink_fn_t& sink_ref,
-                std::vector<storage_unit_t>&& owned_words,
+                p_sink& sink_ref,
+                std::vector<p_storage_unit>&& owned_words,
                 std::uint64_t bp,
                 bool eof) {
                 sink_ref.chunk_owned(std::move(owned_words), bp, eof);
@@ -1220,11 +1253,11 @@ template <
             seq_scratch = {};
             seq_scratch.reserve(
                 std::max<std::size_t>(
-                    options.io.initial_buffer_size / sizeof(storage_unit_t),
+                    options.io.initial_buffer_size / sizeof(p_storage_unit),
                     1024));
         } else {
-            sink.chunk(packed_sequence_chunk<storage_unit_t>{
-                std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
+            sink.chunk(packed_sequence_chunk<p_storage_unit>{
+                std::span<const p_storage_unit>(seq_scratch.data(), seq_scratch.size()),
                 chunk_bp, end_of_record});
             seq_scratch.clear();
         }
@@ -1276,8 +1309,8 @@ template <
         completed_padding      = padding;
     };
 
-    if constexpr (file_type == sequence_file_format::fasta) {
-        fasta_parser_state<storage_unit_t, bits_per_char, letters_per_unit> parser_state;
+    if constexpr (p_file_format == sequence_file_format::fasta) {
+        fasta_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
         auto emit_fasta = [&](std::size_t header_start, std::size_t header_size,
                               std::size_t, std::size_t, std::size_t padding) {
             capture_completion(header_start, header_size, padding);
@@ -1306,7 +1339,9 @@ template <
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch);
-                const auto step = parse_one_fasta_record<alphabet_t, storage_unit_t>(
+                const auto step = parse_one_fasta_record<
+                    p_alphabet,
+                    p_storage_unit>(
                     parser_state, slab.raw(), slab.fill_size, slab.is_eof,
                     slab.parse_cursor, global_offset_base + slab.parse_cursor,
                     emit_fasta, failure_capture);
@@ -1339,7 +1374,7 @@ template <
         return std::unexpected(captured_error);
 
     } else {
-        fastq_parser_state<storage_unit_t, bits_per_char, letters_per_unit> parser_state;
+        fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
         auto emit_fastq = [&](std::size_t header_start, std::size_t header_size,
                               std::size_t, std::size_t, std::size_t padding,
                               std::size_t, std::size_t) {
@@ -1369,7 +1404,9 @@ template <
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch, quality_scratch);
-                const auto step = parse_one_fastq_record<alphabet_t, storage_unit_t>(
+                const auto step = parse_one_fastq_record<
+                    p_alphabet,
+                    p_storage_unit>(
                     parser_state, slab.raw(), slab.fill_size, slab.is_eof,
                     slab.parse_cursor, global_offset_base + slab.parse_cursor,
                     options.encoder.strict_fastq, emit_fastq, failure_capture);
@@ -1407,15 +1444,16 @@ template <
 /// `stream_sequences_file` and `read_decompressed_prefix`: with `prefer_mmap`,
 /// magic-sniff for gzip (gzip_source if gzipped, else mmap_source); else with
 /// `gzip_auto_detect`, gzip_source; else posix_read_source. The chosen source is
-/// handed to `on_source(Source&&)`, which returns `std::expected<R,std::string>`;
+/// handed to `on_source(source)`, which returns the same expected result type;
 /// open failures are reported via `failure_fn` and returned as that same error
 /// type. Factored out so the 3-way selection lives in exactly one place.
-template <typename failure_fn_t, typename on_source_t>
+template <typename p_failure, typename p_on_source>
 [[nodiscard]] auto with_selected_source(
     std::string_view path_view, const reader_options& options,
-    failure_fn_t&& failure_fn, on_source_t&& on_source)
-    -> std::invoke_result_t<on_source_t&, posix_read_source&&> {
-    using result_t = std::invoke_result_t<on_source_t&, posix_read_source&&>;
+    p_failure&& failure_fn, p_on_source&& on_source)
+    -> std::invoke_result_t<p_on_source&, posix_read_source&&> {
+    using result_type =
+        std::invoke_result_t<p_on_source&, posix_read_source&&>;
     if (options.io.prefer_mmap) {
         auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
         if (mmap_or_err) {
@@ -1423,7 +1461,9 @@ template <typename failure_fn_t, typename on_source_t>
                 auto gz_or_err = gzip_source::try_open(path_view);
                 if (!gz_or_err) {
                     failure_fn(std::string{gz_or_err.error()});
-                    return result_t{std::unexpect, std::string{gz_or_err.error()}};
+                    return result_type{
+                        std::unexpect,
+                        std::string{gz_or_err.error()}};
                 }
                 return on_source(std::move(*gz_or_err));
             }
@@ -1436,14 +1476,18 @@ template <typename failure_fn_t, typename on_source_t>
         auto gz_or_err = gzip_source::try_open(path_view);
         if (!gz_or_err) {
             failure_fn(std::string{gz_or_err.error()});
-            return result_t{std::unexpect, std::string{gz_or_err.error()}};
+            return result_type{
+                std::unexpect,
+                std::string{gz_or_err.error()}};
         }
         return on_source(std::move(*gz_or_err));
     }
     auto posix_or_err = posix_read_source::try_open(path_view);
     if (!posix_or_err) {
         failure_fn(std::string{posix_or_err.error()});
-        return result_t{std::unexpect, std::string{posix_or_err.error()}};
+        return result_type{
+            std::unexpect,
+            std::string{posix_or_err.error()}};
     }
     return on_source(std::move(*posix_or_err));
 }
@@ -1456,22 +1500,22 @@ template <typename failure_fn_t, typename on_source_t>
 /// success, or the diagnostic message on failure (as a `std::expected`).
 /// Spec §3.5.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    typename PathLike,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    typename p_path,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> read_sequences_file(
-    PathLike&& file_path,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_path&& file_path,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options = default_reader_options,
     reader_backend* observed_backend = nullptr) {
 
-    static_assert(std::convertible_to<PathLike, std::string_view>,
+    static_assert(std::convertible_to<p_path, std::string_view>,
                   "file_path must be convertible to std::string_view");
     const std::string_view path_view = std::string_view{
-        std::forward<PathLike>(file_path)};
+        std::forward<p_path>(file_path)};
 
     const auto record_backend = [&](reader_backend backend) noexcept {
         if (observed_backend) *observed_backend = backend;
@@ -1501,10 +1545,12 @@ template <
                     if (pgz_or_err) {
                         record_backend(reader_backend::parallel_gzip);
                         return detail::run_pipeline_for_source<
-                            alphabet_t, file_type, parallel_gzip_source>(
+                            p_alphabet,
+                            p_file_format,
+                            parallel_gzip_source>(
                             std::move(*pgz_or_err),
-                            std::forward<handler_fn_t>(handler_fn),
-                            std::forward<failure_fn_t>(failure_fn),
+                            std::forward<p_handler>(handler_fn),
+                            std::forward<p_failure>(failure_fn),
                             options);
                     }
                     bioseq_log<logging_level::debug>("[bioseq_io] parallel_gzip_source failed for "
@@ -1522,18 +1568,18 @@ template <
                 }
                 record_backend(reader_backend::gzip);
                 return detail::run_pipeline_for_source<
-                    alphabet_t, file_type, gzip_source>(
+                    p_alphabet, p_file_format, gzip_source>(
                     std::move(*gz_or_err),
-                    std::forward<handler_fn_t>(handler_fn),
-                    std::forward<failure_fn_t>(failure_fn),
+                    std::forward<p_handler>(handler_fn),
+                    std::forward<p_failure>(failure_fn),
                     options);
             }
             record_backend(reader_backend::memory_mapped);
             return detail::run_pipeline_for_source<
-                alphabet_t, file_type, mmap_source>(
+                p_alphabet, p_file_format, mmap_source>(
                 std::move(mmap_or_err->source),
-                std::forward<handler_fn_t>(handler_fn),
-                std::forward<failure_fn_t>(failure_fn),
+                std::forward<p_handler>(handler_fn),
+                std::forward<p_failure>(failure_fn),
                 options);
         }
         bioseq_log<logging_level::debug>("[bioseq_io] mmap_source unavailable for '{}': {}; "
@@ -1548,10 +1594,10 @@ template <
         }
         record_backend(reader_backend::gzip);
         return detail::run_pipeline_for_source<
-            alphabet_t, file_type, gzip_source>(
+            p_alphabet, p_file_format, gzip_source>(
             std::move(*gzip_source_or_err),
-            std::forward<handler_fn_t>(handler_fn),
-            std::forward<failure_fn_t>(failure_fn),
+            std::forward<p_handler>(handler_fn),
+            std::forward<p_failure>(failure_fn),
             options);
     }
     auto posix_source_or_err = posix_read_source::try_open(path_view);
@@ -1561,32 +1607,32 @@ template <
     }
     record_backend(reader_backend::posix_read);
     return detail::run_pipeline_for_source<
-        alphabet_t, file_type, posix_read_source>(
+        p_alphabet, p_file_format, posix_read_source>(
         std::move(*posix_source_or_err),
-        std::forward<handler_fn_t>(handler_fn),
-        std::forward<failure_fn_t>(failure_fn),
+        std::forward<p_handler>(handler_fn),
+        std::forward<p_failure>(failure_fn),
         options);
 }
 
 /// Bounded streaming read of a FASTA/FASTQ file into the
-/// caller's `storage_unit_t`-packed column layout. Unlike `read_sequences_file`
+/// caller's `p_storage_unit`-packed column layout. Unlike `read_sequences_file`
 /// (which accumulates whole `sequence_batch`es and is hard-wired to a
 /// `uint64_t` storage unit), this drives the per-record FSM single-threaded and
-/// emits bounded `packed_sequence_chunk<storage_unit_t>` values to `sink`, so a
+/// emits bounded `packed_sequence_chunk<p_storage_unit>` values to `sink`, so a
 /// >MaxAllocSize record (e.g. a 6 Gbp reference) is never materialised as one
 /// buffer. Always single-threaded (the columnar write state + seq_caches are
 /// single-backend); gzip is still magic-byte sniffed by the source. Returns the
 /// record count, or the first terminal diagnostic.
 template <
-    sequence_alphabet alphabet_t,
-    typename storage_unit_t,
-    sequence_file_format file_type,
-    typename sink_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    typename p_storage_unit,
+    sequence_file_format p_file_format,
+    typename p_sink,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> stream_sequences_file(
     const char* path,
-    sink_fn_t&& sink,
-    failure_fn_t&& failure_fn,
+    p_sink&& sink,
+    p_failure&& failure_fn,
     reader_options options = default_reader_options) {
     // Streaming is single-threaded by contract: no async workers and no
     // mmap-parallel shards.
@@ -1600,9 +1646,12 @@ template <
     return detail::with_selected_source(
         path_view, options, failure_fn,
         [&](auto&& src) {
-            using source_t = std::remove_reference_t<decltype(src)>;
+            using source_type = std::remove_reference_t<decltype(src)>;
             return detail::run_sync_stream<
-                alphabet_t, storage_unit_t, file_type, source_t>(
+                p_alphabet,
+                p_storage_unit,
+                p_file_format,
+                source_type>(
                 std::move(src), sink, failure_fn, options);
         });
 }
@@ -1719,19 +1768,22 @@ sample_sequence_headers(const char* path, sequence_file_format file_type,
 /// callbacks are shared across files. Each file is fully drained before
 /// the next is opened, preserving declaration order.
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    typename PathLike,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    typename p_path,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> read_sequences_files(
-    std::span<const PathLike> file_paths,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    std::span<const p_path> file_paths,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options = default_reader_options) {
     std::size_t total_records = 0;
     for (const auto& file_path : file_paths) {
-        auto outcome = read_sequences_file<alphabet_t, file_type, const PathLike&>(
+        auto outcome = read_sequences_file<
+            p_alphabet,
+            p_file_format,
+            const p_path&>(
             file_path,
             handler_fn,
             failure_fn,

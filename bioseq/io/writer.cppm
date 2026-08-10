@@ -136,11 +136,12 @@ struct writer_producer_state {
 };
 
 /// Thread-safe FASTA / FASTQ writer.
-template <sequence_alphabet alphabet_t,
-          sequence_file_format file_type>
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format>
 class sequence_writer {
 public:
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
+    using alphabet_config =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
     using sequence_view = compact_sequence_view<alphabet_config>;
     using traits = typename compact_sequence_range<alphabet_config>::traits;
@@ -226,7 +227,7 @@ public:
         const std::size_t total_letters =
             seq.size() * letters_per_unit - seq.padding();
 
-        if constexpr (file_type == sequence_file_format::fastq) {
+        if constexpr (p_file_format == sequence_file_format::fastq) {
             if (_options.strict_fastq_quality_length &&
                 quality.size() != total_letters) {
                 stamp_error(fmt::format(
@@ -251,7 +252,7 @@ public:
 
         emit_header(producer.chunk, header);
         emit_body(producer, seq, total_letters);
-        if constexpr (file_type == sequence_file_format::fastq) {
+        if constexpr (p_file_format == sequence_file_format::fastq) {
             // Append the FASTQ separator + qual + newline as one bulk
             // write per record. Layout: '\n' '+' '\n' <qual> '\n'.
             const std::size_t qsize = std::min(quality.size(), total_letters);
@@ -303,7 +304,7 @@ public:
         emit_header(producer.chunk, header);
 
         const std::size_t wrap_width =
-            (file_type == sequence_file_format::fasta)
+            (p_file_format == sequence_file_format::fasta)
                 ? _options.fasta_line_width
                 : 0;
         const std::size_t units_per_slice =
@@ -323,7 +324,7 @@ public:
             if (wrap_width == 0) {
                 std::uint8_t* dst = producer.chunk.extend(slice_letters);
                 bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
-                    alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                    p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
                         words_ptr, dst, slice_letters);
             } else {
                 // Exact byte count the wrapped kernel writes for this slice:
@@ -337,7 +338,10 @@ public:
                     producer.chunk.extend(slice_letters + newline_count);
                 line_position = bioseq::simd::HWY_NAMESPACE::
                     decode_words_to_ascii_wrapped<
-                        alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                        p_alphabet,
+                        storage_unit,
+                        bits_per_char,
+                        letters_per_unit>(
                             words_ptr, slice_letters, wrap_width, line_position,
                             scratch, dst);
             }
@@ -345,7 +349,7 @@ public:
             if (!flush_producer(producer)) return false;
         }
 
-        if constexpr (file_type == sequence_file_format::fastq) {
+        if constexpr (p_file_format == sequence_file_format::fastq) {
             // No quality is supplied on the streamed path; emit a Phred-0
             // ('!') quality of matching length in bounded chunks. (Quality is
             // dropped on bioseq.load anyway.) Layout: '\n' '+' '\n' <qual> '\n'.
@@ -400,7 +404,7 @@ public:
                 if (!flush_producer(producer)) return false;
             }
 
-            if constexpr (file_type == sequence_file_format::fastq) {
+            if constexpr (p_file_format == sequence_file_format::fastq) {
                 const auto quality_view = batch.quality(record_index);
                 if (_options.strict_fastq_quality_length &&
                     quality_view.size() != total_letters) {
@@ -509,7 +513,7 @@ private:
     inline void emit_header(writer_byte_buffer& chunk,
                              std::string_view header) {
         constexpr std::uint8_t sigil =
-            (file_type == sequence_file_format::fasta)
+            (p_file_format == sequence_file_format::fasta)
                 ? static_cast<std::uint8_t>('>')
                 : static_cast<std::uint8_t>('@');
         std::uint8_t* dst = chunk.extend(1 + header.size() + 1);
@@ -537,13 +541,13 @@ private:
                            std::size_t total_letters) {
         if (total_letters == 0) return;
         const std::size_t wrap_width =
-            (file_type == sequence_file_format::fasta)
+            (p_file_format == sequence_file_format::fasta)
                 ? _options.fasta_line_width
                 : 0;
         if (wrap_width == 0) {
             std::uint8_t* dst = producer.chunk.extend(total_letters);
             bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
-                alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
                     seq.data(), dst, total_letters);
             return;
         }
@@ -555,7 +559,7 @@ private:
         std::uint8_t* scratch = producer.decode_scratch.extend(total_letters);
         std::uint8_t* dst = producer.chunk.extend(output_size);
         (void)bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<
-            alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+            p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
                 seq.data(),
                 total_letters,
                 wrap_width,
@@ -620,20 +624,20 @@ private:
 /// One-shot convenience: open a writer, push every batch from
 /// `batches` into it, close. Returns the count of records written or
 /// the first error.
-template <sequence_alphabet alphabet_t,
-          sequence_file_format file_type,
-          typename PathLike,
-          typename batch_iterable>
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          typename p_path,
+          typename p_batch_range>
 [[nodiscard]] std::expected<std::size_t, std::string> write_sequences_file(
-    PathLike&& path,
-    batch_iterable&& batches,
+    p_path&& path,
+    p_batch_range&& batches,
     const writer_options& options = default_writer_options) {
-    static_assert(std::convertible_to<PathLike, std::string_view>,
+    static_assert(std::convertible_to<p_path, std::string_view>,
                   "path must be convertible to std::string_view");
     const std::string_view path_view = std::string_view{
-        std::forward<PathLike>(path)};
+        std::forward<p_path>(path)};
 
-    auto writer_or_err = sequence_writer<alphabet_t, file_type>::open(
+    auto writer_or_err = sequence_writer<p_alphabet, p_file_format>::open(
         path_view, options);
     if (!writer_or_err) {
         return std::unexpected(std::move(writer_or_err.error()));

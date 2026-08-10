@@ -596,7 +596,7 @@ inline void inherit_natural_column_schemas(
     collected_program program,
     std::string extension_schema = "public",
     std::string extension_name = "bioseq",
-    std::string generated_module_prefix = "bioseq.sql.generated",
+    std::string generated_module_prefix = "bioseq.postgres.sql.generated",
     std::string fmgr_boundary_module =
         "bioseq.postgres.support.sql_boundary",
     std::string fmgr_prelude = "bioseq_common") {

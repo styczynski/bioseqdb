@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * provider/registry.cppm
- *     Public backend-local V2 provider registry contract.
+ *     Public backend-local provider registry contract.
  *
  * Provider descriptors and names are copied into stable, never-compacted
  * slots. A removed slot becomes a permanent tombstone for the life of the
@@ -31,126 +31,126 @@ import bioseq.cache.provider_api;
 
 export namespace bioseq::cache::pg::provider_registry {
 
-using ProviderV2 = bioseq::cache::BioseqCacheProviderV2;
-using ProviderRegistrationV2 =
-    bioseq::cache::BioseqCacheProviderRegistrationV2;
-using ProviderDirectoryV2 =
-    bioseq::cache::BioseqCacheProviderDirectoryV2;
-using PhysicalIdentityV2 = bioseq::cache::BioseqCachePhysicalIdentityV2;
-using PlannerBridgeV2 = bioseq::cache::BioseqCachePlannerBridgeV2;
-using CacheApiV2 = bioseq::cache::BioseqCacheApiV2;
+using provider = bioseq::cache::bioseq_cache_provider;
+using provider_registration =
+    bioseq::cache::bioseq_cache_provider_registration;
+using provider_directory =
+    bioseq::cache::bioseq_cache_provider_directory;
+using physical_identity = bioseq::cache::bioseq_cache_physical_identity;
 
-inline constexpr std::uint32_t kPostgresMajorVersion =
+inline constexpr std::uint32_t k_postgres_major_version =
     static_cast<std::uint32_t>(PG_VERSION_NUM / 10000);
-inline constexpr std::size_t kMaximumRegisteredProvidersV2 = 32;
-inline constexpr std::size_t kMaximumProviderNameBytesV2 = 128;
-inline constexpr std::size_t kInvalidProviderSlotV2 =
+inline constexpr std::size_t maximum_registered_providers = 32;
+inline constexpr std::size_t maximum_provider_name_bytes = 128;
+inline constexpr std::size_t invalid_provider_slot =
     (std::numeric_limits<std::size_t>::max)();
 
 /** Immutable point-in-time copy of active stable provider pointers. */
-struct ProviderSnapshotV2 {
-    std::uint32_t struct_size = sizeof(ProviderSnapshotV2);
+struct provider_snapshot {
+    std::uint32_t struct_size = sizeof(provider_snapshot);
     std::uint32_t provider_count = 0;
     std::uint64_t generation = 0;
-    const ProviderV2* providers[kMaximumRegisteredProvidersV2]{};
+    const provider* providers[maximum_registered_providers]{};
 };
 
-/** Execution-scoped proof that one stable provider slot remains active. */
-struct ProviderLeaseV2 {
-    std::size_t slot_index = kInvalidProviderSlotV2;
+/** Execution-scoped lease on one stable active provider slot. */
+struct provider_lease {
+    std::size_t slot_index = invalid_provider_slot;
     std::uint64_t registry_generation = 0;
     std::uint32_t provider_id = 0;
     std::uint64_t owner_cookie = 0;
 };
 
 /** One in-flight callback counted against registry mutation. */
-struct ProviderCallbackTokenV2 {
-    std::size_t slot_index = kInvalidProviderSlotV2;
+struct provider_callback_token {
+    std::size_t slot_index = invalid_provider_slot;
     std::uint64_t registry_generation = 0;
     std::uint64_t owner_cookie = 0;
 };
 
 /** A null identity requests conservative/coarse write observation. */
-using RelationWriteObserverV2 = void (*)(
+using relation_write_observer = void (*)(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
-    const PhysicalIdentityV2* physical_identity) noexcept;
+    const physical_identity* identity) noexcept;
 
-using PlannerBridgeObserverV2 = void (*)(
+using planner_bridge_observer = void (*)(
     PlannerInfo* root,
     RelOptInfo* rel,
     unsigned int rti,
     RangeTblEntry* rte,
-    const ProviderV2* provider) noexcept;
+    const provider* provider_descriptor) noexcept;
 
 /** Cache-owned observer for a provider's fully mutated PlannedStmt. */
-using FinalizedPlanBridgeObserverV2 = void (*)(
+using finalized_plan_bridge_observer = void (*)(
     PlannedStmt* statement) noexcept;
 
-[[nodiscard]] bool validate_provider_v2(const ProviderV2* provider) noexcept;
-[[nodiscard]] BioseqCacheStatusV2 register_provider_v2(
-    const ProviderV2* provider,
-    ProviderRegistrationV2* registration) noexcept;
-[[nodiscard]] bool unregister_provider_v2(
-    const ProviderRegistrationV2* registration) noexcept;
-[[nodiscard]] const ProviderV2* find_provider_v2(
+[[nodiscard]] bool validate_provider(
+    const provider* provider_descriptor) noexcept;
+[[nodiscard]] bioseq_cache_status register_provider(
+    const provider* provider_descriptor,
+    provider_registration* registration) noexcept;
+[[nodiscard]] bool unregister_provider(
+    const provider_registration* registration) noexcept;
+[[nodiscard]] const provider* find_provider(
     std::uint32_t provider_id) noexcept;
-[[nodiscard]] ProviderSnapshotV2 snapshot_providers_v2() noexcept;
+[[nodiscard]] provider_snapshot snapshot_providers() noexcept;
 
-[[nodiscard]] bool acquire_provider_lease_v2(
-    const ProviderV2* provider,
-    ProviderLeaseV2* lease) noexcept;
-[[nodiscard]] const ProviderV2* provider_from_lease_v2(
-    const ProviderLeaseV2& lease) noexcept;
-[[nodiscard]] bool validate_provider_lease_v2(
-    const ProviderLeaseV2& lease,
-    const ProviderV2* expected_provider = nullptr) noexcept;
-void release_provider_lease_v2(ProviderLeaseV2* lease) noexcept;
+[[nodiscard]] bool acquire_provider_lease(
+    const provider* provider_descriptor,
+    provider_lease* lease) noexcept;
+[[nodiscard]] const provider* provider_from_lease(
+    const provider_lease& lease) noexcept;
+[[nodiscard]] bool validate_provider_lease(
+    const provider_lease& lease,
+    const provider* expected_provider = nullptr) noexcept;
+void release_provider_lease(provider_lease* lease) noexcept;
 
-[[nodiscard]] bool begin_provider_callback_v2(
-    const ProviderV2* provider,
-    const ProviderLeaseV2* lease,
-    ProviderCallbackTokenV2* token) noexcept;
-void end_provider_callback_v2(ProviderCallbackTokenV2* token) noexcept;
+[[nodiscard]] bool begin_provider_callback(
+    const provider* provider_descriptor,
+    const provider_lease* lease,
+    provider_callback_token* token) noexcept;
+void end_provider_callback(provider_callback_token* token) noexcept;
 
-void install_relation_write_observer_v2(
-    RelationWriteObserverV2 observer) noexcept;
-void record_relation_write_v2(
+void install_relation_write_observer(
+    relation_write_observer observer) noexcept;
+void record_relation_write(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
-    const PhysicalIdentityV2* physical_identity) noexcept;
+    const physical_identity* identity) noexcept;
 
-void install_planner_bridge_observer_v2(
-    PlannerBridgeObserverV2 observer) noexcept;
-void after_provider_rel_paths_v2(
+void install_planner_bridge_observer(
+    planner_bridge_observer observer) noexcept;
+void after_provider_rel_paths(
     PlannerInfo* root,
     RelOptInfo* rel,
     unsigned int rti,
     RangeTblEntry* rte,
-    const ProviderV2* provider) noexcept;
-void install_finalized_plan_bridge_observer_v2(
-    FinalizedPlanBridgeObserverV2 observer) noexcept;
-void after_planned_statement_v2(PlannedStmt* statement) noexcept;
+    const provider* provider_descriptor) noexcept;
+void install_finalized_plan_bridge_observer(
+    finalized_plan_bridge_observer observer) noexcept;
+void after_planned_statement(PlannedStmt* statement) noexcept;
 
 /** Validate publication ownership and the optional peer before mutation. */
-[[nodiscard]] bool preflight_provider_registry_v2() noexcept;
+[[nodiscard]] bool preflight_provider_registry() noexcept;
 
 /** Publish the cache API, then request an optional Bioseq directory bind. */
-[[nodiscard]] bool initialize_provider_registry_v2() noexcept;
+[[nodiscard]] bool initialize_provider_registry() noexcept;
 
-[[nodiscard]] const CacheApiV2& cache_api_v2() noexcept;
-[[nodiscard]] const PlannerBridgeV2& planner_bridge_v2() noexcept;
+[[nodiscard]] const bioseq::cache::bioseq_cache_api& cache_api() noexcept;
+[[nodiscard]] const bioseq::cache::bioseq_cache_planner_bridge&
+planner_bridge() noexcept;
 
 #if defined(BIOSEQ_CACHE_TESTING)
 /** Test-only copy/token/tombstone probe exposed through generated SQL. */
 [[nodiscard]] bool provider_registry_owns_copy();
 #endif
 
-static_assert(std::is_standard_layout_v<ProviderSnapshotV2>);
-static_assert(std::is_trivially_copyable_v<ProviderSnapshotV2>);
-static_assert(std::is_standard_layout_v<ProviderLeaseV2>);
-static_assert(std::is_trivially_copyable_v<ProviderLeaseV2>);
-static_assert(std::is_standard_layout_v<ProviderCallbackTokenV2>);
-static_assert(std::is_trivially_copyable_v<ProviderCallbackTokenV2>);
+static_assert(std::is_standard_layout_v<provider_snapshot>);
+static_assert(std::is_trivially_copyable_v<provider_snapshot>);
+static_assert(std::is_standard_layout_v<provider_lease>);
+static_assert(std::is_trivially_copyable_v<provider_lease>);
+static_assert(std::is_standard_layout_v<provider_callback_token>);
+static_assert(std::is_trivially_copyable_v<provider_callback_token>);
 
 } // namespace bioseq::cache::pg::provider_registry

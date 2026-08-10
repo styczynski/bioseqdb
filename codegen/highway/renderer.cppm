@@ -186,7 +186,7 @@ build_target_coordinates(const target_manifest& inventory) {
             .begin_byte = callable.body_relative_offset,
             .end_byte = callable.body_relative_offset,
             .replacement = std::move(attribute),
-            .provenance_id = callable.qualified_name,
+            .source_identity = callable.qualified_name,
             .purpose = "insert HWY_ATTR on " + callable.qualified_name,
         });
     }
@@ -1768,7 +1768,8 @@ inline void validate_rendered_artifact(
     result.policy_evidence_json =
         render_policy_evidence(plan, result.artifacts);
     result.publication_topology_digest = bioseq::common::sha256_hex(
-        "bioseq_highway_publication_topology/v1\n"
+        "bioseq_highway_publication_topology\n"
+        "revision=1\n"
         + result.policy_evidence_json);
     return result;
 }
@@ -1803,7 +1804,8 @@ render_highway_publication_manifest(
     const std::string expected_policy_evidence =
         render_policy_evidence(plan, result.artifacts);
     const std::string expected_topology_digest = bioseq::common::sha256_hex(
-        "bioseq_highway_publication_topology/v1\n"
+        "bioseq_highway_publication_topology\n"
+        "revision=1\n"
         + expected_policy_evidence);
     if (result.policy_evidence_json != expected_policy_evidence
         || result.publication_topology_digest != expected_topology_digest

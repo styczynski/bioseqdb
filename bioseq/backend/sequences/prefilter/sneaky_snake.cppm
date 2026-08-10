@@ -161,7 +161,7 @@ struct scalar_traversal final {
             query, target, position, submaze_end, query_index);
     }
 
-    template <class consumer_type>
+    template <class p_consumer_type>
     [[nodiscard]] bool visit_candidate_starts(
         std::span<const std::uint8_t> query,
         std::uint32_t filter_offset,
@@ -169,7 +169,7 @@ struct scalar_traversal final {
         std::uint32_t position,
         std::uint32_t lower,
         std::uint32_t upper,
-        consumer_type&& consume) const noexcept
+        p_consumer_type&& consume) const noexcept
     {
         for (std::uint32_t candidate = lower;
              candidate <= upper;
@@ -191,9 +191,9 @@ struct scalar_traversal final {
  * primitives; maze geometry, escape accounting, and result semantics have one
  * implementation in this facade.
  */
-template <class traversal_type>
+template <class p_traversal_type>
 [[nodiscard]] inline bool improve_diagonal_candidate_with(
-    traversal_type& traversal,
+    p_traversal_type& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
@@ -213,9 +213,9 @@ template <class traversal_type>
     return best == remaining;
 }
 
-template <class traversal_type>
+template <class p_traversal_type>
 [[nodiscard]] inline std::uint32_t longest_diagonal_run_with(
-    traversal_type& traversal,
+    p_traversal_type& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
@@ -267,9 +267,9 @@ template <class traversal_type>
     return best;
 }
 
-template <class traversal_type>
+template <class p_traversal_type>
 [[nodiscard]] inline prefilter_result equal_length_with(
-    traversal_type& traversal,
+    p_traversal_type& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -320,9 +320,9 @@ template <class traversal_type>
 }
 
 /// Evaluate one already-size-checked rank pair without repeating span limits.
-template <class traversal_type>
+template <class p_traversal_type>
 [[nodiscard]] inline prefilter_result bounded_with(
-    traversal_type& traversal,
+    p_traversal_type& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -361,10 +361,10 @@ template <class traversal_type>
  * Slice validation and fail-open unsupported results are centralized here so
  * scalar and generated Highway backends cannot drift at the batch boundary.
  */
-template <class evaluator_type>
+template <class p_evaluator_type>
 [[nodiscard]] inline std::vector<prefilter_result> evaluate_batch_with(
     const prefilter_batch_input& input,
-    evaluator_type&& evaluate)
+    p_evaluator_type&& evaluate)
 {
     std::vector<prefilter_result> results(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {

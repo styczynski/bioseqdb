@@ -3,8 +3,9 @@
 # Host-agnostic deployment contract / sample: files alone cannot enforce
 # clickjacking protection, so the real header set (including the header-only
 # frame-ancestors directive) is recorded here for the deploying host to apply.
-# website/tests/fixtures/server.py reads this file and applies every header
-# below to every response, and browser_test.py asserts they are present.
+# website/tests/support/static_fixture_server.py reads this file and applies
+# every header below to every response; tests/integration/test_browser.py
+# asserts they are present.
 #
 # Format: one "Header-Name: value" per line; blank lines and lines starting with
 # '#' are ignored. This is the same restrictive CSP as the base template's meta

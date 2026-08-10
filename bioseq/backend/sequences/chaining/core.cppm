@@ -1,5 +1,5 @@
 /**
- * @file chaining_utils.cppm
+ * @file core.cppm
  * @brief Canonical chaining records, parameters, scoring, and backtracking.
  *
  * The module owns the shared contracts used by scalar, SIMD, RMQ, and Vulkan
@@ -115,10 +115,10 @@ struct canonical_anchor_sort_stats {
 
 namespace canonical_anchor_sort_detail {
 
-template <class key_type>
+template <class p_key_type>
 [[nodiscard]] inline canonical_anchor_sort_stats sort_primary(
         std::span<anchor> anchors,
-        key_type key,
+        p_key_type key,
         bool bounded_u32_primary_key) noexcept {
     canonical_anchor_sort_stats stats{};
     stats.bounded_u32_primary_key = bounded_u32_primary_key;
@@ -327,9 +327,9 @@ struct chain {
 /// Lives in `bioseq::chaining` because the chaining kernels are the primary
 /// producers (`backtrack_chains`, `chain_anchors_*`) and the pipeline stages
 /// (`bioseq::simd::HWY_NAMESPACE::pipe`) import this module already.
-template <class element>
+template <class p_element>
 struct arena_slab {
-    using element_type = element;
+    using element_type = p_element;
 
     element_type* data_ = nullptr;
     std::size_t size_ = 0;
@@ -434,10 +434,10 @@ struct arena_slab {
     /// Caller must have called `reserve_for_placement_new(N)` beforehand and
     /// must not exceed `N` constructions.  Used for non-trivial types so the
     /// slab's destructor can call `~element_type()` on each live element.
-    template <class... argument_types>
-    [[gnu::always_inline]] element_type& construct_at_back(argument_types&&... args) {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] element_type& construct_at_back(p_argument_types&&... args) {
         DEBUG_ASSERT(size_ < capacity_, "construct_at_back beyond reserved capacity");
-        element_type* slot = new (data_ + size_) element_type(std::forward<argument_types>(args)...);
+        element_type* slot = new (data_ + size_) element_type(std::forward<p_argument_types>(args)...);
         ++size_;
         return *slot;
     }
@@ -447,7 +447,7 @@ struct arena_slab {
     /// Geometric growth via `memcpy` of the live prefix; non-trivial types
     /// must use the `reserve_for_placement_new` + `construct_at_back`
     /// pattern instead so destructors are called.
-    void push_back(element_type element) {
+    void push_back(element_type value) {
         static_assert(std::is_trivially_copyable_v<element_type>,
             "arena_slab::push_back uses memcpy + trivial relocation during "
             "growth; non-trivially-copyable element types must use the "
@@ -460,7 +460,7 @@ struct arena_slab {
             }
             reserve_geometric(size_ + 1);
         }
-        data_[size_++] = std::move(element);
+        data_[size_++] = std::move(value);
     }
 
     /** Append exact trivially-copyable records into uninitialized arena slots. */
@@ -486,13 +486,13 @@ struct arena_slab {
     }
 
     /** Append storage-sized wire values that are exactly element_type's representation. */
-    template <class storage_type>
+    template <class p_storage_type>
     [[nodiscard]] bool append_trivial_storage(
-            const std::span<const storage_type> records)
+            const std::span<const p_storage_type> records)
         requires (
             std::is_trivially_copyable_v<element_type>
-            && std::is_trivially_copyable_v<storage_type>
-            && sizeof(element_type) == sizeof(storage_type))
+            && std::is_trivially_copyable_v<p_storage_type>
+            && sizeof(element_type) == sizeof(p_storage_type))
     {
         if (records.size()
             > (std::numeric_limits<std::size_t>::max)() - size_) {
@@ -534,9 +534,9 @@ private:
 };
 
 /// Helper: make a fresh arena_slab bound to the current pipeline arena context.
-template <class element>
-[[nodiscard]] inline arena_slab<element> make_arena_slab() noexcept {
-    return arena_slab<element>{nullptr, 0u, 0u, &context::current()};
+template <class p_element>
+[[nodiscard]] inline arena_slab<p_element> make_arena_slab() noexcept {
+    return arena_slab<p_element>{nullptr, 0u, 0u, &context::current()};
 }
 
 // ============================================================================
@@ -545,7 +545,7 @@ template <class element>
 
 /// Algorithm selection for chaining.
 enum class chaining_mode : uint8_t {
-    scalar_dp,   ///< Original O(n * max_iter) scalar DP
+    scalar_dp,   ///< Scalar O(n * max_iter) dynamic programming
     simd_dp,     ///< SIMD-vectorized DP (same algorithm, faster inner loop)
     rmq,         ///< AVL+rmq tree-based O(n log n)
 };
@@ -576,8 +576,7 @@ enum class simd_chaining_policy : std::uint8_t {
 
 /// Parameters controlling anchor chaining behavior.
 ///
-/// Extracted from minimap2_parameters -- only the chaining-relevant subset.
-/// The full minimap2_parameters in minimap_port.cppm derives these via to_chaining_params().
+/// Chaining-specific parameters populated from request configuration.
 struct chaining_parameters {
     int32_t kmer_size         = 15;
     int32_t max_gap           = 5000;
@@ -808,7 +807,7 @@ inline void backtrack_chains(
     arena_slab<chain>& chains_out,
     arena_slab<anchor>& reordered_anchors_out)
 {
-    (void)peak_scores;  // upstream keeps it for parity with lchain.c; unused here
+    (void)peak_scores;  // Retained by the chaining contract; unused here.
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
 
     // Allocate the maximum scored-index population once in the chain arena;

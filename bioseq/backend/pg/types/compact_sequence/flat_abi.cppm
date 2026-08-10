@@ -1,5 +1,5 @@
 /* PostgreSQL-facing flat ABI for bioseq.seq.  This partition is the narrow
- * compatibility surface consumed by the table/storage modules. */
+ * shared surface consumed by the table/storage modules. */
 module;
 
 #include <cstddef>
@@ -26,10 +26,8 @@ import bioseq.postgres.support.sql_boundary;
 import bioseq.sequences;
 import bioseq.storage.layout;
 
-export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
-
 export using pgseq_supported_alphabets =
-#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     supported_alphabets<alphabet_entry<seq::dna4, "dna4">>;
 #else
     supported_alphabets<
@@ -38,19 +36,10 @@ export using pgseq_supported_alphabets =
 #endif
 
 export using pgseq_supported_storage_unit_byte_widths =
-#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     supported_storage_unit_byte_widths<8u>;
 #else
     all_storage_unit_byte_widths;
-#endif
-
-/* Kept only for source compatibility with existing importers.  Typmodless
- * SQL input no longer binds to this alphabet; it uses the unbound tag below. */
-export using pgseq_unconstrained_input_alphabet =
-#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
-    seq::dna4;
-#else
-    seq::dna5;
 #endif
 
 export namespace bioseq::pg_types {
@@ -106,7 +95,7 @@ static_assert(pgseq_unbound_alphabet_code
               >= pgseq_supported_alphabets::alphabet_count);
 
 static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
-#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
               == std::string_view{"'dna4'"},
 #else
               == std::string_view{"'dna4', 'dna5'"},
@@ -115,7 +104,7 @@ static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
 static_assert(
     pgseq_supported_alphabets::entry_for<seq::dna4>::alphabet_name_sv
         == std::string_view{"dna4"});
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 static_assert(
     pgseq_supported_alphabets::entry_for<seq::dna5>::alphabet_name_sv
         == std::string_view{"dna5"});
@@ -130,7 +119,7 @@ is_supported_alphabet_code(std::uint8_t code) noexcept
 export [[nodiscard]] constexpr std::uint8_t
 pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 {
-#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     (void) requested;
     return 8u;
 #else
@@ -217,12 +206,12 @@ pgseq_canonical_symbol_for_alphabet(
     pgseq_canonical_symbol result{false, '\0'};
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
-        [&result, input]<class Alphabet>() {
+        [&result, input]<class p_alphabet>() {
             const char symbol = static_cast<char>(input);
-            if (!seqan3::char_is_valid_for<Alphabet>(symbol)) {
+            if (!seqan3::char_is_valid_for<p_alphabet>(symbol)) {
                 return;
             }
-            Alphabet value{};
+            p_alphabet value{};
             value.assign_char(symbol);
             result = {true, seqan3::to_char(value)};
         });
@@ -261,12 +250,12 @@ export [[nodiscard]] inline bool pgseq_rank_for_symbol(
     bool valid = false;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
-        [input, canonical, &rank, &valid]<class Alphabet>() {
+        [input, canonical, &rank, &valid]<class p_alphabet>() {
             const char symbol = static_cast<char>(input);
-            if (!seqan3::char_is_valid_for<Alphabet>(symbol)) {
+            if (!seqan3::char_is_valid_for<p_alphabet>(symbol)) {
                 return;
             }
-            Alphabet value{};
+            p_alphabet value{};
             value.assign_char(symbol);
             rank = static_cast<std::uint8_t>(seqan3::to_rank(value));
             if (canonical != nullptr) {
@@ -288,11 +277,11 @@ export [[nodiscard]] inline bool pgseq_symbol_for_rank(
     bool valid = false;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
-        [rank, &symbol, &valid]<class Alphabet>() {
-            if (rank >= seqan3::alphabet_size<Alphabet>) {
+        [rank, &symbol, &valid]<class p_alphabet>() {
+            if (rank >= seqan3::alphabet_size<p_alphabet>) {
                 return;
             }
-            Alphabet value{};
+            p_alphabet value{};
             seqan3::assign_rank_to(rank, value);
             symbol = seqan3::to_char(value);
             valid = true;

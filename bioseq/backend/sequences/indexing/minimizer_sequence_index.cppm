@@ -219,14 +219,14 @@ static_assert(sizeof(direct_minimizer_bucket_directory_entry) == 24 && alignof(d
 /**
  * @brief Fixed persisted directory header followed by sorted bucket entries.
  *
- * Field widths, offsets, magic, and format revision are serialization ABI.
+ * Field widths, offsets, magic, and layout revision are serialization ABI.
  */
 struct direct_minimizer_bucket_directory {
     static constexpr std::uint32_t k_direct_minimizer_bucket_magic   = 0xB1000002u;
-    static constexpr std::uint32_t k_direct_minimizer_bucket_format_revision = 2u;
+    static constexpr std::uint32_t k_direct_minimizer_bucket_layout_revision = 2u;
     static constexpr std::uint32_t k_gpu_built = 1u << 0u;
     std::uint32_t magic   = k_direct_minimizer_bucket_magic;
-    std::uint32_t format_revision = k_direct_minimizer_bucket_format_revision;
+    std::uint32_t layout_revision = k_direct_minimizer_bucket_layout_revision;
     std::uint32_t flags = 0;
     std::uint32_t reserved = 0;
     std::uint64_t num_buckets = 0;
@@ -261,8 +261,8 @@ struct direct_minimizer_bucket_directory_view {
         owned.resize((bytes + sizeof(std::int64_t) - 1) / sizeof(std::int64_t));
         std::memcpy(owned.data(), blob, bytes);
         hdr = reinterpret_cast<const direct_minimizer_bucket_directory*>(owned.data());
-        if (hdr->magic != direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic || hdr->format_revision != direct_minimizer_bucket_directory::k_direct_minimizer_bucket_format_revision)
-            index_corruption_panic("directory: magic/format revision");
+        if (hdr->magic != direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic || hdr->layout_revision != direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision)
+            index_corruption_panic("directory: magic/layout revision");
         n = static_cast<std::size_t>(hdr->num_buckets);
         const std::size_t expect = sizeof(direct_minimizer_bucket_directory) + sizeof(direct_minimizer_bucket_directory_entry) * n;
         if (bytes != expect) index_corruption_panic("directory: size mismatch");
@@ -521,7 +521,7 @@ constexpr std::size_t k_encoded_bucket_bytes = minimizer_hashmap_fragment_index:
 inline void serialize_direct_minimizer_bucket_image(char* out, sequence_size_t target_len_val,
         std::span<const encoded_bucket_record> bkts, std::span<const std::uint64_t> poss) {
     encoded_bucket_header h{ minimizer_hashmap_fragment_index::k_encoded_magic,
-              minimizer_hashmap_fragment_index::k_encoded_format_revision,
+              minimizer_hashmap_fragment_index::k_encoded_layout_revision,
               static_cast<std::uint64_t>(target_len_val),
               static_cast<std::uint32_t>(bkts.size()), 0u,
               static_cast<std::uint64_t>(poss.size()) };
@@ -653,7 +653,7 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
 
 // GPU pair geometry helpers. A single GPU window's local
 // positions must fit the 28-bit minimap_sketch_data position field, so a Vulkan
-// collect spans at most `k_position_field_mask` bp of core (minus the W halo).
+// Collect spans at most `k_position_field_mask` bp of core, excluding the halo.
 [[nodiscard]] inline sequence_size_t clamp_gpu_collected_bp(
     sequence_size_t wanted_bp) noexcept
 {
@@ -742,7 +742,7 @@ using direct_minimizer_content_digest = bioseq::common::sha256_digest;
  * and emission replay those same runs, preserving separate route and replay
  * counters so publication cannot infer work from advertised input sizes.
  */
-class mps_generation_execution_receipt {
+class minimizer_sequence_generation_execution_receipt {
 public:
     minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
     minimizer_scheme_identity minimizer_scheme{};
@@ -869,7 +869,7 @@ public:
                     && bounded_nthash_core_runs == 0
                     && vulkan_core_runs == 0
                     && no_exact && no_bounded && no_vulkan;
-            case minimizer_sketch_backend::two_stack_nthash:
+            case minimizer_sketch_backend::exact_simd:
                 return scalar_core_runs == 0
                     && exact_simd_core_runs != 0
                     && bounded_nthash_core_runs == 0
@@ -1372,13 +1372,13 @@ private:
     bool saturated_ = false;
     bool terminal_ = false;
     bool requires_halving_after_failed_scan_ = false;
-    mps_generation_execution_receipt spill_receipt_{};
+    minimizer_sequence_generation_execution_receipt spill_receipt_{};
     std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority_{};
 
     void add_counter_(
             std::uint64_t& destination,
             std::uint64_t increment = 1u) noexcept {
-        mps_generation_execution_receipt::add(
+        minimizer_sequence_generation_execution_receipt::add(
             destination, increment, saturated_);
     }
 
@@ -1427,7 +1427,7 @@ private:
             std::uint64_t target_length,
             std::uint64_t qualified_span,
             minimizer_scheme_identity minimizer_scheme,
-            const mps_generation_execution_receipt& spill_receipt = {},
+            const minimizer_sequence_generation_execution_receipt& spill_receipt = {},
             std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority = {},
             direct_minimizer_spill_storage_binding storage_binding = {}) noexcept
         : storage_(&storage),
@@ -1476,7 +1476,7 @@ public:
     }
 
     /// The persisted physical producer identity comes only from the sealed
-    /// native spill receipt. A raw/unbound replay cannot label its historical
+    /// native spill receipt. A raw/unbound replay cannot label its recorded
     /// event stream as scalar, SIMD, or Vulkan merely from shared scheme bits.
     [[nodiscard]] minimizer_producer_identity
     producer_backend_identity() const noexcept {
@@ -1725,9 +1725,9 @@ public:
     illegal_span_transition_count() const noexcept {
         return illegal_span_transition_count_;
     }
-    [[nodiscard]] mps_generation_execution_receipt
+    [[nodiscard]] minimizer_sequence_generation_execution_receipt
     execution_receipt() const noexcept {
-        mps_generation_execution_receipt receipt = spill_receipt_;
+        minimizer_sequence_generation_execution_receipt receipt = spill_receipt_;
         receipt.generation_layout = generation_layout_;
         receipt.replay_scan_count = scan_count_;
         receipt.replay_merge_pass_count = merge_pass_count_;
@@ -1838,7 +1838,7 @@ public:
     illegal_span_transition_count() const noexcept {
         return producer_.illegal_span_transition_count();
     }
-    [[nodiscard]] mps_generation_execution_receipt
+    [[nodiscard]] minimizer_sequence_generation_execution_receipt
     execution_receipt() const noexcept {
         return producer_.execution_receipt();
     }
@@ -1865,7 +1865,7 @@ struct direct_minimizer_bucket_index {
         minimizer_scheme_identity minimizer_scheme_{};
         std::uint64_t target_length_ = 0;
         std::uint64_t position_segment_span_bp_ = 0;
-        mps_generation_execution_receipt execution_receipt_{};
+        minimizer_sequence_generation_execution_receipt execution_receipt_{};
         std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority_{};
 
         generation_spill_result(
@@ -1875,7 +1875,7 @@ struct direct_minimizer_bucket_index {
                 minimizer_scheme_identity minimizer_scheme,
                 std::uint64_t target_length,
                 std::uint64_t position_segment_span_bp,
-                const mps_generation_execution_receipt& execution_receipt,
+                const minimizer_sequence_generation_execution_receipt& execution_receipt,
                 std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority) noexcept
             : run_count_(run_count),
               exact_simd_stats_(exact_simd_stats),
@@ -1945,7 +1945,7 @@ struct direct_minimizer_bucket_index {
         position_segment_span_bp() const noexcept {
             return position_segment_span_bp_;
         }
-        [[nodiscard]] const mps_generation_execution_receipt&
+        [[nodiscard]] const minimizer_sequence_generation_execution_receipt&
         execution_receipt() const noexcept {
             return execution_receipt_;
         }
@@ -1994,18 +1994,18 @@ struct direct_minimizer_bucket_index {
             segment_unit_range range,
             sketch_collector& collector,
             std::vector<detail::sorted_pair_t>& output,
-            mps_generation_execution_receipt* execution_receipt = nullptr,
+            minimizer_sequence_generation_execution_receipt* execution_receipt = nullptr,
             bool allow_packed_bounded = false,
             direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr) {
         const std::uint64_t target_length = sequence.bp_size();
-        if ((backend == minimizer_sketch_backend::two_stack_nthash
+        if ((backend == minimizer_sketch_backend::exact_simd
                 && (kernels == nullptr
                     || kernels->two_stack_nthash == nullptr))
             || (backend == minimizer_sketch_backend::bounded_nthash_simd
                 && (kernels == nullptr
                     || kernels->bounded_nthash == nullptr))) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         if (range.core_lo_bp > range.core_hi_bp
             || range.core_hi_bp > target_length
@@ -2025,21 +2025,21 @@ struct direct_minimizer_bucket_index {
             ? collection_hi - emit_base : 0u;
         constexpr std::uint64_t minimum_work_bases = 10u + 15u - 1u;
         const auto add_route = [execution_receipt](
-                std::uint64_t mps_generation_execution_receipt::* member,
+                std::uint64_t minimizer_sequence_generation_execution_receipt::* member,
                 std::uint64_t increment = 1u) noexcept {
             if (execution_receipt != nullptr) {
-                mps_generation_execution_receipt::add(
+                minimizer_sequence_generation_execution_receipt::add(
                     execution_receipt->*member,
                     increment,
                     execution_receipt->saturated);
             }
         };
         if (local_bp_size < minimum_work_bases) {
-            add_route(&mps_generation_execution_receipt::short_core_runs);
+            add_route(&minimizer_sequence_generation_execution_receipt::short_core_runs);
             return exact_simd_index_execution_stats{};
         }
         if (backend == minimizer_sketch_backend::vulkan_segment) {
-            add_route(&mps_generation_execution_receipt::vulkan_core_runs);
+            add_route(&minimizer_sequence_generation_execution_receipt::vulkan_core_runs);
             bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats core_stats{};
             auto pairs = bioseq::gpu::vulkan::
                 collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
@@ -2064,16 +2064,16 @@ struct direct_minimizer_bucket_index {
             return exact_simd_index_execution_stats{};
         }
         if (backend != minimizer_sketch_backend::scalar
-            && backend != minimizer_sketch_backend::two_stack_nthash
+            && backend != minimizer_sketch_backend::exact_simd
             && backend != minimizer_sketch_backend::bounded_nthash_simd) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
 
         collector.clear();
         exact_simd_index_execution_stats exact_simd_stats{};
-        if (backend == minimizer_sketch_backend::two_stack_nthash) {
-            add_route(&mps_generation_execution_receipt::exact_simd_core_runs);
+        if (backend == minimizer_sketch_backend::exact_simd) {
+            add_route(&minimizer_sequence_generation_execution_receipt::exact_simd_core_runs);
             exact_simd_stats = collect_exact_simd_index_range_or_throw(
                 collector,
                 sequence,
@@ -2095,9 +2095,9 @@ struct direct_minimizer_bucket_index {
         } else if (backend == minimizer_sketch_backend::bounded_nthash_simd) {
             if (!allow_packed_bounded) {
                 return std::unexpected(
-                    minimizer_generation_encoding_error::compatibility_mismatch);
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             }
-            add_route(&mps_generation_execution_receipt::bounded_nthash_core_runs);
+            add_route(&minimizer_sequence_generation_execution_receipt::bounded_nthash_core_runs);
             std::uint64_t materialized_window_bp = 0u;
             const auto bounded_result =
                 collect_packed_bounded_nthash_index_lazy(
@@ -2129,7 +2129,7 @@ struct direct_minimizer_bucket_index {
                     "minimizers_per_sequence build"};
             }
         } else {
-            add_route(&mps_generation_execution_receipt::scalar_core_runs);
+            add_route(&minimizer_sequence_generation_execution_receipt::scalar_core_runs);
             bioseq::simd::collect_minimizers_segment_scalar<
                 minimap_sketch_data>(
                     collector, sequence, range.cs_u, range.ce_u, 10u, 15u);
@@ -2172,16 +2172,16 @@ struct direct_minimizer_bucket_index {
             std::uint64_t core_span_bp = 0,
             std::uint64_t position_segment_span_bp =
                 k_minimizer_preferred_segment_span_bp,
-            mps_generation_execution_receipt* execution_receipt_out = nullptr,
+            minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr,
             std::uint8_t alphabet_code =
-                bioseq::minimizers::unbound_packed_alphabet_code) {
+                bioseq::minimizers::k_unbound_packed_alphabet_code) {
         static_assert(direct_minimizer_qualified_spill_storage<p_storage>);
         constexpr std::uint64_t default_core_span = 32'768u;
         constexpr std::uint64_t lpu = 1u;
         const std::uint64_t target_length = sequence.bp_size();
         struct receipt_output_guard {
-            mps_generation_execution_receipt* output = nullptr;
-            mps_generation_execution_receipt receipt{};
+            minimizer_sequence_generation_execution_receipt* output = nullptr;
+            minimizer_sequence_generation_execution_receipt receipt{};
             ~receipt_output_guard() {
                 if (output != nullptr) {
                     *output = receipt;
@@ -2189,7 +2189,7 @@ struct direct_minimizer_bucket_index {
             }
         } receipt_guard;
         receipt_guard.output = execution_receipt_out;
-        mps_generation_execution_receipt& receipt = receipt_guard.receipt;
+        minimizer_sequence_generation_execution_receipt& receipt = receipt_guard.receipt;
         receipt.selected_backend = backend;
         receipt.minimizer_scheme =
             minimizer_scheme_identity_for_backend(backend);
@@ -2198,14 +2198,14 @@ struct direct_minimizer_bucket_index {
         receipt.kmer_size = 15;
         receipt.configured_core_span_bp =
             core_span_bp == 0 ? default_core_span : core_span_bp;
-        if ((backend == minimizer_sketch_backend::two_stack_nthash
+        if ((backend == minimizer_sketch_backend::exact_simd
                 && (kernels == nullptr
                     || kernels->two_stack_nthash == nullptr))
             || (backend == minimizer_sketch_backend::bounded_nthash_simd
                 && (kernels == nullptr
                     || kernels->bounded_nthash == nullptr))) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         if (core_span_bp == 0) {
             core_span_bp = default_core_span;
@@ -2219,7 +2219,7 @@ struct direct_minimizer_bucket_index {
         if (!is_supported_minimizer_scheme_identity(
                 minimizer_scheme.id, minimizer_scheme.revision)) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         direct_minimizer_spill_storage_binding storage_binding =
             storage.begin_segment_spill_generation();
@@ -2357,7 +2357,7 @@ struct direct_minimizer_bucket_index {
                 const std::uint64_t maximum_new_sketches =
                     bioseq::common::saturating_mul(collection_units, lpu);
                 // The checked bounded ntHash kernel's exact-tie matrix can emit the
-                // selected minimum plus at most W tied records for one input
+                // selected minimum plus at most one window span of tied records
                 // candidate. Reserve that proven raw-output bound before the
                 // kernel runs; canonical sort/unique below reduces it before
                 // persistence. Other CPU collectors need at most one retained
@@ -2439,9 +2439,9 @@ struct direct_minimizer_bucket_index {
                         return std::unexpected(
                             minimizer_generation_encoding_error::replay_mismatch);
                     }
-                    mps_generation_execution_receipt::add(
+                    minimizer_sequence_generation_execution_receipt::add(
                         receipt.spill_run_count, 1u, receipt.saturated);
-                    mps_generation_execution_receipt::add(
+                    minimizer_sequence_generation_execution_receipt::add(
                         receipt.spilled_event_count,
                         buffers.run.size(),
                         receipt.saturated);
@@ -2478,7 +2478,7 @@ struct direct_minimizer_bucket_index {
                                const canonical_minimizer_event& event)
                     -> std::expected<void, minimizer_generation_encoding_error> {
                     auto& state = *static_cast<spill_qualification*>(context);
-                    mps_generation_execution_receipt::add(
+                    minimizer_sequence_generation_execution_receipt::add(
                         state.event_count, 1u, state.saturated);
                     if (state.saturated) {
                         return std::unexpected(
@@ -2495,7 +2495,7 @@ struct direct_minimizer_bucket_index {
             return std::unexpected(
                 minimizer_generation_encoding_error::duplicate_event);
         }
-        const mps_generation_execution_receipt qualification_receipt =
+        const minimizer_sequence_generation_execution_receipt qualification_receipt =
             qualification_producer.execution_receipt();
         receipt.spill_content_digest =
             qualification_receipt.replay_first_completed_content_digest;
@@ -2504,9 +2504,9 @@ struct direct_minimizer_bucket_index {
         receipt.spill_qualification_merge_count =
             qualification_producer.merge_pass_count();
         const std::uint64_t operation_epoch =
-            mps_generation_execution_receipt::next_spill_operation_epoch();
+            minimizer_sequence_generation_execution_receipt::next_spill_operation_epoch();
         const std::uint64_t authority_seal =
-            mps_generation_execution_receipt::next_spill_authority_seal();
+            minimizer_sequence_generation_execution_receipt::next_spill_authority_seal();
         if (operation_epoch == 0 || authority_seal == 0) {
             return std::unexpected(
                 minimizer_generation_encoding_error::arithmetic_overflow);
@@ -2535,7 +2535,7 @@ struct direct_minimizer_bucket_index {
         receipt.capture_route_snapshot_();
         if (!receipt.is_spill_valid()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         return generation_spill_result{
             receipt.spill_run_count,
@@ -2555,7 +2555,7 @@ struct direct_minimizer_bucket_index {
             std::uint64_t position_segment_span_bp =
                 k_minimizer_preferred_segment_span_bp) {
         static_assert(direct_minimizer_qualified_spill_storage<p_storage>);
-        mps_generation_execution_receipt receipt = spill.execution_receipt_;
+        minimizer_sequence_generation_execution_receipt receipt = spill.execution_receipt_;
         std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority =
             std::move(spill.authority_);
         const bool spill_identity_matches =
@@ -2613,7 +2613,7 @@ struct direct_minimizer_bucket_index {
             generation_spill_result&& spill,
             const grouped_soa_generation_options& options,
             const grouped_soa_generation_limits& limits = {},
-            mps_generation_execution_receipt* execution_receipt_out = nullptr) {
+            minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr) {
         if (execution_receipt_out != nullptr) {
             *execution_receipt_out = {};
         }
@@ -2628,7 +2628,7 @@ struct direct_minimizer_bucket_index {
                 != spill.authority_->storage_binding_
             || !spill.execution_receipt_.is_spill_valid()) {
             return std::unexpected(
-                minimizer_generation_encoding_error::compatibility_mismatch);
+                minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         auto producer = make_generation_replay_producer(
             storage,
@@ -2637,7 +2637,7 @@ struct direct_minimizer_bucket_index {
             k_minimizer_preferred_segment_span_bp);
         auto encoded = encode_minimizer_generation(
             producer, sink, options, limits);
-        mps_generation_execution_receipt receipt =
+        minimizer_sequence_generation_execution_receipt receipt =
             producer.execution_receipt();
         if (encoded) {
             receipt.manifest_position_count =
@@ -2669,7 +2669,7 @@ struct direct_minimizer_bucket_index {
             }
             if (!receipt.is_internally_consistent()) {
                 encoded = std::unexpected(
-                    minimizer_generation_encoding_error::compatibility_mismatch);
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
             }
         }
         if (execution_receipt_out != nullptr) {
@@ -2686,16 +2686,16 @@ struct direct_minimizer_bucket_index {
         const bioseq::minimizers::minimizer_kernels* kernels,
         direct_minimizer_bucket_build_stats* scalar_build_stats_out = nullptr,
         std::uint8_t alphabet_code =
-            bioseq::minimizers::unbound_packed_alphabet_code) {
+            bioseq::minimizers::k_unbound_packed_alphabet_code) {
         constexpr std::size_t w = 10, k = 15;
         constexpr std::size_t lpu = 1u;
         constexpr std::size_t frag_bp    = 32'768u;
-        constexpr std::size_t W          = w + k - 2u;
+        constexpr std::size_t window_span = w + k - 2u;
         static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
         using detail::k_encoded_header_bytes; using detail::k_encoded_bucket_bytes; using detail::encoded_bucket_record;
         constexpr std::size_t k_bucket_target_bytes = std::size_t{8} << 20;       // 8 MiB
 
-        if (backend == minimizer_sketch_backend::two_stack_nthash
+        if (backend == minimizer_sketch_backend::exact_simd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
             throw exact_simd_index_runtime_error{
                 exact_simd_index_status::invalid_state,
@@ -2732,7 +2732,7 @@ struct direct_minimizer_bucket_index {
                 sequence_size_t core_lo,
                 sequence_size_t core_hi) {
             auto range = make_generation_collection_range(
-                seq, core_lo, core_hi, W);
+                seq, core_lo, core_hi, window_span);
             if (!range) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: invalid collection/core range");
@@ -2775,7 +2775,7 @@ struct direct_minimizer_bucket_index {
                 return;
             }
             auto range = make_generation_collection_range(
-                seq, core_lo, core_hi, W);
+                seq, core_lo, core_hi, window_span);
             if (!range || !collect_generation_core_run(
                     seq,
                     alphabet_code,
@@ -3218,7 +3218,7 @@ struct direct_minimizer_bucket_index {
                 ? detail::gpu_fragments_per_block(
                     scalar_fragments_per_block,
                     frag_bp,
-                    2u * W)
+                    2u * window_span)
                 : scalar_fragments_per_block;
         detail::admitted_vector_run<segment_unit_range> admitted_window_ranges;
         const std::size_t maximum_window_ranges =
@@ -3335,13 +3335,13 @@ struct direct_minimizer_bucket_index {
             ob_buckets.clear(); ob_positions.clear(); ob_body_bytes = 0; ob_lo = 0; ob_hi = 0;
         };
 
-        storage.merge_runs([&](std::uint64_t K, auto&& positions) {
+        storage.merge_runs([&](std::uint64_t kmer_key, auto&& positions) {
             const std::uint64_t pcount = positions.total_count();
             if (pcount > UINT32_MAX) index_corruption_panic("merge_runs: kmer count > u32 (encoded_bucket.pos_count)");
             ++total_distinct; total_positions += pcount;
             const std::size_t kmer_framed = k_encoded_header_bytes + k_encoded_bucket_bytes * 1 + sizeof(std::uint64_t) * pcount;
             if (kmer_framed > k_bucket_target_bytes) {
-                // heavy-hitter: split K across chunks (each a standalone one-record direct bucket image)
+                // Split the heavy-hitter key across standalone direct-bucket images.
                 if (!ob_buckets.empty()) flush_bucket();
                 const index_sub_key_t sk = next_bucket_id++;
                 if (sk >= k_temporary_run_sub_key_base) index_corruption_panic("minimizers_per_sequence: bucket id collided with reserved range");
@@ -3377,18 +3377,18 @@ struct direct_minimizer_bucket_index {
                 storage.template write_to_each<char>(sk, [&](std::size_t c, char* outbuf, std::size_t){
                     const std::size_t start = c * per;
                     const std::size_t cnt = std::min<std::size_t>(per, (std::size_t)pcount - start);
-                    encoded_bucket_record rec{ K, 0u, (std::uint32_t)cnt };
+                    encoded_bucket_record rec{ kmer_key, 0u, (std::uint32_t)cnt };
                     detail::serialize_direct_minimizer_bucket_image(outbuf, total_bp, std::span<const encoded_bucket_record>(&rec, 1),
                                               std::span<const std::uint64_t>(kpos.data() + start, cnt));
                     return c;
                 });
-                DEBUG_ASSERT(dir.empty() || dir.back().hi_kmer < K, "directory not strictly ascending (heavy-hitter)");
+                DEBUG_ASSERT(dir.empty() || dir.back().hi_kmer < kmer_key, "directory not strictly ascending (heavy-hitter)");
                 if (!detail::ensure_admitted_vector_run_capacity(
                         admitted_dir, dir.size() + 1u)) {
                     index_corruption_panic(
                         "minimizers_per_sequence: directory admission failed");
                 }
-                dir.push_back({ K, K, sk });
+                dir.push_back({ kmer_key, kmer_key, sk });
             } else {
                 const std::size_t add = k_encoded_bucket_bytes + sizeof(std::uint64_t) * pcount;
                 if (k_encoded_header_bytes + ob_body_bytes + add > k_bucket_target_bytes && !ob_buckets.empty()) flush_bucket();
@@ -3402,8 +3402,8 @@ struct direct_minimizer_bucket_index {
                 }
                 const std::uint32_t off = (std::uint32_t)ob_positions.size();
                 positions.for_each_batch([&](std::span<const std::uint64_t> b){ ob_positions.insert(ob_positions.end(), b.begin(), b.end()); });
-                ob_buckets.push_back(encoded_bucket_record{ K, off, (std::uint32_t)pcount });
-                ob_hi = K; if (ob_buckets.size() == 1) ob_lo = K;
+                ob_buckets.push_back(encoded_bucket_record{ kmer_key, off, (std::uint32_t)pcount });
+                ob_hi = kmer_key; if (ob_buckets.size() == 1) ob_lo = kmer_key;
                 ob_body_bytes += add;
             }
         });
@@ -3416,7 +3416,7 @@ struct direct_minimizer_bucket_index {
             storage.resize_chunks(k_directory_sub_key, std::span<const std::size_t>(plan));
             storage.template write_to_each<char>(k_directory_sub_key, [&](std::size_t c, char* outbuf, std::size_t){
                 direct_minimizer_bucket_directory h;
-                h.magic = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic; h.format_revision = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_format_revision;
+                h.magic = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_magic; h.layout_revision = direct_minimizer_bucket_directory::k_direct_minimizer_bucket_layout_revision;
                 h.flags = backend == minimizer_sketch_backend::vulkan_segment
                     && !std::same_as<p_alphabet, ::seq::dna4>
                     ? direct_minimizer_bucket_directory::k_gpu_built
@@ -3464,9 +3464,9 @@ struct direct_minimizer_bucket_index {
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         std::uint8_t alphabet_code =
-            bioseq::minimizers::unbound_packed_alphabet_code)
+            bioseq::minimizers::k_unbound_packed_alphabet_code)
     {
-        if (backend == minimizer_sketch_backend::two_stack_nthash
+        if (backend == minimizer_sketch_backend::exact_simd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
             throw exact_simd_index_runtime_error{
                 exact_simd_index_status::invalid_state,
@@ -3552,7 +3552,7 @@ struct direct_minimizer_bucket_index {
             const std::size_t nc = storage.number_of_chunks(sk);
             if (nc == 0) storage.index_error("minimizers_per_sequence: directory references a bucket with no chunks");
             if (nc > 1) {
-                // HEAVY-HITTER bucket: a single kmer K. Exact count from metadata alone.
+                // A heavy-hitter bucket contains one k-mer; metadata gives its exact count.
                 std::size_t exact = 0;
                 for (std::size_t c = 0; c < nc; ++c) {
                     storage.validate_minimizer_chunk_metadata_or_error(sk, c, k_encoded_header_bytes + k_encoded_bucket_bytes, alignof(std::uint64_t));

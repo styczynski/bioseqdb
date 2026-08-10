@@ -2,7 +2,7 @@
  *
  * scheduler/dispatch_buffer/api.cppm
  *
- * Narrow custom-scan-facing API for TupleDispatchBuffer.  The primary
+ * Narrow custom-scan-facing API for tuple_dispatch_buffer.  The primary
  * goal is to keep table/custom_scan.cppm from importing the full
  * bioseq.postgres.scheduler.dispatch_buffer BMI: GCC 16.1 crashes while loading
  * that heavy exported module from custom_scan, but the executor only
@@ -34,29 +34,29 @@ export namespace bioseq::scheduler {
 
 /** Cold plan inventory forwarded without exposing the heavy processor BMI. */
 [[nodiscard]] bioseq::simd_dispatch::highway_dispatch_plan
-highway_dispatch_info_for_plan() noexcept;
+highway_dispatch_plan_for_plan() noexcept;
 
-struct DispatchNextOutput {
+struct dispatch_next_output {
     TupleTableSlot* scan_slot_copy = nullptr;
     std::int64_t sequence_rowno = -1;
     std::uint64_t query_ordinal = 0;
     const bioseq::simd::match_result* match = nullptr;
 };
 
-struct DispatchJoinQueryRef {
+struct dispatch_join_query_ref {
     std::uint64_t ordinal = 0;
     TupleTableSlot* query_slot = nullptr;
 };
 
-class DispatchBufferRuntime {
+class dispatch_buffer_runtime {
 public:
-    explicit DispatchBufferRuntime(std::size_t estimated_tuple_count);
-    ~DispatchBufferRuntime();
+    explicit dispatch_buffer_runtime(std::size_t estimated_tuple_count);
+    ~dispatch_buffer_runtime();
 
-    DispatchBufferRuntime(const DispatchBufferRuntime&) = delete;
-    DispatchBufferRuntime& operator=(const DispatchBufferRuntime&) = delete;
-    DispatchBufferRuntime(DispatchBufferRuntime&& rhs) noexcept;
-    DispatchBufferRuntime& operator=(DispatchBufferRuntime&& rhs) noexcept;
+    dispatch_buffer_runtime(const dispatch_buffer_runtime&) = delete;
+    dispatch_buffer_runtime& operator=(const dispatch_buffer_runtime&) = delete;
+    dispatch_buffer_runtime(dispatch_buffer_runtime&& rhs) noexcept;
+    dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& rhs) noexcept;
 
     void configure_params(
         const bioseq::simd::minimap2_parameters& params,
@@ -73,7 +73,7 @@ public:
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
     /* Borrowed statement source authority. The opaque runtime forwards this
-     * exact provider identity to its concrete TupleDispatchBuffer; it never
+     * exact provider identity to its concrete tuple_dispatch_buffer; it never
      * retains or closes the provider independently. */
     void bind_sequence_source_provider(
         bioseq::storage::pg_sequence_source_provider* provider);
@@ -135,8 +135,8 @@ public:
         std::uint8_t query_storage_unit_byte_width);
     void begin_join_target(TupleTableSlot* locator_passthrough_target);
     void prepare_join_target_queries(
-        std::span<const DispatchJoinQueryRef> all_queries);
-    void set_join_query_batch(std::span<const DispatchJoinQueryRef> queries);
+        std::span<const dispatch_join_query_ref> all_queries);
+    void set_join_query_batch(std::span<const dispatch_join_query_ref> queries);
     [[nodiscard]] bool run_join_query_batch_and_build_cursors();
     void finish_join_target();
     void reset_join_runtime_for_rescan();
@@ -154,7 +154,7 @@ public:
     [[nodiscard]] bool run_batch_and_build_cursors();
     void clear_slots();
 
-    [[nodiscard]] std::optional<DispatchNextOutput> read_next_output();
+    [[nodiscard]] std::optional<dispatch_next_output> read_next_output();
     [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats
     execution_stats() const;
     [[nodiscard]] std::size_t extra_query_count() const;

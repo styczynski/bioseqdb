@@ -1330,14 +1330,16 @@ static void publish_sequence_sources_after_parent_row(
 	}
 }
 
-template <class function_type>
-decltype(auto) run_tableam_cpp_checked(const char* operation, function_type&& function) {
+template <class p_function>
+decltype(auto) run_tableam_cpp_checked(
+	const char* operation,
+	p_function&& function) {
 	ErrorData* exact_error = nullptr;
 	std::array<char, 512> detail{};
 	bool cpp_error = false;
 	bool unknown_cpp_error = false;
 	try {
-		if constexpr (std::is_void_v<std::invoke_result_t<function_type&>>) {
+		if constexpr (std::is_void_v<std::invoke_result_t<p_function&>>) {
 			function();
 			return;
 		} else {
@@ -1374,17 +1376,17 @@ decltype(auto) run_tableam_cpp_checked(const char* operation, function_type&& fu
 	pg_unreachable();
 }
 
-template <class function_type>
+template <class p_function>
 decltype(auto) run_index_source_cpp_checked(
 	const char* failure_message,
-	function_type&& function)
+	p_function&& function)
 {
 	ErrorData* exact_error = nullptr;
 	std::array<char, 512> detail{};
 	bool cpp_error = false;
 	bool unknown_cpp_error = false;
 	try {
-		if constexpr (std::is_void_v<std::invoke_result_t<function_type&>>) {
+		if constexpr (std::is_void_v<std::invoke_result_t<p_function&>>) {
 			function();
 			return;
 		} else {

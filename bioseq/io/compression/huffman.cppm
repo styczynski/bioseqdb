@@ -2,9 +2,9 @@
  * @file huffman.cppm
  * @brief Canonical Huffman decoder with primary-table fast path.
  *
- * Templated on `<PrimaryBits, Alphabet>`. The primary table maps
- * `peek<PrimaryBits>` -> `(symbol << 4) | code_length`; codes longer than
- * `PrimaryBits` redirect to a fixed-capacity fallthrough table indexed
+ * Templated on `<p_primary_bits, p_alphabet_size>`. The primary table maps
+ * `peek<p_primary_bits>` -> `(symbol << 4) | code_length`; codes longer than
+ * `p_primary_bits` redirect to a fixed-capacity fallthrough table indexed
  * by the suffix bits. Encoding `code_length=0` in the primary entry
  * means "long code; consult fallthrough".
  *
@@ -62,16 +62,16 @@ fixed_distance_code_lengths() noexcept {
 
 /// `maximum_fallthrough_entries` covers RFC 1951's worst case — 288-symbol
 /// alphabet with all 15-bit codes. The 11-bit primary captures every
-/// code <= 11 bits; the residual is at most `Alphabet * 2^4 / 2^4`
+/// code <= 11 bits; the residual is at most `p_alphabet_size * 2^4 / 2^4`
 /// rounded up to the next 16-element cacheline.
-template <std::size_t PrimaryBits, std::size_t Alphabet>
+template <std::size_t p_primary_bits, std::size_t p_alphabet_size>
 class canonical_huffman_decoder {
 public:
-    static constexpr std::size_t primary_bit_count          = PrimaryBits;
-    static constexpr std::size_t primary_table_size          = std::size_t{1} << PrimaryBits;
+    static constexpr std::size_t primary_bit_count          = p_primary_bits;
+    static constexpr std::size_t primary_table_size          = std::size_t{1} << p_primary_bits;
     static constexpr std::size_t maximum_code_bits          = 15;
     static constexpr std::size_t maximum_fallthrough_entries =
-        ((Alphabet * 16) + 15) & ~std::size_t{15};
+        ((p_alphabet_size * 16) + 15) & ~std::size_t{15};
     static constexpr std::uint16_t invalid_symbol = 0xFFFF;
 
     constexpr canonical_huffman_decoder() noexcept = default;
@@ -156,7 +156,7 @@ private:
         // see if the prefix of that length matches an assigned code.
         std::uint64_t code_be = 0;
         std::uint64_t accumulated = reader.peek<maximum_code_bits>();
-        // Reverse PrimaryBits..maximum_code_bits-1 of `accumulated`.
+        // Reverse p_primary_bits..maximum_code_bits-1 of `accumulated`.
         // The fallthrough lookup uses a linear scan: we walk the
         // canonical table sorted by (length, code) and find the entry
         // whose `(canonical_code, length)` matches the read prefix.
@@ -273,8 +273,8 @@ private:
                 static_cast<std::uint16_t>(symbol);
         }
 
-        // Populate the primary table for codes of length <= PrimaryBits.
-        // Each canonical code of length L expands to (1 << (PrimaryBits - L))
+        // Populate the primary table for codes of length <= p_primary_bits.
+        // Each canonical code of length L expands to (1 << (p_primary_bits - L))
         // primary-table entries with the bits AFTER the code as the
         // varying part.
         std::array<std::uint32_t, maximum_code_bits + 2> per_length_code{};

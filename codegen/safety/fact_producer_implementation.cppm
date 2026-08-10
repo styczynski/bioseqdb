@@ -603,10 +603,14 @@ struct prepared_identity {
     const json_value document = parse_json(manifest_text);
     const json_value::object& root =
         json_object(document, "PCM manifest");
+    const std::int64_t schema_revision = json_integer(
+        json_field(root, "schema_revision", "PCM manifest"),
+        "PCM manifest.schema_revision");
     if (require_string(root, "schema", "PCM manifest")
-        != "bioseq_clang_pcm_manifest/v1") {
+            != "bioseq_clang_pcm_manifest"
+        || schema_revision != 1) {
         fact_failure(
-            "PCM manifest", "unsupported schema");
+            "PCM manifest", "unsupported schema identity or revision");
     }
     return {
         .clang_binary =
@@ -3820,9 +3824,9 @@ bridge_evidence_for(
                 "reviewed implementation");
         }
         expected_name = implementation_name;
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_source_suffix =
-            "/common/pg_sql_boundary/"
+            "/common/postgres/sql_boundary/"
             "call_context_implementation.cppm";
         region_id =
             "bioseq.postgres.support.sql_boundary.context/"
@@ -3831,9 +3835,9 @@ bridge_evidence_for(
     } else if (kind == bridge_kind::generated_boundary_tail) {
         expected_name =
             "bioseq::postgres::support::invoke_postgres_callback";
-        expected_module = "bioseq.pg_sql_boundary";
+        expected_module = "bioseq.postgres.sql_boundary";
         expected_source_suffix =
-            "/common/pg_sql_boundary/index.cppm";
+            "/common/postgres/sql_boundary/index.cppm";
         region_id =
             "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
@@ -4980,9 +4984,13 @@ normal_runtime_event_frontier_after(
 
 [[nodiscard]] std::vector<runtime_probe_fact>
 extract_runtime_probe_facts(
+    const clang::FunctionDecl* function,
     const clang::CFG& cfg,
     const clang::CFG* normal_cfg,
     const std::vector<materialized_call_record>& calls) {
+    const bool generated_boundary =
+        qualified_name(function)
+        == "bioseq::postgres::support::invoke_postgres_callback";
     std::vector<runtime_marker> marker_storage;
     marker_storage.reserve(calls.size());
     std::map<
@@ -5732,6 +5740,7 @@ struct analyzed_function {
     }
     std::vector<runtime_probe_fact> runtime_probes =
         extract_runtime_probe_facts(
+            function,
             *cfg,
             normal_cfg.get(),
             materialized_calls);
@@ -6998,7 +7007,8 @@ validate_compile_commands(
          json_value{std::move(postgresql_roots)}},
         {"postgresql_rejected_header_roots",
          json_value{std::move(rejected_postgresql_roots)}},
-        {"schema", "bioseq_safety_compile_graph/v1"},
+        {"schema", "bioseq_safety_compile_graph"},
+        {"schema_revision", json_value{std::size_t{1}}},
         {"source_list", canonical_path(request.source_list)},
         {"source_list_sha256",
          bioseq::common::sha256_hex(source_list_text)},
@@ -7050,8 +7060,8 @@ validate_compile_commands(
         {"scope",
          "registered-source scan; author only records "
          "also named by a reachable-closure failure"},
-        {"schema",
-         "bioseq_safety_provenance_candidates/v1"},
+        {"schema", "bioseq_safety_provenance_candidates"},
+        {"schema_revision", json_value{std::size_t{1}}},
     });
 }
 
@@ -7497,7 +7507,7 @@ compiler_fact_product produce_compiler_analysis_facts(
     const compiler_fact_request& request) {
     if (request.schema_version != 2) {
         fact_detail::fact_failure(
-            "schema", "only schema version 2 is supported");
+            "schema", "only --schema-version 2 is supported");
     }
     if (request.source_list.empty()
         || request.compile_database.empty()
@@ -7670,7 +7680,7 @@ compiler_fact_product produce_compiler_analysis_facts(
             sql_manifest, std::move(scanned));
 
     compiler_analysis_facts facts{
-        .schema_version = 2,
+        .schema_revision = 2,
         .profile = request.profile,
         .compiler_profile =
             std::string{profile_name(request.profile)},

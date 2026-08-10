@@ -25,8 +25,8 @@ struct source_read_result {
 /// Concept: an I/O source supplies bytes via `read_into(dst, cap)` and
 /// surfaces errors via `last_error_message()`. Sources are monomorphic
 /// per template instantiation; no virtuals.
-template <typename source_t>
-concept io_source = requires(source_t& source, std::uint8_t* dst, std::size_t cap) {
+template <typename p_source>
+concept io_source = requires(p_source& source, std::uint8_t* dst, std::size_t cap) {
     { source.read_into(dst, cap) } -> std::same_as<source_read_result>;
     { source.last_error_message() } -> std::convertible_to<std::string>;
 };

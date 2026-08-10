@@ -1,6 +1,7 @@
 {
-  "schema": "bioseq.website.search_tokens_golden/v1",
-  "comment": "Shared \u00a712.5 search-token corpus. Consumed by browser_test.py against static/js/search_tokens.mjs and mirrored by the C++ self-test in site_builder.cppm; both implementations must agree byte-for-byte.",
+  "schema": "bioseq.website.search_tokens_golden",
+  "schema_revision": 1,
+  "comment": "Shared \u00a712.5 search-token corpus. Consumed by tests/integration/test_browser.py against static/js/search_tokens.mjs and mirrored by the C++ self-test in codegen/website/build_pipeline.cppm; both implementations must agree byte-for-byte.",
   "cases": [
     {
       "input": "Hello, World!",

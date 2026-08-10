@@ -268,9 +268,8 @@ struct erased_benchmark {
 };
 
 /// Test-only process-local fault seam for the durable raw-evidence syscalls.
-/// Production callers leave this at `none`; unlike the removed environment
-/// variable, this cannot be enabled accidentally by an inherited process
-/// environment. Tests must reset the seam after each injected run.
+/// Production callers leave this at `none`, so inherited process state cannot
+/// enable it. Tests must reset the seam after each injected run.
 enum class raw_evidence_io_fault : std::uint8_t {
     none,
     short_write,
@@ -702,7 +701,7 @@ struct rule_comparator {
     /// Reduction applied to each side's sample vector before the
     /// comparator runs. Defaults to the framework's p50 percentile.
     sample_aggregate aggregate = sample_aggregate::p50;
-    /// The historical/default rule path reduces LHS and RHS independently.
+    /// Independent pairing reduces LHS and RHS separately.
     /// Ratio-paired rules build one LHS/RHS ratio for each logical repeat and
     /// reduce that vector. Exact-paired rules compare the finite IEEE-754 value
     /// of every aligned repeat without reducing either source vector.
@@ -713,7 +712,7 @@ struct rule_comparator {
     double paired_baseline = 1.0;
     bool paired_baseline_explicit = false;
     /// Diagnostic rules still emit findings/evidence but do not fail the
-    /// process. Defaults true so every historical rule remains authoritative.
+    /// process. Blocking is the default.
     bool blocking = true;
     /// Number of leading logical repeats excluded from a ratio-paired rule. The
     /// raw samples remain intact, so repeat zero can be reported separately
@@ -855,7 +854,7 @@ struct benchmark_configuration {
     /// only meaningful when the complete declared comparison matrix ran.  The
     /// algorithm list names exact report rows (one expanded tuple per name),
     /// while the test-case map fixes the exact iteration count for each row.
-    /// An empty algorithm list keeps the historical permissive behaviour.
+    /// An empty algorithm list disables the acceptance contract.
     struct acceptance_contract {
         struct named_region_sample_multiplicity {
             std::string algorithm{};
@@ -872,7 +871,7 @@ struct benchmark_configuration {
         std::vector<std::string> exact_algorithm_rows{};
         std::map<std::string, std::size_t> exact_test_case_iterations{};
         bool require_named_region_iteration_coverage = false;
-        /// Historical descriptor-weighted total. For every coordinate the
+        /// Configured descriptor-weighted total. For every coordinate the
         /// total must divide by its accepted iteration count; that quotient is
         /// the exact raw descriptor count required in each logical iteration.
         std::vector<named_region_sample_multiplicity>
@@ -979,7 +978,7 @@ struct paired_rule_evidence {
 /// Raw descriptor emission counts for one completed logical iteration:
 /// region name -> metric name -> number of same-name descriptor samples.
 /// Unlike the aggregate `samples` vectors this retains iteration boundaries,
-/// which strict acceptance needs to reject skewed historical-P50 weighting.
+/// which strict acceptance needs to reject skewed descriptor-weighted P50s.
 using named_region_iteration_sample_counts =
     std::map<std::string, std::map<std::string, std::size_t>>;
 
@@ -1007,8 +1006,8 @@ struct measurement_cell {
     /// `benchmark_configuration::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
     /// Named instrumentation buckets may contain more than one descriptor
-    /// with the same name.  Keep their raw samples unchanged for historical
-    /// ratio compatibility, but separately count at most one contribution per
+    /// with the same name. Keep their raw samples unchanged for ratio
+    /// evaluation, but separately count at most one contribution per
     /// (iteration, region name, metric).  Strict acceptance can therefore
     /// prove all scheduled iterations contributed without assuming raw sample
     /// count == iteration count.
@@ -1208,7 +1207,7 @@ struct regression_rule {
     /// unless they are explicitly classified otherwise.
     std::vector<std::string> exclude_algorithms{};
     /// Diagnostic regressions remain in the report and stderr but do not
-    /// affect process success. Defaults true for backward compatibility.
+    /// affect process success. Blocking is the default.
     bool blocking = true;
 };
 
@@ -1249,10 +1248,8 @@ struct regression_entry {
     /// `"report_3.json"`.
     std::string regression_since{};
     /// Commit SHA captured by the historical report identified by
-    /// `regression_since` (its `meta.commit` field). Empty string ⇒
-    /// JSON `null` — happens when `regression_since` itself is null,
-    /// block), or when `meta.commit` was empty in that report (the
-    /// older run wasn't in a git repo).
+    /// `regression_since`. Empty string ⇒ JSON `null` when
+    /// `regression_since` itself is null or that report's commit is empty.
     std::string regression_since_commit{};
 };
 
@@ -1287,9 +1284,8 @@ struct sanity_warning {
     /// hit a missing report).
     std::string warning_since;
     /// `meta.commit` of the historical report identified by
-    /// `warning_since`. Empty string ⇒ JSON `null` (warning_since
-    /// itself null, or the older report had no `meta` block, or its
-    /// `meta.commit` was empty).
+    /// `warning_since`. Empty string ⇒ JSON `null` when `warning_since`
+    /// is null or the commit is unavailable or empty.
     std::string warning_since_commit;
 };
 
@@ -2268,9 +2264,9 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
       "examples": [
         {
           "bioseq_aligner": {
-            "MinimizerAlgorithmType": {
+            "minimizer_algorithm": {
               "type": "string",
-              "enum": ["SIMD", "SCALAR"],
+              "enum": ["simd", "scalar"],
               "description": "Minimizer-extraction backend"
             },
             "w": {
@@ -2314,7 +2310,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
     },
     "regression_rules": {
       "title": "RegressionRules",
-      "description": "Optional list of regression rules. Each rule compares aggregated samples in this run to the newest eligible historical report on disk and emits a 'regressions' entry whenever the configured operator/tolerance is violated. Eligibility requires an accepted prior run (or a legacy report with no blocking findings), matching run mode, and complete cardinality-consistent evidence for the selected cell; failed, malformed, or incomplete reports are skipped with a non-blocking diagnostic. Regression rules are global to the config file: by default they apply to every benchmark in the same file. The framework writes its run as report_<N>.json (postfixed integer starting at 1).",
+      "description": "Optional list of regression rules. Each rule compares aggregated samples in this run to the newest eligible historical report on disk and emits a 'regressions' entry whenever the configured operator/tolerance is violated. Eligibility requires an accepted prior run with meta.history_eligible=true and closed finding arrays, matching run mode, and complete cardinality-consistent evidence for the selected cell; failed, malformed, or incomplete reports are skipped with a non-blocking diagnostic. Regression rules are global to the config file: by default they apply to every benchmark in the same file. The framework writes its run as report_<N>.json (postfixed integer starting at 1).",
       "type": "array",
       "items": { "$ref": "#/definitions/regression_rule" }
     }
@@ -2466,7 +2462,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
           "examples": [
             {
               "bioseq_aligner": {
-                "MinimizerAlgorithmType": ["SIMD", "SCALAR"],
+                "minimizer_algorithm": ["simd", "scalar"],
                 "w": [10, 15, 20]
               }
             }
@@ -2518,7 +2514,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
     },
     "named_region_sample_multiplicity": {
       "title": "named_region_sample_multiplicity",
-      "description": "Exact raw descriptor-weighted sample count for one named rule source. The count must divide evenly by that test case's accepted iteration count; the quotient is also enforced for every individual iteration. This preserves historical P50 weighting and its per-run topology rather than allowing duplicate descriptors to move between iterations.",
+      "description": "Exact raw descriptor-weighted sample count for one named rule source. The count must divide evenly by that test case's accepted iteration count; the quotient is also enforced for every individual iteration. This preserves the configured P50 weighting and per-run topology rather than allowing duplicate descriptors to move between iterations.",
       "type": "object",
       "required": ["algorithm", "test_case", "region", "metric", "exact_samples"],
       "additionalProperties": false,
@@ -2656,7 +2652,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
       ],
       "examples": [
         ["bioseq_faster_than_minimap",
-         { "key": "bioseq", "MinimizerAlgorithmType": "SCALAR" },
+         { "key": "bioseq", "minimizer_algorithm": "scalar" },
          { "compare": "<", "threshold%": 10, "tolerance%": 1 },
          { "key": "minimap2" }]
       ]
@@ -2689,7 +2685,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
         }
       },
       "examples": [
-        { "key": "bioseq", "MinimizerAlgorithmType": "SCALAR", "w": 10 },
+        { "key": "bioseq", "minimizer_algorithm": "scalar", "w": 10 },
         { "key": "bioseq", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" },
         { "key": "minimap2" }
       ]
@@ -2702,7 +2698,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
     },
     "comparator": {
       "title": "rule_comparator",
-      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBy default both source arrays are reduced independently via aggregate. pairing=by_iteration_ratio first forms the logical-repeat vector lhs[i]/rhs[i], discards warmup_repetitions leading pairs, reduces that vector via aggregate, and compares the result against paired_baseline (default 1.0). This makes tolerance% a direct relative noise allowance around the historical ratio. If a named region has duplicate same-name descriptors, aggregate first reduces that repeat's descriptor partition to one logical value. Ratio-paired rules require an exclusive serial, one-group, interleaved benchmark and fail closed on missing/non-finite samples or a zero RHS. pairing=by_iteration_exact is equality-only, zero-tolerance, evaluation-only, all_regions-only, one-group samplewise identity; it permits concurrent benchmark scheduling because it does not compare timing ratios.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
+      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBy default both source arrays are reduced independently via aggregate. pairing=by_iteration_ratio first forms the logical-repeat vector lhs[i]/rhs[i], discards warmup_repetitions leading pairs, reduces that vector via aggregate, and compares the result against paired_baseline (default 1.0). This makes tolerance% a direct relative noise allowance around the configured ratio. If a named region has duplicate same-name descriptors, aggregate first reduces that repeat's descriptor partition to one logical value. Ratio-paired rules require an exclusive serial, one-group, interleaved benchmark and fail closed on missing/non-finite samples or a zero RHS. pairing=by_iteration_exact is equality-only, zero-tolerance, evaluation-only, all_regions-only, one-group samplewise identity; it permits concurrent benchmark scheduling because it does not compare timing ratios.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
       "oneOf": [
         {
           "title": "OrderedComparator",
@@ -2736,7 +2732,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 1.0,
-              "description": "Historical/reference ratio used as the RHS only for by_iteration_ratio."
+              "description": "Configured reference ratio used as the RHS only for by_iteration_ratio."
             },
             "blocking": {
               "type": "boolean",
@@ -2780,7 +2776,7 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
               "type": "number",
               "exclusiveMinimum": 0,
               "default": 1.0,
-              "description": "Historical/reference ratio used as the RHS only for by_iteration_ratio."
+              "description": "Configured reference ratio used as the RHS only for by_iteration_ratio."
             },
             "blocking": {
               "type": "boolean",
@@ -2949,7 +2945,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
     },
     "regressions": {
       "type": "array",
-      "description": "Every regression rule violation detected against the newest eligible historical report. Historical candidates must be accepted captures (meta.history_eligible=true, or a legacy report with no blocking findings), match meta.fast, carry complete raw-evidence authority when a sidecar exists, contain the selected cell and finite aggregate, and match the current total/finite sample cardinalities. Empty on the first run after a clean report_dir, when no regression rules are configured, when no eligible baseline exists, or when nothing regressed.",
+      "description": "Every regression rule violation detected against the newest eligible historical report. Historical candidates must be accepted captures with meta.history_eligible=true and closed rule_violations, regressions, and sanity_warnings arrays, match meta.fast, carry complete raw-evidence authority when a sidecar exists, contain the selected cell and finite aggregate, and match the current total/finite sample cardinalities. Empty on the first run after a clean report_dir, when no regression rules are configured, when no eligible baseline exists, or when nothing regressed.",
       "items": { "$ref": "#/definitions/regression_entry" }
     },
     "sanity_warnings": {
@@ -3405,7 +3401,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
         },
         "regression_since_commit": {
           "type": ["string", "null"],
-          "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null, when the historical report has no meta block, or when meta.commit was empty in that report."
+          "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null or meta.commit was empty in that report."
         }
       }
     },
@@ -3437,7 +3433,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
         },
         "warning_since_commit": {
           "type": ["string", "null"],
-          "description": "meta.commit field of the historical report identified by 'warning_since'. Null when warning_since is null, when the older report has no meta block, or when meta.commit was empty in that report."
+          "description": "meta.commit field of the historical report identified by 'warning_since'. Null when warning_since is null or the commit is unavailable or empty."
         }
       }
     }
@@ -3548,9 +3544,8 @@ inline void drain_diagnostics_to_context(
     return diagnostics;
 }
 
-// `validate_against_schema` is the single entry point: callers pass
-// either `k_bench_config_schema` or `k_bench_report_schema` directly. The
-// previous one-line wrappers were pure forwarders.
+// `validate_against_schema` is the single entry point: callers pass either
+// `k_bench_config_schema` or `k_bench_report_schema` directly.
 
 // ----------------- Config parsing helpers -----------------
 
@@ -3757,9 +3752,8 @@ parse_compare_and_tolerance(
 }
 
 /// Parse a rule's comparator object. `compare` is mandatory; the two `%`
-/// fields and `warmup_repetitions` default to zero;
-/// `aggregate` defaults to `"p50"` (the legacy median behaviour for
-/// `comparator_passes` for how the values turn into a pass/fail decision and
+/// fields and `warmup_repetitions` default to zero, and `aggregate` defaults
+/// to `"p50"`. See `comparator_passes` for the pass/fail decision and
 /// `aggregate_samples` for the reduction.
 [[nodiscard]] inline rule_comparator parse_rule_comparator(
     simdjson::dom::object cmp_obj,
@@ -4206,8 +4200,6 @@ parse_compare_and_tolerance(
         if (concurrency_obj["concurrency"].get(concurrency_flag) == simdjson::SUCCESS) {
             benchmark.concurrency.concurrency = concurrency_flag;
         }
-        // `additionalProperties: false` rejects the key, so older
-        // configs surface as validation errors.
     }
 
     simdjson::dom::object iteration_order_obj;
@@ -6967,7 +6959,7 @@ k_aggregated_stats_registry{ {
 /// A benchmark can mark an execution cell as "not measured" by returning only
 /// non-finite evaluation metrics. Wall-clock still exists because the framework
 /// times `on_run`, but regression rules must not compare a deliberate skip's
-/// microsecond-scale bookkeeping time against real historical GPU work.
+/// microsecond-scale bookkeeping time against measured GPU work.
 [[nodiscard]] inline bool region_has_nonfinite_evaluation_sentinel(
     const std::map<std::string, std::vector<double>>& region_metrics) noexcept
 {
@@ -7483,11 +7475,11 @@ merged_named_region_coverage_for_state(
 }
 
 /// One value per logical repeat for ratio-paired rule evaluation. The ordinary
-/// report arrays remain untouched for historical compatibility. Named
+/// report arrays retain their independent-aggregate shape. Named
 /// `region_total_ns` sources can contain multiple descriptors with the same
 /// name, so their strict per-iteration descriptor counts partition the raw
 /// vector and each partition is reduced with the rule's configured aggregate
-/// into one repeat value. This retains the historical descriptor semantics
+/// into one repeat value. This retains the descriptor semantics
 /// without pairing unrelated run-level percentiles.
 struct logical_iteration_series {
     std::vector<double> values{};
@@ -7958,7 +7950,7 @@ inline void evaluate_rules(
                                 ? *paired_ratio : 0.0;
                             // A ratio-paired rule compares
                             // aggregate(lhs[i]/rhs[i]) against its explicit
-                            // historical/reference ratio.
+                            // configured reference ratio.
                             rhs_aggregate = paired_present
                                 ? rule.cmp.paired_baseline : 0.0;
                         } else if (rule.cmp.pairing
@@ -8329,8 +8321,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return std::string{commit_text};
 }
 
-/// Pull the `meta.fast` flag from a parsed report. Missing metadata means an
-/// older report predates the flag; callers decide whether that is comparable.
+/// Pull the `meta.fast` flag from a parsed report. Missing or malformed
+/// metadata is incomparable and returns no value.
 [[nodiscard]] inline std::optional<bool> fast_from_report(
     simdjson::dom::element report_root) noexcept
 {
@@ -8682,11 +8674,10 @@ historical_raw_evidence_ineligibility_reason(
     return std::nullopt;
 }
 
-/// Reject captures that the producing run did not accept. New reports carry
-/// an explicit `meta.history_eligible` seal. Reports written before that seal
-/// existed remain backward-compatible, but any persisted blocking within-run
-/// violation or blocking regression makes the entire capture ineligible: a
-/// failed/noisy row must never ratchet an unrelated cell's future baseline.
+/// Reject captures that the producing run did not accept. A current report is
+/// authoritative only when its explicit `meta.history_eligible` seal is true
+/// and all finding arrays are closed. A failed or incomplete row must never
+/// ratchet an unrelated cell's future baseline.
 [[nodiscard]] inline std::optional<std::string>
 historical_run_outcome_ineligibility_reason(
     simdjson::dom::element report_root) noexcept
@@ -8699,48 +8690,32 @@ historical_run_outcome_ineligibility_reason(
     simdjson::dom::element seal_element;
     const auto seal_status =
         (*meta_obj).at_key("history_eligible").get(seal_element);
-    if (seal_status == simdjson::SUCCESS) {
-        bool history_eligible = false;
-        if (seal_element.get(history_eligible) != simdjson::SUCCESS) {
-            return std::string{"meta.history_eligible is malformed"};
-        }
-        if (!history_eligible) {
-            return std::string{"meta.history_eligible is false"};
-        }
-        return std::nullopt;
+    if (seal_status == simdjson::NO_SUCH_FIELD) {
+        return std::string{"meta.history_eligible is missing"};
     }
-    if (seal_status != simdjson::NO_SUCH_FIELD) {
+    if (seal_status != simdjson::SUCCESS) {
         return std::string{"meta.history_eligible is malformed"};
     }
+    bool history_eligible = false;
+    if (seal_element.get(history_eligible) != simdjson::SUCCESS) {
+        return std::string{"meta.history_eligible is malformed"};
+    }
+    if (!history_eligible) {
+        return std::string{"meta.history_eligible is false"};
+    }
 
-    // Legacy fallback. Missing finding arrays predate the current report
-    // schema and are accepted; present arrays must be structurally readable.
     for (const std::string_view finding_key :
          {std::string_view{"rule_violations"},
-          std::string_view{"regressions"}}) {
+          std::string_view{"regressions"},
+          std::string_view{"sanity_warnings"}}) {
         simdjson::dom::array findings;
         const auto findings_status =
             (*root_obj).at_key(finding_key).get(findings);
-        if (findings_status == simdjson::NO_SUCH_FIELD) continue;
-        if (findings_status != simdjson::SUCCESS) {
-            return fmt::format("legacy {} is malformed", finding_key);
+        if (findings_status == simdjson::NO_SUCH_FIELD) {
+            return fmt::format("{} is missing", finding_key);
         }
-        for (const auto finding_element : findings) {
-            const auto finding = try_as_object(finding_element);
-            if (!finding.has_value()) {
-                return fmt::format("legacy {} entry is malformed", finding_key);
-            }
-            bool blocking = true;
-            if ((*finding).at_key("blocking").get(blocking)
-                != simdjson::SUCCESS) {
-                return fmt::format(
-                    "legacy {} entry lacks a valid blocking flag",
-                    finding_key);
-            }
-            if (blocking) {
-                return fmt::format(
-                    "legacy {} contains a blocking finding", finding_key);
-            }
+        if (findings_status != simdjson::SUCCESS) {
+            return fmt::format("{} is malformed", finding_key);
         }
     }
     return std::nullopt;
@@ -9212,9 +9187,8 @@ struct historical_regression_candidate_selector {
     std::vector<regression_entry> entries;
 
     // Per-state merged-samples cache built once per `(config_path,
-    // benchmark)` and reused across every rule that touches the same
-    // state. Earlier versions rebuilt this map per-rule, which scaled
-    // O(N_rules × N_cells).
+    // benchmark)` and reused across every rule that touches the same state,
+    // keeping the work at O(N_cells) rather than O(N_rules × N_cells).
     std::map<const benchmark_execution_state*, merged_samples_by_pair> merged_cache;
     auto merged_for = [&](const benchmark_execution_state* state)
         -> const merged_samples_by_pair&
@@ -11921,10 +11895,9 @@ template<typename p_input, typename p_output>
 /// Render a single `config_value` scalar to its plain-text form. Shared
 /// builder — both want the value as a string but with different field
 /// separators around it. Doubles use `{:.17g}` so an int → double
-/// round-trip in a historical report (`5` parsed back as `5.0`)
-/// canonicalises onto the integer form via the `floor(value) == value
-/// && |value| < 2^53` guard, preventing identity-key drift between
-/// reports written by different framework versions.
+/// round-trip in a report (`5` parsed back as `5.0`) canonicalises onto the
+/// integer form via the `floor(value) == value && |value| < 2^53` guard,
+/// preventing identity-key drift after parsing and writing.
 inline void append_config_value_text(std::string& out, const config_value& value) noexcept {
     switch (value.kind) {
         case config_value::value_kind::string:    out += value.string_value; return;
@@ -12295,9 +12268,8 @@ inline constexpr char k_summary_identity_us = '\x1f';
 /// Variadic identity-string builder. Joins `kind` to the trailing
 /// `fields` with `\x1e` after the kind and `\x1f` between subsequent
 /// fields. Each `field` is implicitly convertible to `std::string_view`.
-/// Used by the three `make_*_identity` callers below; the fold
-/// expression collapses what was previously a per-kind 20-line
-/// `string += sep` ritual.
+/// Used by the three `make_*_identity` callers below so every issue kind uses
+/// the same delimiter contract.
 template<typename... p_fields>
 [[nodiscard]] inline std::string join_identity(
     std::string_view kind, const p_fields&... fields) noexcept
@@ -12315,10 +12287,9 @@ template<typename... p_fields>
 }
 
 /// Identity helpers — one tiny call to `join_identity` each. See
-/// on `make_violation_identity` reserve slots in the identity tuple
-/// callers pass the constant defaults `"all_regions"` / `"p50"` (no
-/// per-region rules exist yet, but the slots ensure forward
-/// compatibility).
+/// on `make_violation_identity` reserve slots in the identity tuple. Callers
+/// pass the constant defaults `"all_regions"` / `"p50"`; these slots are part
+/// of the identity contract even though per-region rules do not exist yet.
 [[nodiscard]] inline std::string make_violation_identity(
     std::string_view config_path,
     std::string_view benchmark,
@@ -12541,9 +12512,7 @@ struct extracted_issue {
 /// violations, regressions, sanity warnings) all follow the same
 /// shape: pull `report_root[array_key]`, iterate entries, build an
 /// identity, and merge into `aggregation`. Only the per-entry
-/// extraction differs — encoded in the `Extract` callable. This
-/// templated walker collapses ~120 lines of triplicated boilerplate
-/// from the previous three `walk_report_*` functions into one.
+/// extraction differs — encoded in the `Extract` callable.
 template<typename p_extract>
 inline void walk_report_array(
     simdjson::dom::element                report_root,
@@ -14111,7 +14080,7 @@ struct benchmark_filter_metadata {
 
         // An explicitly named benchmark must never turn into a successful
         // empty report merely because --fast excludes it. Tag-only fast
-        // sweeps retain the historical skip behaviour.
+        // sweeps retain the standard skip behaviour.
         if (cli.fast_filter && f.benchmark) {
             for (std::size_t i = 0; i < selected.size(); ++i) {
                 if (!meta[i].parsed_ok || meta[i].fast) continue;

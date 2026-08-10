@@ -197,7 +197,7 @@ using host_stage_clock = std::chrono::steady_clock;
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::runtime::instance();
-    const std::string detail = !runtime.usable()
+    const std::string detail = !runtime.is_usable()
         ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
         : runtime.features().software_device
             ? fmt::format(
@@ -226,7 +226,7 @@ using host_stage_clock = std::chrono::steady_clock;
 // `std::size_t`).  Guard the build mode so a misconfigured build fails
 // loudly rather than producing subtly-wrong codegen.
 static_assert(__cplusplus >= 202302L,
-    " requires C++23 — see");
+    "bioseq pipeline templates require C++23");
 
 // Import types from the surrounding modules so the stage bodies can refer
 // to them by short name.
@@ -239,7 +239,7 @@ using ::bioseq::chaining::chain_anchors_scalar;
 using ::bioseq::chaining::chain_anchors_rmq;
 
 // =============================================================================
-// 4. Compile-time parameter packs
+// Compile-time parameter packs
 // =============================================================================
 
 /**
@@ -314,7 +314,7 @@ enum class pipeline_entry_point : std::uint8_t {
 };
 
 // =============================================================================
-// 5/6. Concepts and stage skeleton (,)
+// Concepts and stage skeleton
 // =============================================================================
 
 namespace detail {
@@ -454,7 +454,7 @@ template <class p_sink> class emitted_token;
  * the type system rules out skipping the emit (no way to construct the
  * required `emitted_token<p_sink>` return value).
  *
- * Single-emission enforcement ( R7):
+ * Single-emission enforcement:
  *   - At least once: HARD compile-time.  `process*<p_aligner_parameters>` must return
  *     `emitted_token<p_sink>`; the only way to construct one is to call
  *     `emit_token<p_sink>::emit_batch*`.
@@ -465,7 +465,10 @@ template <class p_sink> class emitted_token;
 template <class p_sink>
 class emit_token {
 public:
-    template <is_constexpr_aligner_params, class, class> friend struct stage;
+    template <is_constexpr_aligner_params p_aligner_parameters,
+              class p_self,
+              class p_stage_sink>
+    friend struct stage;
 
     emit_token()                            = delete;
     emit_token(const emit_token&)            = delete;
@@ -481,7 +484,7 @@ public:
             "on_batch(std::span<p_element>). See stage-shape matrix.");
         DEBUG_ASSERT(sink_ptr_ != nullptr,
             "emit_token consumed twice; the first emit_batch* call nulled the "
-            "sink pointer (see R7 in).");
+            "sink pointer is no longer available.");
         sink_ptr_->on_batch(data);
         sink_ptr_ = nullptr;
         return emitted_token<p_sink>::make();
@@ -590,7 +593,7 @@ private:
  *
  * `arena_slab<p_element>::push_back` requires `std::is_trivially_copyable_v<p_element>` —
  * satisfied by every `minimizer_representation<p_bucket_width, p_kmer_size>`.  The existing slab
- * `static_assert` (`chaining_utils.cppm:236`) covers the constraint and
+ * `arena_slab`'s `static_assert` covers the constraint and
  * would fire if a non-trivial minimizer type were ever introduced.
  */
 template <class p_element>
@@ -744,7 +747,7 @@ template <is_constexpr_aligner_params p_aligner_parameters, class p_first_stage,
 }
 
 // =============================================================================
-// 7. Batch storage — owning arena slab
+// Batch storage — owning arena slab
 // =============================================================================
 //
 // `arena_slab<p_element>` itself lives in `bioseq.chaining.core` so the
@@ -755,7 +758,7 @@ template <is_constexpr_aligner_params p_aligner_parameters, class p_first_stage,
 // `make_arena_slab<p_element>()` helper so stage bodies refer to them by short name.
 
 // =============================================================================
-// 11. Metadata surface — forward types for algorithm_traits
+// Metadata surface — forward types for algorithm_traits
 // =============================================================================
 //
 // The full `stage_description` / `pipeline_description` definitions live after
@@ -769,7 +772,7 @@ struct named_property {
 };
 
 // =============================================================================
-// 8.0 p_kernel-trait pattern (, R5)
+// Kernel-trait pattern
 // =============================================================================
 //
 // `algorithm_traits<p_algorithm>` maps an algorithm enum value to
@@ -785,20 +788,14 @@ struct named_property {
 
 /// Dependent-false helper so the primary template's `static_assert` fires
 /// only on instantiation (not at point of definition).
-template <auto>
+template <auto p_algorithm>
 inline constexpr bool no_kernel_for_v = false;
 
 /// Primary template — unspecialised.  Substitution failure here produces a
 /// readable diagnostic naming the offending enum value.
 ///
-/// Specialisations live below for `chaining_algorithm` and
-/// `minimizer_algorithm`; `base_alignment_algorithm` is still dispatched
-/// inside `align_stage::process_pair` via `align_regions<p_alignment_algorithm>` because that
-/// kernel's signature is templated on both `p_alignment_algorithm` and the per-stage sequence
-/// ranges `(QR, TR)` — a trait specialisation would still need to forward
-/// `QR`/`TR`, so the direct call is preferred for clarity.  A future
-/// iteration can move `align_stage` to the trait pattern once the kernel
-/// surface is refactored to take a uniform-shape output adapter.
+/// Specializations below cover the chaining, minimizer, and base-alignment
+/// algorithm dimensions.
 template <auto p_algorithm>
 struct algorithm_traits {
     static_assert(no_kernel_for_v<p_algorithm>,
@@ -812,7 +809,7 @@ template <auto p_algorithm>
 using kernel_t = typename algorithm_traits<p_algorithm>::kernel_type;
 
 // ---------------------------------------------------------------------------
-// 8.0.1 chaining_algorithm kernel traits
+// chaining_algorithm kernel traits
 // ---------------------------------------------------------------------------
 
 /// scalar DP chaining — `chain_anchors_scalar` from
@@ -943,7 +940,7 @@ struct algorithm_traits<::bioseq::simd::chaining_algorithm::range_minimum_query>
     };
 };
 
-/// Vulkan tiled-DP chaining ( Stage A) — `chain_anchors_vulkan` from
+/// Vulkan tiled-DP chaining — `chain_anchors_vulkan` from
 /// `bioseq.chaining.vulkan`. G3SA-style tiled DP score generation on
 /// Vulkan + bioseq CPU `backtrack_chains`; selected Vulkan execution is
 /// mandatory and failures throw `vulkan_runtime_error`.
@@ -1457,7 +1454,7 @@ template <minimizer_kernel_kind p_kind, class p_minimizer,
                 c, seq, 0u, seq.bp_size(), w, k);
             return {};
         }
-        const auto run_reference = [&](const auto& descriptor) {
+        const auto run_reference = [&](const auto& p_descriptor) {
             const auto result =
                 invoke_selected_minimizer_kernel<p_minimizer>(
                     highway,
@@ -1465,7 +1462,7 @@ template <minimizer_kernel_kind p_kind, class p_minimizer,
                         minimizer_minimap2_reference,
                     ::bioseq::minimizers::minimizer_kernel_algorithm::
                         minimap2_reference,
-                    minimizer_kernel_view<p_alphabet>(descriptor, highway),
+                    minimizer_kernel_view<p_alphabet>(p_descriptor, highway),
                     w,
                     k,
                     c);
@@ -1546,12 +1543,10 @@ minimizer_dispatch_constexpr(
 // crash (observed: a 206 Mbp segment of a 500 Mbp target reported 99.7M minimizers
 // — more than the WHOLE sequence — then SIGSEGV). The scalar view honours
 // `seq_begin/seq_end` exactly and emits `seq_pos` from 0 at `seq_begin`, which is
-// what the globalisation (`TargetIndex::add_position_offset`) and the scalar/simd
-// parity both rely on. scalar collection over contiguous memory is cheap (no I/O;
-// alignment dominates the per-segment wall-clock), so this is correct AND fast.
-//  Patch D — no default backend. The scalar sub-range body now lives in
-// `collect_minimizers_segment_scalar` (bioseq.sequences.kmers) so pipe and the
-// persisted builders share one (bug-carrying) sub-range contract. Under
+// what position globalization and scalar/SIMD equivalence require. Scalar
+// collection over contiguous memory is cheap because alignment dominates the
+// per-segment wall clock. The shared scalar sub-range body lives in
+// `collect_minimizers_segment_scalar` (bioseq.sequences.kmers). Under
 // `vulkan_segment` the GPU segment sketch is called and throws on any decline.
 struct minimizer_range_execution_stats {
     scalar_minimizer_execution_stats scalar{};
@@ -1579,7 +1574,7 @@ enum class exact_simd_range_route : std::uint8_t {
 };
 
 /// Preserve native-width topology by default. Persisted indexed-query
-/// preparation is the narrow exception: its continuation/B8 compatibility
+/// preparation is the narrow exception: its continuation/B8 storage
 /// contract requires an exact u32 input packing.
 enum class exact_simd_input_storage : std::uint8_t {
     preserve_native_width,
@@ -1700,14 +1695,14 @@ minimizer_dispatch_range(
                 "bounded_nthash_simd requires the DNA4 alphabet; fallback is "
                 "forbidden");
         } else {
-            auto run_bounded = [&](const auto& descriptor) {
+            auto run_bounded = [&](const auto& p_descriptor) {
                 return invoke_selected_minimizer_kernel<p_minimizer>(
                     highway,
                     ::bioseq::simd_dispatch::highway_kernel::
                         minimizer_bounded_nthash,
                     ::bioseq::minimizers::minimizer_kernel_algorithm::
                         bounded_nthash,
-                    minimizer_kernel_view<p_alphabet>(descriptor, highway),
+                    minimizer_kernel_view<p_alphabet>(p_descriptor, highway),
                     window_size,
                     kmer_size,
                     collector);
@@ -1930,11 +1925,8 @@ inline constexpr sequence_size_t k_segment_core_max_bp    = 200'000'000ull;  // 
 inline constexpr sequence_size_t k_segment_overlap_max_bp =  30'000'000ull;  // per-side overlap ceiling
 inline constexpr sequence_size_t k_segment_min_bp        =  32'000'000ull;  // floor (keep batches useful)
 inline constexpr sequence_size_t k_vulkan_segment_min_bp   =   1'000'000ull;  // floor when GPU sketch is selected
-//  continuation: 76M/96M is the best measured consolidation point. The
-// earlier 100M/128M experiment made the inner sketch admission shrink and exposed
-// a multi-window correctness bug; 96M keeps the collected span below that failed
-// shape while cutting the 300M probe from ~44 GPU windows to ~6 when
-// memory admission accepts a one-window sketch.
+// The 76M core and 96M collected-span bounds keep each admitted Vulkan sketch
+// within the fixed position layout while limiting upload-window count.
 inline constexpr sequence_size_t k_vulkan_segment_target_bp = 76'000'000ull;  // target core before query-overlap clamping
 inline constexpr sequence_size_t k_vulkan_segment_collected_max_bp =
     96'000'000ull;
@@ -1944,16 +1936,15 @@ static_assert(k_segment_core_max_bp + 2 * k_segment_overlap_max_bp <=
               "minimap_sketch_data's 28-bit position field");
 
 // Choose a target-index SEGMENT size (bp) from the live memory budget. A full
-// minimizer index over an N-bp target costs ~6 p_batch/bp at PEAK (collector vector
-// 8 p_batch + flat_map bucket ~16 p_batch/distinct + positions 8 p_batch, all × density ~0.19).
+// minimizer index over an N-bp target costs ~6 bytes/bp at peak (collector vector
+// 8 bytes + flat_map bucket ~16 bytes/distinct + positions 8 bytes, all × density ~0.19).
 // On a 16 GB box a 6 Gbp full index (~37 GB) swaps; capping a segment to the
 // budget keeps the live index ~one segment, clamped to [k_segment_min_bp,
 // k_segment_core_max_bp].
 [[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
     // Respect both the live process/system ceiling and the explicit index cap.
-    // The old raw default-budget read ignored
-    // memory_admission_controller::set_index_memory_cap_bytes(), so admission
-    // and segment geometry could disagree about the maximum legal index.
+    // Use the same effective ceiling as admission so segment geometry and the
+    // maximum legal index cannot disagree.
     const std::uint64_t budget =
         bioseq::parallelism::memory_admission_controller::instance()
             .budget_ceiling();
@@ -2106,12 +2097,12 @@ validated_segment_bp_bounds(
 }
 
 // ---------------------------------------------------------------------------
-// 8.0.2 minimizer_algorithm kernel traits
+// minimizer_algorithm kernel traits
 // ---------------------------------------------------------------------------
 //
 // The minimizer kernels are templated on the sketch-collector and the
 // sequence range, both of which depend on the minimizer_stage's `p_minimizer`
-// and `QR` template parameters.  The trait's `call` method is therefore a
+// and `p_range` template parameters. The trait's `call` method is therefore a
 // member template — the stage instantiates it with the correct types at the
 // call site.
 
@@ -2266,7 +2257,7 @@ struct algorithm_traits<::bioseq::simd::minimizer_algorithm::two_stack_nthash> {
     };
 };
 
-/// Bounded-memory bounded-u32/R7/sum ntHash simd minimizer extraction. This is
+/// Bounded-memory unsigned-32-bit sum ntHash SIMD minimizer extraction. This is
 /// deliberately distinct from two_stack_nthash/exact_simd: both the execution
 /// stats and persisted scheme identity must match this selector.
 template <>
@@ -2333,7 +2324,7 @@ struct algorithm_traits<::bioseq::simd::minimizer_algorithm::bounded_nthash_simd
     };
 };
 
-///  Stage C — Vulkan minimap-int minimizer extraction. Reads packed
+/// Vulkan minimap-integer minimizer extraction. Reads packed
 /// `compact_sequence_range` storage directly on the GPU. When this algorithm
 /// is selected, Vulkan execution is mandatory and failures throw.
 /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
@@ -2428,12 +2419,12 @@ struct algorithm_traits<::bioseq::simd::minimizer_algorithm::vulkan_minimap_inte
 };
 
 // ---------------------------------------------------------------------------
-// 8.0.3 base_alignment_algorithm kernel traits
+// base_alignment_algorithm kernel traits
 // ---------------------------------------------------------------------------
 //
-// The trait pattern is now universal across every algorithm dimension
-// ( R10).  align_stage<p_kernel, QR, TR> calls `p_kernel::template
-// call<QR, TR>(...)` once — the per-algorithm dispatch lives entirely in
+// The trait pattern is shared across every algorithm dimension.
+// `align_stage<p_kernel, p_alphabet>` calls `p_kernel::call<p_alphabet>(...)`
+// once; per-algorithm dispatch lives entirely in
 // the trait specialisations below.
 
 namespace detail {
@@ -2508,10 +2499,6 @@ resolve_alignment_kernels(
 template <>
 struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2> {
     struct kernel_type {
-        ///  R10: the dispatcher consults this constant to route the
-        /// cross-query deferred-align scheduling shape instead of an
-        /// `if constexpr (p_alignment_algorithm == ...)` ladder.
-        static constexpr bool supports_cross_query_batched = false;
         static constexpr bool emits_block_execution_stats = false;
         static constexpr bool emits_scalar_ksw2_execution_stats = true;
         static constexpr bool emits_ksw2_batched_execution_stats = false;
@@ -2570,7 +2557,6 @@ struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2> {
 template <>
 struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::block_aligner> {
     struct kernel_type {
-        static constexpr bool supports_cross_query_batched = false;
         static constexpr bool emits_block_execution_stats = true;
         static constexpr bool emits_scalar_ksw2_execution_stats = false;
         static constexpr bool emits_ksw2_batched_execution_stats = false;
@@ -2623,19 +2609,10 @@ struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::block_aligner>
     };
 };
 
-// `ksw2_batched` —  The kernel ships in
-// `alignment_hwy/ksw2_batched.cppm`; this trait forwards through a free
-// function `align_regions_batched<QR, TR>(...)` that is declared in this
-// module via the `bioseq.alignment.ksw2_batched` import.
+// The ksw2_batched kernel is provided by `bioseq.alignment.ksw2_batched`.
 template <>
 struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2_batched> {
     struct kernel_type {
-        /// — the only kernel whose dispatcher branch
-        /// supports cross-query batching.  Setting this constant true on
-        /// the ksw2_batched specialisation only is how
-        /// `pipeline_run_impl_batch` selects the deferred-align variant
-        /// without an enum-value `if constexpr` ladder.
-        static constexpr bool supports_cross_query_batched = true;
         static constexpr bool emits_block_execution_stats = false;
         static constexpr bool emits_scalar_ksw2_execution_stats = false;
         static constexpr bool emits_ksw2_batched_execution_stats = true;
@@ -2707,7 +2684,7 @@ struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2_batched> 
 };
 
 // =============================================================================
-// 11. Metadata surface — full definitions
+// Metadata surface — full definitions
 // =============================================================================
 //
 // `named_property` was hoisted ahead of the algorithm_traits block so trait
@@ -2895,7 +2872,7 @@ describe_query_sketch_stage(
 }
 
 // =============================================================================
-// 21. Output size estimates
+// Output size estimates
 // =============================================================================
 
 namespace detail {
@@ -2980,7 +2957,7 @@ stage_highway_kernels() noexcept {
 } // namespace detail
 
 // =============================================================================
-// 9.6 p_derived helpers
+// Derived helpers
 // =============================================================================
 
 [[nodiscard]] constexpr int32_t sub_diff(
@@ -2998,9 +2975,7 @@ stage_highway_kernels() noexcept {
 /**
  * @brief Thread-local cached scoring matrix keyed on (match, mismatch, ambi).
  *
- * Mirrors the cache previously inlined at `minimap_port.cppm:2392-2408`
- * inside `minimap2_port_with_index_impl`.  Hoisted to a free function so
- * both the previous entry point and `pipeline_run_impl_batch` can share it.
+ * Shared by the single-query and batch pipeline entry points.
  */
 template <sequence_alphabet p_alphabet>
 [[nodiscard, gnu::always_inline]] inline const scoring_matrix<p_alphabet>&
@@ -3029,7 +3004,7 @@ thread_local_scoring_matrix(
 }
 
 // =============================================================================
-// 8. Concrete stages
+// Concrete stages
 // =============================================================================
 //
 // Each stage's `process*<p_aligner_parameters>(...)` body forwards to the existing kernel
@@ -3039,11 +3014,11 @@ thread_local_scoring_matrix(
 // inside each stage before the downstream call.
 
 /**
- * @brief stage 0: minimizer extraction.
+ * @brief Minimizer extraction stage.
  *
  * Templated on `p_kernel` — the algorithm-specific call surface exposed by
  * `algorithm_traits<minimizer_algorithm::X>::kernel_type`.
- * R5 trait pattern).  The stage body has zero `if constexpr` over enum
+ * The stage body has zero `if constexpr` over enum
  * values; adding a new minimizer-extraction algorithm is a single trait
  * specialisation in the kernel's own module.
  *
@@ -3068,9 +3043,8 @@ struct minimizer_stage
     match_result_collection* stats_dst = nullptr;
     match_result_collection* host_timing_dst = nullptr;
 
-    // /: the kernel writes directly into the per-query
-    // arena slab via `sketch_collector_arena_adapter`, eliminating the
-    // sketches→vector→slab memcpy that the previous shape required.  The
+    // The kernel writes directly into the per-query arena slab via
+    // `sketch_collector_arena_adapter`, avoiding an intermediate copy. The
     // specialised path calls `call_constexpr<p_window_size, p_kmer_size, p_minimizer>(...)` so
     // the (p_window_size, p_kmer_size) pair propagates as integer immediates through the
     // window-loop bounds and unrolls.
@@ -3260,7 +3234,7 @@ struct minimizer_stage
 };
 
 /**
- * @brief stage 1: pass-through that decorates downstream with TargetIndex&.
+ * @brief Pass-through stage that decorates downstream with the target index.
  *
  * Converts the sink shape from `on_batch(span<p_minimizer>)` upstream to
  * `on_batch_with_index(span<p_minimizer>, p_index const&)` downstream.  Inlines
@@ -4026,13 +4000,11 @@ struct post_seed_owned_lifetime {
 };
 
 /**
- * @brief stage 2: seed-hit collection.
+ * @brief Seed-hit collection stage.
  *
  * Wraps the `collect_seed_hits` kernel, which writes its anchor output
- * directly into a caller-provided arena_slab ( follow-up:
- * output-side kernel-to-arena refactor).  No `std::vector` is materialised
- * inside the stage — the per-stage memcpy that the previous shape required
- * is eliminated, so the kernel's `push_back` traffic lands straight in the
+ * directly into a caller-provided arena_slab. No `std::vector` is materialised
+ * inside the stage, so the kernel's `push_back` traffic lands directly in the
  * pipeline arena.
  */
 struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
@@ -4486,7 +4458,7 @@ struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
             record_cpu_seed_completion();
             // The owning PreparedFragmentAnchorBatch outlives this synchronous
             // pipeline call. Emit its already-canonical span directly: no
-            // arena_slab allocation, anchor copy, or global MPF sort.
+            // arena_slab allocation, anchor copy, or global fragment sort.
             return std::move(token).emit_batch(ordered_anchors);
         } else {
             // Ordinary per-hash lookup retains the arena-producing kernel.
@@ -4533,17 +4505,16 @@ struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
 };
 
 /**
- * @brief stage 3: anchor chaining.
+ * @brief Anchor chaining stage.
  *
  * Templated on `p_kernel` — the algorithm-specific call surface exposed by
  * `algorithm_traits<chaining_algorithm::X>::kernel_type`.
- * R5 trait pattern).  The stage body has zero `if constexpr` over enum
+ * The stage body has zero `if constexpr` over enum
  * values — adding a new chaining algorithm is a single trait specialisation
  * in the kernel's own module.
  *
  * The chosen kernel writes its `(chains, reordered_anchors)` output directly
- * into caller-provided arena_slab parameters ( follow-up:
- * output-side kernel-to-arena refactor); no intermediate vector is
+ * into caller-provided arena_slab parameters; no intermediate vector is
  * materialised inside the stage.
  */
 template <class p_kernel>
@@ -4676,12 +4647,11 @@ struct chain_stage : stage_base<chain_stage<p_kernel>, chain> {
 };
 
 /**
- * @brief stage 4: chain → region conversion.
+ * @brief Chain-to-region conversion stage.
  *
  * Wraps the `generate_regions` kernel, which writes its
  * `alignment_region`-per-chain output directly into a caller-provided
- * arena_slab via placement-new ( follow-up: output-side
- * kernel-to-arena refactor).  `alignment_region` owns a `std::vector<cigar_operation>`,
+ * arena_slab via placement-new. `alignment_region` owns a `std::vector<cigar_operation>`,
  * so it is not trivially-destructible; the slab's destructor walks
  * `[0, len_)` and calls `~alignment_region()` on each live element before the
  * arena reclaims the storage.
@@ -4728,7 +4698,7 @@ struct region_stage : stage_base<region_stage, alignment_region> {
 };
 
 /**
- * @brief stage 5: classify primary/secondary in place.
+ * @brief In-place primary/secondary classification stage.
  *
  * Mutates the regions span via `classify_primary_secondary` (which takes
  * std::vector<alignment_region>& and modifies parent / score fields).  The
@@ -4745,8 +4715,7 @@ struct primary_secondary_stage : stage_base<primary_secondary_stage, alignment_r
     template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
     emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
-        // p_kernel now mutates in place through a span — no vector round-trip
-        // ( M8).
+        // The kernel mutates in place through a span without a vector round-trip.
         classify_primary_secondary(
             std::span<alignment_region>{regions.data(), regions.size()},
             mask_level, mask_len, sub_diff_value);
@@ -4771,7 +4740,7 @@ struct primary_secondary_stage : stage_base<primary_secondary_stage, alignment_r
 };
 
 /**
- * @brief stage 6: filter secondary regions, shrinking the span in place.
+ * @brief In-place secondary-region filtering stage.
  */
 struct secondary_filter_stage : stage_base<secondary_filter_stage, alignment_region> {
     static constexpr std::string_view stage_name = "secondary_filter_stage";
@@ -4783,9 +4752,8 @@ struct secondary_filter_stage : stage_base<secondary_filter_stage, alignment_reg
     template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
     emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
-        // p_kernel filters in place via a span; the new effective size is
-        // returned so the downstream stage observes a shorter prefix
-        // ( M8 — `filter_secondary_regions_span`).
+        // The kernel filters in place via a span; the returned effective size
+        // gives the downstream stage a shorter prefix.
         const std::size_t new_size = filter_secondary_regions(
             std::span<alignment_region>{regions.data(), regions.size()},
             pri_ratio, min_diff_value, best_n);
@@ -4810,7 +4778,7 @@ struct secondary_filter_stage : stage_base<secondary_filter_stage, alignment_reg
 };
 
 /**
- * @brief stage 7: estimate divergence (conditional).
+ * @brief Conditional divergence-estimation stage.
  */
 template <class p_minimizer, class p_query_minimizers = std::vector<p_minimizer>>
 struct divergence_stage : stage_base<divergence_stage<p_minimizer, p_query_minimizers>, alignment_region> {
@@ -5083,16 +5051,16 @@ struct prefilter_stage
             }
             if (algorithm == algorithm_type::gatekeeper) {
                 mask_rejection_candidates +=
-                    prefilter::gatekeeper_mask_rejection_candidate(result)
+                    prefilter::is_gatekeeper_mask_rejection_candidate(result)
                         ? 1u : 0u;
                 exact_guard_activations +=
-                    prefilter::gatekeeper_exact_guard_activated(result)
+                    prefilter::is_gatekeeper_exact_guard_activated(result)
                         ? 1u : 0u;
                 guard_confirmed_rejections +=
-                    prefilter::gatekeeper_guard_confirmed_rejection(result)
+                    prefilter::is_gatekeeper_guard_confirmed_rejection(result)
                         ? 1u : 0u;
                 hamming_exact_rejections +=
-                    prefilter::gatekeeper_hamming_exact_rejection(result)
+                    prefilter::is_gatekeeper_hamming_exact_rejection(result)
                         ? 1u : 0u;
             }
             if (!prefilter::is_prefilter_accepted(result)) ++rejected_jobs;
@@ -5262,12 +5230,10 @@ struct exact_edit_filter_stage
 };
 
 /**
- * @brief stage 8: base-level alignment via the chosen aligner (conditional).
+ * @brief Conditional base-level alignment stage.
  *
- * — reparameterised on `p_kernel = kernel_t<p_alignment_algorithm>`.  algorithm_type
- * dispatch happens exclusively via the trait; the `if constexpr (p_alignment_algorithm == ...)`
- * ladder inside `describe()` is gone — its rows now live in
- * `p_kernel::populate_runtime_params(...)`.
+ * Algorithm dispatch occurs through `p_kernel = kernel_t<p_alignment_algorithm>`;
+ * runtime parameters are populated by `p_kernel::populate_runtime_params(...)`.
  */
 template <class p_kernel,
           sequence_alphabet p_alphabet>
@@ -5385,7 +5351,7 @@ struct align_stage : stage_base<align_stage<p_kernel, p_alphabet>, alignment_reg
 };
 
 /**
- * @brief stage 9: compute MAPQ (conditional).
+ * @brief Conditional mapping-quality stage.
  *
  * Accepts a `(regions, anchors)` pair upstream but only uses the regions
  * span; emits the regions span downstream as a single batch.
@@ -5467,14 +5433,13 @@ struct sink_stage {
 };
 
 // =============================================================================
-// 11.2 describe() walker — out-of-line definition (stage forward-declared above)
+// Out-of-line pipeline-description walker
 // =============================================================================
 
 template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
 [[nodiscard]] pipeline_description stage<p_aligner_parameters, p_self, p_sink>::describe() const {
-    // / R11: every concrete stage's `describe()` is templated on
-    // p_aligner_parameters so describe-time p_aligner_parameters-sensitive output always matches the runtime
-    // path's behaviour.  No `describe_representative_cep_t` alias.
+    // Every concrete stage description uses the same parameter specialization
+    // as the runtime path.
     pipeline_description d;
     d.stages.push_back(self_.template describe<p_aligner_parameters>());
     if constexpr (requires { sink_.describe(); }) {
@@ -5515,7 +5480,7 @@ template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class 
 }
 
 // =============================================================================
-// 9.4 make_minimap_pipeline — single source of truth for the pipeline shape
+// make_minimap_pipeline — single source of truth for the pipeline shape
 // =============================================================================
 
 [[nodiscard]] inline bool vulkan_components_requested(
@@ -5608,7 +5573,7 @@ template <is_constexpr_aligner_params p_aligner_parameters,
 }
 
 // =============================================================================
-// 20.4 pipeline_run_impl_batch — batched leaf dispatcher
+// pipeline_run_impl_batch — batched leaf dispatcher
 // =============================================================================
 
 /**
@@ -5706,7 +5671,7 @@ template <is_constexpr_aligner_params p_aligner_parameters,
         && complete_all_gpu_tuple_selected(params);
 }
 
-// — the Stage C frontend's GPU target-index build replaces the CPU
+// The Vulkan frontend's GPU target-index build replaces the CPU
 // `minimizer_hashmap_fragment_index` build for this exact (minimizer, chaining)
 // leaf. runtime-gated; both flags plus the matching algorithm selectors must be
 // set. The runtime device check is done at the call site.
@@ -5968,15 +5933,7 @@ inline void bind_verified_gpu_segment_gate_identity(
     };
 }
 
-//  Stage 1 — the deferred-align parallel pipeline template
-// (`pipeline_run_impl_batch_deferred_align`) and its supporting types
-// (`PerQueryAlignState`, `AlignCollectStage`, `align_regions_batched_cross_query`)
-// were removed. The two function bodies were 98% identical and LTO already
-// DCE'd the deferred body in every linked binary (no production caller sets
-// `params.cross_query_batched = true`), so the post-LTO `__TEXT` is unchanged.
-// The pre-LTO IR cost — paid in pipe.cppm's TU compile RSS — is what motivates
-// the deletion: every `p_alignment_algorithm = ksw2_batched` leaf no longer instantiates a
-// duplicate ~6 KB body. See + Option p_batch for the rationale.
+// Batched execution shares one implementation for all alignment algorithms.
 template <is_constexpr_aligner_params p_aligner_parameters,
           ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
           ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
@@ -6193,8 +6150,7 @@ template <is_constexpr_aligner_params p_aligner_parameters,
             ? query_minimizers_per_query[qi]
             : empty_minimizers_proto;
 
-        // Short-circuit early-empty cases matching the previous entry's
-        // returns at `minimap_port.cppm:2313` and :2325.
+        // Short-circuit empty query or target inputs before pipeline assembly.
         if (query_len == 0 || target_len == 0) {
             return out;
         }
@@ -6229,8 +6185,8 @@ template <is_constexpr_aligner_params p_aligner_parameters,
             >= bioseq::parallelism::task_parallel_minimums::k_query_count
         && lazy_is_worker_shareable(target_seq)
         && std::ranges::all_of(query_seqs,
-               [](const auto query) {
-                   return lazy_is_worker_shareable(query);
+               [](const auto p_query) {
+                   return lazy_is_worker_shareable(p_query);
                });
 
     if (may_parallel_batch) {
@@ -6257,16 +6213,6 @@ template <is_constexpr_aligner_params p_aligner_parameters,
     }
     return out_per_query;
 }
-
-//  Stage 1 — the entire cross-query deferred-align scheduling shape
-// (including `pipeline_run_impl_batch_deferred_align`, `PerQueryAlignState`,
-// `AlignCollectStage`, and `align_regions_batched_cross_query`) was deleted.
-// Its only structural difference from `pipeline_run_impl_batch` was one extra
-// `Arena::chain` push for a not-yet-implemented cross-query fill accumulator;
-// the cross-query helper itself was a pass-through over per-query
-// `align_regions_batched<…>` calls. Restoring the shape later means re-adding
-// the four declarations above; the runtime semantics are now `cross_query_batched`-
-// flag-independent.
 
 /**
  * @brief Single-query convenience wrapper around `pipeline_run_impl_batch`.
@@ -6628,16 +6574,15 @@ using ::bioseq::common::templating::value_sequence;
 // — minimizer_layout-driven p_bucket_width bucket derivation
 // =============================================================================
 //
-// Replaces the hand-coded `(p_kmer_size, p_bucket_width)` ladders that used to live inside
-// `dispatch_pipeline` and `minimap_port`.  The bucket list is computed at
-// compile time from the per-p_kmer_size transitions in `minimizer_layout::storage_bits`,
+// The bucket list is computed at compile time from the per-p_kmer_size
+// transitions in `minimizer_layout::storage_bits`,
 // so adding a new p_kmer_size only requires editing `kmer_size_buckets` and the
 // per-p_kmer_size clause in `storage_bits_for`.
 
 /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
 /// entry is the default for non-canonical kmer_size — see kmer_size_default.
 ///
-///  Stage 1 / BIOSEQ_OPTTIMIZATION_LEVEL — the array's SIZE must
+/// The array's size must
 /// match its element count, not be hard-coded to 3. A `std::array<size_t, 3>`
 /// with only `{15u}` initialised silently zeroes the trailing two slots, and
 /// the consteval dispatch table then enumerates p_kmer_size=0, which instantiates
@@ -6645,7 +6590,7 @@ using ::bioseq::common::templating::value_sequence;
 /// trips an undefined-shift constexpr error in `index.cppm:151`. `std::to_array`
 /// deduces the array size from the initialiser so the two stay in lockstep.
 inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
-    #if BIOSEQ_OPTTIMIZATION_LEVEL <= 3
+    #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
     15u
     #else
     15u, 7u, 27u
@@ -6813,7 +6758,7 @@ using kmer_size_buckets_seq = decltype(
     make_kmer_size_buckets_seq(
         std::make_index_sequence<kmer_size_buckets.size()>{}));
 
-//  Stage 1 — per-p_kmer_size seq_len_log2 breakpoint sequence.
+// Per-p_kmer-size sequence-length breakpoint sequence.
 //
 // Materialise the p_kmer_size-specific breakpoint list (from `compute_breakpoints_for<p_kmer_size>()`)
 // as a `value_sequence<std::size_t, ...>`.  Used by `dependent_bucket_step`'s
@@ -6855,11 +6800,8 @@ static_assert(kmer_size_default == kmer_size_buckets[0],
 // / — Low-level enum/value dispatch primitives
 // =============================================================================
 //
-// The dispatch primitives now live in `bioseq.common.templating`
-//. They are re-exported under the existing names so this
-// module's call sites stay unchanged. Codegen is identical to the
-// previous in-place definition — every helper carries
-// `[[gnu::always_inline]]`.
+// The dispatch primitives live in `bioseq.common.templating` and are
+// re-exported here for unqualified pipeline call sites.
 
 using ::bioseq::common::templating::dispatch_exact_value_or_default;
 using ::bioseq::common::templating::dispatch_exact_value_or_default_void;
@@ -6977,7 +6919,7 @@ namespace detail {
 /// A type satisfies `has_bp_size` when it exposes a `bp_size()` member
 /// returning an unsigned integer.  Constrains `seq_len_log2_registry::read_field`'s
 /// first two args so a chain composing `seq_len_log2_step` into a call site
-/// lacking `(QR&, TR&)` in those slots produces a localised diagnostic
+/// lacking query and target ranges in those slots produces a localized diagnostic
 /// at the chain instantiation point.
 template <class p_type>
 concept has_bp_size = requires (const p_type& x) {
@@ -7015,7 +6957,7 @@ struct kmer_size_registry {
     }
 };
 
-///  Stage 1 — pinned-aware seq_len_log2 registry.
+/// Pinned-aware sequence-length registry.
 ///
 /// Exposes `value_list_for<p_kmer_size, …>` and `read_field_for<p_kmer_size, …>` so the chain's
 /// `dependent_bucket_step` can iterate only the p_bucket_width breakpoints for the previously-pinned p_kmer_size.
@@ -7032,10 +6974,13 @@ struct seq_len_log2_registry_per_k {
     /// chain primitive requires a value to thread through inactive steps.
     static constexpr std::size_t default_value = 15u;
 
-    template <std::size_t p_kmer_size, auto... /*RestPinned*/>
+    template <std::size_t p_kmer_size, auto... p_rest_pinned>
     using value_list_for = per_k_breakpoints_seq<p_kmer_size>;
 
-    template <std::size_t /*K_pinned*/, has_bp_size p_query_range, has_bp_size p_target_range, class... p_remaining_stages>
+    template <std::size_t p_pinned_kmer_size,
+              has_bp_size p_query_range,
+              has_bp_size p_target_range,
+              class... p_remaining_stages>
     [[nodiscard, gnu::always_inline]] static std::size_t read_field_for(
         const ::bioseq::simd::minimap2_parameters& params,
         const p_query_range& q, const p_target_range& t,
@@ -7053,12 +6998,11 @@ struct seq_len_log2_registry_per_k {
 // / / — dispatch_chain primitive and step adapters
 // =============================================================================
 //
-// The chain primitive and the three step adapters now live in
+// The chain primitive and step adapters live in
 // `bioseq.common.templating::dispatch_chain.cppm`.
 // They are re-exported here so the pipeline body keeps unqualified
-// names. The per-pipeline aliases below pin `Params = minimap2_parameters`;
-// `pipeline_dispatch_chain` is the local alias that supplies the
-// `minimap2_parameters` slot so chain call sites do not need to repeat it.
+// names. The per-pipeline alias supplies the `minimap2_parameters` slot so
+// chain call sites do not need to repeat it.
 
 namespace detail {
 
@@ -7076,15 +7020,17 @@ using ma_step  = enum_step<algorithm_enum_values<
 using kmer_size_step    = enum_step<kmer_size_registry>;
 using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
 
-///  Stage 1 — per-p_kmer_size seq_len_log2 step. Must follow `kmer_size_step`
+/// The per-p_kmer_size seq_len_log2 step must follow `kmer_size_step`
 /// in the chain so the pinned-p_kmer_size's per-p_kmer_size breakpoint list is iterated.
 using seq_len_log2_step_per_k = dependent_bucket_step<seq_len_log2_registry_per_k>;
 
-/// Per-pipeline chain alias — pins `Params` to the only param type
-/// pipe.cppm ever uses. `p_result` and the leaf template stay as template
+/// Per-pipeline chain alias for the request parameter type used here.
+/// `p_result` and the leaf template stay as template
 /// parameters because real call sites instantiate with different
 /// return types (match_result_collection / pipeline_description / void).
-template <class p_result, template <auto...> class p_leaf, class... p_steps>
+template <class p_result,
+          template <auto... p_values> class p_leaf,
+          class... p_steps>
 using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
     p_result, p_leaf, ::bioseq::simd::minimap2_parameters, p_steps...>;
 
@@ -7094,12 +7040,11 @@ using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
 // — p_leaf types and traits aliases
 // =============================================================================
 //
-// `pipeline_run_leaf<p_entry_point, QR, TR, MT, IT, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>` is the
+// `pipeline_run_leaf` is the
 // namespace-scope class template that bottoms out the runtime cascade.
-// The p_aligner_parameters (Specialised vs Fallback) branch lifted from the deleted
-// `dispatch_on_specialisation` lives inside the leaf body.
+// The specialized/fallback parameter branch lives inside the leaf body.
 //
-// `pipeline_run_traits<p_entry_point, QR, TR, MT, IT>::leaf<p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>` is the
+// `pipeline_run_traits::leaf` is the
 // alias-template wrapper exposing the leaf as an NTTP-only `template
 // <auto...> class` view — the shape `dispatch_chain` requires for its
 // `template <auto...> class p_leaf` template-template parameter.
@@ -7143,16 +7088,15 @@ struct pipeline_run_leaf {
             transient_target_index_owner = {})
     {
         using specialized_parameters     = static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
-        #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
+        #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
         using fallback_parameters = fallback_aligner_parameters<63>;
         #else
         using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
         #endif
 
-        #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
-        // p_aligner_parameters selection — lifted from the deleted `dispatch_on_specialisation`.
-        // Both p_aligner_parameters instantiations are is_available in the binary; the runtime
-        // `if` picks one.  Compile-time impact: identical to the earlier design body.
+        #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
+        // Both parameter specializations are available; the runtime condition
+        // selects the matching specialization.
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(p_kmer_size))
         {
@@ -7180,10 +7124,8 @@ struct pipeline_run_traits {
         p_entry_point, p_alphabet, p_minimizer, p_index, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>;
 };
 
-/// Common leaf body shared by both Spec and Fallback p_aligner_parameters branches inside
-/// `describe_leaf::call`.  Identical to the previous `describe_pipeline_leaf`
-/// from the earlier design — kept under that name so the chain instantiation
-/// can be expressed without renaming the previous entry.  Declared before
+/// Common leaf body shared by specialized and fallback parameter branches in
+/// `describe_leaf::call`. Declared before
 /// `describe_leaf` so its unqualified call inside `describe_leaf::call`
 /// resolves at the point of template definition.
 template <is_constexpr_aligner_params p_aligner_parameters,
@@ -7273,32 +7215,33 @@ struct describe_leaf {
         const query_sketch_route& query_sketch_route)
     {
         using specialized_parameters     = static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
-        #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
+        #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
         using fallback_parameters = fallback_aligner_parameters<63>;
         #else
         using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
         #endif
 
-        constexpr auto EP_describe = pipeline_entry_point::with_prebuilt_minimizers;
-        constexpr auto MA_describe = algorithm_enum_values<
+        constexpr auto describe_entry_point =
+            pipeline_entry_point::with_prebuilt_minimizers;
+        constexpr auto describe_minimizer_algorithm = algorithm_enum_values<
             ::bioseq::simd::minimizer_algorithm>::default_value;
-        static_assert(MA_describe ==
+        static_assert(describe_minimizer_algorithm ==
             ::bioseq::simd::minimizer_algorithm::scalar,
             "describe_leaf relies on p_minimizer_algorithm default = scalar.  Update both call "
             "sites if the p_minimizer_algorithm default ever changes.");
 
-        #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
+        #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(p_kmer_size))
         {
             return describe_pipeline_leaf<specialized_parameters, p_alignment_algorithm, p_chaining_algorithm,
-                MA_describe, EP_describe, p_alphabet>(
+                describe_minimizer_algorithm, describe_entry_point, p_alphabet>(
                     q, t, params, query_len, target_len,
                     query_sketch_route);
         }
         #endif
         return describe_pipeline_leaf<fallback_parameters, p_alignment_algorithm, p_chaining_algorithm,
-            MA_describe, EP_describe, p_alphabet>(
+            describe_minimizer_algorithm, describe_entry_point, p_alphabet>(
                 q, t, params, query_len, target_len,
                 query_sketch_route);
     }
@@ -7306,7 +7249,7 @@ struct describe_leaf {
 
 template <sequence_alphabet p_alphabet>
 struct describe_traits {
-    //  Stage 1: chain pins p_kmer_size before p_bucket_width (see pipeline_run_traits).
+    // The chain pins p_kmer_size before p_bucket_width.
     template <auto p_kmer_size, auto p_bucket_width, auto p_alignment_algorithm, auto p_chaining_algorithm>
     using leaf = describe_leaf<p_alphabet, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm>;
 };
@@ -7317,11 +7260,8 @@ struct describe_traits {
 // / — top-level runtime cascade entry
 // =============================================================================
 //
-// Replaces every per-level dispatcher function (`dispatch_on_chain`,
-// `dispatch_on_chain_and_mini`, `dispatch_on_algorithms`,
-// `dispatch_on_specialisation`) and the hand-coded `(p_kmer_size, p_bucket_width)` ladder.  The
-// body is a single `dispatch_chain<...>::run<>(...)` line over five steps
-// (p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm) — see
+// The runtime cascade is one `dispatch_chain<...>::run<>(...)` over the
+// bucket-width, k-mer-size, alignment, chaining, and minimizer dimensions.
 
 template <pipeline_entry_point p_entry_point,
           sequence_alphabet p_alphabet,
@@ -7341,8 +7281,7 @@ match_result_collection dispatch_pipeline(
         transient_target_index_owner = {})
 {
     using traits_type = detail::pipeline_run_traits<p_entry_point, p_alphabet, p_minimizer, p_index>;
-    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order so the p_bucket_width step (per-p_kmer_size) can
-    // iterate only the breakpoints relevant for the pinned p_kmer_size.
+    // Pin p_kmer_size before p_bucket_width so only relevant breakpoints run.
     return detail::dispatch_chain<
         match_result_collection,
         traits_type::template leaf,
@@ -7379,7 +7318,7 @@ pipeline_description describe_pipeline_for(
     const sequence_size_t target_len = target_seq_proto.bp_size();
 
     using traits_type = detail::describe_traits<p_alphabet>;
-    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order (per-p_kmer_size p_bucket_width step).
+    // Pin p_kmer_size before the dependent p_bucket_width step.
     return detail::dispatch_chain<
         pipeline_description,
         traits_type::template leaf,
@@ -7435,9 +7374,7 @@ template <sequence_alphabet p_alphabet>
 } // namespace bioseq::simd::pipe
 
 // =============================================================================
-// 9.7 Public entry points — relocated from minimap_port.cppm so
-// they can delegate to `pipe::dispatch_pipeline` without forming a circular
-// import. These scheduler-facing entry points are target-neutral and receive
+// Public scheduler-facing entry points are target-neutral and receive
 // the already-selected Highway table through minimap2_parameters.
 // =============================================================================
 
@@ -8031,10 +7968,9 @@ template <class p_minimizer,
 }
 
 /**
- * @brief Run the minimap2 pipeline against pre-built target minimizers
- * ( / previous minimap2_port shape).
+ * @brief Run the minimap2 pipeline against pre-built target minimizers.
  *
- * Builds a TargetIndex from `target_minimizers` and delegates to
+ * Builds a target index from `target_minimizers` and delegates to
  * `minimap2_port_with_index`.
  */
 template <class p_minimizer,
@@ -8522,8 +8458,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
 // / — sketch leaf and helpers
 // =============================================================================
 //
-// The two minimizer sketching switches (target pass / query pass) in the
-// previous `minimap_port_with_repr` body collapse into:
+// Target and query minimizer sketching use these shared components:
 //   - `sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>` — the chain's
 //     terminal leaf; pins p_minimizer_algorithm at compile time and invokes the trait's
 //     kernel directly.
@@ -8865,8 +8800,8 @@ struct sketch_traits {
     using leaf = sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>;
 };
 
-/// One-step chain over the p_minimizer_algorithm dimension — replaces the previous switch on
-/// `params.minimizer_algorithm`.  The chain pins p_minimizer_algorithm at compile time and the
+/// One-step chain over the p_minimizer_algorithm dimension. The chain pins
+/// p_minimizer_algorithm at compile time and the
 /// leaf dispatches via the trait's kernel.
 template <class p_minimizer, class p_collector, class p_range>
 BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
@@ -8883,10 +8818,8 @@ minimizer_sketch_execution_stats sketch_one(
     >::template run<>(params, collector, range, window_len, kmer_len);
 }
 
-/// Packages the per-pass instrumentation scope + collector reserve +
-/// sketch_one into one inline call.  Replaces the ~22-line block-scope
-/// boilerplate repeated for the target and query passes in the previous
-/// `minimap_port_with_repr` body.
+/// Packages the per-pass instrumentation scope, collector reservation, and
+/// sketch dispatch into one inline call.
 template <class p_minimizer, class p_range>
 BIOSEQ_PIPELINE_INLINE_ATTR
 minimizer_sketch_execution_stats sketch_into_collector(
@@ -9036,10 +8969,10 @@ template <class p_minimizer,
 // — from-sequence cascade leaf and traits
 // =============================================================================
 //
-// `minimap_port` now collapses to one `dispatch_chain<...>::run<>(...)` over
+// `minimap_port` uses one `dispatch_chain<...>::run<>(...)` over
 // two steps (p_bucket_width, p_kmer_size).  The leaf below pins `(p_bucket_width, p_kmer_size)` into the
-// `minimizer_representation<p_bucket_width, p_kmer_size>` storage type and delegates to the existing
-// `minimap_port_with_repr<p_minimizer>` body unchanged.
+// `minimizer_representation<p_bucket_width, p_kmer_size>` storage type and
+// delegates to `minimap_port_with_repr<p_minimizer>`.
 
 template <sequence_alphabet p_alphabet,
           std::size_t p_bucket_width, std::size_t p_kmer_size>
@@ -9070,11 +9003,10 @@ struct minimap_port_traits {
 } // namespace pipe_entry_detail
 
 /**
- * @brief Top-level minimap2 entry — raw query/target sequences only
- * ( / previous `minimap_port`; chain rewrite).
+ * @brief Top-level minimap2 entry for raw query and target sequences.
  *
  * One `dispatch_chain<...>::run<>(...)` line over `seq_len_log2_step` +
- * `kmer_size_step` — replaces the hand-coded `(p_kmer_size, p_bucket_width)` ladder.  Each pinned
+ * `kmer_size_step`. Each pinned
  * `(p_bucket_width, p_kmer_size)` selects a `minimizer_representation<p_bucket_width, p_kmer_size>` and forwards to
  * `pipe_entry_detail::minimap_port_with_repr<p_minimizer>` which sketches
  * both target and query minimisers, builds the target index, and delegates
@@ -9089,7 +9021,7 @@ match_result_collection minimap_port(
     const minimap2_parameters& params = minimap2_parameters{})
 {
     using traits_type = pipe_entry_detail::minimap_port_traits<p_alphabet>;
-    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order (per-p_kmer_size p_bucket_width step).
+    // Pin p_kmer_size before the dependent p_bucket_width step.
     return ::bioseq::simd::pipe::detail::dispatch_chain<
         match_result_collection,
         traits_type::template leaf,
@@ -9099,17 +9031,15 @@ match_result_collection minimap_port(
 }
 
 /**
- * @brief  — memory-bounded recompute entry. Drop-in replacement for
- * `minimap_port` on the production paths, sized for arbitrarily large targets
- * on a fixed-RAM host.
+ * @brief Memory-bounded recompute entry for arbitrarily large targets on a
+ * fixed-memory host.
  *
- * The non-segmented `minimap_port` builds ONE minimizer index over the whole
- * target (~6 p_batch/bp at peak → ~37 GB for 6 Gbp), which swaps a 16 GB box to death.
- * This entry instead indexes the target in budget-sized SEGMENTS (≤200 Mbp core
- * + overlap, sized by `bioseq::memory::default_budget()`), pinning the 8-byte
+ * The non-segmented `minimap_port` builds one minimizer index over the whole
+ * target (~6 bytes/bp at peak). This entry indexes the target in
+ * admission-sized segments (at most 200 Mbp core plus overlap), pinning the 8-byte
  * `minimap_sketch_data` minimizer (segment-local positions fit its 28-bit field).
- * Each segment index is globalized (`TargetIndex::add_position_offset`) and run
- * through the UNCHANGED `minimap2_port_with_index` against the FULL target, so
+ * Each segment index is globalized with `add_position_offset` and run
+ * through `minimap2_port_with_index` against the full target, so
  * chaining + DP alignment see correct global coordinates and stream the real
  * target bytes. A result is kept only when its `target_start` lands in the
  * segment's CORE — with overlap ≥ the longest match span, every alignment is
@@ -9298,8 +9228,8 @@ private:
 //
 // Holds the query minimizers produced for persistent-index bucket filtering,
 // keeping the optional GPU host-result permit and device span alive for the
-// caller's lifetime. The host vector feeds the existing assembly/filter helpers
-// unchanged; the Vulkan branch sketches the query on the GPU so the segmented
+// caller's lifetime. The host vector feeds the assembly/filter helpers; the
+// Vulkan branch sketches the query on the GPU so the segmented
 // path's seed lookup consumes byte-identical minimizers.
 template <class p_minimizer>
 struct budgeted_sketch_vector {

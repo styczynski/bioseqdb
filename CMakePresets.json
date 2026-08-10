@@ -55,7 +55,7 @@
       {
         "name": "bench-opt",
         "displayName": "Benchmark-tuned optimisation config",
-         "description": "Production-grade -O3 + NDEBUG used by every default build (postgresql_bioseq, the test execs, bioseq_bench). The previous form of this preset also carried `-save-temps=obj -g`; both were dropped because they more than doubled per-TU peak RSS on the heavy-template TUs (dispatch_buffer.cppm, two_stacks_minimizers.cppm) — the DWARF tables alone push the dispatch_buffer compile from ~5 GB to >11 GB and the .ii/.s/.bc dumps add a multi-GB write per TU on top of that. `CMAKE_CXX_FLAGS_DEBUG` is set to an empty string so `-g` is NOT silently re-added by the `Debug` build type (the Debug type is preserved only because other CMake logic in the tree branches on it). For the inspect MCP tool (which needs the per-TU .s/.bc and DWARF) use the `bench-opt-debug` preset, or pass `debug=true` to `start_build` so the MCP server selects that preset automatically.",
+         "description": "Production-grade -O3 + NDEBUG used by every default build (postgresql_bioseq, the test execs, bioseq_benchmark). The previous form of this preset also carried `-save-temps=obj -g`; both were dropped because they more than doubled per-TU peak RSS on the heavy-template TUs (dispatch_buffer.cppm, two_stacks_minimizers.cppm) — the DWARF tables alone push the dispatch_buffer compile from ~5 GB to >11 GB and the .ii/.s/.bc dumps add a multi-GB write per TU on top of that. `CMAKE_CXX_FLAGS_DEBUG` is set to an empty string so `-g` is NOT silently re-added by the `Debug` build type (the Debug type is preserved only because other CMake logic in the tree branches on it). For the inspect MCP tool (which needs the per-TU .s/.bc and DWARF) use the `bench-opt-debug` preset, or pass `debug=true` to `start_build` so the MCP server selects that preset automatically.",
         "generator": "Ninja",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
@@ -84,7 +84,7 @@
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_TEST_INDEXES": "ON",
-          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0"
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64"
         }
       },
       {
@@ -115,7 +115,7 @@
         "cacheVariables": {
           "BIOSEQ_BUILD_TESTS": "OFF",
           "BIOSEQ_TEST_INDEXES": "OFF",
-          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/tests/integration/fixtures/postgres_error_safety_cases.json",
           "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
           "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR": "${sourceDir}/build/postgres-error-safety-test-indexes",
           "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
@@ -131,7 +131,7 @@
         "cacheVariables": {
           "BIOSEQ_BUILD_TESTS": "ON",
           "BIOSEQ_TEST_INDEXES": "ON",
-          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/tests/integration/fixtures/postgres_error_safety_cases.json",
           "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
           "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
           "BIOSEQ_BUILD_WEBSITE": "OFF"
@@ -143,7 +143,7 @@
         "hidden": true,
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
           "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
           "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext"
         }
@@ -152,7 +152,7 @@
         "name": "test-opt-asan",
         "inherits": "test-opt-sanitizer",
         "displayName": "AddressSanitizer unit/integration qualification",
-        "description": "Isolated local arm64 qualification tree for DOC0377 ownership and lifetime checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
+        "description": "Isolated local arm64 ownership and lifetime qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
@@ -166,7 +166,7 @@
         "name": "test-opt-ubsan",
         "inherits": "test-opt-sanitizer",
         "displayName": "UndefinedBehaviorSanitizer unit/integration qualification",
-        "description": "Isolated local arm64 qualification tree for DOC0377 arithmetic, representation, and lifecycle checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
+        "description": "Isolated local arm64 arithmetic, representation, and lifecycle qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
@@ -180,7 +180,7 @@
         "name": "test-opt-tsan",
         "inherits": "test-opt-sanitizer",
         "displayName": "ThreadSanitizer unit/integration qualification",
-        "description": "Isolated local arm64 qualification tree for DOC0377 async-owner, TBB, and DSM publication checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
+        "description": "Isolated local arm64 async-owner, TBB, and DSM publication qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
@@ -188,34 +188,44 @@
           "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
           "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
           "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
-          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports-tsan"
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports-tsan"
         }
       },
       {
-        "name": "test-opt-level1",
+        "name": "test-optimized-all-alphabets-uint64",
         "inherits": "test-opt",
-        "displayName": "Optimised level-1 qualification config",
-        "description": "Isolated unit/integration qualification tree for the 14-unit typed-scheduler profile. The checked-in everyday optimization level remains zero.",
+        "displayName": "All-alphabets uint64 qualification config",
+        "description": "Isolated unit/integration qualification tree for the 14-unit all-alphabets uint64 typed-scheduler profile.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "1"
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
         }
       },
       {
-        "name": "test-opt-level2",
+        "name": "test-optimized-all-coordinates",
         "inherits": "test-opt",
-        "displayName": "Optimised level-2 qualification config",
-        "description": "Isolated unit/integration qualification tree with the full dna4/dna5 and 1/2/4/8-byte PostgreSQL profile. The checked-in everyday optimization level remains zero.",
+        "displayName": "All-coordinates qualification config",
+        "description": "Isolated unit/integration qualification tree for every alphabet and storage-width scheduler coordinate.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "2"
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_coordinates"
         }
       },
       {
-        "name": "test-opt-level2-trace",
-        "inherits": "test-opt-level2",
-        "displayName": "Optimised level-2 compiler-trace qualification config",
-        "description": "Isolated DOC0377 compiler-instantiation evidence tree. Emits complete Clang time-trace events without changing the everyday test-opt or level-2 qualification trees.",
+        "name": "test-optimized-full-specialization",
+        "inherits": "test-opt",
+        "displayName": "Full-specialization qualification config",
+        "description": "Isolated unit/integration qualification tree for the complete template-specialization domain.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "full_specialization"
+        }
+      },
+      {
+        "name": "test-optimized-all-coordinates-trace",
+        "inherits": "test-optimized-all-coordinates",
+        "displayName": "All-coordinates compiler-trace qualification config",
+        "description": "Isolated compiler-instantiation evidence tree with complete Clang time-trace events.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_TIME_TRACE": "ON",
@@ -335,7 +345,7 @@
           "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
           "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
-          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports",
           "VCPKG_TARGET_ARCHITECTURE": "x64",
           "BIOSEQ_HEAVY_JOBS": "4"
         }
@@ -355,11 +365,11 @@
         "name": "website-aws-x64-linux",
         "inherits": "aws-x64-linux",
         "displayName": "AWS Clang static documentation website build",
-        "description": "Clang-22 core tree that enables the static documentation website. The website structural pass consumes this tree's Clang-22 BMIs/compile database; the isolated code generator itself still builds with GCC 16.1 via BioseqCodegen.cmake. Cache and papers are off; a private PostgreSQL cluster is used for runnable SQL.",
+        "description": "Clang-22 production Bioseq plus bioseq_cache tree that enables the static documentation website. The website structural pass consumes this tree's Clang-22 BMIs/compile database; the isolated code generator itself still builds with GCC 16.1 via bioseq_codegen.cmake. Papers are off; one private PostgreSQL cluster qualifies both production extensions for runnable SQL.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_BUILD_CORE": "ON",
-          "BIOSEQ_BUILD_CACHE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
           "BIOSEQ_BUILD_PAPERS": "OFF",
           "BIOSEQ_BUILD_WEBSITE": "ON",
           "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
@@ -373,11 +383,11 @@
         "name": "website-aws-x64-linux-debug",
         "inherits": "aws-x64-linux-debug",
         "displayName": "AWS Clang website debug/inspect config",
-        "description": "Website Clang tree with DWARF and per-TU compiler artefacts for saved-temp diagnostics; website artifacts are not inspect targets.",
+        "description": "Website Bioseq plus bioseq_cache Clang tree with DWARF and per-TU compiler artefacts for saved-temp diagnostics; website artifacts are not inspect targets.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_BUILD_CORE": "ON",
-          "BIOSEQ_BUILD_CACHE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
           "BIOSEQ_BUILD_PAPERS": "OFF",
           "BIOSEQ_BUILD_WEBSITE": "ON",
           "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",

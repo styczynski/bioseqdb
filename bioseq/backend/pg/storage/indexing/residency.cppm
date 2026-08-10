@@ -67,8 +67,9 @@ struct registered_callbacks {
     return hash;
 }
 
-template <class Key>
-[[nodiscard]] bool same_relation_identity(const Key& lhs, const Key& rhs) noexcept {
+template <class p_key>
+[[nodiscard]] bool same_relation_identity(
+        const p_key& lhs, const p_key& rhs) noexcept {
     return lhs.db_oid == rhs.db_oid
         && lhs.user_relid == rhs.user_relid
         && lhs.tablespace_oid == rhs.tablespace_oid
@@ -247,10 +248,10 @@ struct residency_state {
     return state;
 }
 
-inline constexpr std::size_t kChunkCacheMaxEntries = 256;
-inline constexpr std::uint64_t kChunkCacheMaxBytes = std::uint64_t{2} << 30;
-inline constexpr std::size_t kAssembledCacheMaxEntries = 32;
-inline constexpr std::uint64_t kAssembledCacheMaxBytes = std::uint64_t{4} << 30;
+inline constexpr std::size_t k_chunk_cache_maximum_entries = 256;
+inline constexpr std::uint64_t k_chunk_cache_maximum_bytes = std::uint64_t{2} << 30;
+inline constexpr std::size_t k_assembled_cache_maximum_entries = 32;
+inline constexpr std::uint64_t k_assembled_cache_maximum_bytes = std::uint64_t{4} << 30;
 
 void evict_chunk_index(std::size_t entry_index) noexcept {
     residency_state& state = residency_state();
@@ -491,7 +492,7 @@ void install_index_residency_callbacks() {
         std::span<const char> payload,
         bool written_in_current_xact) {
     install_index_residency_callbacks();
-    if (payload.empty() || payload.size() > kChunkCacheMaxBytes) {
+    if (payload.empty() || payload.size() > k_chunk_cache_maximum_bytes) {
         return std::nullopt;
     }
     auto permit =
@@ -509,8 +510,8 @@ void install_index_residency_callbacks() {
         }
     }
     while (!state.chunk_entries.empty()
-           && (state.chunk_entries.size() >= kChunkCacheMaxEntries
-               || state.chunk_bytes + payload.size() > kChunkCacheMaxBytes)) {
+           && (state.chunk_entries.size() >= k_chunk_cache_maximum_entries
+               || state.chunk_bytes + payload.size() > k_chunk_cache_maximum_bytes)) {
         const auto victim = std::min_element(
             state.chunk_entries.begin(), state.chunk_entries.end(),
             [](const chunk_cache_entry& lhs, const chunk_cache_entry& rhs) {
@@ -519,7 +520,7 @@ void install_index_residency_callbacks() {
         evict_chunk_index(static_cast<std::size_t>(
             std::distance(state.chunk_entries.begin(), victim)));
     }
-    if (state.chunk_bytes + payload.size() > kChunkCacheMaxBytes) {
+    if (state.chunk_bytes + payload.size() > k_chunk_cache_maximum_bytes) {
         return std::nullopt;
     }
 
@@ -571,7 +572,7 @@ void store_assembled_index(
         bioseq::indexing::minimizer_hashmap_fragment_index&& index) {
     install_index_residency_callbacks();
     const std::uint64_t bytes = estimate_assembled_index_bytes(index);
-    if (bytes == 0 || bytes > kAssembledCacheMaxBytes) {
+    if (bytes == 0 || bytes > k_assembled_cache_maximum_bytes) {
         return;
     }
     auto permit =
@@ -589,8 +590,8 @@ void store_assembled_index(
         }
     }
     while (!state.assembled_entries.empty()
-           && (state.assembled_entries.size() >= kAssembledCacheMaxEntries
-               || state.assembled_bytes + bytes > kAssembledCacheMaxBytes)) {
+           && (state.assembled_entries.size() >= k_assembled_cache_maximum_entries
+               || state.assembled_bytes + bytes > k_assembled_cache_maximum_bytes)) {
         const auto victim = std::min_element(
             state.assembled_entries.begin(), state.assembled_entries.end(),
             [](const assembled_index_cache_entry& lhs, const assembled_index_cache_entry& rhs) {
@@ -599,7 +600,7 @@ void store_assembled_index(
         evict_assembled_index(static_cast<std::size_t>(
             std::distance(state.assembled_entries.begin(), victim)));
     }
-    if (state.assembled_bytes + bytes > kAssembledCacheMaxBytes) {
+    if (state.assembled_bytes + bytes > k_assembled_cache_maximum_bytes) {
         return;
     }
 

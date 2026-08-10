@@ -803,7 +803,7 @@ static_assert(k_minimizer_output_layout<minimizer_representation<63u, 27u>>
 enum class minimizer_sketch_backend : std::uint8_t {
     scalar = 0,
     vulkan_segment = 1,
-    two_stack_nthash = 2,
+    exact_simd = 2,
     bounded_nthash_simd = 3,
 };
 
@@ -814,8 +814,8 @@ enum class minimizer_sketch_backend : std::uint8_t {
     switch (backend) {
         case minimizer_sketch_backend::scalar: return "scalar";
         case minimizer_sketch_backend::vulkan_segment: return "vulkan_segment";
-        case minimizer_sketch_backend::two_stack_nthash:
-            return "two_stack_nthash";
+        case minimizer_sketch_backend::exact_simd:
+            return "exact_simd";
         case minimizer_sketch_backend::bounded_nthash_simd:
             return "bounded_nthash_simd";
     }

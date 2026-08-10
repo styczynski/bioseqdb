@@ -14,20 +14,20 @@ export module bioseq.codegen.sql.annotation_model:entities;
 
 export namespace bioseq::sql {
 
-template<std::size_t Capacity>
+template<std::size_t p_capacity>
 struct fixed_text {
-    std::array<char, Capacity> bytes{};
+    std::array<char, p_capacity> bytes{};
     std::size_t size{};
 
     consteval fixed_text() = default;
 
-    template<std::size_t Size>
-    consteval fixed_text(const char (&value)[Size])
-        : size{Size - 1} {
-        if (Size == 1 || Size > Capacity) {
+    template<std::size_t p_size>
+    consteval fixed_text(const char (&value)[p_size])
+        : size{p_size - 1} {
+        if (p_size == 1 || p_size > p_capacity) {
             throw "SQL annotation text is empty or too long";
         }
-        for (std::size_t index = 0; index < Size; ++index) {
+        for (std::size_t index = 0; index < p_size; ++index) {
             bytes[index] = value[index];
         }
     }
@@ -44,8 +44,8 @@ struct checked_sql {
 
     consteval checked_sql() = default;
 
-    template<std::size_t Size>
-    consteval checked_sql(const char (&value)[Size])
+    template<std::size_t p_size>
+    consteval checked_sql(const char (&value)[p_size])
         : text{value} {
     }
 
@@ -62,8 +62,8 @@ struct declaration_reference {
 
     consteval declaration_reference() = default;
 
-    template<class Declaration>
-    consteval declaration_reference(Declaration&&) noexcept
+    template<class p_declaration>
+    consteval declaration_reference(p_declaration&&) noexcept
         : present{true} {
     }
 };
@@ -77,8 +77,8 @@ struct entity_reference_list {
 
     consteval entity_reference_list() = default;
 
-    template<class Entities>
-    consteval entity_reference_list(const Entities&) noexcept
+    template<class p_entities>
+    consteval entity_reference_list(const p_entities&) noexcept
         : present{true} {
     }
 };
@@ -86,15 +86,15 @@ struct entity_reference_list {
 struct schema_entity final {
 };
 
-template<class Setting, class Value>
+template<class p_setting, class p_value>
 struct session_setting_action final {
-    Setting const* setting{};
-    Value value{};
+    p_setting const* setting{};
+    p_value value{};
 };
 
-template<class Setting, class Value>
-[[nodiscard]] consteval session_setting_action<Setting, Value>
-set_after_guard(Setting const& setting, Value value) {
+template<class p_setting, class p_value>
+[[nodiscard]] consteval session_setting_action<p_setting, p_value>
+set_after_guard(p_setting const& setting, p_value value) {
     return {.setting = &setting, .value = value};
 }
 
@@ -118,10 +118,10 @@ inline constexpr schema_ref pg_catalog{
     .name = "pg_catalog",
 };
 
-template<identifier Name>
+template<identifier p_name>
 inline constexpr schema_ref fixed_schema{
     .binding = schema_binding::fixed,
-    .name = Name,
+    .name = p_name,
 };
 
 enum class pg_type_id : std::uint16_t {
@@ -220,25 +220,25 @@ inline constexpr pg_type quoted_any{
     .id = pg_type_id::quoted_any, .custom_name = "quoted_any"};
 }  // namespace pg
 
-template<identifier Name>
+template<identifier p_name>
 inline constexpr pg_type custom_type{
     .id = pg_type_id::custom,
-    .custom_name = Name,
+    .custom_name = p_name,
 };
 
-template<class Type>
+template<class p_type>
 inline constexpr pg_type type_of{
     .id = pg_type_id::custom,
     .custom_name = "custom",
 };
 
-template<class... Types, class... Values>
-[[nodiscard]] consteval auto entities(Values&&... values) {
+template<class... p_types, class... p_values>
+[[nodiscard]] consteval auto entities(p_values&&... values) {
     static_assert(
-        sizeof...(Types) + sizeof...(Values) > 0,
+        sizeof...(p_types) + sizeof...(p_values) > 0,
         "an SQL entity list cannot be empty");
-    return std::tuple<Types..., std::remove_cvref_t<Values>...>{
-        Types{}..., std::forward<Values>(values)...};
+    return std::tuple<p_types..., std::remove_cvref_t<p_values>...>{
+        p_types{}..., std::forward<p_values>(values)...};
 }
 
 struct aggregate_tag final {
@@ -299,41 +299,41 @@ struct opclass_function_options {
     declaration_reference function{};
 };
 
-template<std::size_t Capacity>
+template<std::size_t p_capacity>
 struct opclass_entry_list {
-    std::array<opclass_operator_options, Capacity> operator_entries{};
-    std::array<opclass_function_options, Capacity> function_entries{};
+    std::array<opclass_operator_options, p_capacity> operator_entries{};
+    std::array<opclass_function_options, p_capacity> function_entries{};
     std::size_t size{};
 };
 
 using opclass_operator_list = opclass_entry_list<16>;
 using opclass_function_list = opclass_entry_list<16>;
 
-template<class Function>
+template<class p_function>
 [[nodiscard]] consteval opclass_operator_options opclass_operator(
     std::uint16_t strategy,
-    Function&& function) {
+    p_function&& function) {
     if (strategy == 0) {
         throw "an operator-class strategy number must be positive";
     }
     return {
         .strategy = strategy,
         .function = declaration_reference{
-            std::forward<Function>(function)},
+            std::forward<p_function>(function)},
     };
 }
 
-template<class Function>
+template<class p_function>
 [[nodiscard]] consteval opclass_function_options opclass_function(
     std::uint16_t support_number,
-    Function&& function) {
+    p_function&& function) {
     if (support_number == 0) {
         throw "an operator-class support number must be positive";
     }
     return {
         .support_number = support_number,
         .function = declaration_reference{
-            std::forward<Function>(function)},
+            std::forward<p_function>(function)},
     };
 }
 
@@ -382,7 +382,7 @@ struct cast_tag final {
 struct script_phase final {
 };
 
-template<class SqlResult>
+template<class p_sql_result>
 struct sql_function_body final {
     checked_sql body;
 };

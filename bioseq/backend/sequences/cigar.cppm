@@ -100,9 +100,9 @@ inline void append_cigar(
  * deliberately projects exact matches and mismatches to the generic match
  * opcode at its public CIGAR boundary.
  *
- * @tparam strand_reversed Whether query ranks are decoded in reverse-complement
+ * @tparam p_strand_reversed Whether query ranks are decoded in reverse-complement
  * order.
- * @tparam alphabet Logical alphabet shared by both sequence views.
+ * @tparam p_alphabet Logical alphabet shared by both sequence views.
  * @param query_seq Lazy query view; it is decoded only for the selected window.
  * @param target_seq Lazy target view; it is decoded only for the selected window.
  * @param query_start Inclusive query offset.
@@ -115,12 +115,12 @@ inline void append_cigar(
  * @throws std::runtime_error If the CIGAR is unsupported or does not cover the
  * selected windows exactly.
  */
-template <bool strand_reversed,
-          sequence_alphabet alphabet>
+template <bool p_strand_reversed,
+          sequence_alphabet p_alphabet>
 [[nodiscard]] bioseq::storage::sequence_size_t
 exact_edit_distance_from_packed_cigar(
-    bioseq::storage::lazy_sequence_view<alphabet> query_seq,
-    bioseq::storage::lazy_sequence_view<alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -134,7 +134,7 @@ exact_edit_distance_from_packed_cigar(
     const std::size_t target_length = target_end - target_start;
     std::vector<std::uint8_t> query_ranks(query_length);
     std::vector<std::uint8_t> target_ranks(target_length);
-    query_seq.template copy_ranks<strand_reversed, false>(
+    query_seq.template copy_ranks<p_strand_reversed, false>(
         std::span<std::uint8_t>(query_ranks), query_start, query_end);
     target_seq.template copy_ranks<false, false>(
         std::span<std::uint8_t>(target_ranks), target_start, target_end);
@@ -238,9 +238,9 @@ inline void append_implicit_seed_cigar(
  * not establish equal underlying ranks, so exact-distance callers compare the
  * seed span explicitly.
  *
- * @tparam strand_reversed Whether query ranks are decoded in reverse-complement
+ * @tparam p_strand_reversed Whether query ranks are decoded in reverse-complement
  * order.
- * @tparam alphabet Logical alphabet shared by both sequence views.
+ * @tparam p_alphabet Logical alphabet shared by both sequence views.
  * @param query_seq Lazy query view.
  * @param target_seq Lazy target view.
  * @param query_start Inclusive query offset.
@@ -251,12 +251,12 @@ inline void append_implicit_seed_cigar(
  * @throws std::invalid_argument If either window is inverted.
  * @throws std::out_of_range If either window exceeds its sequence.
  */
-template <bool strand_reversed,
-          sequence_alphabet alphabet>
+template <bool p_strand_reversed,
+          sequence_alphabet p_alphabet>
 [[nodiscard]] bioseq::storage::sequence_size_t
 exact_edit_distance_for_implicit_seed(
-    bioseq::storage::lazy_sequence_view<alphabet> query_seq,
-    bioseq::storage::lazy_sequence_view<alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -276,7 +276,7 @@ exact_edit_distance_for_implicit_seed(
     const std::size_t common_length = std::min(query_length, target_length);
     std::vector<std::uint8_t> query_ranks(common_length);
     std::vector<std::uint8_t> target_ranks(common_length);
-    query_seq.template copy_ranks<strand_reversed, false>(
+    query_seq.template copy_ranks<p_strand_reversed, false>(
         std::span<std::uint8_t>(query_ranks),
         query_start,
         query_start + common_length);

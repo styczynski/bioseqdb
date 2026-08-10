@@ -22,7 +22,7 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 namespace hn = hwy::HWY_NAMESPACE;
 
 [[nodiscard]] std::vector<seq::dna4> short_dna4_sequence() {
-    constexpr std::string_view bases =
+    constexpr std::string_view k_bases =
         "ACTGTAGCTGATCGTAGCTAGTCACTGTAGCT"
         "GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA"
         "ACTGTATCGTAGCTAGTCCGTAGCTACTGTAG"
@@ -32,45 +32,46 @@ namespace hn = hwy::HWY_NAMESPACE;
         "TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA"
         "CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG"
         "ATCGTAGCTAGTC";
-    std::vector<seq::dna4> result(bases.size());
-    for (std::size_t index = 0u; index < bases.size(); ++index) {
-        result[index].assign_char(bases[index]);
+    std::vector<seq::dna4> result(k_bases.size());
+    for (std::size_t index = 0u; index < k_bases.size(); ++index) {
+        result[index].assign_char(k_bases[index]);
     }
     return result;
 }
 
 template<
-    class Input,
-    template<class> class ScalarHasher,
-    template<class> class SimdHasher>
+    class p_input,
+    template<class p_alphabet> class p_scalar_hasher,
+    template<class p_alphabet> class p_simd_hasher>
 [[nodiscard]] bool hasher_set_parity() {
-    using alphabet_storage_t =
-        sequence_custom_alphabet<seq::dna4, Input>;
-    using range_t = compact_sequence_range<alphabet_storage_t>;
-    using traits_t = typename range_t::traits;
-    using d_t = hn::ScalableTag<Input>;
-    constexpr std::size_t maximum_lanes = hn::MaxLanes(d_t{});
-    constexpr std::size_t kmer_length = 10u;
+    using alphabet_storage_type =
+        sequence_custom_alphabet<seq::dna4, p_input>;
+    using range_type = compact_sequence_range<alphabet_storage_type>;
+    using traits_type = typename range_type::traits;
+    using simd_tag_type = hn::ScalableTag<p_input>;
+    constexpr std::size_t k_maximum_lanes =
+        hn::MaxLanes(simd_tag_type{});
+    constexpr std::size_t k_kmer_length = 10u;
 
     auto source = short_dna4_sequence();
-    range_t sequence{source};
-    typename ScalarHasher<seq::dna4>::template scalar_hash<Input>
-        scalar_hasher{kmer_length};
-    d_t d;
-    typename SimdHasher<seq::dna4>::template simd_hash<Input, d_t>
-        simd_hasher{d, kmer_length};
+    range_type sequence{source};
+    typename p_scalar_hasher<seq::dna4>::template scalar_hash<p_input>
+        scalar_hasher{k_kmer_length};
+    simd_tag_type simd_tag;
+    typename p_simd_hasher<seq::dna4>::template simd_hash<
+        p_input, simd_tag_type> simd_hasher{simd_tag, k_kmer_length};
 
-    std::vector<std::pair<std::size_t, Input>> scalar_results;
-    std::vector<std::pair<std::size_t, Input>> simd_results;
+    std::vector<std::pair<std::size_t, p_input>> scalar_results;
+    std::vector<std::pair<std::size_t, p_input>> simd_results;
     scalar_results.reserve(sequence.bp_size());
     simd_results.reserve(sequence.bp_size());
 
     std::size_t position = 0u;
     for (const auto rank : sequence.template iterable<logical_rank>()) {
         const auto [hash, strand] = scalar_hasher.next(
-            static_cast<Input>(rank), static_cast<Input>(rank));
+            static_cast<p_input>(rank), static_cast<p_input>(rank));
         (void)strand;
-        if (position >= kmer_length) {
+        if (position >= k_kmer_length) {
             scalar_results.emplace_back(position, hash);
         }
         ++position;
@@ -78,29 +79,29 @@ template<
 
     position = 0u;
     iterate_sequence_bp_simd_offsets(
-        sequence, sequence.begin(), sequence.end(), kmer_length,
-        [&]<bool IsFull>(
-            std::bool_constant<IsFull>,
+        sequence, sequence.begin(), sequence.end(), k_kmer_length,
+        [&]<bool p_is_full>(
+            std::bool_constant<p_is_full>,
             const auto& offsets,
-            auto& callback_d,
+            auto& callback_simd_tag,
             auto& mask,
             auto&& incoming,
             auto,
             auto outgoing) {
             const auto hash = simd_hasher.next(
-                callback_d, incoming, outgoing);
-            if (position >= kmer_length) {
-                std::array<Input, maximum_lanes> values{};
-                std::array<Input, maximum_lanes> masks{};
-                hn::Store(hash, callback_d, values.data());
+                callback_simd_tag, incoming, outgoing);
+            if (position >= k_kmer_length) {
+                std::array<p_input, k_maximum_lanes> values{};
+                std::array<p_input, k_maximum_lanes> masks{};
+                hn::Store(hash, callback_simd_tag, values.data());
                 hn::Store(
-                    hn::VecFromMask(callback_d, mask),
-                    callback_d, masks.data());
-                const std::size_t lanes = hn::Lanes(callback_d);
+                    hn::VecFromMask(callback_simd_tag, mask),
+                    callback_simd_tag, masks.data());
+                const std::size_t lanes = hn::Lanes(callback_simd_tag);
                 for (std::size_t lane = 0u; lane < lanes; ++lane) {
-                    if (masks[lane] == Input{}) continue;
+                    if (masks[lane] == p_input{}) continue;
                     simd_results.emplace_back(
-                        offsets[lane] * traits_t::letters_per_unit
+                        offsets[lane] * traits_type::letters_per_unit
                             + position,
                         values[lane]);
                 }
@@ -113,26 +114,26 @@ template<
         == std::set(simd_results.begin(), simd_results.end());
 }
 
-template<class Input>
+template<class p_input>
 [[nodiscard]] bool lexic_parity() {
     return hasher_set_parity<
-        Input,
+        p_input,
         ::bioseq::simd::lexic_hasher,
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::lexic_hasher>();
 }
 
-template<class Input>
+template<class p_input>
 [[nodiscard]] bool minimap_int_parity() {
     return hasher_set_parity<
-        Input,
+        p_input,
         ::bioseq::simd::minimap_int_hasher,
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::minimap_int_hasher>();
 }
 
 }  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
 
-extern "C" bool bioseq_highway_probe_hashers(
-    BioseqHighwayHashersProbeReceipt* receipt) noexcept {
+extern "C" bool bioseq_highway_run_hashers_probe(
+    bioseq_highway_hashers_probe_receipt* receipt) noexcept {
     if (receipt == nullptr) return false;
     *receipt = {};
     receipt->target = static_cast<std::int64_t>(HWY_TARGET);

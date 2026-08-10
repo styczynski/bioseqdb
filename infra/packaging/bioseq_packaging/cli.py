@@ -16,7 +16,7 @@ DEFAULT_SOURCE_DIR = Path(__file__).resolve().parents[3]
 
 
 def argument_parser() -> argparse.ArgumentParser:
-    """Return the compatibility-preserving worker argument parser."""
+    """Return the current worker argument parser."""
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--architecture", choices=("arm64", "x64"), required=True)

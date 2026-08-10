@@ -5,7 +5,7 @@
  * The current indexing algorithms have no target-specific callable in this
  * source family. Keeping the annotated namespace preserves the authenticated
  * source-record key and generated target cardinality without retaining the
- * removed grouped-position compatibility validator.
+ * grouped-position storage-contract validator.
  */
 module;
 

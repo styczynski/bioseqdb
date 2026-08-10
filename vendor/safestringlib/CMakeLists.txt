@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 project(safestring)
 
-include_directories("${CMAKE_CURRENT_LIST_DIR}/../../config")
-
 option(BUILD_UNITTESTS "Build also project unit-tests" OFF)
 
 if (NOT DEFINED BUILD_OPT_DEFAULT)

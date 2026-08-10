@@ -66,7 +66,6 @@ import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif
-import bioseq.postgres.support.runtime_test_counters;
 import bioseq.postgres.support.sql_catalog_entities;
 import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
@@ -105,10 +104,12 @@ using namespace bioseq::postgres::support;
 namespace bioseq::pg::sql_routines {
 
 bioseq::postgres::support::table_rows<
-    bioseq::postgres::sql_rows::last_mps_build_stats_row>
-last_mps_build_stats() {
-	const auto st = bioseq::storage::indexing::g_last_mps_build_stats;
-    std::vector<bioseq::postgres::sql_rows::last_mps_build_stats_row> rows;
+    bioseq::postgres::sql_rows::last_minimizer_sequence_build_stats_row>
+last_minimizer_sequence_build_stats() {
+	const auto st = bioseq::storage::indexing::
+		g_last_minimizer_sequence_build_stats;
+    std::vector<
+		bioseq::postgres::sql_rows::last_minimizer_sequence_build_stats_row> rows;
     rows.push_back({
         static_cast<std::int64_t>(st.backend_pid),
         static_cast<std::int64_t>(st.db_oid),
@@ -130,16 +131,18 @@ last_mps_build_stats() {
         static_cast<std::int64_t>(st.position_spill_count),
     });
     return bioseq::postgres::support::table_rows<
-        bioseq::postgres::sql_rows::last_mps_build_stats_row>{
+		bioseq::postgres::sql_rows::last_minimizer_sequence_build_stats_row>{
             std::move(rows)};
 }
 
 bioseq::postgres::support::table_rows<
-    bioseq::postgres::sql_rows::scheduler_mps_build_stats_row>
-scheduler_mps_build_stats() {
+    bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>
+scheduler_minimizer_sequence_build_stats() {
 	const auto snap = bioseq::postgres::scheduler::snapshot_async_minimizer_sequence_build_stats();
 	const auto st = snap.stats;
-    std::vector<bioseq::postgres::sql_rows::scheduler_mps_build_stats_row> rows;
+    std::vector<
+		bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>
+		rows;
     rows.push_back({
         static_cast<std::int64_t>(st.backend_pid),
         static_cast<std::int64_t>(st.db_oid),
@@ -167,12 +170,12 @@ scheduler_mps_build_stats() {
         static_cast<std::int64_t>(snap.shareable_lazy_workers),
     });
     return bioseq::postgres::support::table_rows<
-        bioseq::postgres::sql_rows::scheduler_mps_build_stats_row>{
+		bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>{
             std::move(rows)};
 }
 
 
-bool arm_async_mps_worker_failure(std::string failure_point) {
+bool arm_async_minimizer_sequence_worker_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
 	const std::string_view point_name{failure_point};
 	using stage_failure = bioseq::postgres::scheduler::async_minimizer_sequence_stage_pg_failure;
@@ -230,7 +233,7 @@ bool arm_async_mps_worker_failure(std::string failure_point) {
 }
 
 
-void disarm_async_mps_worker_failure() {
+void disarm_async_minimizer_sequence_worker_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::postgres::scheduler::disarm_async_minimizer_sequence_worker_pg_failure();
 	bioseq::postgres::scheduler::disarm_async_minimizer_sequence_stage_pg_failure();
@@ -248,7 +251,7 @@ void disarm_async_mps_worker_failure() {
 
 
 bioseq::postgres::support::table_rows<
-	bioseq::postgres::sql_rows::async_mps_worker_boundary_stats_row>
+	bioseq::postgres::sql_rows::async_minimizer_sequence_worker_boundary_stats_row>
 async_minimizer_sequence_worker_boundary_stats() {
 	const auto stats = bioseq::postgres::scheduler::
 		snapshot_async_minimizer_sequence_worker_boundary_stats();
@@ -257,7 +260,8 @@ async_minimizer_sequence_worker_boundary_stats() {
 	const char* armed_point = bioseq::postgres::scheduler::
 		async_minimizer_sequence_worker_failure_point_name(stats.armed_failure_point);
 	std::vector<
-		bioseq::postgres::sql_rows::async_mps_worker_boundary_stats_row> rows;
+		bioseq::postgres::sql_rows::
+			async_minimizer_sequence_worker_boundary_stats_row> rows;
 	rows.push_back({
 		static_cast<std::int64_t>(stats.relation_leaf_calls),
 		static_cast<std::int64_t>(stats.spi_leaf_calls),
@@ -279,7 +283,8 @@ async_minimizer_sequence_worker_boundary_stats() {
 			: "",
 	});
 	return bioseq::postgres::support::table_rows<
-		bioseq::postgres::sql_rows::async_mps_worker_boundary_stats_row>{
+		bioseq::postgres::sql_rows::
+			async_minimizer_sequence_worker_boundary_stats_row>{
 			std::move(rows)};
 }
 

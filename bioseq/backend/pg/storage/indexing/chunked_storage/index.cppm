@@ -1,6 +1,6 @@
 /**
  * @file chunked_storage.cppm
- * @brief DOC0279 §8 — the concrete Postgres storage implementations that satisfy
+ * @brief Concrete Postgres storage implementations that satisfy
  *        the `is_index_chunked_storage_for<...>` concepts.
  *
  * Index chunks are raw BYTEA tuples in heap relations (heap_form_tuple /
@@ -103,7 +103,7 @@ import bioseq.postgres.storage.scanner;      // PostgreSQL-backed lazy sequence 
 import bioseq.storage.lazy_sequence;            // lazy_sequence
 import bioseq.postgres.types.compact_sequence;  // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;               // compact_sequence_range
-import bioseq.sequences.simd;          // canonical bounded base decoding for source proof
+import bioseq.sequences.simd;          // canonical bounded base decoding
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -111,8 +111,8 @@ import bioseq.parallelism.pool;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;                    // DOC0322 §7.4 — relation_oid_uses_column_table_access_method (leaf)
-import bioseq.postgres.storage.metadata;                     // DOC0322 §7.4 — column_table_row_count (moved to storage_metadata:core)
+import bioseq.postgres.column.table_access;
+import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
@@ -178,7 +178,7 @@ using bioseq::indexing::encoded_hash_major_minimizer_head;
 using bioseq::indexing::encoded_hash_major_minimizer_manifest;
 using bioseq::indexing::hash_major_minimizer_authorized_control_range;
 using bioseq::indexing::hash_major_minimizer_authorized_posting_range;
-using bioseq::indexing::hash_major_minimizer_compatibility;
+using bioseq::indexing::hash_major_minimizer_storage_profile;
 using bioseq::indexing::hash_major_minimizer_consume_control_block_fn;
 using bioseq::indexing::hash_major_minimizer_consume_posting_bytes_fn;
 using bioseq::indexing::hash_major_minimizer_encoded_metadata;
@@ -200,14 +200,14 @@ static_assert(k_hash_major_generation_head_sub_key
     < k_hash_major_dense_seal_sub_key);
 static_assert(k_hash_major_dense_seal_sub_key < k_generation_head_sub_key);
 
-// pg-side mirror checks (§5): the macros ARE in scope here.
+// PostgreSQL-side mirror checks: the macros are in scope here.
 static_assert(bioseq::indexing::k_varlena_header_bytes == VARHDRSZ, "VARHDRSZ mirror drift");
 static_assert(bioseq::indexing::k_postgres_max_allocation_bytes == MaxAllocSize, "MaxAllocSize mirror drift");
 
-// Backend-local per-sequence build observability (§8.8/DOC0299). Defined here
+// Backend-local per-sequence build observability. Defined here
 // (storage) so merge/release can set it; admin zeroes it at build start and
 // mod.cppm reads it through SQL in the same backend.
-struct last_mps_build_stats {
+struct last_minimizer_sequence_build_stats {
     std::uint64_t backend_pid = 0;
     std::uint64_t db_oid = 0;
     std::uint64_t relfilenode = 0;
@@ -228,7 +228,7 @@ struct last_mps_build_stats {
     std::uint64_t position_spill_count = 0;
 };
 
-/// PostgreSQL-local evidence for one cold persisted-index preparation.  This
+/// PostgreSQL-local stats for one cold persisted-index preparation. This
 /// is a transport delta, not a second execution/fallback authority: the
 /// dispatch owner merges it into pipeline_operational_stats exactly once.
 /// Every SQL-bound value clamps at INT64_MAX so the PostgreSQL bigint row
@@ -297,7 +297,7 @@ struct cold_index_preparation_stats {
     std::uint64_t shared_blks_read = 0;
     bool are_stats_saturated = false;
 
-    static constexpr std::uint64_t sql_bigint_max =
+    static constexpr std::uint64_t k_sql_bigint_max =
         static_cast<std::uint64_t>(
             (std::numeric_limits<std::int64_t>::max)());
 
@@ -305,10 +305,10 @@ struct cold_index_preparation_stats {
     void add(
             std::uint64_t& destination,
             std::uint64_t increment) noexcept {
-        if (destination > sql_bigint_max
-            || increment > sql_bigint_max -
-                std::min(destination, sql_bigint_max)) {
-            destination = sql_bigint_max;
+        if (destination > k_sql_bigint_max
+            || increment > k_sql_bigint_max -
+                std::min(destination, k_sql_bigint_max)) {
+            destination = k_sql_bigint_max;
             are_stats_saturated = true;
             return;
         }
@@ -385,8 +385,8 @@ struct cold_index_preparation_stats {
 };
 
 struct minimizer_generation_administration_identity;
-class minimizer_generation_catalog_source_proof;
-[[nodiscard]] inline minimizer_generation_catalog_source_proof derive_minimizer_generation_catalog_source_proof_pg(
+class minimizer_generation_catalog_source_authorization;
+[[nodiscard]] inline minimizer_generation_catalog_source_authorization authorize_minimizer_generation_catalog_source_pg(
     const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
 
 /// Move-only, non-owning executor read capability.  The CustomScan owns the
@@ -397,7 +397,7 @@ class minimizer_generation_catalog_source_proof;
 /// snapshot).
 class borrowed_executor_read_context {
 private:
-    friend minimizer_generation_catalog_source_proof derive_minimizer_generation_catalog_source_proof_pg(
+    friend minimizer_generation_catalog_source_authorization authorize_minimizer_generation_catalog_source_pg(
         const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
 
     Relation relation_ = nullptr;
@@ -544,17 +544,18 @@ inline void add_cold_index_buffer_usage(
 }
 
 inline std::uint64_t g_last_index_merge_run_count = 0;
-inline last_mps_build_stats g_last_mps_build_stats{};
+inline last_minimizer_sequence_build_stats
+    g_last_minimizer_sequence_build_stats{};
 
-inline void reset_last_mps_build_stats() noexcept {
+inline void reset_last_minimizer_sequence_build_stats() noexcept {
     g_last_index_merge_run_count = 0;
-    g_last_mps_build_stats = {};
+    g_last_minimizer_sequence_build_stats = {};
 }
 
 enum class minimizer_generation_failure_injection : std::uint8_t {
     none,
-    mps_spill,
-    mps_merge,
+    minimizer_sequence_spill,
+    minimizer_sequence_merge,
     generation_tts_create,
     generation_tuple_form,
     generation_tts_store,
@@ -591,7 +592,7 @@ inline void inject_minimizer_generation_failure_leaf(
     g_minimizer_generation_failure_injection = minimizer_generation_failure_injection::none;
     ereport(ERROR,
         (errcode(ERRCODE_IO_ERROR),
-         errmsg("injected revision-3 PostgreSQL failure"),
+         errmsg("injected PostgreSQL generation failure"),
          errdetail("failure_point=%s", point_name),
          errhint("retry the failed index build in a fresh transaction")));
 }
@@ -677,16 +678,15 @@ inline void inject_inline_sequence_pg_leaf_failure(
 		inline_sequence_pg_leaf_failure) noexcept {}
 #endif
 
-// Pinned attribute numbers (§8.1) for the CHUNKED_PER_FRAGMENT table.
-inline constexpr AttrNumber kAttQueryKey   = 1;
-inline constexpr AttrNumber kAttSubKey     = 2;
-inline constexpr AttrNumber kAttChunkNo    = 3;
-inline constexpr AttrNumber kAttChunkBytes = 4;
-inline constexpr AttrNumber kAttBlob       = 5;
+// Pinned attribute numbers for the fragment-chunk table.
+inline constexpr AttrNumber k_attribute_query_key   = 1;
+inline constexpr AttrNumber k_attribute_sub_key     = 2;
+inline constexpr AttrNumber k_attribute_chunk_number    = 3;
+inline constexpr AttrNumber k_attribute_chunk_bytes = 4;
+inline constexpr AttrNumber k_attribute_blob       = 5;
 
-// Revision-3 lives in this module as an inactive, fail-closed surface until the
-// destructive schema cutover is made atomically with every live writer/reader.
-// The legacy five-column constants above deliberately remain unchanged.
+// Current-generation storage uses the exact eight-column relation surface.
+// The direct fragment-row constants above define the separate row-chunk API.
 inline constexpr AttrNumber k_minimizer_generation_attribute_query_key       = 1;
 inline constexpr AttrNumber k_minimizer_generation_attribute_generation_id   = 2;
 inline constexpr AttrNumber k_minimizer_generation_attribute_position_segment = 3;
@@ -856,7 +856,7 @@ struct minimizer_generation_schema_expectation {
     Oid tablespace_oid = InvalidOid;
 };
 
-/// Inspect the complete revision-3 relation shape without accepting attno
+/// Inspect the complete current-generation relation shape without accepting attno
 /// shims, included PK columns, nullable fields, or a toastable blob.
 [[nodiscard]] inline minimizer_generation_schema_inspection inspect_minimizer_generation_schema(
         Relation relation,
@@ -936,7 +936,7 @@ struct minimizer_generation_schema_expectation {
     foreach (cell, index_list) {
         const Oid index_oid = lfirst_oid(cell);
         // Production callers leave this invalid and retain the exact-one-index
-        // contract.  The revision-3 catalog-corruption fixture alone names its
+        // contract.  The current-generation catalog-corruption fixture alone names its
         // real donor index, which must coexist long enough for its parsed
         // predicate/expression tree to be copied onto the primary index.
         if (index_oid == permitted_auxiliary_index_oid) continue;
@@ -986,7 +986,7 @@ struct minimizer_generation_schema_expectation {
             } else if (RelationGetIndexExpressions(index_relation) != NIL) {
                 primary_error = minimizer_generation_schema_error::primary_index_expression;
             } else {
-                constexpr std::array<Oid, 5> expected_opclasses{
+                constexpr std::array<Oid, 5> k_expected_opclasses{
                     INT8_BTREE_OPS_OID,
                     INT8_BTREE_OPS_OID,
                     INT8_BTREE_OPS_OID,
@@ -1002,7 +1002,7 @@ struct minimizer_generation_schema_expectation {
                     }
                     if (get_index_column_opclass(
                             index_oid, static_cast<int>(key + 1u))
-                        != expected_opclasses[key]) {
+                        != k_expected_opclasses[key]) {
                         primary_error = minimizer_generation_schema_error::primary_index_opclass;
                         break;
                     }
@@ -1039,10 +1039,10 @@ struct minimizer_generation_schema_expectation {
     };
 }
 
-/// Validate a revision-3 heap and its already-open primary-index descriptor.
+/// Validate a current-generation heap and its already-open primary-index descriptor.
 /// Unlike inspect_minimizer_generation_schema(), this routine performs no Relation open
 /// or close.  It is the production cold-read validator: the exact descriptor
-/// proven here is the descriptor subsequently used by every ordered scan.
+/// validated here is the descriptor subsequently used by every ordered scan.
 [[nodiscard]] inline minimizer_generation_schema_inspection
 inspect_bound_minimizer_generation_schema(
         Relation relation,
@@ -1174,7 +1174,7 @@ inspect_bound_minimizer_generation_schema(
     if (RelationGetIndexExpressions(primary_index_relation) != NIL) {
         return {.error = minimizer_generation_schema_error::primary_index_expression};
     }
-    constexpr std::array<Oid, 5> expected_opclasses{
+    constexpr std::array<Oid, 5> k_expected_opclasses{
         INT8_BTREE_OPS_OID,
         INT8_BTREE_OPS_OID,
         INT8_BTREE_OPS_OID,
@@ -1190,7 +1190,7 @@ inspect_bound_minimizer_generation_schema(
         }
         if (get_index_column_opclass(
                 primary_index_oid, static_cast<int>(key + 1u))
-            != expected_opclasses[key]) {
+            != k_expected_opclasses[key]) {
             return {.error = minimizer_generation_schema_error::primary_index_opclass};
         }
         if (primary_index_relation->rd_indcollation == nullptr
@@ -1212,15 +1212,14 @@ inspect_bound_minimizer_generation_schema(
 
 enum class minimizer_generation_relation_kind : std::uint8_t {
     missing,
-    legacy_exact,
-    revision3_exact,
+    current_exact,
     malformed,
 };
 
 struct minimizer_generation_relation_inspection {
     minimizer_generation_relation_kind kind =
         minimizer_generation_relation_kind::malformed;
-    minimizer_generation_schema_error revision3_error =
+    minimizer_generation_schema_error schema_error =
         minimizer_generation_schema_error::none;
 };
 
@@ -1232,221 +1231,6 @@ struct minimizer_generation_relation_open_failure {
     minimizer_generation_relation_inspection inspection{};
 };
 
-/// Recognise only the two legacy schemas that the old PostgreSQL writers
-/// actually created.  Attribute count alone is intentionally insufficient:
-/// ordinal 2 must not describe an arbitrary lookalike or damaged relation as
-/// a valid legacy index.
-[[nodiscard]] inline bool inspect_exact_legacy_minimizer_index_schema(
-        Relation relation,
-        std::string_view index_name) {
-    constexpr std::array<minimizer_generation_index_attribute_descriptor, 5>
-        mpf_attributes{{
-            {1, "query_key", INT8OID},
-            {2, "sub_key", INT8OID},
-            {3, "chunk_no", INT4OID},
-            {4, "chunk_bytes", INT4OID},
-            {5, "blob", BYTEAOID},
-        }};
-    constexpr std::array<AttrNumber, 3> mpf_primary_key{1, 2, 3};
-    constexpr std::array<Oid, 3> mpf_opclasses{
-        INT8_BTREE_OPS_OID,
-        INT8_BTREE_OPS_OID,
-        INT4_BTREE_OPS_OID,
-    };
-    constexpr std::array<minimizer_generation_index_attribute_descriptor, 3>
-        mps_attributes{{
-            {1, "query_key", INT8OID},
-            {2, "chunk_bytes", INT4OID},
-            {3, "blob", BYTEAOID},
-        }};
-    constexpr std::array<AttrNumber, 1> mps_primary_key{1};
-    constexpr std::array<Oid, 1> mps_opclasses{INT8_BTREE_OPS_OID};
-
-    std::span<const minimizer_generation_index_attribute_descriptor> attributes;
-    std::span<const AttrNumber> primary_key;
-    std::span<const Oid> opclasses;
-    if (index_name == k_minimizers_per_fragment_index_name) {
-        attributes = mpf_attributes;
-        primary_key = mpf_primary_key;
-        opclasses = mpf_opclasses;
-    } else if (index_name == k_minimizers_per_sequence_index_name) {
-        attributes = mps_attributes;
-        primary_key = mps_primary_key;
-        opclasses = mps_opclasses;
-    } else {
-        return false;
-    }
-
-    if (relation == nullptr || relation->rd_rel->relam != HEAP_TABLE_AM_OID) {
-        return false;
-    }
-    TupleDesc tuple_desc = RelationGetDescr(relation);
-    if (tuple_desc == nullptr
-        || tuple_desc->natts != static_cast<int>(attributes.size())) {
-        return false;
-    }
-    for (std::size_t index = 0; index < attributes.size(); ++index) {
-        const minimizer_generation_index_attribute_descriptor& expected = attributes[index];
-        Form_pg_attribute attribute = TupleDescAttr(
-            tuple_desc, static_cast<int>(index));
-        if (attribute->attnum != expected.attno
-            || attribute->attisdropped
-            || std::string_view{NameStr(attribute->attname)} != expected.name
-            || attribute->atttypid != expected.type_oid
-            || !attribute->attnotnull) {
-            return false;
-        }
-        if (index + 1u == attributes.size()
-            && attribute->attstorage != TYPSTORAGE_EXTERNAL) {
-            return false;
-        }
-    }
-
-    std::uint32_t primary_index_count = 0;
-    bool primary_index_exact = false;
-    List* index_list = RelationGetIndexList(relation);
-    ListCell* cell = nullptr;
-    foreach (cell, index_list) {
-        const Oid index_oid = lfirst_oid(cell);
-        Relation index_relation = index_open(index_oid, AccessShareLock);
-        const Form_pg_index index_form = index_relation->rd_index;
-        if (index_form != nullptr && index_form->indisprimary) {
-            ++primary_index_count;
-            primary_index_exact =
-                index_form->indisunique
-                && index_form->indimmediate
-                && index_form->indisvalid
-                && index_form->indisready
-                && index_form->indislive
-                && index_form->indnatts
-                    == static_cast<std::int16_t>(primary_key.size())
-                && index_form->indnkeyatts
-                    == static_cast<std::int16_t>(primary_key.size())
-                && index_relation->rd_rel->relam == BTREE_AM_OID
-                && RelationGetIndexPredicate(index_relation) == NIL
-                && RelationGetIndexExpressions(index_relation) == NIL;
-            for (std::size_t key = 0;
-                 primary_index_exact && key < primary_key.size(); ++key) {
-                primary_index_exact =
-                    index_form->indkey.values[key] == primary_key[key]
-                    && get_index_column_opclass(
-                        index_oid, static_cast<int>(key + 1u))
-                        == opclasses[key]
-                    && index_relation->rd_indcollation != nullptr
-                    && !OidIsValid(index_relation->rd_indcollation[key])
-                    && index_relation->rd_indoption != nullptr
-                    && index_relation->rd_indoption[key] == 0
-                    && (index_relation->rd_opcoptions == nullptr
-                        || index_relation->rd_opcoptions[key] == nullptr);
-            }
-        }
-        index_close(index_relation, AccessShareLock);
-    }
-    list_free(index_list);
-    return primary_index_count == 1 && primary_index_exact;
-}
-
-/// Legacy classifier for the one-bound-descriptor production path.  It
-/// recognises the historical schema without opening another index relation.
-[[nodiscard]] inline bool inspect_bound_exact_legacy_minimizer_index_schema(
-        Relation relation,
-        Relation primary_index_relation,
-        std::string_view index_name) {
-    constexpr std::array<minimizer_generation_index_attribute_descriptor, 5>
-        mpf_attributes{{
-            {1, "query_key", INT8OID},
-            {2, "sub_key", INT8OID},
-            {3, "chunk_no", INT4OID},
-            {4, "chunk_bytes", INT4OID},
-            {5, "blob", BYTEAOID},
-        }};
-    constexpr std::array<AttrNumber, 3> mpf_primary_key{1, 2, 3};
-    constexpr std::array<Oid, 3> mpf_opclasses{
-        INT8_BTREE_OPS_OID,
-        INT8_BTREE_OPS_OID,
-        INT4_BTREE_OPS_OID,
-    };
-    constexpr std::array<minimizer_generation_index_attribute_descriptor, 3>
-        mps_attributes{{
-            {1, "query_key", INT8OID},
-            {2, "chunk_bytes", INT4OID},
-            {3, "blob", BYTEAOID},
-        }};
-    constexpr std::array<AttrNumber, 1> mps_primary_key{1};
-    constexpr std::array<Oid, 1> mps_opclasses{INT8_BTREE_OPS_OID};
-
-    std::span<const minimizer_generation_index_attribute_descriptor> attributes;
-    std::span<const AttrNumber> primary_key;
-    std::span<const Oid> opclasses;
-    if (index_name == k_minimizers_per_fragment_index_name) {
-        attributes = mpf_attributes;
-        primary_key = mpf_primary_key;
-        opclasses = mpf_opclasses;
-    } else if (index_name == k_minimizers_per_sequence_index_name) {
-        attributes = mps_attributes;
-        primary_key = mps_primary_key;
-        opclasses = mps_opclasses;
-    } else {
-        return false;
-    }
-    if (relation == nullptr || primary_index_relation == nullptr
-        || relation->rd_rel->relam != HEAP_TABLE_AM_OID
-        || primary_index_relation->rd_index == nullptr
-        || primary_index_relation->rd_index->indrelid
-            != RelationGetRelid(relation)) {
-        return false;
-    }
-    TupleDesc tuple_desc = RelationGetDescr(relation);
-    if (tuple_desc == nullptr
-        || tuple_desc->natts != static_cast<int>(attributes.size())) {
-        return false;
-    }
-    for (std::size_t index = 0; index < attributes.size(); ++index) {
-        const minimizer_generation_index_attribute_descriptor& expected = attributes[index];
-        Form_pg_attribute attribute = TupleDescAttr(
-            tuple_desc, static_cast<int>(index));
-        if (attribute->attnum != expected.attno
-            || attribute->attisdropped
-            || std::string_view{NameStr(attribute->attname)} != expected.name
-            || attribute->atttypid != expected.type_oid
-            || !attribute->attnotnull
-            || (index + 1u == attributes.size()
-                && attribute->attstorage != TYPSTORAGE_EXTERNAL)) {
-            return false;
-        }
-    }
-    const bool exact_primary = RelationGetPrimaryKeyIndex(relation)
-        == RelationGetRelid(primary_index_relation);
-    const Form_pg_index index_form = primary_index_relation->rd_index;
-    bool exact = exact_primary
-        && index_form->indisprimary
-        && index_form->indisunique
-        && index_form->indimmediate
-        && index_form->indisvalid
-        && index_form->indisready
-        && index_form->indislive
-        && index_form->indnatts
-            == static_cast<std::int16_t>(primary_key.size())
-        && index_form->indnkeyatts
-            == static_cast<std::int16_t>(primary_key.size())
-        && primary_index_relation->rd_rel->relam == BTREE_AM_OID
-        && RelationGetIndexPredicate(primary_index_relation) == NIL
-        && RelationGetIndexExpressions(primary_index_relation) == NIL;
-    const Oid index_oid = RelationGetRelid(primary_index_relation);
-    for (std::size_t key = 0; exact && key < primary_key.size(); ++key) {
-        exact = index_form->indkey.values[key] == primary_key[key]
-            && get_index_column_opclass(
-                index_oid, static_cast<int>(key + 1u)) == opclasses[key]
-            && primary_index_relation->rd_indcollation != nullptr
-            && !OidIsValid(primary_index_relation->rd_indcollation[key])
-            && primary_index_relation->rd_indoption != nullptr
-            && primary_index_relation->rd_indoption[key] == 0
-            && (primary_index_relation->rd_opcoptions == nullptr
-                || primary_index_relation->rd_opcoptions[key] == nullptr);
-    }
-    return exact;
-}
-
 /// Integration-only catalog corruption seam. It copies a real parsed
 /// predicate or expression tree from a donor index onto the otherwise-valid
 /// primary index row. Tests execute it inside a transaction and roll back,
@@ -1457,17 +1241,17 @@ inline void copy_primary_index_shape_pg(
         Oid donor_index_oid,
         bool copy_predicate) {
     if (!superuser()) {
-        minimizer_generation_storage_error("rev3 index-shape corruption requires superuser");
+        minimizer_generation_storage_error("current generation index-shape corruption requires superuser");
     }
     Relation target = bioseq::postgres::support::try_open_postgres_relation(table_oid, AccessShareLock);
     if (target == nullptr) {
-        minimizer_generation_storage_error("rev3 index-shape target relation is missing");
+        minimizer_generation_storage_error("current generation index-shape target relation is missing");
     }
     const minimizer_generation_schema_inspection schema = inspect_minimizer_generation_schema(
         target, nullptr, {}, donor_index_oid);
     relation_close(target, AccessShareLock);
     if (!schema) {
-        minimizer_generation_storage_error("rev3 index-shape target schema is not initially valid");
+        minimizer_generation_storage_error("current generation index-shape target schema is not initially valid");
     }
     Relation donor = bioseq::postgres::support::try_open_postgres_relation(donor_index_oid, AccessShareLock);
     if (donor == nullptr || donor->rd_index == nullptr
@@ -1476,7 +1260,7 @@ inline void copy_primary_index_shape_pg(
             ? RelationGetIndexPredicate(donor) == NIL
             : RelationGetIndexExpressions(donor) == NIL)) {
         if (donor != nullptr) relation_close(donor, AccessShareLock);
-        minimizer_generation_storage_error("rev3 index-shape donor does not carry the requested shape");
+        minimizer_generation_storage_error("current generation index-shape donor does not carry the requested shape");
     }
     relation_close(donor, AccessShareLock);
 
@@ -1489,7 +1273,7 @@ inline void copy_primary_index_shape_pg(
         if (HeapTupleIsValid(primary_tuple)) heap_freetuple(primary_tuple);
         if (HeapTupleIsValid(donor_tuple)) ReleaseSysCache(donor_tuple);
         table_close(catalog, RowExclusiveLock);
-        minimizer_generation_storage_error("rev3 index-shape catalog tuple is missing");
+        minimizer_generation_storage_error("current generation index-shape catalog tuple is missing");
     }
     const AttrNumber shape_attno = copy_predicate
         ? Anum_pg_index_indpred : Anum_pg_index_indexprs;
@@ -1500,7 +1284,7 @@ inline void copy_primary_index_shape_pg(
         heap_freetuple(primary_tuple);
         ReleaseSysCache(donor_tuple);
         table_close(catalog, RowExclusiveLock);
-        minimizer_generation_storage_error("rev3 index-shape donor catalog value is NULL");
+        minimizer_generation_storage_error("current generation index-shape donor catalog value is NULL");
     }
     std::array<Datum, Natts_pg_index> values{};
     std::array<bool, Natts_pg_index> nulls{};
@@ -1630,7 +1414,7 @@ inline void run_internal_ddl(const char* ddl) {
         std::string_view message) {
     ereport(ERROR,
         (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-         errmsg("bioseq revision-3 index: %.*s",
+         errmsg("bioseq current-generation index: %.*s",
             static_cast<int>(message.size()), message.data())));
     pg_unreachable();
 }
@@ -1659,7 +1443,7 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
             return index_open(primary_oid, AccessShareLock);
         });
     const Form_pg_index form = primary->rd_index;
-    constexpr std::array<AttrNumber, 4> expected_columns{
+    constexpr std::array<AttrNumber, 4> k_expected_columns{
         1, 2, 3, 4};
     bool valid = form != nullptr
         && form->indisvalid
@@ -1669,13 +1453,13 @@ inline void validate_metadata_age_log_primary_key(Relation relation) {
         && form->indisprimary
         && form->indnkeyatts
             == static_cast<std::int16_t>(
-                expected_columns.size());
+                k_expected_columns.size());
     for (std::size_t index = 0;
-         valid && index < expected_columns.size();
+         valid && index < k_expected_columns.size();
          ++index) {
         valid =
             form->indkey.values[index]
-            == expected_columns[index];
+            == k_expected_columns[index];
     }
     bioseq::postgres::support::invoke_pg_as_cpp(
         [primary] {
@@ -1775,7 +1559,7 @@ upsert_metadata_age_log_pg(
             minimizer_generation_storage_error(
                 "metadata_age_log SPI_connect failed");
         }
-        static constexpr char statement[] =
+        static constexpr char k_statement[] =
             "INSERT INTO bioseq_internal.metadata_age_log "
             "(user_relid, main_relfilenode, column_attno, "
             " index_name, last_updated) "
@@ -1787,7 +1571,7 @@ upsert_metadata_age_log_pg(
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [&argument_types, &argument_values] {
                     return SPI_execute_with_args(
-                        statement,
+                        k_statement,
                         static_cast<int>(argument_types.size()),
                         argument_types.data(),
                         argument_values.data(),
@@ -1935,7 +1719,7 @@ delete_metadata_age_log_pg(
             minimizer_generation_storage_error(
                 "metadata_age_log SPI_connect failed");
         }
-        static constexpr char statement[] =
+        static constexpr char k_statement[] =
             "DELETE FROM bioseq_internal.metadata_age_log "
             "WHERE user_relid = $1 "
             "  AND main_relfilenode = $2 "
@@ -1945,7 +1729,7 @@ delete_metadata_age_log_pg(
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [&argument_types, &argument_values] {
                     return SPI_execute_with_args(
-                        statement,
+                        k_statement,
                         static_cast<int>(argument_types.size()),
                         argument_types.data(),
                         argument_values.data(),
@@ -2010,9 +1794,8 @@ delete_metadata_age_log_pg(
     }
 }
 
-/// Stable administration-lock key shared by the legacy administrator and the
-/// future revision-3 reset/publication path. The hash is intentionally byte-for-
-/// byte identical to the pre-existing admin helper.
+/// Stable administration-lock key shared by reset and publication. The hash
+/// remains byte-for-byte identical across both operations.
 [[nodiscard]] inline std::uint64_t index_advisory_xact_lock_key(
         Oid db,
         Oid tablespace,
@@ -2165,7 +1948,7 @@ inspect_minimizer_generation_sequence_contract() {
 }
 
 /// Allocate a positive signed-SQL generation ID. This helper never creates the
-/// sequence; installation/cutover owns that atomic DDL step.
+/// sequence; installation owns that atomic DDL step.
 [[nodiscard]] inline std::uint64_t allocate_minimizer_generation_id_pg() {
     const minimizer_generation_sequence_inspection sequence =
         inspect_minimizer_generation_sequence_contract();
@@ -2185,7 +1968,7 @@ inspect_minimizer_generation_sequence_contract() {
     return static_cast<std::uint64_t>(generation_id);
 }
 
-/// Validate one revision-3 address and its row checksum before a PostgreSQL
+/// Validate one current-generation address and its row checksum before a PostgreSQL
 /// tuple is formed. The active-head row is never accepted by the immutable
 /// generation sink and has a separate atomic publication helper below.
 struct minimizer_generation_row_validator;
@@ -2290,7 +2073,7 @@ public:
         return validated_minimizer_generation_row{row};
     }
 
-    /// Compute and bind the sole grouped-SoA/S1 payload-row CRC. The caller does
+    /// Compute and bind the sole grouped-SoA payload-row CRC. The caller does
     /// not provide a checksum that would require a second verification pass.
     [[nodiscard]] static std::expected<
         validated_minimizer_generation_row, minimizer_generation_encoding_error>
@@ -2345,17 +2128,17 @@ struct minimizer_generation_administration_identity {
     }
 };
 
-/// Immutable identity of the exact visible source row used by revision-3.
-/// `compatibility_checksum` is filled only after the independently decoded
-/// manifest has been checked against the source row and active compatibility
-/// axes; no head/manifest digest is copied into this object.
+/// Immutable identity of the exact visible source row used by the current generation.
+/// `storage_contract_checksum` is filled only after the independently decoded
+/// manifest has been checked against the source row and active storage-contract
+/// axes; no head/manifest checksum is copied into this object.
 struct minimizer_generation_source_locator {
     std::uint64_t sequence_rowno = 0;
     sequence_locator locator{};
     std::uint8_t alphabet_code = 0;
     std::uint8_t storage_unit_byte_width = 0;
     std::uint16_t padding_letters = 0;
-    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
 
     [[nodiscard]] bool operator==(
             const minimizer_generation_source_locator& other) const noexcept {
@@ -2372,7 +2155,7 @@ struct minimizer_generation_source_locator {
             && alphabet_code == other.alphabet_code
             && storage_unit_byte_width == other.storage_unit_byte_width
             && padding_letters == other.padding_letters
-            && compatibility_checksum == other.compatibility_checksum;
+            && storage_contract_checksum == other.storage_contract_checksum;
     }
 };
 
@@ -2390,9 +2173,9 @@ struct minimizer_generation_source_locator {
         && left.source_epoch == right.source_epoch;
 }
 
-/// Canonical locator-derived identity. Base content is deliberately a second,
-/// independently streamed proof so a same-length mutation cannot be hidden by
-/// a self-consistent rewrite of the head and manifest.
+/// Canonical locator-derived identity. The independently streamed content
+/// checksum prevents a same-length mutation from being hidden by a
+/// self-consistent rewrite of the head and manifest.
 [[nodiscard]] constexpr std::uint64_t minimizer_generation_source_identity(
         Oid /*main_relfilenode*/,
         const minimizer_generation_source_locator& source) noexcept {
@@ -2404,12 +2187,12 @@ class index_storage_fragment_generation_read_session;
 class index_storage_hash_major_minimizer_writer;
 class index_storage_hash_major_minimizer_read_session;
 
-/// Unforgeable PostgreSQL-owned proof derived from the exact visible main-row
+/// Unforgeable PostgreSQL-owned authorization derived from the exact visible main-row
 /// datum and, for a locator stub, every referenced fragment row under one
-/// registered MVCC snapshot. Only the derivation helper can construct it. The
+/// registered MVCC snapshot. Only the authorization helper can construct it. The
 /// relation/query/snapshot binding prevents replay into another read session;
 /// consumption is move-only and invalidates the token.
-class minimizer_generation_source_proof {
+class minimizer_generation_source_authorization {
 private:
     minimizer_generation_source_locator source_{};
     std::uint64_t source_content_checksum_ = 0;
@@ -2424,7 +2207,7 @@ private:
     TransactionId transaction_id_ = InvalidTransactionId;
     bool valid_ = false;
 
-    minimizer_generation_source_proof() = default;
+    minimizer_generation_source_authorization() = default;
 
     void invalidate_() noexcept {
         source_ = {};
@@ -2441,8 +2224,8 @@ private:
         valid_ = false;
     }
 
-    friend minimizer_generation_source_proof
-    derive_minimizer_generation_source_proof_pg(
+    friend minimizer_generation_source_authorization
+    authorize_minimizer_generation_source_pg(
         const minimizer_generation_administration_identity&,
         std::uint64_t,
         Snapshot);
@@ -2452,12 +2235,12 @@ private:
     friend class index_storage_hash_major_minimizer_read_session;
 
 public:
-    minimizer_generation_source_proof(
-        const minimizer_generation_source_proof&) = delete;
-    minimizer_generation_source_proof& operator=(
-        const minimizer_generation_source_proof&) = delete;
-    minimizer_generation_source_proof(
-            minimizer_generation_source_proof&& other) noexcept
+    minimizer_generation_source_authorization(
+        const minimizer_generation_source_authorization&) = delete;
+    minimizer_generation_source_authorization& operator=(
+        const minimizer_generation_source_authorization&) = delete;
+    minimizer_generation_source_authorization(
+            minimizer_generation_source_authorization&& other) noexcept
         : source_(other.source_),
           source_content_checksum_(other.source_content_checksum_),
           database_oid_(other.database_oid_),
@@ -2472,8 +2255,8 @@ public:
           valid_(other.valid_) {
         other.invalidate_();
     }
-    minimizer_generation_source_proof& operator=(
-            minimizer_generation_source_proof&& other) noexcept {
+    minimizer_generation_source_authorization& operator=(
+            minimizer_generation_source_authorization&& other) noexcept {
         if (this != &other) {
             invalidate_();
             source_ = other.source_;
@@ -2492,7 +2275,7 @@ public:
         }
         return *this;
     }
-    ~minimizer_generation_source_proof() = default;
+    ~minimizer_generation_source_authorization() = default;
 
     [[nodiscard]] const minimizer_generation_source_locator&
     source_for_diagnostics() const noexcept {
@@ -2506,21 +2289,21 @@ public:
 };
 
 static_assert(!std::is_default_constructible_v<
-    minimizer_generation_source_proof>);
+    minimizer_generation_source_authorization>);
 static_assert(!std::is_copy_constructible_v<
-    minimizer_generation_source_proof>);
+    minimizer_generation_source_authorization>);
 static_assert(std::is_nothrow_move_constructible_v<
-    minimizer_generation_source_proof>);
+    minimizer_generation_source_authorization>);
 
-[[nodiscard]] inline minimizer_generation_source_proof
-derive_minimizer_generation_source_proof_pg(
+[[nodiscard]] inline minimizer_generation_source_authorization
+authorize_minimizer_generation_source_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t sequence_rowno,
         Snapshot registered_snapshot) {
     const auto minimizer_generation_storage_error = [](std::string_view message) {
         minimizer_generation_storage_error_as_cpp(message);
     };
-    struct ProofState {
+    struct source_read_state {
         Relation source_relation = nullptr;
         column_read_state* source_read = nullptr;
         column_read_state* fragment_read = nullptr;
@@ -2528,8 +2311,8 @@ derive_minimizer_generation_source_proof_pg(
         MemoryContext work_context = nullptr;
         MemoryContext fragment_context = nullptr;
     };
-    auto* state = new ProofState{};
-    minimizer_generation_source_proof proof{};
+    auto* state = new source_read_state{};
+    minimizer_generation_source_authorization authorization{};
     try {
         if (identity.database_oid != MyDatabaseId
             || !OidIsValid(identity.user_relid)
@@ -2541,17 +2324,17 @@ derive_minimizer_generation_source_proof_pg(
             || registered_snapshot == nullptr
             || !IsMVCCSnapshot(registered_snapshot)
             || registered_snapshot->regd_count == 0) {
-            minimizer_generation_storage_error("authoritative source proof input is invalid");
+            minimizer_generation_storage_error("authoritative source authorization input is invalid");
         }
         state->work_context = bioseq::postgres::support::invoke_pg_as_cpp([&] {
             return AllocSetContextCreate(
                 CurrentMemoryContext,
-                "bioseq rev3 authoritative source proof",
+                "bioseq current generation authoritative source authorization",
                 ALLOCSET_DEFAULT_SIZES);
         });
         state->fragment_context = bioseq::postgres::support::invoke_pg_as_cpp([&] {
             return AllocSetContextCreate(
-                state->work_context, "bioseq rev3 source proof fragment",
+                state->work_context, "bioseq current generation source authorization fragment",
                 ALLOCSET_DEFAULT_SIZES);
         });
         state->source_relation = bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -2627,7 +2410,7 @@ derive_minimizer_generation_source_proof_pg(
         if (!is_locator_stub(source_header)) {
             switch_context(previous_context);
             minimizer_generation_storage_error(
-                "authoritative revision-3 source is not an epoch-bearing locator stub");
+                "authoritative current-generation source is not an epoch-bearing locator stub");
         }
         const sequence_locator locator = decode_locator_from_stub(source_header);
         if (locator.payload_version != sequence_locator_payload_version
@@ -2636,13 +2419,13 @@ derive_minimizer_generation_source_proof_pg(
             switch_context(previous_context);
             minimizer_generation_storage_error("authoritative source locator is invalid");
         }
-        proof.source_ = minimizer_generation_source_locator{
+        authorization.source_ = minimizer_generation_source_locator{
             .sequence_rowno = sequence_rowno,
             .locator = locator,
             .alphabet_code = alphabet_code,
             .storage_unit_byte_width = storage_width,
             .padding_letters = padding_letters,
-            .compatibility_checksum = 0,
+            .storage_contract_checksum = 0,
         };
 
         const auto source_catalog = bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -2683,10 +2466,10 @@ derive_minimizer_generation_source_proof_pg(
                 minimizer_generation_storage_error("authoritative source fragment header disagrees");
             }
             fragment->convert_to([&content_checksum, &decoded_bp,
-                    &minimizer_generation_storage_error]<class S>(
-                    const compact_sequence_range<S>& range) {
+                    &minimizer_generation_storage_error]<class p_sequence_type>(
+                    const compact_sequence_range<p_sequence_type>& range) {
                 const std::string decoded =
-                    ::bioseq::simd::active_target::decode_sequence_simd<S>(range);
+                    ::bioseq::simd::active_target::decode_sequence_simd<p_sequence_type>(range);
                 if (decoded.size() != range.bp_size()
                     || decoded.size()
                         > (std::numeric_limits<std::uint64_t>::max)()
@@ -2790,23 +2573,23 @@ derive_minimizer_generation_source_proof_pg(
             minimizer_generation_storage_error(
                 "authoritative source decoded checksum disagrees with its epoch catalog");
         }
-        proof.source_content_checksum_ =
+        authorization.source_content_checksum_ =
             source_catalog->source_content_checksum;
-        proof.database_oid_ = identity.database_oid;
-        proof.tablespace_oid_ = identity.tablespace_oid;
-        proof.main_relfilenode_ = identity.main_relfilenode;
-        proof.user_relid_ = identity.user_relid;
-        proof.column_attno_ = identity.column_attno;
-        proof.index_name_ = identity.index_name;
-        proof.table_name_ = format_seqidx_name(
+        authorization.database_oid_ = identity.database_oid;
+        authorization.tablespace_oid_ = identity.tablespace_oid;
+        authorization.main_relfilenode_ = identity.main_relfilenode;
+        authorization.user_relid_ = identity.user_relid;
+        authorization.column_attno_ = identity.column_attno;
+        authorization.index_name_ = identity.index_name;
+        authorization.table_name_ = format_seqidx_name(
             identity.index_name, identity.database_oid,
             identity.tablespace_oid, identity.main_relfilenode,
-            identity.column_attno, proof.source_.locator.bucket_index,
-            proof.source_.locator.shard_index);
-        proof.snapshot_ = registered_snapshot;
-        proof.transaction_id_ = bioseq::postgres::support::invoke_pg_as_cpp(
+            identity.column_attno, authorization.source_.locator.bucket_index,
+            authorization.source_.locator.shard_index);
+        authorization.snapshot_ = registered_snapshot;
+        authorization.transaction_id_ = bioseq::postgres::support::invoke_pg_as_cpp(
             [] { return GetCurrentTransactionId(); });
-        proof.valid_ = true;
+        authorization.valid_ = true;
 
         if (state->fragment_read != nullptr) {
             bioseq::postgres::support::invoke_pg_as_cpp(
@@ -2840,18 +2623,18 @@ derive_minimizer_generation_source_proof_pg(
         state->source_relation = nullptr;
         state->work_context = nullptr;
         state->fragment_context = nullptr;
-        proof.invalidate_();
+        authorization.invalidate_();
         delete state;
         throw;
     }
     delete state;
-    return proof;
+    return authorization;
 }
 
 /// Fixed work equation for cold, timed source admission. These counters travel
-/// inside the move-only proof and are rechecked by the read session, so a later
+/// inside the move-only authorization and are rechecked by the read session, so a later
 /// accidental source scan cannot be benchmark-accepted as an O(1) load.
-struct minimizer_generation_catalog_source_proof_counters {
+struct minimizer_generation_catalog_source_stats {
     std::uint64_t parent_rows_read = 0;
     std::uint64_t catalog_rows_read = 0;
     std::uint64_t catalog_index_scans = 0;
@@ -2870,15 +2653,15 @@ struct minimizer_generation_catalog_source_proof_counters {
     }
 };
 
-/// O(1), PostgreSQL-owned source proof for a cold reader. It validates one
+/// O(1), PostgreSQL-owned source authorization for a cold reader. It validates one
 /// visible parent stub and one source-epoch catalog tuple, plus constant-size
 /// relation storage-incarnation metadata. It never opens a source fragment
 /// read state and never decodes bases.
-class minimizer_generation_catalog_source_proof {
+class minimizer_generation_catalog_source_authorization {
 private:
     minimizer_generation_source_locator source_{};
     std::uint64_t source_content_checksum_ = 0;
-    minimizer_generation_catalog_source_proof_counters counters_{};
+    minimizer_generation_catalog_source_stats stats_{};
     cold_index_preparation_stats cold_stats_{};
     Oid database_oid_ = InvalidOid;
     Oid tablespace_oid_ = InvalidOid;
@@ -2890,12 +2673,12 @@ private:
     Snapshot snapshot_ = nullptr;
     bool valid_ = false;
 
-    minimizer_generation_catalog_source_proof() = default;
+    minimizer_generation_catalog_source_authorization() = default;
 
     void invalidate_() noexcept {
         source_ = {};
         source_content_checksum_ = 0;
-        counters_ = {};
+        stats_ = {};
         cold_stats_ = {};
         database_oid_ = InvalidOid;
         tablespace_oid_ = InvalidOid;
@@ -2908,21 +2691,21 @@ private:
         valid_ = false;
     }
 
-    friend minimizer_generation_catalog_source_proof derive_minimizer_generation_catalog_source_proof_pg(
+    friend minimizer_generation_catalog_source_authorization authorize_minimizer_generation_catalog_source_pg(
         const minimizer_generation_administration_identity&, std::uint64_t,
         const borrowed_executor_read_context&);
-    friend minimizer_generation_catalog_source_proof derive_minimizer_generation_catalog_source_proof_pg(
+    friend minimizer_generation_catalog_source_authorization authorize_minimizer_generation_catalog_source_pg(
         const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
     friend class index_storage_fragment_generation_read_session;
     friend class index_storage_hash_major_minimizer_read_session;
 
 public:
-    minimizer_generation_catalog_source_proof(const minimizer_generation_catalog_source_proof&) = delete;
-    minimizer_generation_catalog_source_proof& operator=(const minimizer_generation_catalog_source_proof&) = delete;
-    minimizer_generation_catalog_source_proof(minimizer_generation_catalog_source_proof&& other) noexcept
+    minimizer_generation_catalog_source_authorization(const minimizer_generation_catalog_source_authorization&) = delete;
+    minimizer_generation_catalog_source_authorization& operator=(const minimizer_generation_catalog_source_authorization&) = delete;
+    minimizer_generation_catalog_source_authorization(minimizer_generation_catalog_source_authorization&& other) noexcept
         : source_(other.source_),
           source_content_checksum_(other.source_content_checksum_),
-          counters_(other.counters_),
+          stats_(other.stats_),
           cold_stats_(other.cold_stats_),
           database_oid_(other.database_oid_),
           tablespace_oid_(other.tablespace_oid_),
@@ -2934,13 +2717,13 @@ public:
           snapshot_(other.snapshot_), valid_(other.valid_) {
         other.invalidate_();
     }
-    minimizer_generation_catalog_source_proof& operator=(
-            minimizer_generation_catalog_source_proof&& other) noexcept {
+    minimizer_generation_catalog_source_authorization& operator=(
+            minimizer_generation_catalog_source_authorization&& other) noexcept {
         if (this != &other) {
             invalidate_();
             source_ = other.source_;
             source_content_checksum_ = other.source_content_checksum_;
-            counters_ = other.counters_;
+            stats_ = other.stats_;
             cold_stats_ = other.cold_stats_;
             database_oid_ = other.database_oid_;
             tablespace_oid_ = other.tablespace_oid_;
@@ -2955,7 +2738,7 @@ public:
         }
         return *this;
     }
-    ~minimizer_generation_catalog_source_proof() = default;
+    ~minimizer_generation_catalog_source_authorization() = default;
 
     [[nodiscard]] const minimizer_generation_source_locator&
     source_for_diagnostics() const noexcept { return source_; }
@@ -2963,18 +2746,18 @@ public:
     source_content_checksum_for_diagnostics() const noexcept {
         return source_content_checksum_;
     }
-    [[nodiscard]] const minimizer_generation_catalog_source_proof_counters&
-    counters_for_diagnostics() const noexcept { return counters_; }
+    [[nodiscard]] const minimizer_generation_catalog_source_stats&
+    stats_for_diagnostics() const noexcept { return stats_; }
     [[nodiscard]] std::string_view
     table_name_for_diagnostics() const noexcept { return table_name_; }
 };
 
-static_assert(!std::is_default_constructible_v<minimizer_generation_catalog_source_proof>);
-static_assert(!std::is_copy_constructible_v<minimizer_generation_catalog_source_proof>);
-static_assert(std::is_nothrow_move_constructible_v<minimizer_generation_catalog_source_proof>);
+static_assert(!std::is_default_constructible_v<minimizer_generation_catalog_source_authorization>);
+static_assert(!std::is_copy_constructible_v<minimizer_generation_catalog_source_authorization>);
+static_assert(std::is_nothrow_move_constructible_v<minimizer_generation_catalog_source_authorization>);
 
-[[nodiscard]] inline minimizer_generation_catalog_source_proof
-derive_minimizer_generation_catalog_source_proof_pg(
+[[nodiscard]] inline minimizer_generation_catalog_source_authorization
+authorize_minimizer_generation_catalog_source_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t sequence_rowno,
         const borrowed_executor_read_context& executor_read) {
@@ -2983,14 +2766,14 @@ derive_minimizer_generation_catalog_source_proof_pg(
     const auto minimizer_generation_storage_error = [](std::string_view message) {
         minimizer_generation_storage_error_as_cpp(message);
     };
-    struct ProofState {
+    struct source_read_state {
         Relation source_relation = nullptr;
         Relation fragment_relation = nullptr;
         column_read_state* source_read = nullptr;
         MemoryContext work_context = nullptr;
     };
-    auto* state = new ProofState{};
-    minimizer_generation_catalog_source_proof proof{};
+    auto* state = new source_read_state{};
+    minimizer_generation_catalog_source_authorization authorization{};
     try {
         Snapshot registered_snapshot = executor_read.snapshot();
         if (identity.database_oid != MyDatabaseId
@@ -3003,11 +2786,11 @@ derive_minimizer_generation_catalog_source_proof_pg(
             || !executor_read.matches(
                 identity.database_oid, identity.tablespace_oid,
                 identity.main_relfilenode, identity.user_relid)) {
-            minimizer_generation_storage_error("catalog source proof input is invalid");
+            minimizer_generation_storage_error("catalog source authorization input is invalid");
         }
         state->work_context = bioseq::postgres::support::invoke_pg_as_cpp([&] {
             return AllocSetContextCreate(
-                CurrentMemoryContext, "bioseq rev3 catalog source proof",
+                CurrentMemoryContext, "bioseq current generation catalog source authorization",
                 ALLOCSET_DEFAULT_SIZES);
         });
         state->source_relation = executor_read.relation();
@@ -3061,8 +2844,8 @@ derive_minimizer_generation_catalog_source_proof_pg(
             switch_context(previous_context);
             minimizer_generation_storage_error("catalog source row is not visible");
         }
-        ++proof.counters_.parent_rows_read;
-        proof.cold_stats_.parent_random_reads = 1;
+        ++authorization.stats_.parent_rows_read;
+        authorization.cold_stats_.parent_random_reads = 1;
         bioseq::pg_types::seq* source_header =
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [values, column_attno = identity.column_attno] {
@@ -3096,30 +2879,30 @@ derive_minimizer_generation_catalog_source_proof_pg(
                 &source_lookup_telemetry);
         });
         if (exact_primary_index_scan) {
-            ++proof.counters_.catalog_index_scans;
-            proof.cold_stats_.add(
-                proof.cold_stats_.source_heap_opens,
+            ++authorization.stats_.catalog_index_scans;
+            authorization.cold_stats_.add(
+                authorization.cold_stats_.source_heap_opens,
                 source_lookup_telemetry.heap_opens);
-            proof.cold_stats_.add(
-                proof.cold_stats_.source_index_opens,
+            authorization.cold_stats_.add(
+                authorization.cold_stats_.source_index_opens,
                 source_lookup_telemetry.index_opens);
-            proof.cold_stats_.add(
-                proof.cold_stats_.source_schema_validations,
+            authorization.cold_stats_.add(
+                authorization.cold_stats_.source_schema_validations,
                 source_lookup_telemetry.schema_validations);
-            proof.cold_stats_.add(
-                proof.cold_stats_.lock_acquires,
+            authorization.cold_stats_.add(
+                authorization.cold_stats_.lock_acquires,
                 source_lookup_telemetry.lock_acquires);
-            proof.cold_stats_.add(
-                proof.cold_stats_.lock_releases,
+            authorization.cold_stats_.add(
+                authorization.cold_stats_.lock_releases,
                 source_lookup_telemetry.lock_releases);
         }
-        if (catalog) ++proof.counters_.catalog_rows_read;
+        if (catalog) ++authorization.stats_.catalog_rows_read;
         const std::uint64_t main_storage_id =
             bioseq::postgres::support::invoke_pg_as_cpp([&] {
                 return column_storage_id(
                     state->source_relation, false);
             });
-        ++proof.counters_.storage_incarnations_checked;
+        ++authorization.stats_.storage_incarnations_checked;
         if (!catalog
             || catalog->source_epoch != locator.source_epoch
             || catalog->user_relid != identity.user_relid
@@ -3147,8 +2930,8 @@ derive_minimizer_generation_catalog_source_proof_pg(
                 return bioseq::postgres::support::try_open_postgres_relation(
                     catalog->fragment_relid, AccessShareLock);
             });
-            proof.cold_stats_.fragment_heap_opens = 1;
-            proof.cold_stats_.add(proof.cold_stats_.lock_acquires, 1);
+            authorization.cold_stats_.fragment_heap_opens = 1;
+            authorization.cold_stats_.add(authorization.cold_stats_.lock_acquires, 1);
             const std::string expected_fragment_name = format_sub_table_name(
                 identity.database_oid, identity.tablespace_oid,
                 identity.main_relfilenode, identity.column_attno,
@@ -3168,33 +2951,33 @@ derive_minimizer_generation_catalog_source_proof_pg(
                 minimizer_generation_storage_error(
                     "catalog source fragment storage incarnation changed");
             }
-            ++proof.counters_.storage_incarnations_checked;
+            ++authorization.stats_.storage_incarnations_checked;
         }
 
-        proof.source_ = minimizer_generation_source_locator{
+        authorization.source_ = minimizer_generation_source_locator{
             .sequence_rowno = sequence_rowno,
             .locator = locator,
             .alphabet_code = alphabet_code,
             .storage_unit_byte_width = storage_width,
             .padding_letters = padding_letters,
-            .compatibility_checksum = 0,
+            .storage_contract_checksum = 0,
         };
-        proof.source_content_checksum_ = catalog->source_content_checksum;
-        proof.database_oid_ = identity.database_oid;
-        proof.tablespace_oid_ = identity.tablespace_oid;
-        proof.main_relfilenode_ = identity.main_relfilenode;
-        proof.user_relid_ = identity.user_relid;
-        proof.column_attno_ = identity.column_attno;
-        proof.index_name_ = identity.index_name;
-        proof.table_name_ = format_seqidx_name(
+        authorization.source_content_checksum_ = catalog->source_content_checksum;
+        authorization.database_oid_ = identity.database_oid;
+        authorization.tablespace_oid_ = identity.tablespace_oid;
+        authorization.main_relfilenode_ = identity.main_relfilenode;
+        authorization.user_relid_ = identity.user_relid;
+        authorization.column_attno_ = identity.column_attno;
+        authorization.index_name_ = identity.index_name;
+        authorization.table_name_ = format_seqidx_name(
             identity.index_name, identity.database_oid,
             identity.tablespace_oid, identity.main_relfilenode,
             identity.column_attno, locator.bucket_index, locator.shard_index);
-        proof.snapshot_ = registered_snapshot;
-        proof.valid_ = proof.counters_.timed_equation_holds();
-        if (!proof.valid_) {
+        authorization.snapshot_ = registered_snapshot;
+        authorization.valid_ = authorization.stats_.timed_equation_holds();
+        if (!authorization.valid_) {
             switch_context(previous_context);
-            minimizer_generation_storage_error("catalog source proof work equation disagrees");
+            minimizer_generation_storage_error("catalog source authorization work equation disagrees");
         }
 
         if (state->fragment_relation != nullptr) {
@@ -3202,13 +2985,13 @@ derive_minimizer_generation_catalog_source_proof_pg(
                 state->fragment_relation, nullptr);
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [&] { relation_close(finished, AccessShareLock); });
-            proof.cold_stats_.add(proof.cold_stats_.lock_releases, 1);
+            authorization.cold_stats_.add(authorization.cold_stats_.lock_releases, 1);
         }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&] { end_column_read(state->source_read); });
         state->source_read = nullptr;
         switch_context(previous_context);
-        // The executor owns this Relation and its AccessShareLock.  The proof
+        // The executor owns this Relation and its AccessShareLock. The authorization
         // closes only its column read state and never closes the borrowed
         // descriptor.
         state->source_relation = nullptr;
@@ -3217,27 +3000,27 @@ derive_minimizer_generation_catalog_source_proof_pg(
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&] { MemoryContextDelete(finished_context); });
         add_cold_index_elapsed(
-            proof.cold_stats_, proof.cold_stats_.source_ns,
+            authorization.cold_stats_, authorization.cold_stats_.source_ns,
             source_begin_ns);
-        add_cold_index_buffer_usage(proof.cold_stats_, source_buffer_begin);
+        add_cold_index_buffer_usage(authorization.cold_stats_, source_buffer_begin);
     } catch (...) {
         state->source_read = nullptr;
         state->fragment_relation = nullptr;
         state->source_relation = nullptr;
         state->work_context = nullptr;
-        proof.invalidate_();
+        authorization.invalidate_();
         delete state;
         throw;
     }
     delete state;
-    return proof;
+    return authorization;
 }
 
-/// Administrative compatibility overload.  Admin callers do not own an
+/// Administrative overload. Admin callers do not own an
 /// executor Relation descriptor, so they retain the explicit open; the timed
 /// BatchJoin production path above never enters this overload.
-[[nodiscard]] inline minimizer_generation_catalog_source_proof
-derive_minimizer_generation_catalog_source_proof_pg(
+[[nodiscard]] inline minimizer_generation_catalog_source_authorization
+authorize_minimizer_generation_catalog_source_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t sequence_rowno,
         Snapshot registered_snapshot) {
@@ -3252,15 +3035,15 @@ derive_minimizer_generation_catalog_source_proof_pg(
         }
         borrowed_executor_read_context borrowed{
             relation, registered_snapshot};
-        auto proof = derive_minimizer_generation_catalog_source_proof_pg(
+        auto authorization = authorize_minimizer_generation_catalog_source_pg(
             identity, sequence_rowno, borrowed);
         Relation finished = std::exchange(relation, nullptr);
         bioseq::postgres::support::invoke_pg_as_cpp(
             [finished] { relation_close(finished, AccessShareLock); });
-        proof.cold_stats_.target_relation_extra_opens = 1;
-        proof.cold_stats_.add(proof.cold_stats_.lock_acquires, 1);
-        proof.cold_stats_.add(proof.cold_stats_.lock_releases, 1);
-        return proof;
+        authorization.cold_stats_.target_relation_extra_opens = 1;
+        authorization.cold_stats_.add(authorization.cold_stats_.lock_acquires, 1);
+        authorization.cold_stats_.add(authorization.cold_stats_.lock_releases, 1);
+        return authorization;
     } catch (const bioseq::postgres::support::postgres_error&) {
         relation = nullptr;
         throw;
@@ -3276,12 +3059,10 @@ derive_minimizer_generation_catalog_source_proof_pg(
 class index_storage_fragment_generation_row_sink;
 class ready_minimizer_generation_token;
 
-/// Exact receipt returned by the immutable minimizer fragment image image writer.  Device/inode
-/// are transaction-local sealing evidence; the descriptor persists the
-/// provider, byte length and authenticated header checksum.
+/// Exact receipt returned by the immutable minimizer fragment image writer. Device/inode
+/// are transaction-local sealing receipts; the descriptor persists the byte
+/// length and authenticated header checksum.
 struct minimizer_fragment_image_file_receipt {
-    bioseq::indexing::minimizer_fragment_image_storage_kind provider =
-        bioseq::indexing::minimizer_fragment_image_storage_kind::postgres_relation;
     std::uint64_t file_bytes = 0u;
     std::uint64_t payload_crc64 = 0u;
     std::uint64_t header_crc64 = 0u;
@@ -3295,9 +3076,9 @@ enum class minimizer_generation_storage_state : std::int16_t {
 };
 
 /// Production row model for
-/// bioseq_internal.minimizer_generation_storage.  Nullable relation locator
-/// attributes stay optional so provider 1 cannot acquire accidental relation
-/// authority through a default value.
+/// bioseq_internal.minimizer_generation_storage. The SQL catalog requires the
+/// complete relation locator; defensive in-memory optionals prevent a malformed
+/// raw row from acquiring relation authority through a default value.
 struct minimizer_generation_storage_descriptor {
     Oid database_oid = InvalidOid;
     Oid tablespace_oid = InvalidOid;
@@ -3307,8 +3088,6 @@ struct minimizer_generation_storage_descriptor {
     std::string index_name{};
     std::uint64_t query_key = 0u;
     std::uint64_t generation_id = 0u;
-    bioseq::indexing::minimizer_fragment_image_storage_kind provider =
-        bioseq::indexing::minimizer_fragment_image_storage_kind::postgres_relation;
     std::optional<Oid> payload_relation_oid{};
     std::optional<Oid> payload_database_oid{};
     std::optional<Oid> payload_tablespace_oid{};
@@ -3321,7 +3100,7 @@ struct minimizer_generation_storage_descriptor {
         minimizer_generation_storage_state::live;
 };
 
-inline constexpr std::size_t kStorageDescriptorAttributeCount =
+inline constexpr std::size_t k_storage_descriptor_attribute_count =
     minimizer_generation_storage_codec::fields_count;
 
 [[nodiscard]] inline bool exact_storage_descriptor_identity(
@@ -3337,29 +3116,18 @@ inline constexpr std::size_t kStorageDescriptorAttributeCount =
         && descriptor.query_key == query_key;
 }
 
-[[nodiscard]] inline bool exact_storage_descriptor_provider_shape(
+[[nodiscard]] inline bool has_exact_storage_descriptor_relation_shape(
         const minimizer_generation_storage_descriptor& descriptor) noexcept {
-    using bioseq::indexing::minimizer_fragment_image_storage_kind;
-    if (descriptor.provider == minimizer_fragment_image_storage_kind::postgres_relation) {
-        return descriptor.payload_relation_oid
-            && OidIsValid(*descriptor.payload_relation_oid)
-            && descriptor.payload_database_oid
-            && *descriptor.payload_database_oid == descriptor.database_oid
-            && descriptor.payload_tablespace_oid
-            && OidIsValid(*descriptor.payload_tablespace_oid)
-            && descriptor.payload_relfilenode
-            && OidIsValid(*descriptor.payload_relfilenode)
-            && descriptor.payload_relation_name
-            && !descriptor.payload_relation_name->empty();
-    }
-    if (descriptor.provider == minimizer_fragment_image_storage_kind::mapped_file) {
-        return !descriptor.payload_relation_oid
-            && !descriptor.payload_database_oid
-            && !descriptor.payload_tablespace_oid
-            && !descriptor.payload_relfilenode
-            && !descriptor.payload_relation_name;
-    }
-    return false;
+    return descriptor.payload_relation_oid
+        && OidIsValid(*descriptor.payload_relation_oid)
+        && descriptor.payload_database_oid
+        && *descriptor.payload_database_oid == descriptor.database_oid
+        && descriptor.payload_tablespace_oid
+        && OidIsValid(*descriptor.payload_tablespace_oid)
+        && descriptor.payload_relfilenode
+        && OidIsValid(*descriptor.payload_relfilenode)
+        && descriptor.payload_relation_name
+        && !descriptor.payload_relation_name->empty();
 }
 
 struct ready_minimizer_generation_published_head_receipt {
@@ -3371,11 +3139,11 @@ struct ready_minimizer_generation_published_head_receipt {
     std::optional<std::uint64_t> replaced_generation_id{};
 };
 
-template <class Receipt>
+template <class p_receipt>
 concept reports_ready_minimizer_generation_acceptance =
-    requires(const Receipt& receipt) { receipt.published(); }
-    || requires(const Receipt& receipt) { receipt.execution_accepted(); }
-    || requires(const Receipt& receipt) { receipt.accepted(); };
+    requires(const p_receipt& receipt) { receipt.published(); }
+    || requires(const p_receipt& receipt) { receipt.execution_accepted(); }
+    || requires(const p_receipt& receipt) { receipt.accepted(); };
 
 static_assert(!reports_ready_minimizer_generation_acceptance<
     ready_minimizer_generation_published_head_receipt>);
@@ -3384,7 +3152,7 @@ static_assert(!reports_ready_minimizer_generation_acceptance<
 publish_ready_minimizer_generation_head_pg(
     ready_minimizer_generation_token&& token);
 
-/// Move-only proof that one exact relation/source/generation was completely
+/// Move-only authorization that one exact relation/source/generation was completely
 /// reread under an own-write-visible registered snapshot. Construction is
 /// private to the generation sink's full validation pass.
 class ready_minimizer_generation_token {
@@ -3397,7 +3165,7 @@ private:
     std::uint64_t generation_id_ = 0;
     std::uint64_t source_identity_ = 0;
     std::uint64_t source_content_checksum_ = 0;
-    std::uint64_t compatibility_checksum_ = 0;
+    std::uint64_t storage_contract_checksum_ = 0;
     TransactionId transaction_id_ = InvalidTransactionId;
     std::array<std::byte, minimizer_generation_head::encoded_bytes>
         head_bytes_{};
@@ -3414,7 +3182,7 @@ private:
             std::uint64_t generation_id,
             std::uint64_t source_identity,
             std::uint64_t source_content_checksum,
-            std::uint64_t compatibility_checksum,
+            std::uint64_t storage_contract_checksum,
             TransactionId transaction_id,
             std::span<const std::byte> head_bytes,
             std::uint64_t head_row_checksum,
@@ -3427,7 +3195,7 @@ private:
           generation_id_(generation_id),
           source_identity_(source_identity),
           source_content_checksum_(source_content_checksum),
-          compatibility_checksum_(compatibility_checksum),
+          storage_contract_checksum_(storage_contract_checksum),
           transaction_id_(transaction_id),
           head_row_checksum_(head_row_checksum),
           file_receipt_(std::move(file_receipt)),
@@ -3444,7 +3212,7 @@ private:
         generation_id_ = 0;
         source_identity_ = 0;
         source_content_checksum_ = 0;
-        compatibility_checksum_ = 0;
+        storage_contract_checksum_ = 0;
         transaction_id_ = InvalidTransactionId;
         head_bytes_.fill(std::byte{0});
         head_row_checksum_ = 0;
@@ -3470,7 +3238,7 @@ public:
           generation_id_(other.generation_id_),
           source_identity_(other.source_identity_),
           source_content_checksum_(other.source_content_checksum_),
-          compatibility_checksum_(other.compatibility_checksum_),
+          storage_contract_checksum_(other.storage_contract_checksum_),
           transaction_id_(other.transaction_id_),
           head_bytes_(other.head_bytes_),
           head_row_checksum_(other.head_row_checksum_),
@@ -3489,7 +3257,7 @@ public:
             generation_id_ = other.generation_id_;
             source_identity_ = other.source_identity_;
             source_content_checksum_ = other.source_content_checksum_;
-            compatibility_checksum_ = other.compatibility_checksum_;
+            storage_contract_checksum_ = other.storage_contract_checksum_;
             transaction_id_ = other.transaction_id_;
             head_bytes_ = other.head_bytes_;
             head_row_checksum_ = other.head_row_checksum_;
@@ -3511,7 +3279,7 @@ static_assert(std::is_nothrow_move_assignable_v<ready_minimizer_generation_token
 /// Read the sole LIVE descriptor for one exact storage identity through the
 /// catalog's partial unique index.  The caller owns both relation locks and
 /// the registered MVCC snapshot; this helper neither substitutes SnapshotSelf
-/// nor consults the current payload-provider GUC.
+/// nor consults mutable payload-routing state.
 [[nodiscard]] inline minimizer_generation_storage_descriptor
 read_live_minimizer_generation_storage_descriptor_pg(
         Relation storage_relation,
@@ -3612,14 +3380,16 @@ read_live_minimizer_generation_storage_descriptor_pg(
         const std::int64_t query_key_sql = catalog.query_key;
         const std::int64_t generation_id_sql =
             catalog.generation_id;
-        const std::int16_t provider_sql = catalog.provider;
+        const std::int16_t storage_kind_sql = catalog.provider;
         const std::int64_t image_bytes_sql = catalog.image_bytes;
         const std::int16_t state_sql = catalog.state;
         if (query_key_sql < 0 || generation_id_sql <= 0
             || image_bytes_sql
                 < static_cast<std::int64_t>(k_minimizer_fragment_image_header_bytes)
-            || !is_valid_minimizer_fragment_image_storage_kind(
-                static_cast<std::uint8_t>(provider_sql))) {
+            || storage_kind_sql
+                != static_cast<std::int16_t>(
+                    bioseq::indexing::
+                        k_minimizer_fragment_image_relation_backed_storage_kind)) {
             minimizer_generation_storage_error_as_cpp(
                 "LIVE generation descriptor scalar shape is invalid");
         }
@@ -3633,15 +3403,16 @@ read_live_minimizer_generation_storage_descriptor_pg(
             .index_name = NameStr(catalog.index_name),
             .query_key = static_cast<std::uint64_t>(query_key_sql),
             .generation_id = static_cast<std::uint64_t>(generation_id_sql),
-            .provider = static_cast<minimizer_fragment_image_storage_kind>(provider_sql),
-            .payload_relation_oid = catalog.payload_relation_oid,
-            .payload_database_oid = catalog.payload_database_oid,
-            .payload_tablespace_oid = catalog.payload_tablespace_oid,
-            .payload_relfilenode = catalog.payload_relfilenode,
-            .payload_relation_name = catalog.payload_relation_name
-                ? std::optional<std::string>{
-                    NameStr(*catalog.payload_relation_name)}
-                : std::nullopt,
+            .payload_relation_oid =
+                std::optional<Oid>{catalog.payload_relation_oid},
+            .payload_database_oid =
+                std::optional<Oid>{catalog.payload_database_oid},
+            .payload_tablespace_oid =
+                std::optional<Oid>{catalog.payload_tablespace_oid},
+            .payload_relfilenode =
+                std::optional<Oid>{catalog.payload_relfilenode},
+            .payload_relation_name = std::optional<std::string>{
+                NameStr(catalog.payload_relation_name)},
             .image_bytes = static_cast<std::uint64_t>(image_bytes_sql),
             .header_checksum = checksum_from_pg_bigint(
                 catalog.header_checksum),
@@ -3659,7 +3430,7 @@ read_live_minimizer_generation_storage_descriptor_pg(
             || descriptor.state
                 != minimizer_generation_storage_state::live
             || descriptor.retire_full_xid
-            || !exact_storage_descriptor_provider_shape(descriptor)) {
+            || !has_exact_storage_descriptor_relation_shape(descriptor)) {
             minimizer_generation_storage_error_as_cpp(
                 "LIVE generation descriptor disagrees with the active head");
         }
@@ -3688,7 +3459,7 @@ read_live_minimizer_generation_storage_descriptor_pg(
     }
 }
 
-/// Form one immutable revision-3 payload/directory/manifest tuple. The caller
+/// Form one immutable current-generation payload/directory/manifest tuple. The caller
 /// transfers the tuple into a TTSOpsHeapTuple slot and flushes a bounded group
 /// with CatalogTuplesMultiInsertWithInfo, PostgreSQL 17's supported catalog
 /// heap-multi-insert + index-maintenance API. This helper never inserts, probes
@@ -3738,8 +3509,8 @@ form_minimizer_generation_row_pg(
     return tuple;
 }
 
-/// Exact PostgreSQL ABI proof for the S1 one-page PLAIN payload contract.
-struct PgInlinePayloadLayout {
+/// Exact PostgreSQL ABI validation result for the S1 one-page PLAIN payload contract.
+struct pg_inline_payload_layout {
     std::uint32_t block_bytes = 0;
     std::uint32_t max_heap_tuple_bytes = 0;
     std::uint32_t fixed_tuple_bytes = 0;
@@ -3748,27 +3519,27 @@ struct PgInlinePayloadLayout {
     std::uint32_t full_tuple_bytes = 0;
 };
 
-[[nodiscard]] inline PgInlinePayloadLayout
+[[nodiscard]] inline pg_inline_payload_layout
 verify_pg_inline_payload_layout(Relation relation) {
-    static std::optional<PgInlinePayloadLayout> cached;
+    static std::optional<pg_inline_payload_layout> cached;
     if (cached) return *cached;
     if (relation == nullptr || BLCKSZ != 8192
         || RelationGetDescr(relation) == nullptr
         || RelationGetDescr(relation)->natts
             != static_cast<int>(k_minimizer_generation_index_attribute_descriptors.size())) {
         minimizer_generation_storage_error_as_cpp(
-            "grouped-SoA/S1 requires BLCKSZ=8192 and the exact tuple descriptor");
+            "grouped-SoA storage requires BLCKSZ=8192 and the exact tuple descriptor");
     }
-    constexpr std::uint32_t payload_bytes =
+    constexpr std::uint32_t k_payload_bytes =
         bioseq::indexing::k_grouped_soa_extent_payload_bytes;
-    constexpr std::uint32_t alignment_multiple = 96u;
-    static_assert(payload_bytes % alignment_multiple == 0u);
-    static_assert(payload_bytes % 16u == 0u);
-    static_assert(payload_bytes % 12u == 0u);
-    static_assert(payload_bytes % 8u == 0u);
-    static_assert(payload_bytes % 4u == 0u);
+    constexpr std::uint32_t k_alignment_multiple = 96u;
+    static_assert(k_payload_bytes % k_alignment_multiple == 0u);
+    static_assert(k_payload_bytes % 16u == 0u);
+    static_assert(k_payload_bytes % 12u == 0u);
+    static_assert(k_payload_bytes % 8u == 0u);
+    static_assert(k_payload_bytes % 4u == 0u);
 
-    std::array<std::byte, payload_bytes> payload{};
+    std::array<std::byte, k_payload_bytes> payload{};
     const index_chunk_address address{
         .generation_id = 1u,
         .position_segment = 0,
@@ -3780,45 +3551,45 @@ verify_pg_inline_payload_layout(Relation relation) {
         .bytes = payload,
         .row_checksum = bioseq::indexing::crc64_index_chunk_row(
             address.generation_id, address.position_segment,
-            address.sub_key, address.chunk_no, payload_bytes, payload),
+            address.sub_key, address.chunk_no, k_payload_bytes, payload),
     };
     auto validated = validate_minimizer_generation_row_for_write(1u, row);
     if (!validated) {
         minimizer_generation_storage_error_as_cpp(
-            "grouped-SoA/S1 representative row validation failed");
+            "grouped-SoA representative row validation failed");
     }
     auto tuple = form_minimizer_generation_row_pg(
         relation, 1u, *validated, /*inject_failure=*/false);
     if (!tuple) {
         minimizer_generation_storage_error_as_cpp(
-            "grouped-SoA/S1 representative tuple formation failed");
+            "grouped-SoA representative tuple formation failed");
     }
     const std::uint32_t tuple_bytes = (*tuple)->t_len;
     heap_freetuple(*tuple);
-    if (tuple_bytes < payload_bytes) {
+    if (tuple_bytes < k_payload_bytes) {
         minimizer_generation_storage_error_as_cpp(
-            "grouped-SoA/S1 representative tuple length underflow");
+            "grouped-SoA representative tuple length underflow");
     }
-    const std::uint32_t fixed_tuple_bytes = tuple_bytes - payload_bytes;
+    const std::uint32_t fixed_tuple_bytes = tuple_bytes - k_payload_bytes;
     const std::uint32_t max_payload_by_tuple =
         static_cast<std::uint32_t>(MaxHeapTupleSize) - fixed_tuple_bytes;
     const std::uint32_t largest_aligned_payload =
-        max_payload_by_tuple / alignment_multiple * alignment_multiple;
+        max_payload_by_tuple / k_alignment_multiple * k_alignment_multiple;
     const std::uint32_t page_payload_capacity =
         BLCKSZ - SizeOfPageHeaderData;
     if (tuple_bytes != 8140u
         || tuple_bytes > static_cast<std::uint32_t>(MaxHeapTupleSize)
         || MAXALIGN(tuple_bytes) + sizeof(ItemIdData) > page_payload_capacity
-        || largest_aligned_payload != payload_bytes) {
+        || largest_aligned_payload != k_payload_bytes) {
         minimizer_generation_storage_error_as_cpp(
-            "grouped-SoA/S1 8064-byte payload does not satisfy the one-page tuple equation");
+            "grouped-SoA 8064-byte payload does not satisfy the one-page tuple equation");
     }
-    cached = PgInlinePayloadLayout{
+    cached = pg_inline_payload_layout{
         .block_bytes = BLCKSZ,
         .max_heap_tuple_bytes = MaxHeapTupleSize,
         .fixed_tuple_bytes = fixed_tuple_bytes,
-        .payload_bytes = payload_bytes,
-        .alignment_multiple = alignment_multiple,
+        .payload_bytes = k_payload_bytes,
+        .alignment_multiple = k_alignment_multiple,
         .full_tuple_bytes = tuple_bytes,
     };
     return *cached;
@@ -3922,7 +3693,7 @@ struct minimizer_generation_projected_row {
 static_assert(std::is_trivially_copyable_v<minimizer_generation_projected_row>);
 static_assert(std::is_trivially_destructible_v<minimizer_generation_projected_row>);
 
-/// Decode the frozen eight-column projection and prove inline PLAIN/length
+/// Decode the frozen eight-column projection and validate inline PLAIN/length
 /// shape without constructing any C++ authority object.  Address-bound CRC
 /// validation remains outside PostgreSQL error frames.
 [[nodiscard]] inline minimizer_generation_projected_row project_minimizer_generation_deformed_row(
@@ -4059,8 +3830,7 @@ inline void handle_minimizer_generation_concurrent_abort_pg_leaf() {
 /// Fetch, deform and project up to K rows under one PostgreSQL error boundary.
 /// Every slot owns its buffer pin until the caller has consumed the complete
 /// batch. A semantic projection error stops the fill at that row so its error
-/// identity remains the first observable failure, exactly as in the old
-/// one-row reader.
+/// identity remains the first observable failure, matching single-row reads.
 [[nodiscard]] inline pinned_minimizer_generation_projected_row_batch
 next_pinned_minimizer_generation_projected_row_batch_or_error(
         Relation relation,
@@ -4265,41 +4035,40 @@ load_authenticated_minimizer_generation_projected_row_or_error(
 // -------------------------------------------------------------------------
 // Bounded transaction-owned generation file actions.
 //
-// This remains dark until the v2 image writer and descriptor catalog publish
-// through it.  Keeping it separate prevents the v1 bridge's replace-by-rename
-// lifetime from becoming an accidental compatibility contract.
+// The file-action queue is separate from publication so transaction callbacks
+// never inherit writer object lifetime.
 // -------------------------------------------------------------------------
 
-inline constexpr std::size_t kPendingFileActionCapacity = 4096u;
-inline constexpr std::size_t kFileActionDiagnosticCapacity = 256u;
-inline constexpr std::size_t kMaximumReaperFileActions = 64u;
-inline constexpr std::uint16_t kNoPairedFileAction = UINT16_MAX;
+inline constexpr std::size_t k_pending_file_action_capacity = 4096u;
+inline constexpr std::size_t k_file_action_diagnostic_capacity = 256u;
+inline constexpr std::size_t k_maximum_reaper_file_actions = 64u;
+inline constexpr std::uint16_t k_no_paired_file_action = UINT16_MAX;
 inline constexpr std::uint8_t k_mapped_minimizer_fragment_index_identity = 1u;
 inline constexpr std::string_view k_minimizer_generation_file_directory_name =
-    "bioseq_mpf5";
+    "bioseq_minimizer_fragment_images";
 
-enum class FileAction : std::uint8_t {
+enum class file_action : std::uint8_t {
     unlink_on_abort,
     unlink_on_commit,
 };
 
 /// Callback-safe file authority.  The queue stores no owning C++ object and
 /// no pointer into a PostgreSQL memory context.
-struct PendingFileAction {
-    FileAction action{};
+struct pending_file_action {
+    file_action action{};
     SubTransactionId owner_subxid{};
     dev_t expected_device{};
     ino_t expected_inode{};
-    std::uint16_t paired_slot = kNoPairedFileAction;
+    std::uint16_t paired_slot = k_no_paired_file_action;
     bool inode_valid = false;
     bool armed = false;
     char path[MAXPGPATH]{};
 };
 
-static_assert(std::is_trivially_copyable_v<PendingFileAction>);
-static_assert(std::is_standard_layout_v<PendingFileAction>);
+static_assert(std::is_trivially_copyable_v<pending_file_action>);
+static_assert(std::is_standard_layout_v<pending_file_action>);
 
-enum class FileActionDiagnosticCode : std::uint8_t {
+enum class file_action_diagnostic_code : std::uint8_t {
     none,
     already_missing,
     unlinked,
@@ -4314,22 +4083,22 @@ enum class FileActionDiagnosticCode : std::uint8_t {
     prepare_rejected,
 };
 
-struct FileActionDiagnostic {
+struct file_action_diagnostic {
     std::uint64_t sequence = 0u;
-    std::uint16_t slot = kNoPairedFileAction;
-    FileActionDiagnosticCode code = FileActionDiagnosticCode::none;
+    std::uint16_t slot = k_no_paired_file_action;
+    file_action_diagnostic_code code = file_action_diagnostic_code::none;
     int saved_errno = 0;
 };
 
-struct FileActionDiagnosticsSnapshot {
-    std::array<FileActionDiagnostic, kFileActionDiagnosticCapacity> entries{};
+struct file_action_diagnostics_snapshot {
+    std::array<file_action_diagnostic, k_file_action_diagnostic_capacity> entries{};
     std::uint64_t total = 0u;
 };
 
 /// Opaque all-or-nothing reservation.  Slots are found by reservation id
 /// rather than assumed contiguous because savepoint completion can leave
 /// holes in the fixed queue.
-struct FileActionReservation {
+struct file_action_reservation {
     std::uint32_t id = 0u;
     std::uint16_t count = 0u;
 };
@@ -4356,9 +4125,9 @@ struct resolved_minimizer_generation_file_path {
 };
 
 struct pending_minimizer_generation_file_publication {
-    FileActionReservation reservation{};
-    std::uint16_t temporary_slot = kNoPairedFileAction;
-    std::uint16_t final_slot = kNoPairedFileAction;
+    file_action_reservation reservation{};
+    std::uint16_t temporary_slot = k_no_paired_file_action;
+    std::uint16_t final_slot = k_no_paired_file_action;
     int fd = -1;
     dev_t expected_device{};
     ino_t expected_inode{};
@@ -4375,11 +4144,11 @@ struct pending_minimizer_generation_file_publication {
     pending_minimizer_generation_file_publication(
             pending_minimizer_generation_file_publication&& other) noexcept
         : reservation(std::exchange(
-              other.reservation, FileActionReservation{})),
+              other.reservation, file_action_reservation{})),
           temporary_slot(std::exchange(
-              other.temporary_slot, kNoPairedFileAction)),
+              other.temporary_slot, k_no_paired_file_action)),
           final_slot(std::exchange(
-              other.final_slot, kNoPairedFileAction)),
+              other.final_slot, k_no_paired_file_action)),
           fd(std::exchange(other.fd, -1)),
           expected_device(other.expected_device),
           expected_inode(other.expected_inode),
@@ -4397,18 +4166,18 @@ struct pending_minimizer_generation_file_publication {
 
 namespace generation_file_action_detail {
 
-enum class SlotState : std::uint8_t {
+enum class slot_state : std::uint8_t {
     free,
     reserved,
     armed,
 };
 
-struct QueueState {
-    std::array<PendingFileAction, kPendingFileActionCapacity> actions{};
-    std::array<SlotState, kPendingFileActionCapacity> slot_states{};
-    std::array<std::uint32_t, kPendingFileActionCapacity> reservation_ids{};
-    std::array<FileActionDiagnostic,
-        kFileActionDiagnosticCapacity> diagnostics{};
+struct queue_state {
+    std::array<pending_file_action, k_pending_file_action_capacity> actions{};
+    std::array<slot_state, k_pending_file_action_capacity> slot_states{};
+    std::array<std::uint32_t, k_pending_file_action_capacity> reservation_ids{};
+    std::array<file_action_diagnostic,
+        k_file_action_diagnostic_capacity> diagnostics{};
     std::uint64_t diagnostic_total = 0u;
     std::uint32_t next_reservation_id = 1u;
     bool xact_callback_installed = false;
@@ -4416,27 +4185,27 @@ struct QueueState {
 };
 
 // The extension image is private to one PostgreSQL backend process.
-inline QueueState g_queue_state{};
+inline queue_state g_queue_state{};
 
-static_assert(std::tuple_size_v<decltype(QueueState::actions)>
-    == kPendingFileActionCapacity);
-static_assert(std::tuple_size_v<decltype(QueueState::diagnostics)>
-    == kFileActionDiagnosticCapacity);
+static_assert(std::tuple_size_v<decltype(queue_state::actions)>
+    == k_pending_file_action_capacity);
+static_assert(std::tuple_size_v<decltype(queue_state::diagnostics)>
+    == k_file_action_diagnostic_capacity);
 
 [[nodiscard]] inline bool slot_is_occupied(
         const std::size_t slot) noexcept {
-    return g_queue_state.slot_states[slot] != SlotState::free;
+    return g_queue_state.slot_states[slot] != slot_state::free;
 }
 
 inline void record_diagnostic(
         const std::uint16_t slot,
-        const FileActionDiagnosticCode code,
+        const file_action_diagnostic_code code,
         const int saved_errno = 0) noexcept {
     const std::uint64_t sequence = g_queue_state.diagnostic_total++;
-    FileActionDiagnostic& diagnostic =
+    file_action_diagnostic& diagnostic =
         g_queue_state.diagnostics[
-            sequence % kFileActionDiagnosticCapacity];
-    diagnostic = FileActionDiagnostic{
+            sequence % k_file_action_diagnostic_capacity];
+    diagnostic = file_action_diagnostic{
         .sequence = sequence + 1u,
         .slot = slot,
         .code = code,
@@ -4445,14 +4214,14 @@ inline void record_diagnostic(
 }
 
 inline void release_slot(const std::size_t slot) noexcept {
-    g_queue_state.actions[slot] = PendingFileAction{};
-    g_queue_state.slot_states[slot] = SlotState::free;
+    g_queue_state.actions[slot] = pending_file_action{};
+    g_queue_state.slot_states[slot] = slot_state::free;
     g_queue_state.reservation_ids[slot] = 0u;
 }
 
 [[nodiscard]] inline bool reservation_id_is_live(
         const std::uint32_t reservation_id) noexcept {
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (slot_is_occupied(slot)
             && g_queue_state.reservation_ids[slot] == reservation_id) {
@@ -4479,13 +4248,13 @@ inline void release_slot(const std::size_t slot) noexcept {
 }
 
 [[nodiscard]] inline std::optional<std::uint16_t> reservation_slot(
-        const FileActionReservation reservation,
+        const file_action_reservation reservation,
         const std::size_t ordinal) noexcept {
     if (reservation.id == 0u || ordinal >= reservation.count) {
         return std::nullopt;
     }
     std::size_t seen = 0u;
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (slot_is_occupied(slot)
             && g_queue_state.reservation_ids[slot] == reservation.id) {
@@ -4500,39 +4269,39 @@ inline void release_slot(const std::size_t slot) noexcept {
 
 [[nodiscard]] inline bool same_inode(
         const struct stat& observed,
-        const PendingFileAction& action) noexcept {
+        const pending_file_action& action) noexcept {
     return action.inode_valid
         && observed.st_dev == action.expected_device
         && observed.st_ino == action.expected_inode;
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-enum class CallbackFailureInjection : std::uint8_t {
+enum class callback_failure_injection : std::uint8_t {
     none,
     stat_failed,
     identity_mismatch,
     unlink_failed,
 };
-inline CallbackFailureInjection g_callback_failure_injection =
-    CallbackFailureInjection::none;
+inline callback_failure_injection g_callback_failure_injection =
+    callback_failure_injection::none;
 #endif
 
 /// The sole callback filesystem mutation.  It cannot allocate, log or raise;
 /// failures enter the fixed ring for later backend-thread reporting.
 inline void unlink_identity_bound_noexcept(
         const std::uint16_t slot) noexcept {
-    PendingFileAction& action = g_queue_state.actions[slot];
+    pending_file_action& action = g_queue_state.actions[slot];
     if (!action.armed || !action.inode_valid || action.path[0] == '\0') {
         record_diagnostic(
-            slot, FileActionDiagnosticCode::missing_inode_authority);
+            slot, file_action_diagnostic_code::missing_inode_authority);
         return;
     }
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_callback_failure_injection
-        == CallbackFailureInjection::stat_failed) {
-        g_callback_failure_injection = CallbackFailureInjection::none;
+        == callback_failure_injection::stat_failed) {
+        g_callback_failure_injection = callback_failure_injection::none;
         record_diagnostic(
-            slot, FileActionDiagnosticCode::stat_failed, EIO);
+            slot, file_action_diagnostic_code::stat_failed, EIO);
         return;
     }
 #endif
@@ -4544,44 +4313,44 @@ inline void unlink_identity_bound_noexcept(
         record_diagnostic(
             slot,
             saved_errno == ENOENT
-                ? FileActionDiagnosticCode::already_missing
-                : FileActionDiagnosticCode::stat_failed,
+                ? file_action_diagnostic_code::already_missing
+                : file_action_diagnostic_code::stat_failed,
             saved_errno == ENOENT ? 0 : saved_errno);
         return;
     }
     if (!S_ISREG(observed.st_mode)) {
-        record_diagnostic(slot, FileActionDiagnosticCode::not_regular);
+        record_diagnostic(slot, file_action_diagnostic_code::not_regular);
         return;
     }
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_callback_failure_injection
-        == CallbackFailureInjection::identity_mismatch) {
-        g_callback_failure_injection = CallbackFailureInjection::none;
+        == callback_failure_injection::identity_mismatch) {
+        g_callback_failure_injection = callback_failure_injection::none;
         record_diagnostic(
-            slot, FileActionDiagnosticCode::identity_mismatch);
+            slot, file_action_diagnostic_code::identity_mismatch);
         return;
     }
 #endif
     if (!same_inode(observed, action)) {
         record_diagnostic(
-            slot, FileActionDiagnosticCode::identity_mismatch);
+            slot, file_action_diagnostic_code::identity_mismatch);
         return;
     }
     if (observed.st_nlink == 2) {
-        if (action.paired_slot >= kPendingFileActionCapacity
+        if (action.paired_slot >= k_pending_file_action_capacity
             || action.paired_slot == slot) {
             record_diagnostic(
-                slot, FileActionDiagnosticCode::paired_slot_invalid);
+                slot, file_action_diagnostic_code::paired_slot_invalid);
             return;
         }
-        const PendingFileAction& paired =
+        const pending_file_action& paired =
             g_queue_state.actions[action.paired_slot];
         if (g_queue_state.slot_states[action.paired_slot]
-                != SlotState::armed
+                != slot_state::armed
             || !paired.armed || !paired.inode_valid
             || paired.path[0] == '\0') {
             record_diagnostic(
-                slot, FileActionDiagnosticCode::paired_slot_invalid);
+                slot, file_action_diagnostic_code::paired_slot_invalid);
             return;
         }
         struct stat paired_observed{};
@@ -4594,21 +4363,21 @@ inline void unlink_identity_bound_noexcept(
             || !same_inode(paired_observed, paired)) {
             record_diagnostic(
                 slot,
-                FileActionDiagnosticCode::paired_identity_mismatch,
+                file_action_diagnostic_code::paired_identity_mismatch,
                 errno);
             return;
         }
     } else if (observed.st_nlink != 1) {
         record_diagnostic(
-            slot, FileActionDiagnosticCode::link_count_mismatch);
+            slot, file_action_diagnostic_code::link_count_mismatch);
         return;
     }
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_callback_failure_injection
-        == CallbackFailureInjection::unlink_failed) {
-        g_callback_failure_injection = CallbackFailureInjection::none;
+        == callback_failure_injection::unlink_failed) {
+        g_callback_failure_injection = callback_failure_injection::none;
         record_diagnostic(
-            slot, FileActionDiagnosticCode::unlink_failed, EIO);
+            slot, file_action_diagnostic_code::unlink_failed, EIO);
         return;
     }
 #endif
@@ -4617,25 +4386,25 @@ inline void unlink_identity_bound_noexcept(
         record_diagnostic(
             slot,
             saved_errno == ENOENT
-                ? FileActionDiagnosticCode::already_missing
-                : FileActionDiagnosticCode::unlink_failed,
+                ? file_action_diagnostic_code::already_missing
+                : file_action_diagnostic_code::unlink_failed,
             saved_errno == ENOENT ? 0 : saved_errno);
         return;
     }
-    record_diagnostic(slot, FileActionDiagnosticCode::unlinked);
+    record_diagnostic(slot, file_action_diagnostic_code::unlinked);
 }
 
 inline void finish_top_transaction(const bool committed) noexcept {
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (!slot_is_occupied(slot)) continue;
-        const PendingFileAction& action = g_queue_state.actions[slot];
-        if (g_queue_state.slot_states[slot] == SlotState::armed
+        const pending_file_action& action = g_queue_state.actions[slot];
+        if (g_queue_state.slot_states[slot] == slot_state::armed
             && action.armed
             && ((committed
-                    && action.action == FileAction::unlink_on_commit)
+                    && action.action == file_action::unlink_on_commit)
                 || (!committed
-                    && action.action == FileAction::unlink_on_abort))) {
+                    && action.action == file_action::unlink_on_abort))) {
             unlink_identity_bound_noexcept(
                 static_cast<std::uint16_t>(slot));
         }
@@ -4647,20 +4416,20 @@ inline void finish_subtransaction(
         const SubTransactionId subxid,
         const bool committed,
         const SubTransactionId parent_subxid) noexcept {
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (!slot_is_occupied(slot)
             || g_queue_state.actions[slot].owner_subxid != subxid) {
             continue;
         }
-        PendingFileAction& action = g_queue_state.actions[slot];
+        pending_file_action& action = g_queue_state.actions[slot];
         if (committed) {
             action.owner_subxid = parent_subxid;
             continue;
         }
-        if (g_queue_state.slot_states[slot] == SlotState::armed
+        if (g_queue_state.slot_states[slot] == slot_state::armed
             && action.armed
-            && action.action == FileAction::unlink_on_abort) {
+            && action.action == file_action::unlink_on_abort) {
             unlink_identity_bound_noexcept(
                 static_cast<std::uint16_t>(slot));
         }
@@ -4669,7 +4438,7 @@ inline void finish_subtransaction(
 }
 
 [[nodiscard]] inline bool has_occupied_slot() noexcept {
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (slot_is_occupied(slot)) return true;
     }
@@ -4689,8 +4458,8 @@ inline void xact_callback(const XactEvent event, void*) {
         case XACT_EVENT_PRE_PREPARE:
             if (has_occupied_slot()) {
                 record_diagnostic(
-                    kNoPairedFileAction,
-                    FileActionDiagnosticCode::prepare_rejected);
+                    k_no_paired_file_action,
+                    file_action_diagnostic_code::prepare_rejected);
                 ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("bioseq generation file actions do not support prepared transactions"),
@@ -4737,17 +4506,17 @@ inline void install_callbacks() {
     }
 }
 
-template <std::size_t BufferBytes, typename... Args>
+template <std::size_t p_buffer_bytes, typename... p_argument_types>
 [[nodiscard]] inline bool format_fixed(
-        std::array<char, BufferBytes>& destination,
-        fmt::format_string<Args...> format,
-        Args&&... args) {
-    static_assert(BufferBytes > 1u);
+        std::array<char, p_buffer_bytes>& destination,
+        fmt::format_string<p_argument_types...> format,
+        p_argument_types&&... args) {
+    static_assert(p_buffer_bytes > 1u);
     destination.fill('\0');
     const auto formatted = fmt::format_to_n(
-        destination.data(), BufferBytes - 1u, format,
-        std::forward<Args>(args)...);
-    if (formatted.size >= BufferBytes) {
+        destination.data(), p_buffer_bytes - 1u, format,
+        std::forward<p_argument_types>(args)...);
+    if (formatted.size >= p_buffer_bytes) {
         destination[0] = '\0';
         return false;
     }
@@ -4818,9 +4587,9 @@ template <std::size_t BufferBytes, typename... Args>
 }
 
 inline void arm_reserved_slot(
-        const FileActionReservation reservation,
+        const file_action_reservation reservation,
         const std::size_t ordinal,
-        const FileAction action,
+        const file_action action,
         const char* path,
         const dev_t expected_device,
         const ino_t expected_inode,
@@ -4832,7 +4601,7 @@ inline void arm_reserved_slot(
             "generation file-action reservation slot is missing");
     }
     const std::uint16_t slot = *maybe_slot;
-    if (g_queue_state.slot_states[slot] != SlotState::reserved
+    if (g_queue_state.slot_states[slot] != slot_state::reserved
         || path == nullptr) {
         minimizer_generation_storage_error_as_cpp(
             "generation file-action reservation cannot be armed");
@@ -4842,8 +4611,8 @@ inline void arm_reserved_slot(
         minimizer_generation_storage_error_as_cpp(
             "generation file-action path is empty or truncated");
     }
-    PendingFileAction& pending = g_queue_state.actions[slot];
-    pending = PendingFileAction{
+    pending_file_action& pending = g_queue_state.actions[slot];
+    pending = pending_file_action{
         .action = action,
         .owner_subxid = GetCurrentSubTransactionId(),
         .expected_device = expected_device,
@@ -4853,7 +4622,7 @@ inline void arm_reserved_slot(
         .armed = true,
     };
     std::memcpy(pending.path, path, path_bytes + 1u);
-    g_queue_state.slot_states[slot] = SlotState::armed;
+    g_queue_state.slot_states[slot] = slot_state::armed;
 }
 
 inline void fsync_directory(const char* path) {
@@ -4875,17 +4644,17 @@ inline void fsync_directory(const char* path) {
 
 } // namespace generation_file_action_detail
 
-[[nodiscard]] inline FileActionReservation reserve_file_actions(
+[[nodiscard]] inline file_action_reservation reserve_file_actions(
         const std::size_t requested_count) {
     using namespace generation_file_action_detail;
     if (requested_count == 0u
-        || requested_count > kPendingFileActionCapacity) {
+        || requested_count > k_pending_file_action_capacity) {
         minimizer_generation_storage_error_as_cpp(
             "generation file-action reservation size is invalid");
     }
     install_callbacks();
     std::size_t available = 0u;
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         available += slot_is_occupied(slot) ? 0u : 1u;
     }
@@ -4899,26 +4668,26 @@ inline void fsync_directory(const char* path) {
     const std::uint32_t reservation_id = next_unused_reservation_id();
     std::size_t reserved = 0u;
     for (std::size_t slot = 0u;
-         slot < kPendingFileActionCapacity && reserved < requested_count;
+         slot < k_pending_file_action_capacity && reserved < requested_count;
          ++slot) {
         if (slot_is_occupied(slot)) continue;
-        g_queue_state.actions[slot] = PendingFileAction{
+        g_queue_state.actions[slot] = pending_file_action{
             .owner_subxid = GetCurrentSubTransactionId(),
         };
-        g_queue_state.slot_states[slot] = SlotState::reserved;
+        g_queue_state.slot_states[slot] = slot_state::reserved;
         g_queue_state.reservation_ids[slot] = reservation_id;
         ++reserved;
     }
-    return FileActionReservation{
+    return file_action_reservation{
         .id = reservation_id,
         .count = static_cast<std::uint16_t>(requested_count),
     };
 }
 
-[[nodiscard]] inline FileActionReservation reserve_reaper_file_actions(
+[[nodiscard]] inline file_action_reservation reserve_reaper_file_actions(
         const std::size_t requested_count) {
     if (requested_count == 0u
-        || requested_count > kMaximumReaperFileActions) {
+        || requested_count > k_maximum_reaper_file_actions) {
         minimizer_generation_storage_error_as_cpp(
             "generation reaper file-action batch exceeds hard cap 64");
     }
@@ -4926,11 +4695,11 @@ inline void fsync_directory(const char* path) {
 }
 
 inline void release_unarmed_file_action_reservation(
-        const FileActionReservation reservation) noexcept {
+        const file_action_reservation reservation) noexcept {
     using namespace generation_file_action_detail;
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
-        if (g_queue_state.slot_states[slot] == SlotState::reserved
+        if (g_queue_state.slot_states[slot] == slot_state::reserved
             && g_queue_state.reservation_ids[slot] == reservation.id) {
             release_slot(slot);
         }
@@ -4955,11 +4724,11 @@ inline void cancel_generation_file_publication_noexcept(
     }
 
     bool has_armed_action = false;
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (g_queue_state.reservation_ids[slot]
                 == publication.reservation.id
-            && g_queue_state.slot_states[slot] == SlotState::armed) {
+            && g_queue_state.slot_states[slot] == slot_state::armed) {
             has_armed_action = true;
             break;
         }
@@ -4975,24 +4744,24 @@ inline void cancel_generation_file_publication_noexcept(
     if (!has_armed_action && publication.temporary_path[0] != '\0') {
         (void)unlink(publication.temporary_path.data());
     }
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
         if (g_queue_state.reservation_ids[slot]
             != publication.reservation.id) {
             continue;
         }
-        if (g_queue_state.slot_states[slot] == SlotState::armed
+        if (g_queue_state.slot_states[slot] == slot_state::armed
             && g_queue_state.actions[slot].armed
             && g_queue_state.actions[slot].action
-                == FileAction::unlink_on_abort) {
+                == file_action::unlink_on_abort) {
             unlink_identity_bound_noexcept(
                 static_cast<std::uint16_t>(slot));
         }
         release_slot(slot);
     }
     publication.reservation = {};
-    publication.temporary_slot = kNoPairedFileAction;
-    publication.final_slot = kNoPairedFileAction;
+    publication.temporary_slot = k_no_paired_file_action;
+    publication.final_slot = k_no_paired_file_action;
     publication.temporary_path.fill('\0');
     publication.final_path.fill('\0');
     publication.published = true;
@@ -5015,7 +4784,7 @@ resolve_generation_file_path(
             != k_mapped_minimizer_fragment_index_identity
         || identity.generation_id == 0u) {
         minimizer_generation_storage_error_as_cpp(
-            "generation file identity is invalid or is not mapped MPF");
+            "generation file identity is invalid or is not a mapped minimizer-fragment index");
     }
 
     resolved_minimizer_generation_file_path resolved{};
@@ -5054,13 +4823,13 @@ resolve_generation_file_path(
         minimizer_generation_storage_error_as_cpp(
             "generation Bioseq directory path is truncated");
     }
-    constexpr std::array<char, 16u> kLowerHex{
+    constexpr std::array<char, 16u> k_lower_hex{
         '0', '1', '2', '3', '4', '5', '6', '7',
         '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
     const std::uint8_t shard =
         static_cast<std::uint8_t>(identity.generation_id & 0xffu);
     const std::array<char, 3u> shard_name{
-        kLowerHex[shard >> 4u], kLowerHex[shard & 0x0fu], '\0'};
+        k_lower_hex[shard >> 4u], k_lower_hex[shard & 0x0fu], '\0'};
     if (!format_fixed(
             resolved.shard_directory, "{}/{}",
             resolved.bioseq_directory.data(), shard_name.data())) {
@@ -5069,7 +4838,7 @@ resolve_generation_file_path(
     }
     if (!format_fixed(
             resolved.final_path,
-            "{}/{}.{}.{}.1.{}.{}.mpf5",
+            "{}/{}.{}.{}.1.{}.{}.minimizer_fragment_index",
             resolved.shard_directory.data(),
             static_cast<unsigned>(identity.main_relfilenode),
             static_cast<unsigned>(identity.user_relid),
@@ -5104,7 +4873,7 @@ begin_generation_file_publication(
     using namespace generation_file_action_detail;
     const resolved_minimizer_generation_file_path resolved =
         resolve_generation_file_path(identity);
-    const FileActionReservation reservation = reserve_file_actions(2u);
+    const file_action_reservation reservation = reserve_file_actions(2u);
     const auto temporary_slot = reservation_slot(reservation, 0u);
     const auto final_slot = reservation_slot(reservation, 1u);
     if (!temporary_slot || !final_slot) {
@@ -5129,9 +4898,9 @@ begin_generation_file_publication(
     if (shard_directory_created) {
         fsync_directory(resolved.bioseq_directory.data());
     }
-    constexpr std::size_t kNonceBytes = 16u;
-    constexpr std::size_t kMaximumCollisionRetries = 128u;
-    constexpr std::array<char, 16u> kLowerHex{
+    constexpr std::size_t k_nonce_bytes = 16u;
+    constexpr std::size_t k_maximum_collision_retries = 128u;
+    constexpr std::array<char, 16u> k_lower_hex{
         '0', '1', '2', '3', '4', '5', '6', '7',
         '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
     const std::uint64_t top_full_xid =
@@ -5140,19 +4909,19 @@ begin_generation_file_publication(
                 GetTopFullTransactionId());
         });
     for (std::size_t attempt = 0u;
-         attempt < kMaximumCollisionRetries; ++attempt) {
-        std::array<unsigned char, kNonceBytes> nonce{};
+         attempt < k_maximum_collision_retries; ++attempt) {
+        std::array<unsigned char, k_nonce_bytes> nonce{};
         if (!pg_strong_random(nonce.data(), nonce.size())) {
             minimizer_generation_storage_error_as_cpp(
                 "generation temp nonce source failed");
         }
-        std::array<char, kNonceBytes * 2u + 1u> nonce_hex{};
+        std::array<char, k_nonce_bytes * 2u + 1u> nonce_hex{};
         for (std::size_t byte_index = 0u; byte_index < nonce.size();
              ++byte_index) {
             nonce_hex[byte_index * 2u] =
-                kLowerHex[nonce[byte_index] >> 4u];
+                k_lower_hex[nonce[byte_index] >> 4u];
             nonce_hex[byte_index * 2u + 1u] =
-                kLowerHex[nonce[byte_index] & 0x0fu];
+                k_lower_hex[nonce[byte_index] & 0x0fu];
         }
         if (!format_fixed(
                 publication.temporary_path,
@@ -5193,7 +4962,7 @@ begin_generation_file_publication(
     publication.expected_device = observed.st_dev;
     publication.expected_inode = observed.st_ino;
     arm_reserved_slot(
-        reservation, 0u, FileAction::unlink_on_abort,
+        reservation, 0u, file_action::unlink_on_abort,
         publication.temporary_path.data(), observed.st_dev,
         observed.st_ino, publication.final_slot);
     return publication;
@@ -5206,8 +4975,8 @@ inline void publish_generation_file(
         pending_minimizer_generation_file_publication& publication) {
     using namespace generation_file_action_detail;
     if (publication.fd < 0
-        || publication.temporary_slot == kNoPairedFileAction
-        || publication.final_slot == kNoPairedFileAction) {
+        || publication.temporary_slot == k_no_paired_file_action
+        || publication.final_slot == k_no_paired_file_action) {
         minimizer_generation_storage_error_as_cpp(
             "generation publication is not open");
     }
@@ -5229,7 +4998,7 @@ inline void publish_generation_file(
     }
     arm_reserved_slot(
         publication.reservation, 1u,
-        FileAction::unlink_on_abort,
+        file_action::unlink_on_abort,
         publication.final_path.data(),
         publication.expected_device, publication.expected_inode,
         publication.temporary_slot);
@@ -5249,9 +5018,9 @@ inline void publish_generation_file(
             "generation strict temp unlink failed: errno={}", errno));
     }
     release_slot(publication.temporary_slot);
-    PendingFileAction& final_action =
+    pending_file_action& final_action =
         g_queue_state.actions[publication.final_slot];
-    final_action.paired_slot = kNoPairedFileAction;
+    final_action.paired_slot = k_no_paired_file_action;
 
     struct stat published{};
     if (fstatat(
@@ -5284,7 +5053,7 @@ inline void publish_generation_file(
 /// reaper first reserves its whole <=64-file batch, then calls this only after
 /// its descriptor/head horizon checks and before descriptor deletion.
 inline void arm_generation_file_unlink_on_commit(
-        const FileActionReservation reservation,
+        const file_action_reservation reservation,
         const std::size_t ordinal,
         const minimizer_generation_file_identity& identity) {
     using namespace generation_file_action_detail;
@@ -5317,14 +5086,14 @@ inline void arm_generation_file_unlink_on_commit(
             "generation commit-unlink inode contract is invalid");
     }
     arm_reserved_slot(
-        reservation, ordinal, FileAction::unlink_on_commit,
+        reservation, ordinal, file_action::unlink_on_commit,
         resolved.final_path.data(), observed.st_dev, observed.st_ino,
-        kNoPairedFileAction);
+        k_no_paired_file_action);
 }
 
-[[nodiscard]] inline FileActionDiagnosticsSnapshot
+[[nodiscard]] inline file_action_diagnostics_snapshot
 generation_file_action_diagnostics() noexcept {
-    return FileActionDiagnosticsSnapshot{
+    return file_action_diagnostics_snapshot{
         .entries = generation_file_action_detail::g_queue_state.diagnostics,
         .total =
             generation_file_action_detail::g_queue_state.diagnostic_total,
@@ -5332,23 +5101,23 @@ generation_file_action_diagnostics() noexcept {
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-struct FileActionQueueTestSnapshot {
+struct file_action_queue_test_snapshot {
     std::size_t reserved = 0u;
     std::size_t armed_abort = 0u;
     std::size_t armed_commit = 0u;
 };
 
-[[nodiscard]] inline FileActionQueueTestSnapshot
+[[nodiscard]] inline file_action_queue_test_snapshot
 generation_file_action_queue_test_snapshot() noexcept {
     using namespace generation_file_action_detail;
-    FileActionQueueTestSnapshot snapshot{};
-    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+    file_action_queue_test_snapshot snapshot{};
+    for (std::size_t slot = 0u; slot < k_pending_file_action_capacity;
          ++slot) {
-        if (g_queue_state.slot_states[slot] == SlotState::reserved) {
+        if (g_queue_state.slot_states[slot] == slot_state::reserved) {
             ++snapshot.reserved;
-        } else if (g_queue_state.slot_states[slot] == SlotState::armed) {
+        } else if (g_queue_state.slot_states[slot] == slot_state::armed) {
             if (g_queue_state.actions[slot].action
-                == FileAction::unlink_on_abort) {
+                == file_action::unlink_on_abort) {
                 ++snapshot.armed_abort;
             } else {
                 ++snapshot.armed_commit;
@@ -5359,7 +5128,7 @@ generation_file_action_queue_test_snapshot() noexcept {
 }
 
 inline void arm_generation_file_callback_failure(
-        const generation_file_action_detail::CallbackFailureInjection
+        const generation_file_action_detail::callback_failure_injection
             injection) noexcept {
     generation_file_action_detail::g_callback_failure_injection = injection;
 }
@@ -5370,7 +5139,7 @@ inline void reset_generation_file_action_queue_for_test() noexcept {
         g_queue_state.xact_callback_installed;
     const bool subxact_callback_installed =
         g_queue_state.subxact_callback_installed;
-    g_queue_state = QueueState{};
+    g_queue_state = queue_state{};
     g_queue_state.xact_callback_installed = xact_callback_installed;
     g_queue_state.subxact_callback_installed =
         subxact_callback_installed;
@@ -5387,7 +5156,7 @@ namespace minimizer_fragment_image_pg_detail {
         || identity.database_oid != MyDatabaseId
         || identity.column_attno <= 0) {
         minimizer_generation_storage_error_as_cpp(
-            "minimizer fragment image file identity is not the current MPF relation");
+            "minimizer fragment image file identity is not the current minimizer-fragment relation");
     }
     return minimizer_generation_file_identity{
         .database_oid = identity.database_oid,
@@ -5434,13 +5203,13 @@ inline void write_zero_padding(
         const int fd,
         const std::uint64_t begin,
         const std::uint64_t end) {
-    static constexpr std::array<std::byte, 64u> zeros{};
-    if (end < begin || end - begin > zeros.size()) {
+    static constexpr std::array<std::byte, 64u> k_zeros{};
+    if (end < begin || end - begin > k_zeros.size()) {
         minimizer_generation_storage_error_as_cpp("minimizer fragment image padding geometry is invalid");
     }
     pwrite_all(
         fd,
-        std::span<const std::byte>{zeros}.first(
+        std::span<const std::byte>{k_zeros}.first(
             static_cast<std::size_t>(end - begin)),
         begin);
 }
@@ -5525,7 +5294,6 @@ public:
 [[nodiscard]] inline bioseq::indexing::expected_minimizer_fragment_image_identity
 expected_identity(
         const minimizer_generation_file_identity& identity,
-        const bioseq::indexing::minimizer_fragment_image_storage_kind provider,
         const minimizer_generation_head& head,
         const minimizer_generation_manifest& manifest,
         const bioseq::indexing::minimizer_fragment_image_layout& layout,
@@ -5538,14 +5306,13 @@ expected_identity(
         .column_attno = static_cast<std::uint16_t>(identity.column_attno),
         .index_identity =
             bioseq::indexing::k_minimizer_fragment_image_index_identity,
-        .storage_kind = static_cast<std::uint8_t>(provider),
         .layout_identity =
             bioseq::indexing::k_minimizer_fragment_image_layout_identity,
         .query_key = identity.query_key,
         .generation_id = identity.generation_id,
         .source_identity = head.source_identity,
         .source_content_crc = head.source_content_checksum,
-        .compatibility_crc = head.compatibility_checksum,
+        .storage_contract_checksum = head.storage_contract_checksum,
         .target_length = manifest.target_length,
         .file_bytes = layout.file_bytes,
         .position_segment_count = manifest.position_segment_count,
@@ -5555,7 +5322,7 @@ expected_identity(
         .manifest = layout.manifest,
         .header_crc64 = header_crc64,
         .feature_bitmap = layout.feature_bitmap,
-        .compact_h32_direct = layout.compact_h32_direct,
+        .compact_hash32_direct = layout.compact_hash32_direct,
     };
 }
 
@@ -5576,8 +5343,8 @@ inline void validate_generation_metadata(
         || head.source_identity != manifest.source_identity
         || head.source_content_checksum
             != manifest.source_content_checksum
-        || head.compatibility_checksum
-            != bioseq::indexing::minimizer_generation_compatibility_checksum(
+        || head.storage_contract_checksum
+            != bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                 manifest)
         || directory.size() != manifest.directory_bytes
         || bioseq::indexing::crc64_ecma182(directory)
@@ -5620,12 +5387,12 @@ inline void release_mapping_lease_resource(const Datum value) noexcept {
     release_mapping_lease_raw(*lease);
 }
 
-inline constexpr ResourceReleasePriority kMappingLeaseReleasePriority = 10u;
-static_assert(kMappingLeaseReleasePriority >= RELEASE_PRIO_FIRST);
-inline const ResourceOwnerDesc kMappingLeaseResourceOwnerDesc{
+inline constexpr ResourceReleasePriority k_mapping_lease_release_priority = 10u;
+static_assert(k_mapping_lease_release_priority >= RELEASE_PRIO_FIRST);
+inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     .name = "bioseq minimizer fragment image mapping lease",
     .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
-    .release_priority = kMappingLeaseReleasePriority,
+    .release_priority = k_mapping_lease_release_priority,
     .ReleaseResource = release_mapping_lease_resource,
     .DebugPrint = nullptr,
 };
@@ -5647,7 +5414,7 @@ inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
     if (lease->remembered) {
         ResourceOwnerForget(
             lease->owner, PointerGetDatum(lease),
-            &kMappingLeaseResourceOwnerDesc);
+            &k_mapping_lease_resource_owner_descriptor);
         lease->remembered = false;
     }
     release_mapping_lease_raw(*lease);
@@ -5656,7 +5423,7 @@ inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
     lease = nullptr;
 }
 
-/// Form the compatibility token expected by the PostgreSQL-free mapped-index
+/// Form the lifetime token expected by PostgreSQL-free mapped-index
 /// readers without transferring or extending the lease lifetime.  The token
 /// deliberately has no control block: callers must retain the backend-thread
 /// lease guard which supplied it until every borrowed span has been destroyed.
@@ -5833,13 +5600,11 @@ inline void advise_borrowed_mapping_page_range(
 
 } // namespace minimizer_fragment_image_pg_detail
 
-/// Shared header-last v2 writer.  Relation generations feed this from their
-/// authenticated heap reread; mapped generations can feed the same append API
-/// directly from the common grouped-SoA encoder callbacks without forming tuples.
+/// Shared header-last writer. Relation generations feed this from their
+/// authenticated heap reread through the common grouped-SoA encoder callbacks.
 class minimizer_fragment_image_writer {
 private:
     minimizer_generation_file_identity identity_{};
-    bioseq::indexing::minimizer_fragment_image_storage_kind provider_{};
     pending_minimizer_generation_file_publication publication_{};
     std::uint64_t payload_bytes_ = 0u;
     crc64_ecma182_accumulator payload_crc_{};
@@ -5849,17 +5614,10 @@ public:
     minimizer_fragment_image_writer(
             const minimizer_generation_administration_identity& identity,
             const std::uint64_t query_key,
-            const std::uint64_t generation_id,
-            const bioseq::indexing::minimizer_fragment_image_storage_kind provider)
+            const std::uint64_t generation_id)
         : identity_(minimizer_fragment_image_pg_detail::generation_file_identity(
               identity, query_key, generation_id)),
-          provider_(provider),
-          publication_(begin_generation_file_publication(identity_)) {
-        if (!bioseq::indexing::is_valid_minimizer_fragment_image_storage_kind(
-                static_cast<std::uint8_t>(provider_))) {
-            minimizer_generation_storage_error_as_cpp("minimizer fragment image provider is invalid");
-        }
-    }
+          publication_(begin_generation_file_publication(identity_)) {}
 
     minimizer_fragment_image_writer(const minimizer_fragment_image_writer&) = delete;
     minimizer_fragment_image_writer& operator=(const minimizer_fragment_image_writer&) = delete;
@@ -5962,7 +5720,7 @@ public:
         if (!provisional_layout
             || provisional_layout->feature_bitmap
                 != k_minimizer_fragment_compact_hash32_feature
-            || provisional_layout->compact_h32_direct.bytes
+            || provisional_layout->compact_hash32_direct.bytes
                 != compact_plan->image_bytes) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image direct-section layout planning failed");
@@ -5990,7 +5748,7 @@ public:
                 + provisional_layout->manifest.bytes;
         minimizer_fragment_image_pg_detail::write_zero_padding(
             publication_.fd, manifest_end,
-            provisional_layout->compact_h32_direct.offset);
+            provisional_layout->compact_hash32_direct.offset);
         minimizer_fragment_image_pg_detail::resize_temporary_image(
             publication_.fd, provisional_layout->file_bytes);
 
@@ -6000,9 +5758,9 @@ public:
                 publication_.fd, provisional_layout->file_bytes,
                 PROT_READ | PROT_WRITE};
             const auto direct_offset = static_cast<std::size_t>(
-                provisional_layout->compact_h32_direct.offset);
+                provisional_layout->compact_hash32_direct.offset);
             const auto direct_bytes = static_cast<std::size_t>(
-                provisional_layout->compact_h32_direct.bytes);
+                provisional_layout->compact_hash32_direct.bytes);
             std::span<std::byte> direct_image =
                 destination_mapping.writable_bytes().subspan(
                     direct_offset, direct_bytes);
@@ -6049,10 +5807,10 @@ public:
             || layout->manifest != provisional_layout->manifest
             || layout->feature_bitmap
                 != provisional_layout->feature_bitmap
-            || layout->compact_h32_direct.offset
-                != provisional_layout->compact_h32_direct.offset
-            || layout->compact_h32_direct.bytes
-                != provisional_layout->compact_h32_direct.bytes
+            || layout->compact_hash32_direct.offset
+                != provisional_layout->compact_hash32_direct.offset
+            || layout->compact_hash32_direct.bytes
+                != provisional_layout->compact_hash32_direct.bytes
             || layout->file_bytes != provisional_layout->file_bytes) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image authenticated direct layout changed after build");
@@ -6060,7 +5818,7 @@ public:
 
         minimizer_fragment_image_header header{
             .magic = k_minimizer_fragment_image_magic,
-            .format_revision = k_minimizer_fragment_image_format_revision,
+            .layout_revision = k_minimizer_fragment_image_layout_revision,
             .header_bytes = k_minimizer_fragment_image_header_bytes,
             .database_oid = identity_.database_oid,
             .tablespace_oid = identity_.tablespace_oid,
@@ -6069,13 +5827,14 @@ public:
             .column_attno = static_cast<std::uint16_t>(
                 identity_.column_attno),
             .index_identity = k_minimizer_fragment_image_index_identity,
-            .storage_kind = static_cast<std::uint8_t>(provider_),
+            .storage_kind = bioseq::indexing::
+                k_minimizer_fragment_image_relation_backed_storage_kind,
             .layout_identity = k_minimizer_fragment_image_layout_identity,
             .query_key = identity_.query_key,
             .generation_id = identity_.generation_id,
             .source_identity = head.source_identity,
             .source_content_crc = head.source_content_checksum,
-            .compatibility_crc = head.compatibility_checksum,
+            .storage_contract_checksum = head.storage_contract_checksum,
             .target_length = manifest.target_length,
             .file_bytes = layout->file_bytes,
             .position_segment_count = manifest.position_segment_count,
@@ -6085,7 +5844,7 @@ public:
             .directory = layout->directory,
             .manifest = layout->manifest,
             .feature_bitmap = layout->feature_bitmap,
-            .compact_h32_direct = layout->compact_h32_direct,
+            .compact_hash32_direct = layout->compact_hash32_direct,
         };
         const auto encoded_header =
             encode_minimizer_fragment_image_header(header);
@@ -6112,7 +5871,7 @@ public:
         }
         const minimizer_fragment_image_validation_options validation_options{
             .expected_identity = minimizer_fragment_image_pg_detail::expected_identity(
-                identity_, provider_, head, manifest, *layout,
+                identity_, head, manifest, *layout,
                 decoded_header->header_crc64),
             .payload_crc_policy = minimizer_fragment_payload_crc_policy::deferred,
         };
@@ -6128,7 +5887,6 @@ public:
         }
 
         const minimizer_fragment_image_file_receipt receipt{
-            .provider = provider_,
             .file_bytes = layout->file_bytes,
             .payload_crc64 = payload_crc64,
             .header_crc64 = decoded_header->header_crc64,
@@ -6145,9 +5903,9 @@ enum class minimizer_fragment_image_mapped_open_validation : std::uint8_t {
     /// Timed restart path: authenticate only the fixed outer header, layout,
     /// descriptor identity and section receipts. No section payload is read.
     bounded_header_only = 0u,
-    /// Explicit publication/scrub compatibility path. Payload CRC remains
-    /// deferred, while directory/manifest metadata receive the legacy full
-    /// validation pass.
+    /// Explicit publication/scrub validation. Payload CRC remains
+    /// deferred, while directory/manifest metadata receive complete
+    /// validation.
     full_metadata = 1u,
 };
 
@@ -6197,7 +5955,7 @@ public:
         return static_cast<bool>(borrow_mapping_token());
     }
 
-    /// Non-owning compatibility token.  Every copy becomes invalid as soon as
+    /// Non-owning lifetime token. Every copy becomes invalid as soon as
     /// this guard is destroyed or replaced.
     [[nodiscard]] std::shared_ptr<const void>
     borrow_mapping_token() const noexcept {
@@ -6283,7 +6041,7 @@ public:
     /// Issue fail-open asynchronous readahead for the authenticated compact-
     /// H32 metadata only. Selected posting pages are advised later, while the
     /// existing descriptor layout traversal already knows their exact spans.
-    /// The unrelated outer MPF payload and unselected posting pages are never
+    /// The unrelated outer minimizer-fragment payload and unselected posting pages are never
     /// named as byte ranges; page granularity may include adjacent bytes on a
     /// boundary page.
     void advise_compact_h32_direct_metadata_readahead(
@@ -6438,7 +6196,7 @@ public:
         };
     }
 
-    /// Borrow the PG-free reader's shared_ptr-shaped compatibility token while
+    /// Borrow the PG-free reader's shared_ptr-shaped lifetime token while
     /// retaining this image as the prompt normal-path lease authority.
     [[nodiscard]] std::shared_ptr<const void>
     borrow_mapping_token() const noexcept {
@@ -6490,7 +6248,7 @@ open_exact_minimizer_fragment_image_pg(
         || descriptor.generation_id != manifest.generation_id
         || descriptor.state != minimizer_generation_storage_state::live
         || descriptor.retire_full_xid
-        || !exact_storage_descriptor_provider_shape(descriptor)) {
+        || !has_exact_storage_descriptor_relation_shape(descriptor)) {
         minimizer_generation_storage_error_as_cpp("minimizer fragment image open binding is invalid");
     }
     const resolved_minimizer_generation_file_path resolved =
@@ -6528,7 +6286,7 @@ open_exact_minimizer_fragment_image_pg(
     // above and this pre-enlarged ResourceOwner registration.
     ResourceOwnerRemember(
         lease->owner, PointerGetDatum(lease),
-        &minimizer_fragment_image_pg_detail::kMappingLeaseResourceOwnerDesc);
+        &minimizer_fragment_image_pg_detail::k_mapping_lease_resource_owner_descriptor);
     lease->remembered = true;
     lease->mapping_bytes = static_cast<std::size_t>(observed.st_size);
     lease->mapping = mmap(
@@ -6559,9 +6317,9 @@ open_exact_minimizer_fragment_image_pg(
     if ((decoded_header->feature_bitmap
             & k_minimizer_fragment_compact_hash32_feature) != 0u) {
         compact_h32_direct = minimizer_fragment_compact_hash32_section_spec{
-            .bytes = decoded_header->compact_h32_direct.bytes,
+            .bytes = decoded_header->compact_hash32_direct.bytes,
             .direct_header_crc64 =
-                decoded_header->compact_h32_direct.direct_header_crc64,
+                decoded_header->compact_hash32_direct.direct_header_crc64,
         };
     }
     const auto layout = plan_minimizer_fragment_image_layout(
@@ -6579,7 +6337,7 @@ open_exact_minimizer_fragment_image_pg(
     }
     const minimizer_fragment_image_validation_options options{
         .expected_identity = minimizer_fragment_image_pg_detail::expected_identity(
-            file_identity, descriptor.provider, head, manifest, *layout,
+            file_identity, head, manifest, *layout,
             descriptor.header_checksum),
         .payload_crc_policy = minimizer_fragment_payload_crc_policy::deferred,
     };
@@ -6591,7 +6349,7 @@ open_exact_minimizer_fragment_image_pg(
             : std::expected<validated_minimizer_fragment_image_view,
                 minimizer_fragment_image_error>{std::unexpected(
                     minimizer_fragment_image_error::identity_mismatch)};
-    const bool bounded_evidence_exact = validated
+    const bool bounded_validation_exact = validated
         && validated->header_crc_bytes == k_minimizer_fragment_image_header_bytes
         && validated->payload_crc_bytes == 0u
         && (validation
@@ -6603,19 +6361,19 @@ open_exact_minimizer_fragment_image_pg(
                     == manifest.directory_bytes
                 && validated->manifest_crc_bytes
                     == minimizer_generation_manifest::encoded_bytes);
-    if (!bounded_evidence_exact) {
+    if (!bounded_validation_exact) {
         minimizer_fragment_image_pg_detail::destroy_mapping_lease(lease);
         minimizer_generation_storage_error_as_cpp(
-            "minimizer fragment image mapped image validation/evidence failed");
+            "minimizer fragment image mapped image validation failed");
     }
     mapped_minimizer_fragment_image result;
     result.lease_ = lease;
     result.payload_ = validated->payload;
-    result.compact_h32_direct_ = validated->compact_h32_direct;
+    result.compact_h32_direct_ = validated->compact_hash32_direct;
     result.payload_raw_checksum_ = validated->header.payload.crc64;
-    if (!validated->compact_h32_direct.empty()) {
+    if (!validated->compact_hash32_direct.empty()) {
         result.compact_h32_direct_header_receipt_ =
-            validated->header.compact_h32_direct.direct_header_crc64;
+            validated->header.compact_hash32_direct.direct_header_crc64;
     }
     return result;
 }
@@ -6625,7 +6383,7 @@ open_exact_minimizer_fragment_image_pg(
 /// make an incompletely reread generation visible.
 class index_storage_fragment_generation_row_sink {
 private:
-    enum class WriteStage : std::uint8_t {
+    enum class write_stage : std::uint8_t {
         payload,
         directory,
         manifest,
@@ -6634,8 +6392,8 @@ private:
         moved,
     };
 
-    static constexpr std::uint64_t kWriteBatchRows = 4096;
-    static constexpr std::uint64_t kWriteBatchBytes =
+    static constexpr std::uint64_t k_write_batch_rows = 4096;
+    static constexpr std::uint64_t k_write_batch_bytes =
         MAX_CATALOG_MULTI_INSERT_BYTES;
 
     minimizer_generation_administration_identity identity_{};
@@ -6648,7 +6406,7 @@ private:
     std::uint64_t query_key_ = 0;
     std::uint64_t generation_id_ = 0;
     std::uint64_t row_count_ = 0;
-    std::uint64_t write_batch_row_limit_ = kWriteBatchRows;
+    std::uint64_t write_batch_row_limit_ = k_write_batch_rows;
     std::uint64_t catalog_multi_insert_batches_ = 0;
     std::vector<TupleTableSlot*> pending_slots_;
     std::uint64_t rows_in_batch_ = 0;
@@ -6664,8 +6422,8 @@ private:
     std::array<std::byte, minimizer_generation_manifest::encoded_bytes>
         written_manifest_bytes_{};
     std::uint32_t written_manifest_size_ = 0;
-    std::optional<minimizer_generation_source_proof> validation_source_proof_;
-    WriteStage stage_ = WriteStage::payload;
+    std::optional<minimizer_generation_source_authorization> validation_source_authorization_;
+    write_stage stage_ = write_stage::payload;
     bool pg_poisoned_ = false;
 
     [[nodiscard]] static bool checked_add_(
@@ -6695,7 +6453,7 @@ private:
     }
 
     void abandon_resources_noexcept_() noexcept {
-        validation_source_proof_.reset();
+        validation_source_authorization_.reset();
         pending_slots_.clear();
         std::vector<TupleTableSlot*>{}.swap(pending_slots_);
         rows_in_batch_ = 0;
@@ -6708,16 +6466,16 @@ private:
     }
 
     void fail_cleanup_() noexcept {
-        stage_ = WriteStage::failed;
+        stage_ = write_stage::failed;
         pg_poisoned_ = true;
         abandon_resources_noexcept_();
         identity_.release_owned_strings();
     }
 
     void abandon_after_pg_error_() noexcept {
-        stage_ = WriteStage::failed;
+        stage_ = write_stage::failed;
         pg_poisoned_ = true;
-        validation_source_proof_.reset();
+        validation_source_authorization_.reset();
         // Do not call any PostgreSQL cleanup routine while propagating an
         // ERROR converted at a leaf. Slots, scans, snapshots, catalog state
         // and relation locks remain registered with PostgreSQL's current
@@ -6767,10 +6525,10 @@ private:
 
     [[nodiscard]] std::optional<minimizer_generation_encoding_error>
     validate_next_row_(const minimizer_generation_row_view& row) noexcept {
-        if (stage_ == WriteStage::manifest
-            || stage_ == WriteStage::tokenized
-            || stage_ == WriteStage::failed
-            || stage_ == WriteStage::moved) {
+        if (stage_ == write_stage::manifest
+            || stage_ == write_stage::tokenized
+            || stage_ == write_stage::failed
+            || stage_ == write_stage::moved) {
             return minimizer_generation_encoding_error::row_order;
         }
         const bool manifest = row.address.position_segment == -1
@@ -6791,8 +6549,8 @@ private:
             return std::nullopt;
         }
         if (directory) {
-            if (stage_ != WriteStage::payload
-                && stage_ != WriteStage::directory) {
+            if (stage_ != write_stage::payload
+                && stage_ != write_stage::directory) {
                 return minimizer_generation_encoding_error::row_order;
             }
             if (row.address.chunk_no != next_directory_chunk_) {
@@ -6800,7 +6558,7 @@ private:
             }
             return std::nullopt;
         }
-        if (stage_ != WriteStage::payload
+        if (stage_ != write_stage::payload
             || row.address.position_segment < 0
             || row.address.sub_key < 0
             || row.address.sub_key >= k_temporary_run_sub_key_base) {
@@ -6849,9 +6607,9 @@ private:
                 written_manifest_bytes_.begin());
             written_manifest_size_ = static_cast<std::uint32_t>(
                 row.bytes.size());
-            stage_ = WriteStage::manifest;
+            stage_ = write_stage::manifest;
         } else if (directory) {
-            stage_ = WriteStage::directory;
+            stage_ = write_stage::directory;
             ++next_directory_chunk_;
             directory_checksum_.update(row.bytes);
             if (!checked_add_(directory_bytes_written_, row.bytes.size())) {
@@ -6893,7 +6651,7 @@ private:
                 bioseq::indexing::plan_index_tuple_batch_append(
                     pending_slots_.size(), bytes_in_batch_,
                     actual_batch_bytes,
-                    write_batch_row_limit_, kWriteBatchBytes);
+                    write_batch_row_limit_, k_write_batch_bytes);
             if (!batch_decision.valid) {
                 heap_freetuple(*tuple);
                 minimizer_generation_storage_error_as_cpp(
@@ -6940,7 +6698,7 @@ public:
             minimizer_generation_administration_identity identity,
             std::uint64_t query_key,
             std::uint64_t generation_id,
-            std::uint64_t write_batch_row_limit = kWriteBatchRows)
+            std::uint64_t write_batch_row_limit = k_write_batch_rows)
         : identity_(std::move(identity)),
           query_key_(query_key), generation_id_(generation_id),
           write_batch_row_limit_(write_batch_row_limit) {
@@ -6954,7 +6712,7 @@ public:
                 || identity_.index_name.empty()
                 || identity_.table_name.empty()
                 || write_batch_row_limit_ == 0
-                || write_batch_row_limit_ > kWriteBatchRows) {
+                || write_batch_row_limit_ > k_write_batch_rows) {
                 minimizer_generation_storage_error_as_cpp(
                     "generation sink identity/key is invalid");
             }
@@ -6987,7 +6745,7 @@ public:
                 || std::string_view{RelationGetRelationName(relation_)}
                     != identity_.table_name) {
                 minimizer_generation_storage_error_as_cpp(
-                    "revision-3 generation relation is missing or renamed");
+                    "generation relation is missing or renamed");
             }
             const minimizer_generation_schema_inspection schema =
                 bioseq::postgres::support::invoke_pg_as_cpp(
@@ -7050,11 +6808,11 @@ public:
               other.global_payload_order_possible_),
           written_manifest_bytes_(other.written_manifest_bytes_),
           written_manifest_size_(other.written_manifest_size_),
-          validation_source_proof_(std::move(
-              other.validation_source_proof_)),
+          validation_source_authorization_(std::move(
+              other.validation_source_authorization_)),
           stage_(other.stage_),
           pg_poisoned_(other.pg_poisoned_) {
-        other.stage_ = WriteStage::moved;
+        other.stage_ = write_stage::moved;
         other.pg_poisoned_ = true;
     }
     index_storage_fragment_generation_row_sink& operator=(
@@ -7082,7 +6840,7 @@ public:
         return write_validated_row_(*validated);
     }
 
-    /// grouped-SoA/S1 payload owner: compute the address-bound CRC once, bind it
+    /// grouped-SoA payload owner: compute the address-bound CRC once, bind it
     /// into an unforgeable validated token, form the tuple from that token, and
     /// return the exact checksum for manifest folding.
     [[nodiscard]] std::expected<minimizer_generation_row_write_receipt,
@@ -7128,18 +6886,18 @@ public:
         const auto minimizer_generation_storage_error = [](std::string_view message) {
             minimizer_generation_storage_error_as_cpp(message);
         };
-        Oid proven_relation_oid = InvalidOid;
-        RelFileLocator proven_locator{};
+        Oid validated_relation_oid = InvalidOid;
+        RelFileLocator validated_locator{};
         std::array<std::byte, minimizer_generation_head::encoded_bytes>
-            proven_head_bytes{};
-        std::uint64_t proven_head_checksum = 0;
-        std::uint64_t proven_source_identity = 0;
-        std::uint64_t proven_source_content_checksum = 0;
-        std::uint64_t proven_compatibility_checksum = 0;
-        std::optional<minimizer_fragment_image_file_receipt> proven_file_receipt{};
+            validated_head_bytes{};
+        std::uint64_t validated_head_checksum = 0;
+        std::uint64_t validated_source_identity = 0;
+        std::uint64_t validated_source_content_checksum = 0;
+        std::uint64_t validated_storage_contract_checksum = 0;
+        std::optional<minimizer_fragment_image_file_receipt> validated_file_receipt{};
 
         try {
-            if (stage_ != WriteStage::manifest
+            if (stage_ != write_stage::manifest
                 || relation_ == nullptr || catalog_indexes_ == nullptr
                 || generation.head.generation_id != generation_id_
                 || generation.manifest.generation_id != generation_id_) {
@@ -7157,16 +6915,14 @@ public:
                 identity_.index_name == k_minimizers_per_fragment_index_name;
             std::unique_ptr<minimizer_fragment_image_writer>
                 fragment_image_writer;
-			/* The sidecar path/header intentionally encode the MPF source
-			 * identity, not a logical-index discriminator.  MPS grouped-SoA keeps
-			 * the authoritative PostgreSQL payload route and therefore must not
-			 * create or overwrite this MPF-only image. */
+			/* The sidecar path/header intentionally encode the minimizer-fragment
+			 * source identity, not a logical-index discriminator. The minimizer-sequence
+			 * grouped-SoA route keeps the authoritative PostgreSQL payload and therefore
+			 * must not create or overwrite this minimizer-fragment-only image. */
             if (mapped_minimizer_fragment_image) {
                 fragment_image_writer =
                     std::make_unique<minimizer_fragment_image_writer>(
-                        identity_, query_key_, generation_id_,
-                        bioseq::indexing::minimizer_fragment_image_storage_kind::
-                            postgres_relation);
+                        identity_, query_key_, generation_id_);
             }
             if (!global_payload_order_possible_) {
                 minimizer_generation_storage_error(
@@ -7189,7 +6945,7 @@ public:
                     .sub_key = k_generation_head_sub_key,
                     .chunk_no = 0,
                 }
-                || head_row.bytes.size() != proven_head_bytes.size()
+                || head_row.bytes.size() != validated_head_bytes.size()
                 || head_row.row_checksum
                     != bioseq::indexing::crc64_index_chunk_row(
                         0, -1, k_generation_head_sub_key, 0,
@@ -7198,8 +6954,8 @@ public:
                 minimizer_generation_storage_error("READY validation head row is malformed");
             }
             std::copy(head_row.bytes.begin(), head_row.bytes.end(),
-                proven_head_bytes.begin());
-            proven_head_checksum = head_row.row_checksum;
+                validated_head_bytes.begin());
+            validated_head_checksum = head_row.row_checksum;
 
             std::uint64_t expected_payload_rows = 0;
             std::uint64_t expected_payload_bytes = 0;
@@ -7283,48 +7039,48 @@ public:
                 minimizer_generation_storage_error("READY reread snapshot was not registered");
             }
 
-            validation_source_proof_.emplace(
-                derive_minimizer_generation_source_proof_pg(
+            validation_source_authorization_.emplace(
+                authorize_minimizer_generation_source_pg(
                     identity_, query_key_, validation_snapshot_));
-            minimizer_generation_source_proof& source_proof =
-                *validation_source_proof_;
-            if (!source_proof.valid_
-                || source_proof.snapshot_ != validation_snapshot_
-                || source_proof.database_oid_ != identity_.database_oid
-                || source_proof.tablespace_oid_ != identity_.tablespace_oid
-                || source_proof.main_relfilenode_
+            minimizer_generation_source_authorization& source_authorization =
+                *validation_source_authorization_;
+            if (!source_authorization.valid_
+                || source_authorization.snapshot_ != validation_snapshot_
+                || source_authorization.database_oid_ != identity_.database_oid
+                || source_authorization.tablespace_oid_ != identity_.tablespace_oid
+                || source_authorization.main_relfilenode_
                     != identity_.main_relfilenode
-                || source_proof.user_relid_ != identity_.user_relid
-                || source_proof.column_attno_ != identity_.column_attno
-                || source_proof.index_name_ != identity_.index_name
-                || source_proof.table_name_ != identity_.table_name
-                || source_proof.source_.sequence_rowno != query_key_) {
+                || source_authorization.user_relid_ != identity_.user_relid
+                || source_authorization.column_attno_ != identity_.column_attno
+                || source_authorization.index_name_ != identity_.index_name
+                || source_authorization.table_name_ != identity_.table_name
+                || source_authorization.source_.sequence_rowno != query_key_) {
                 minimizer_generation_storage_error(
-                    "READY authoritative source proof binding disagrees");
+                    "READY authoritative source authorization binding disagrees");
             }
-            const std::uint64_t compatibility_checksum =
-                bioseq::indexing::minimizer_generation_compatibility_checksum(
+            const std::uint64_t storage_contract_checksum =
+                bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                     generation.manifest);
             if (generation.manifest.alphabet_code
-                    != source_proof.source_.alphabet_code
+                    != source_authorization.source_.alphabet_code
                 || generation.manifest.storage_unit_byte_width
-                    != source_proof.source_.storage_unit_byte_width
+                    != source_authorization.source_.storage_unit_byte_width
                 || generation.manifest.target_length
-                    != source_proof.source_.locator.logical_length
-                || generation.head.compatibility_checksum
-                    != compatibility_checksum
+                    != source_authorization.source_.locator.logical_length
+                || generation.head.storage_contract_checksum
+                    != storage_contract_checksum
                 || generation.head.source_content_checksum
-                    != source_proof.source_content_checksum_
+                    != source_authorization.source_content_checksum_
                 || generation.manifest.source_content_checksum
-                    != source_proof.source_content_checksum_) {
+                    != source_authorization.source_content_checksum_) {
                 minimizer_generation_storage_error(
-                    "READY authoritative source content/compatibility disagrees");
+                    "READY authoritative source content/storage contract disagrees");
             }
-            source_proof.source_.compatibility_checksum =
-                compatibility_checksum;
+            source_authorization.source_.storage_contract_checksum =
+                storage_contract_checksum;
             const std::uint64_t required_source_identity =
                 minimizer_generation_source_identity(
-                    identity_.main_relfilenode, source_proof.source_);
+                    identity_.main_relfilenode, source_authorization.source_);
             if (required_source_identity == 0
                 || generation.head.source_identity
                     != required_source_identity
@@ -7333,12 +7089,12 @@ public:
                 minimizer_generation_storage_error(
                     "READY authoritative source identity disagrees");
             }
-            proven_source_identity = required_source_identity;
-            proven_source_content_checksum =
-                source_proof.source_content_checksum_;
-            proven_compatibility_checksum = compatibility_checksum;
-            source_proof.invalidate_();
-            validation_source_proof_.reset();
+            validated_source_identity = required_source_identity;
+            validated_source_content_checksum =
+                source_authorization.source_content_checksum_;
+            validated_storage_contract_checksum = storage_contract_checksum;
+            source_authorization.invalidate_();
+            validation_source_authorization_.reset();
 
             const minimizer_generation_schema_inspection schema =
                 bioseq::postgres::support::invoke_pg_as_cpp(
@@ -7352,8 +7108,8 @@ public:
             if (!schema) {
                 minimizer_generation_storage_error("READY relation schema changed");
             }
-            proven_relation_oid = RelationGetRelid(relation_);
-            proven_locator = relation_->rd_locator;
+            validated_relation_oid = RelationGetRelid(relation_);
+            validated_locator = relation_->rd_locator;
             validation_primary_index_ = bioseq::postgres::support::invoke_pg_as_cpp(
                 [&] {
                     return index_open(
@@ -7560,9 +7316,9 @@ public:
                 [&] { systable_endscan_ordered(validation_scan_); });
             validation_scan_ = nullptr;
             // The S1 PK is the physical authority: every global control
-            // sub-key precedes every derived position sub-key. Legacy wire
-            // payload checksums retain their historical emitter order, so the
-            // sink validates that aggregate before this physical reread.
+            // sub-key precedes every derived position sub-key. Wire payload
+            // checksums use emitter order, so the sink validates that aggregate
+            // before this physical reread.
             if (!payload_complete
                 || entry_chunk != 0
                 || reread_payload_rows != expected_payload_rows
@@ -7572,7 +7328,7 @@ public:
                     "READY complete payload aggregate reread disagrees");
             }
             if (fragment_image_writer) {
-                proven_file_receipt = fragment_image_writer->publish(
+                validated_file_receipt = fragment_image_writer->publish(
                     generation.head,
                     generation.manifest,
                     generation.directory,
@@ -7596,26 +7352,26 @@ public:
             throw;
         }
 
-        stage_ = WriteStage::tokenized;
-        const TransactionId proven_transaction_id =
+        stage_ = write_stage::tokenized;
+        const TransactionId validated_transaction_id =
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [] { return GetCurrentTransactionId(); });
-        minimizer_generation_administration_identity proven_identity =
+        minimizer_generation_administration_identity validated_identity =
             std::move(identity_);
         return ready_minimizer_generation_token{
-            std::move(proven_identity),
-            proven_relation_oid,
-            proven_locator,
+            std::move(validated_identity),
+            validated_relation_oid,
+            validated_locator,
             advisory_lock_key_,
             query_key_,
             generation_id_,
-            proven_source_identity,
-            proven_source_content_checksum,
-            proven_compatibility_checksum,
-            proven_transaction_id,
-            proven_head_bytes,
-            proven_head_checksum,
-            std::move(proven_file_receipt)};
+            validated_source_identity,
+            validated_source_content_checksum,
+            validated_storage_contract_checksum,
+            validated_transaction_id,
+            validated_head_bytes,
+            validated_head_checksum,
+            std::move(validated_file_receipt)};
     }
 };
 
@@ -7656,7 +7412,7 @@ read_locked_generation_head_for_descriptor_publication_pg(
         "WHERE query_key=$1 AND generation_id=$2 AND sub_key=$3 "
         "AND position_segment=$4 AND chunk_no=$5 FOR UPDATE",
         quoted_table);
-    struct State {
+    struct operation_state {
         int connect = 0;
         int execute = 0;
         int finish = 0;
@@ -7730,13 +7486,13 @@ read_locked_live_descriptor_for_publication_pg(
         NameGetDatum(&index_name),
         Int64GetDatum(static_cast<std::int64_t>(query_key)),
     };
-    static constexpr std::string_view sql{
+    static constexpr std::string_view k_select_sql{
         "SELECT * FROM bioseq_internal.minimizer_generation_storage "
         "WHERE database_oid=$1 AND tablespace_oid=$2 "
         "AND main_relfilenode=$3 AND user_relid=$4 "
         "AND column_attno=$5 AND index_name=$6 AND query_key=$7 "
         "AND state=smallint '1' FOR UPDATE"};
-    struct RawRow {
+    struct raw_row {
         Oid database_oid = InvalidOid;
         Oid tablespace_oid = InvalidOid;
         Oid main_relfilenode = InvalidOid;
@@ -7745,7 +7501,7 @@ read_locked_live_descriptor_for_publication_pg(
         NameData index_name{};
         std::int64_t query_key = -1;
         std::int64_t generation_id = 0;
-        std::int16_t provider = -1;
+        std::int16_t storage_kind = -1;
         Oid payload_relation_oid = InvalidOid;
         Oid payload_database_oid = InvalidOid;
         Oid payload_tablespace_oid = InvalidOid;
@@ -7763,7 +7519,7 @@ read_locked_live_descriptor_for_publication_pg(
         bool retire_full_xid_null = true;
         bool required_null = false;
     } row{};
-    struct State {
+    struct operation_state {
         int connect = 0;
         int execute = 0;
         int finish = 0;
@@ -7775,7 +7531,7 @@ read_locked_live_descriptor_for_publication_pg(
             state.connect = SPI_connect();
             if (state.connect != SPI_OK_CONNECT) return;
             state.execute = SPI_execute_with_args(
-                sql.data(), static_cast<int>(types.size()), types.data(),
+                k_select_sql.data(), static_cast<int>(types.size()), types.data(),
                 arguments.data(), nullptr, false, 1);
             state.rows = SPI_processed;
             state.table = SPI_tuptable != nullptr;
@@ -7798,7 +7554,7 @@ read_locked_live_descriptor_for_publication_pg(
                 row.index_name = *DatumGetName(required(6));
                 row.query_key = DatumGetInt64(required(7));
                 row.generation_id = DatumGetInt64(required(8));
-                row.provider = DatumGetInt16(required(9));
+                row.storage_kind = DatumGetInt16(required(9));
                 Datum value = SPI_getbinval(
                     tuple, descriptor, 10, &row.payload_relation_oid_null);
                 if (!row.payload_relation_oid_null) {
@@ -7850,8 +7606,10 @@ read_locked_live_descriptor_for_publication_pg(
         || row.image_bytes
             < static_cast<std::int64_t>(
                 bioseq::indexing::k_minimizer_fragment_image_header_bytes)
-        || !bioseq::indexing::is_valid_minimizer_fragment_image_storage_kind(
-            static_cast<std::uint8_t>(row.provider))) {
+        || row.storage_kind
+            != static_cast<std::int16_t>(
+                bioseq::indexing::
+                    k_minimizer_fragment_image_relation_backed_storage_kind)) {
         minimizer_generation_storage_error_as_cpp(
             "descriptor publication LIVE row scalar shape is invalid");
     }
@@ -7864,8 +7622,6 @@ read_locked_live_descriptor_for_publication_pg(
         .index_name = NameStr(row.index_name),
         .query_key = static_cast<std::uint64_t>(row.query_key),
         .generation_id = static_cast<std::uint64_t>(row.generation_id),
-        .provider = static_cast<bioseq::indexing::minimizer_fragment_image_storage_kind>(
-            row.provider),
         .payload_relation_oid = row.payload_relation_oid_null
             ? std::nullopt
             : std::optional<Oid>{row.payload_relation_oid},
@@ -7891,7 +7647,7 @@ read_locked_live_descriptor_for_publication_pg(
         .state = static_cast<minimizer_generation_storage_state>(row.state),
     };
     if (!exact_storage_descriptor_identity(result, identity, query_key)
-        || !exact_storage_descriptor_provider_shape(result)
+        || !has_exact_storage_descriptor_relation_shape(result)
         || result.state != minimizer_generation_storage_state::live
         || result.retire_full_xid) {
         minimizer_generation_storage_error_as_cpp(
@@ -7914,7 +7670,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
                 *new_live, identity, query_key)
             || new_live->state != minimizer_generation_storage_state::live
             || new_live->retire_full_xid
-            || !exact_storage_descriptor_provider_shape(*new_live)
+            || !has_exact_storage_descriptor_relation_shape(*new_live)
             || !bioseq::indexing::sql_bigint_can_represent(
                 new_live->generation_id)
             || !bioseq::indexing::sql_bigint_can_represent(
@@ -7951,7 +7707,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
                     [] { return GetTopFullTransactionId(); }))
             : FullTransactionIdGetDatum(InvalidFullTransactionId),
     };
-    static constexpr std::string_view update_sql{
+    static constexpr std::string_view k_update_sql{
         "UPDATE bioseq_internal.minimizer_generation_storage "
         "SET retire_full_xid=$9, state=smallint '2' "
         "WHERE database_oid=$1 AND tablespace_oid=$2 "
@@ -7960,13 +7716,13 @@ inline void apply_minimizer_generation_storage_transition_pg(
         "AND generation_id=$8 AND state=smallint '1' "
         "AND retire_full_xid IS NULL"};
 
-    std::array<Oid, kStorageDescriptorAttributeCount> insert_types{
+    std::array<Oid, k_storage_descriptor_attribute_count> insert_types{
         OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID,
         INT8OID, INT8OID, INT2OID,
         OIDOID, OIDOID, OIDOID, OIDOID, NAMEOID,
         INT8OID, INT8OID, XID8OID, INT2OID};
-    std::array<Datum, kStorageDescriptorAttributeCount> insert_arguments{};
-    std::array<char, kStorageDescriptorAttributeCount> insert_nulls{};
+    std::array<Datum, k_storage_descriptor_attribute_count> insert_arguments{};
+    std::array<char, k_storage_descriptor_attribute_count> insert_nulls{};
     if (new_live) {
         insert_arguments = {
             ObjectIdGetDatum(new_live->database_oid),
@@ -7978,7 +7734,9 @@ inline void apply_minimizer_generation_storage_transition_pg(
             Int64GetDatum(static_cast<std::int64_t>(new_live->query_key)),
             Int64GetDatum(static_cast<std::int64_t>(
                 new_live->generation_id)),
-            Int16GetDatum(static_cast<std::int16_t>(new_live->provider)),
+            Int16GetDatum(static_cast<std::int16_t>(
+                bioseq::indexing::
+                    k_minimizer_fragment_image_relation_backed_storage_kind)),
             new_live->payload_relation_oid
                 ? ObjectIdGetDatum(*new_live->payload_relation_oid) : 0,
             new_live->payload_database_oid
@@ -8011,7 +7769,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
         }
         insert_nulls[16] = 'n';
     }
-    static constexpr std::string_view insert_sql{
+    static constexpr std::string_view k_insert_sql{
         "INSERT INTO bioseq_internal.minimizer_generation_storage "
         "(database_oid,tablespace_oid,main_relfilenode,user_relid,"
         "column_attno,index_name,query_key,generation_id,provider,"
@@ -8020,7 +7778,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
         "header_checksum,retire_full_xid,state) VALUES "
         "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,"
         "$17,$18)"};
-    struct State {
+    struct operation_state {
         int connect = 0;
         int update = 0;
         int insert = 0;
@@ -8036,7 +7794,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
             if (state.connect != SPI_OK_CONNECT) return;
             if (old_live) {
                 state.update = SPI_execute_with_args(
-                    update_sql.data(), static_cast<int>(update_types.size()),
+                    k_update_sql.data(), static_cast<int>(update_types.size()),
                     update_types.data(), update_arguments.data(), nullptr,
                     false, 0);
                 state.updated = SPI_processed;
@@ -8047,7 +7805,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
             }
             if (new_live) {
                 state.insert = SPI_execute_with_args(
-                    insert_sql.data(), static_cast<int>(insert_types.size()),
+                    k_insert_sql.data(), static_cast<int>(insert_types.size()),
                     insert_types.data(), insert_arguments.data(),
                     insert_nulls.data(), false, 0);
                 state.inserted = SPI_processed;
@@ -8068,7 +7826,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
     }
 }
 
-/// Consume the private complete-reread proof and publish its head atomically.
+/// Consume the private complete-reread authorization and publish its head atomically.
 /// There is no public overload that accepts an arbitrary relation/generation.
 [[nodiscard]] inline ready_minimizer_generation_published_head_receipt
 publish_ready_minimizer_generation_head_pg(
@@ -8076,13 +7834,13 @@ publish_ready_minimizer_generation_head_pg(
     const auto minimizer_generation_storage_error = [](std::string_view message) {
         minimizer_generation_storage_error_as_cpp(message);
     };
-    struct PublicationState {
+    struct publication_state {
         Relation relation = nullptr;
         Relation descriptor_relation = nullptr;
         bytea* blob = nullptr;
         std::string sql;
     };
-    auto* publication = new PublicationState{};
+    auto* publication = new publication_state{};
     std::array<std::byte, minimizer_generation_head::encoded_bytes>
         returned_head_bytes{};
     std::array<std::byte, minimizer_generation_head::encoded_bytes>
@@ -8157,8 +7915,8 @@ publish_ready_minimizer_generation_head_pg(
             || decoded_token_head->source_identity != token.source_identity_
             || decoded_token_head->source_content_checksum
                 != token.source_content_checksum_
-            || decoded_token_head->compatibility_checksum
-                != token.compatibility_checksum_
+            || decoded_token_head->storage_contract_checksum
+                != token.storage_contract_checksum_
             || token.head_row_checksum_
                 != bioseq::indexing::crc64_index_chunk_row(
                     0, -1, k_generation_head_sub_key, 0,
@@ -8193,7 +7951,7 @@ publish_ready_minimizer_generation_head_pg(
                 grouped_soa_segment_local;
         if (!fragment_index && token.file_receipt_) {
             minimizer_generation_storage_error(
-                "non-MPF generation carried an minimizer fragment image file receipt");
+                "non-fragment generation carried a minimizer fragment image file receipt");
         }
         if (fragment_index) {
             const Oid descriptor_oid =
@@ -8237,8 +7995,6 @@ publish_ready_minimizer_generation_head_pg(
                     "active head and LIVE generation descriptor disagree");
             }
             if (old_live
-                && old_live->provider
-                    == bioseq::indexing::minimizer_fragment_image_storage_kind::postgres_relation
                 && (old_live->payload_relation_oid
                         != std::optional<Oid>{token.sidecar_relation_oid_}
                     || old_live->payload_database_oid
@@ -8253,18 +8009,16 @@ publish_ready_minimizer_generation_head_pg(
                         != std::optional<std::string>{
                             token.identity_.table_name})) {
                 minimizer_generation_storage_error(
-                    "old relation-provider descriptor locator changed");
+                    "previous relation-backed descriptor locator changed");
             }
             if (new_grouped_soa != token.file_receipt_.has_value()) {
                 minimizer_generation_storage_error(
-                    "new MPF grouped-SoA head and file receipt disagree");
+                    "new minimizer-fragment grouped-SoA head and file receipt disagree");
             }
             std::optional<minimizer_generation_storage_descriptor> new_live;
             if (token.file_receipt_) {
                 const minimizer_fragment_image_file_receipt& file = *token.file_receipt_;
-                if (!bioseq::indexing::is_valid_minimizer_fragment_image_storage_kind(
-                        static_cast<std::uint8_t>(file.provider))
-                    || file.file_bytes
+                if (file.file_bytes
                         < bioseq::indexing::k_minimizer_fragment_image_header_bytes
                     || !bioseq::indexing::sql_bigint_can_represent(
                         file.file_bytes)) {
@@ -8280,35 +8034,16 @@ publish_ready_minimizer_generation_head_pg(
                     .index_name = token.identity_.index_name,
                     .query_key = token.query_key_,
                     .generation_id = token.generation_id_,
-                    .provider = file.provider,
-                    .payload_relation_oid = file.provider
-                            == bioseq::indexing::minimizer_fragment_image_storage_kind::
-                                postgres_relation
-                        ? std::optional<Oid>{token.sidecar_relation_oid_}
-                        : std::nullopt,
-                    .payload_database_oid = file.provider
-                            == bioseq::indexing::minimizer_fragment_image_storage_kind::
-                                postgres_relation
-                        ? std::optional<Oid>{token.sidecar_locator_.dbOid}
-                        : std::nullopt,
-                    .payload_tablespace_oid = file.provider
-                            == bioseq::indexing::minimizer_fragment_image_storage_kind::
-                                postgres_relation
-                        ? std::optional<Oid>{token.sidecar_locator_.spcOid}
-                        : std::nullopt,
-                    .payload_relfilenode = file.provider
-                            == bioseq::indexing::minimizer_fragment_image_storage_kind::
-                                postgres_relation
-                        ? std::optional<Oid>{
-                            static_cast<Oid>(
-                                token.sidecar_locator_.relNumber)}
-                        : std::nullopt,
-                    .payload_relation_name = file.provider
-                            == bioseq::indexing::minimizer_fragment_image_storage_kind::
-                                postgres_relation
-                        ? std::optional<std::string>{
-                            token.identity_.table_name}
-                        : std::nullopt,
+                    .payload_relation_oid =
+                        std::optional<Oid>{token.sidecar_relation_oid_},
+                    .payload_database_oid =
+                        std::optional<Oid>{token.sidecar_locator_.dbOid},
+                    .payload_tablespace_oid =
+                        std::optional<Oid>{token.sidecar_locator_.spcOid},
+                    .payload_relfilenode = std::optional<Oid>{
+                        static_cast<Oid>(token.sidecar_locator_.relNumber)},
+                    .payload_relation_name = std::optional<std::string>{
+                        token.identity_.table_name},
                     .image_bytes = file.file_bytes,
                     .header_checksum = file.header_crc64,
                     .retire_full_xid = std::nullopt,
@@ -8354,7 +8089,7 @@ publish_ready_minimizer_generation_head_pg(
         "chunk_bytes=EXCLUDED.chunk_bytes, checksum=EXCLUDED.checksum "
         "RETURNING blob",
         quoted_table);
-        struct PublishSpiState {
+        struct publish_spi_state {
             int connect_status = 0;
             int execute_status = 0;
             int finish_status = 0;
@@ -8438,7 +8173,7 @@ publish_ready_minimizer_generation_head_pg(
                 token.head_bytes_, returned_head_bytes)
             || *returned_head != *decoded_token_head) {
             minimizer_generation_storage_error(
-                "READY publication did not return the byte-exact proven head");
+                "READY publication did not return the byte-exact validated head");
         }
         std::optional<std::uint64_t> replaced_generation_id;
         if (previous_present) {
@@ -8512,9 +8247,9 @@ struct minimizer_generation_payload_stage_read_stats {
     index_chunk_read_stats read{};
 };
 
-/// Proof counters for the full-generation relation-scan route.  Unlike the
+/// Authorization counters for the full-generation relation-scan route.  Unlike the
 /// selected-range reader, this route consumes every payload row through one
-/// ordered primary-index scan after metadata/source attestation has completed.
+/// ordered primary-index scan after metadata/source authorization has completed.
 struct minimizer_generation_full_payload_read_stats {
     std::uint64_t scan_calls = 0;
     std::uint64_t planned_extents = 0;
@@ -8526,16 +8261,16 @@ struct minimizer_generation_full_payload_read_stats {
     std::uint64_t payload_row_checksum = 0;
 };
 
-/// Compact Format-6-specific evidence nested under the existing generation
+/// Compact hash-major-specific stats nested under the existing generation
 /// read receipt. It carries only correctness/performance gates that cannot be
-/// reconstructed from the legacy control/position extent fields.
+/// reconstructed from the control/position extent fields.
 struct hash_major_minimizer_cold_read_stats {
-    std::uint64_t format_revision = 0;
+    std::uint64_t layout_revision = 0;
     std::uint64_t sessions = 0;
     std::uint64_t generation_id = 0;
     std::array<std::byte, 16> source_identity{};
     std::uint64_t source_content_crc64 = 0;
-    std::array<std::byte, 32> compatibility_digest{};
+    std::array<std::byte, 32> storage_contract_digest{};
     std::uint64_t directory_rows = 0;
     std::uint64_t directory_bytes = 0;
     std::uint64_t control_rows = 0;
@@ -8626,16 +8361,16 @@ enum class minimizer_generation_snapshot_registration : std::uint8_t {
     borrow_registered,
 };
 
-/// Inactive revision-3 target session. It binds one fresh heap OID, its exact
+/// Current-generation target session. It binds one fresh heap OID, its exact
 /// five-key primary index, one executor-owned data snapshot, and one query key
 /// for the complete head -> metadata -> controls -> positions -> finish
-/// lifecycle. Both payload phases retain the same open relations and snapshot.
+/// lifecycle. Both payload sections retain the same open relations and snapshot.
 class index_storage_fragment_generation_read_session {
 private:
-    enum class State : std::uint8_t {
+    enum class operation_state : std::uint8_t {
         opened,
         head_read,
-        metadata_unattested,
+        metadata_pending_source,
         metadata_ready,
         controls_planned,
         controls_complete,
@@ -8647,16 +8382,16 @@ private:
         moved,
     };
 
-    enum class PayloadPhase : std::uint8_t {
+    enum class payload_section : std::uint8_t {
         controls,
         positions,
     };
 
     static constexpr std::uint64_t k_ordered_range_scan_penalty_rows = 8u;
 
-    using LoadedRow = minimizer_generation_loaded_row;
+    using loaded_row_type = minimizer_generation_loaded_row;
 
-    struct PlannedGroup {
+    struct planned_group {
         index_sub_key_range range{};
         std::vector<index_sub_key_request> requests;
         std::size_t first_directory_ordinal = 0;
@@ -8666,7 +8401,7 @@ private:
         bool executed = false;
     };
 
-    struct RuntimeRequest {
+    struct runtime_request {
         index_sub_key_request request{};
         std::uint64_t end_chunk_no = 0;
         std::uint64_t next_chunk_no = 0;
@@ -8689,8 +8424,8 @@ private:
     Oid expected_tablespace_oid_ = InvalidOid;
     expected_minimizer_generation_identity expected_{};
     grouped_soa_minimizer_profile expected_profile_{};
-    State state_ = State::opened;
-    bool catalog_source_attested_ = false;
+    operation_state state_ = operation_state::opened;
+    bool catalog_source_authorized_ = false;
     // Permits precede every allocation they cover, so reverse member
     // destruction cannot return admitted bytes while an owned view/buffer is
     // still alive.
@@ -8702,8 +8437,8 @@ private:
     std::optional<minimizer_generation_read_metadata> metadata_;
     std::optional<minimizer_generation_manifest> manifest_only_;
     std::vector<std::byte> directory_bytes_scratch_;
-    std::vector<PlannedGroup> planned_groups_;
-    std::vector<RuntimeRequest> runtime_requests_;
+    std::vector<planned_group> planned_groups_;
+    std::vector<runtime_request> runtime_requests_;
     std::vector<std::uint32_t> authorized_position_ordinals_;
     std::size_t next_group_ = 0;
     std::optional<std::uint64_t> previous_payload_heap_block_;
@@ -8723,7 +8458,7 @@ private:
     }
 
     [[noreturn]] void fail_(std::string_view message) {
-        state_ = State::failed;
+        state_ = operation_state::failed;
         minimizer_generation_storage_error_as_cpp(message);
     }
 
@@ -8772,7 +8507,7 @@ private:
 
     /// Record one truthful coarse wall interval for the complete payload
     /// scan-and-callback stage. Decode and transfer remain explicitly
-    /// unavailable (zero) until their owning phases expose coarse boundaries;
+    /// unavailable (zero) until their owning sections expose coarse boundaries;
     /// no tuple/chunk-local clock reads are permitted on the cold path.
     void finalize_payload_timing_() noexcept {
         if (!payload_stage_begin_ns_) return;
@@ -8781,7 +8516,7 @@ private:
             end_ns >= *payload_stage_begin_ns_
                 ? end_ns - *payload_stage_begin_ns_ : 0;
         const std::uint64_t total_ns = std::min(
-            raw_total_ns, cold_index_preparation_stats::sql_bigint_max);
+            raw_total_ns, cold_index_preparation_stats::k_sql_bigint_max);
         if (raw_total_ns != total_ns) {
             stats_.cold.are_stats_saturated = true;
         }
@@ -8792,8 +8527,8 @@ private:
     void release_owned_state_() noexcept {
         // Free/reset every covered allocation before returning admission.
         std::vector<std::byte>{}.swap(directory_bytes_scratch_);
-        std::vector<PlannedGroup>{}.swap(planned_groups_);
-        std::vector<RuntimeRequest>{}.swap(runtime_requests_);
+        std::vector<planned_group>{}.swap(planned_groups_);
+        std::vector<runtime_request>{}.swap(runtime_requests_);
         std::vector<std::uint32_t>{}.swap(authorized_position_ordinals_);
         metadata_.reset();
         manifest_only_.reset();
@@ -8804,8 +8539,8 @@ private:
         metadata_permit_.release();
     }
 
-    void release_phase_plan_() noexcept {
-        std::vector<PlannedGroup>{}.swap(planned_groups_);
+    void release_section_plan_() noexcept {
+        std::vector<planned_group>{}.swap(planned_groups_);
         next_group_ = 0;
         plan_permit_.release();
     }
@@ -8911,16 +8646,16 @@ private:
             stats, index_chunk_read_stats{}, index_chunk_read_stats{});
     }
 
-    [[nodiscard]] static constexpr bool phase_stats_are_zero_(
-            const minimizer_generation_payload_stage_read_stats& phase) noexcept {
-        return phase.plan_calls == 0u
-            && phase.planned_request_groups == 0u
-            && phase.executed_request_groups == 0u
-            && phase.range_scan_calls == 0u
-            && phase.physical_heap_rows_read == 0u
-            && phase.physical_bytes_read == 0u
-            && phase.control_authorization_checks == 0u
-            && read_stats_are_zero_(phase.read);
+    [[nodiscard]] static constexpr bool section_stats_are_zero_(
+            const minimizer_generation_payload_stage_read_stats& section) noexcept {
+        return section.plan_calls == 0u
+            && section.planned_request_groups == 0u
+            && section.executed_request_groups == 0u
+            && section.range_scan_calls == 0u
+            && section.physical_heap_rows_read == 0u
+            && section.physical_bytes_read == 0u
+            && section.control_authorization_checks == 0u
+            && read_stats_are_zero_(section.read);
     }
 
     [[nodiscard]] static constexpr bool full_payload_stats_are_zero_(
@@ -8935,27 +8670,27 @@ private:
             && full.payload_row_checksum == 0u;
     }
 
-    [[nodiscard]] static constexpr bool phase_equations_hold_(
-            const minimizer_generation_payload_stage_read_stats& phase) noexcept {
-        return phase.plan_calls == 1
-            && phase.planned_request_groups
-                == phase.executed_request_groups
-            && phase.executed_request_groups == phase.range_scan_calls
-            && phase.read.relation_opens == 0
-            && phase.read.index_scans == phase.range_scan_calls
-            && phase.read.requested_ranges == phase.range_scan_calls
-            && phase.read.heap_rows_read == phase.physical_heap_rows_read
-            && phase.read.heap_rows_read
-                == phase.read.delivered_chunks + phase.read.skipped_rows
-            && phase.read.toast_values_read == 0
-            && phase.read.detoast_bytes == 0
-            && phase.read.explicit_copy_bytes == 0
-            && phase.read.wanted_subkeys == phase.read.read_subkeys
-            && phase.read.wanted_extents == phase.read.read_extents
-            && phase.read.wanted_chunks == phase.read.delivered_chunks
-            && phase.read.skipped_rows == phase.read.skip_budget_rows
-            && phase.read.repeated_chunk_reads == 0
-            && phase.physical_bytes_read >= phase.read.delivered_bytes;
+    [[nodiscard]] static constexpr bool section_equations_hold_(
+            const minimizer_generation_payload_stage_read_stats& section) noexcept {
+        return section.plan_calls == 1
+            && section.planned_request_groups
+                == section.executed_request_groups
+            && section.executed_request_groups == section.range_scan_calls
+            && section.read.relation_opens == 0
+            && section.read.index_scans == section.range_scan_calls
+            && section.read.requested_ranges == section.range_scan_calls
+            && section.read.heap_rows_read == section.physical_heap_rows_read
+            && section.read.heap_rows_read
+                == section.read.delivered_chunks + section.read.skipped_rows
+            && section.read.toast_values_read == 0
+            && section.read.detoast_bytes == 0
+            && section.read.explicit_copy_bytes == 0
+            && section.read.wanted_subkeys == section.read.read_subkeys
+            && section.read.wanted_extents == section.read.read_extents
+            && section.read.wanted_chunks == section.read.delivered_chunks
+            && section.read.skipped_rows == section.read.skip_budget_rows
+            && section.read.repeated_chunk_reads == 0
+            && section.physical_bytes_read >= section.read.delivered_bytes;
     }
 
     /// Allocate every auxiliary BufferHeapTuple slot before the batch reader
@@ -9063,7 +8798,7 @@ private:
                 stats_.cold, stats_.cold.close_ns, close_begin_ns);
             add_cold_index_buffer_usage(stats_.cold, close_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         }
@@ -9075,7 +8810,7 @@ private:
     /// stack, never from a destructor during C++ unwinding.
     [[noreturn]] void cleanup_failed_session_and_rethrow_() {
         std::exception_ptr original_error = std::current_exception();
-        state_ = State::failed;
+        state_ = operation_state::failed;
         try {
             close_relations_checked_();
         } catch (...) {
@@ -9087,7 +8822,7 @@ private:
         std::rethrow_exception(original_error);
     }
 
-    struct ProjectedExtentRange {
+    struct projected_extent_range {
         index_sub_key_t logical_begin = 0;
         index_sub_key_t logical_end = 0;
         bool position_extent = false;
@@ -9096,21 +8831,21 @@ private:
     /// Project one physical range onto the logical/control directory key
     /// namespace. A range may cover controls or positions, never cross the
     /// namespace boundary.
-    [[nodiscard]] static std::optional<ProjectedExtentRange>
+    [[nodiscard]] static std::optional<projected_extent_range>
     project_extent_range_(const index_sub_key_range& range) noexcept {
         if (range.begin < 0 || range.begin >= range.end
             || range.end > k_temporary_run_sub_key_base) {
             return std::nullopt;
         }
         if (range.end <= k_position_extent_sub_key_base) {
-            return ProjectedExtentRange{
+            return projected_extent_range{
                 .logical_begin = range.begin,
                 .logical_end = range.end,
                 .position_extent = false,
             };
         }
         if (range.begin >= k_position_extent_sub_key_base) {
-            return ProjectedExtentRange{
+            return projected_extent_range{
                 .logical_begin = range.begin - k_position_extent_sub_key_base,
                 .logical_end = range.end - k_position_extent_sub_key_base,
                 .position_extent = true,
@@ -9199,7 +8934,7 @@ public:
                     minimizer_generation_encoding_error>{
                         std::unexpected(
                             minimizer_generation_encoding_error::
-                                compatibility_mismatch)};
+                                storage_contract_mismatch)};
             const bool supported_storage_width =
                 expected_.storage_unit_byte_width == 1u
                 || expected_.storage_unit_byte_width == 2u
@@ -9217,7 +8952,7 @@ public:
                 || expected_.gpu_abi_revision
                     != expected_profile->gpu_abi_revision) {
                 minimizer_generation_storage_error(
-                    "generation read expected minimizer compatibility is invalid");
+                    "generation read expected minimizer storage contract is invalid");
             }
             expected_profile_ = *expected_profile;
             if (snapshot_registration
@@ -9236,7 +8971,7 @@ public:
                 throw minimizer_generation_relation_open_failure{
                     .inspection = {
                         .kind = minimizer_generation_relation_kind::missing,
-                        .revision3_error = minimizer_generation_schema_error::none,
+                        .schema_error = minimizer_generation_schema_error::none,
                     },
                 };
             }
@@ -9254,13 +8989,13 @@ public:
                 throw minimizer_generation_relation_open_failure{
                     .inspection = {
                         .kind = minimizer_generation_relation_kind::missing,
-                        .revision3_error = minimizer_generation_schema_error::none,
+                        .schema_error = minimizer_generation_schema_error::none,
                     },
                 };
             }
             if (heap_relation_ == nullptr) {
                 minimizer_generation_storage_error(
-                    "revision-3 generation relation is missing or renamed");
+                    "generation relation is missing or renamed");
             }
             const bool relation_identity_exact =
                 RelationGetNamespace(heap_relation_) == bioseq_internal_ns()
@@ -9295,13 +9030,6 @@ public:
             stats_.cold.add(stats_.cold.sidecar_schema_validations, 1);
             if (!schema) {
                 if (!classification_index_name.empty()) {
-                    const bool legacy_exact = relation_identity_exact
-                        && primary_index_relation_ != nullptr
-                        && bioseq::postgres::support::invoke_pg_as_cpp([&] {
-                            return inspect_bound_exact_legacy_minimizer_index_schema(
-                                heap_relation_, primary_index_relation_,
-                                classification_index_name);
-                        });
                     if (primary_index_relation_ != nullptr) {
                         Relation finished_index = std::exchange(
                             primary_index_relation_, nullptr);
@@ -9326,10 +9054,8 @@ public:
                     }
                     throw minimizer_generation_relation_open_failure{
                         .inspection = {
-                            .kind = legacy_exact
-                                ? minimizer_generation_relation_kind::legacy_exact
-                                : minimizer_generation_relation_kind::malformed,
-                            .revision3_error = schema.error,
+                            .kind = minimizer_generation_relation_kind::malformed,
+                            .schema_error = schema.error,
                         },
                     };
                 }
@@ -9343,7 +9069,7 @@ public:
                 stats_.cold, stats_.cold.bind_ns, bind_begin_ns);
             add_cold_index_buffer_usage(stats_.cold, bind_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         }
@@ -9375,7 +9101,7 @@ public:
           expected_(other.expected_),
           expected_profile_(other.expected_profile_),
           state_(other.state_),
-          catalog_source_attested_(other.catalog_source_attested_),
+          catalog_source_authorized_(other.catalog_source_authorized_),
           metadata_permit_(std::move(other.metadata_permit_)),
           plan_permit_(std::move(other.plan_permit_)),
           runtime_permit_(std::move(other.runtime_permit_)),
@@ -9395,7 +9121,7 @@ public:
           payload_stage_begin_ns_(other.payload_stage_begin_ns_),
           stats_(other.stats_) {
         other.full_generation_batch_slots_.fill(nullptr);
-        other.state_ = State::moved;
+        other.state_ = operation_state::moved;
     }
     index_storage_fragment_generation_read_session& operator=(
         index_storage_fragment_generation_read_session&&) = delete;
@@ -9410,7 +9136,7 @@ private:
         const std::uint64_t head_begin_ns = cold_index_now_ns();
         const BufferUsage head_buffer_begin = pgBufferUsage;
         try {
-            if (state_ != State::opened) {
+            if (state_ != operation_state::opened) {
                 checked_add_(stats_.metadata_repeated_reads, 1,
                     "repeated metadata counter overflow");
                 fail_("active generation head was read more than once or out of order");
@@ -9444,7 +9170,7 @@ private:
             if (!HeapTupleIsValid(tuple)) {
                 fail_("active generation head is missing");
             }
-            LoadedRow row =
+            loaded_row_type row =
                 load_minimizer_generation_row_or_error(heap_relation_, tuple);
             std::array<std::byte, minimizer_generation_head::encoded_bytes> bytes{};
             if (row.query_key != query_key_
@@ -9479,7 +9205,7 @@ private:
             }
             result = *decoded;
             head_ = result;
-            state_ = State::head_read;
+            state_ = operation_state::head_read;
             stats_.head_scans = 1;
             stats_.cold.head_scans = 1;
             stats_.head_rows_read = 1;
@@ -9490,7 +9216,7 @@ private:
                 stats_.cold, stats_.cold.head_ns, head_begin_ns);
             add_cold_index_buffer_usage(stats_.cold, head_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         }
@@ -9527,7 +9253,7 @@ public:
         const std::uint64_t manifest_begin_ns = cold_index_now_ns();
         const BufferUsage manifest_buffer_begin = pgBufferUsage;
         try {
-            if (state_ != State::head_read || !head_
+            if (state_ != operation_state::head_read || !head_
                 || expected_head != *head_ || metadata_ || manifest_only_
                 || expected_head.layout
                     != bioseq::indexing::minimizer_generation_layout::
@@ -9569,12 +9295,12 @@ public:
             if (!HeapTupleIsValid(tuple)) {
                 fail_("READY generation manifest is missing");
             }
-            LoadedRow manifest_row =
+            loaded_row_type manifest_row =
                 load_minimizer_generation_row_or_error(heap_relation_, tuple);
             std::array<std::byte,
                 minimizer_generation_manifest::encoded_bytes>
                 manifest_bytes{};
-            constexpr std::size_t expected_manifest_bytes =
+            constexpr std::size_t k_expected_manifest_bytes =
                 minimizer_generation_manifest::encoded_bytes;
             if (manifest_row.query_key != query_key_
                 || manifest_row.address != index_chunk_address{
@@ -9583,7 +9309,7 @@ public:
                     .sub_key = k_directory_sub_key,
                     .chunk_no = 0,
                 }
-                || manifest_row.bytes.size() != expected_manifest_bytes) {
+                || manifest_row.bytes.size() != k_expected_manifest_bytes) {
                 manifest_row.release();
                 fail_("READY generation manifest row shape disagrees");
             }
@@ -9615,10 +9341,10 @@ public:
                 || bioseq::indexing::crc64_ecma182(encoded_manifest)
                     != expected_head.manifest_checksum
                 || bioseq::indexing::
-                    minimizer_generation_compatibility_checksum(*manifest)
-                    != expected_head.compatibility_checksum
+                    compute_minimizer_generation_storage_contract_checksum(*manifest)
+                    != expected_head.storage_contract_checksum
                 || !bioseq::indexing::
-                    validate_minimizer_generation_compatibility(
+                    validate_minimizer_generation_storage_contract(
                         *manifest, expected_)) {
                 fail_("READY generation manifest/head binding disagrees");
             }
@@ -9654,21 +9380,21 @@ public:
 
             expected_profile_ = *manifest_profile;
             manifest_only_.emplace(*manifest);
-            state_ = State::metadata_unattested;
+            state_ = operation_state::metadata_pending_source;
             stats_.manifest_directory_scans = 1u;
             stats_.cold.directory_scans = 1u;
             stats_.manifest_rows_read = 1u;
-            stats_.manifest_bytes_read = expected_manifest_bytes;
+            stats_.manifest_bytes_read = k_expected_manifest_bytes;
             stats_.directory_chunks_read = 0u;
             stats_.directory_bytes_read = 0u;
             stats_.metadata_heap_rows_read = 2u;
             stats_.metadata_bytes_read =
                 minimizer_generation_head::encoded_bytes
-                + expected_manifest_bytes;
+                + k_expected_manifest_bytes;
             checked_add_(stats_.index_scans, 1u,
                 "metadata index scan count overflow");
             checked_add_(stats_.explicit_copy_bytes,
-                expected_manifest_bytes,
+                k_expected_manifest_bytes,
                 "metadata copy byte count overflow");
             add_cold_index_elapsed(
                 stats_.cold, stats_.cold.directory_ns,
@@ -9676,7 +9402,7 @@ public:
             add_cold_index_buffer_usage(
                 stats_.cold, manifest_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         }
@@ -9688,7 +9414,7 @@ public:
         const std::uint64_t directory_begin_ns = cold_index_now_ns();
         const BufferUsage directory_buffer_begin = pgBufferUsage;
         try {
-        if (state_ != State::head_read || !head_
+        if (state_ != operation_state::head_read || !head_
             || expected_head != *head_ || metadata_ || manifest_only_) {
             checked_add_(stats_.metadata_repeated_reads, 1,
                 "repeated metadata counter overflow");
@@ -9722,7 +9448,7 @@ public:
         if (!HeapTupleIsValid(tuple)) {
             fail_("READY generation manifest is missing");
         }
-        LoadedRow manifest_row =
+        loaded_row_type manifest_row =
             load_minimizer_generation_row_or_error(heap_relation_, tuple);
         std::array<std::byte,
             minimizer_generation_manifest::encoded_bytes>
@@ -9755,9 +9481,9 @@ public:
                 > (std::numeric_limits<std::size_t>::max)()) {
             fail_("READY generation manifest fixed wire disagrees");
         }
-        if (!bioseq::indexing::validate_minimizer_generation_compatibility(
+        if (!bioseq::indexing::validate_minimizer_generation_storage_contract(
                 *manifest, expected_)) {
-            fail_("READY generation minimizer compatibility disagrees");
+            fail_("READY generation minimizer storage contract disagrees");
         }
         const auto manifest_profile =
             bioseq::indexing::derive_grouped_soa_minimizer_profile(
@@ -9846,7 +9572,7 @@ public:
             if (!HeapTupleIsValid(tuple)) {
                 fail_("READY generation directory has missing chunks");
             }
-            LoadedRow directory_row =
+            loaded_row_type directory_row =
                 load_minimizer_generation_row_or_error(heap_relation_, tuple);
             const std::uint64_t offset =
                 static_cast<std::uint64_t>(chunk_no - 1u)
@@ -9925,7 +9651,7 @@ public:
             k_ordered_range_scan_penalty_rows);
         metadata_permit_.shrink_to(
             metadata_->directory.owned_capacity_bytes());
-        state_ = State::metadata_unattested;
+        state_ = operation_state::metadata_pending_source;
         stats_.manifest_directory_scans = 1;
         stats_.cold.directory_scans = 1;
         stats_.manifest_rows_read = 1;
@@ -9950,7 +9676,7 @@ public:
             directory_begin_ns);
         add_cold_index_buffer_usage(stats_.cold, directory_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         }
@@ -9959,125 +9685,127 @@ public:
 
     /// Bind metadata to an independently reopened source row. This is the only
     /// transition to metadata_ready: source identity alone is insufficient.
-    void validate_full_source_attestation(
-            minimizer_generation_source_proof&& proof) {
+    void consume_full_source_authorization(
+            minimizer_generation_source_authorization&& authorization) {
         try {
             const minimizer_generation_manifest* const manifest =
                 active_manifest_();
-            if (state_ != State::metadata_unattested
+            if (state_ != operation_state::metadata_pending_source
                 || !head_ || manifest == nullptr) {
-                proof.invalidate_();
-                fail_("READY source proof was consumed out of order");
+                authorization.invalidate_();
+                fail_("READY source authorization was consumed out of order");
             }
-            if (!proof.valid_
-                || proof.snapshot_ != snapshot_
-                || proof.database_oid_ != MyDatabaseId
-                || proof.source_.sequence_rowno != query_key_
-                || proof.table_name_ != table_name_) {
-                proof.invalidate_();
-                fail_("READY source proof relation/query/snapshot binding disagrees");
+            if (!authorization.valid_
+                || authorization.snapshot_ != snapshot_
+                || authorization.database_oid_ != MyDatabaseId
+                || authorization.source_.sequence_rowno != query_key_
+                || authorization.table_name_ != table_name_) {
+                authorization.invalidate_();
+                fail_("READY source authorization relation/query/snapshot binding disagrees");
             }
-            const std::uint64_t compatibility_checksum =
-                bioseq::indexing::minimizer_generation_compatibility_checksum(
+            const std::uint64_t storage_contract_checksum =
+                bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                     *manifest);
-            proof.source_.compatibility_checksum = compatibility_checksum;
+            authorization.source_.storage_contract_checksum =
+                storage_contract_checksum;
             const std::uint64_t source_identity = minimizer_generation_source_identity(
-                proof.main_relfilenode_, proof.source_);
+                authorization.main_relfilenode_, authorization.source_);
             const std::uint64_t source_content_checksum =
-                proof.source_content_checksum_;
+                authorization.source_content_checksum_;
             if (source_identity == 0
                 || manifest->alphabet_code
-                    != proof.source_.alphabet_code
+                    != authorization.source_.alphabet_code
                 || manifest->storage_unit_byte_width
-                    != proof.source_.storage_unit_byte_width
+                    != authorization.source_.storage_unit_byte_width
                 || manifest->target_length
-                    != proof.source_.locator.logical_length
+                    != authorization.source_.locator.logical_length
                 || head_->source_identity != source_identity
                 || manifest->source_identity != source_identity
                 || head_->source_content_checksum
                     != source_content_checksum
                 || manifest->source_content_checksum
                     != source_content_checksum
-                || head_->compatibility_checksum
-                    != compatibility_checksum
-                || bioseq::indexing::minimizer_generation_compatibility_checksum(
-                    *manifest) != compatibility_checksum) {
-                proof.invalidate_();
-                fail_("READY metadata/source attestation disagrees");
+                || head_->storage_contract_checksum
+                    != storage_contract_checksum
+                || bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
+                    *manifest) != storage_contract_checksum) {
+                authorization.invalidate_();
+                fail_("READY metadata/source authorization disagrees");
             }
-            proof.invalidate_();
-            catalog_source_attested_ = false;
-            state_ = State::metadata_ready;
+            authorization.invalidate_();
+            catalog_source_authorized_ = false;
+            state_ = operation_state::metadata_ready;
         } catch (...) {
-            proof.invalidate_();
-            state_ = State::failed;
+            authorization.invalidate_();
+            state_ = operation_state::failed;
             throw;
         }
     }
 
-    /// Timed cold-reader transition. Only the constant-work catalog proof is
-    /// accepted here; the full decoded proof has a separate, explicitly named
+    /// Timed cold-reader transition. Only the constant-work catalog authorization is
+    /// accepted here; the full decoded authorization has a separate, explicitly named
     /// untimed writer/admin transition above.
-    void validate_source_attestation(minimizer_generation_catalog_source_proof&& proof) {
+    void consume_source_authorization(minimizer_generation_catalog_source_authorization&& authorization) {
         try {
             const minimizer_generation_manifest* const manifest =
                 active_manifest_();
-            if (state_ != State::metadata_unattested
+            if (state_ != operation_state::metadata_pending_source
                 || !head_ || manifest == nullptr) {
-                proof.invalidate_();
-                fail_("READY catalog source proof was consumed out of order");
+                authorization.invalidate_();
+                fail_("READY catalog source authorization was consumed out of order");
             }
-            if (!proof.valid_
-                || !proof.counters_.timed_equation_holds()
-                || proof.snapshot_ != snapshot_
-                || proof.database_oid_ != MyDatabaseId
-                || proof.source_.sequence_rowno != query_key_
-                || proof.table_name_ != table_name_) {
-                proof.invalidate_();
-                fail_("READY catalog source proof binding/work equation disagrees");
+            if (!authorization.valid_
+                || !authorization.stats_.timed_equation_holds()
+                || authorization.snapshot_ != snapshot_
+                || authorization.database_oid_ != MyDatabaseId
+                || authorization.source_.sequence_rowno != query_key_
+                || authorization.table_name_ != table_name_) {
+                authorization.invalidate_();
+                fail_("READY catalog source authorization binding/work equation disagrees");
             }
-            const std::uint64_t compatibility_checksum =
-                bioseq::indexing::minimizer_generation_compatibility_checksum(
+            const std::uint64_t storage_contract_checksum =
+                bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                     *manifest);
-            proof.source_.compatibility_checksum = compatibility_checksum;
+            authorization.source_.storage_contract_checksum =
+                storage_contract_checksum;
             const std::uint64_t source_identity = minimizer_generation_source_identity(
-                proof.main_relfilenode_, proof.source_);
+                authorization.main_relfilenode_, authorization.source_);
             const std::uint64_t source_content_checksum =
-                proof.source_content_checksum_;
+                authorization.source_content_checksum_;
             if (source_identity == 0
                 || manifest->alphabet_code
-                    != proof.source_.alphabet_code
+                    != authorization.source_.alphabet_code
                 || manifest->storage_unit_byte_width
-                    != proof.source_.storage_unit_byte_width
+                    != authorization.source_.storage_unit_byte_width
                 || manifest->target_length
-                    != proof.source_.locator.logical_length
+                    != authorization.source_.locator.logical_length
                 || head_->source_identity != source_identity
                 || manifest->source_identity != source_identity
                 || head_->source_content_checksum
                     != source_content_checksum
                 || manifest->source_content_checksum
                     != source_content_checksum
-                || head_->compatibility_checksum
-                    != compatibility_checksum) {
-                proof.invalidate_();
-                fail_("READY metadata/catalog source attestation disagrees");
+                || head_->storage_contract_checksum
+                    != storage_contract_checksum) {
+                authorization.invalidate_();
+                fail_("READY metadata/catalog source authorization disagrees");
             }
-            stats_.source_parent_rows_read = proof.counters_.parent_rows_read;
-            stats_.source_catalog_rows_read = proof.counters_.catalog_rows_read;
+            stats_.source_parent_rows_read = authorization.stats_.parent_rows_read;
+            stats_.source_catalog_rows_read = authorization.stats_.catalog_rows_read;
             stats_.source_catalog_index_scans =
-                proof.counters_.catalog_index_scans;
+                authorization.stats_.catalog_index_scans;
             stats_.source_fragment_rows_read =
-                proof.counters_.fragment_rows_read;
-            stats_.source_decoded_bp = proof.counters_.decoded_bp;
+                authorization.stats_.fragment_rows_read;
+            stats_.source_decoded_bp = authorization.stats_.decoded_bp;
             stats_.source_storage_incarnations_checked =
-                proof.counters_.storage_incarnations_checked;
-            stats_.cold.merge(proof.cold_stats_);
-            proof.invalidate_();
-            catalog_source_attested_ = true;
-            state_ = State::metadata_ready;
+                authorization.stats_.storage_incarnations_checked;
+            stats_.cold.merge(authorization.cold_stats_);
+            authorization.invalidate_();
+            catalog_source_authorized_ = true;
+            state_ = operation_state::metadata_ready;
         } catch (...) {
-            proof.invalidate_();
-            state_ = State::failed;
+            authorization.invalidate_();
+            state_ = operation_state::failed;
             throw;
         }
     }
@@ -10093,8 +9821,8 @@ public:
         try {
             const minimizer_generation_manifest* const manifest =
                 active_manifest_();
-            if (state_ != State::metadata_ready
-                || !catalog_source_attested_ || !head_
+            if (state_ != operation_state::metadata_ready
+                || !catalog_source_authorized_ || !head_
                 || manifest == nullptr
                 || manifest->layout
                     != bioseq::indexing::minimizer_generation_layout::
@@ -10155,9 +9883,7 @@ public:
                     storage_descriptor_relation_,
                     storage_descriptor_live_index_relation_, snapshot_,
                     identity, query_key_, head_->generation_id);
-            if (descriptor.provider
-                    == bioseq::indexing::minimizer_fragment_image_storage_kind::postgres_relation
-                && (descriptor.payload_relation_oid
+            if (descriptor.payload_relation_oid
                         != std::optional<Oid>{RelationGetRelid(heap_relation_)}
                     || descriptor.payload_database_oid
                         != std::optional<Oid>{heap_relation_->rd_locator.dbOid}
@@ -10168,8 +9894,8 @@ public:
                             static_cast<Oid>(
                                 heap_relation_->rd_locator.relNumber)}
                     || descriptor.payload_relation_name
-                        != std::optional<std::string>{table_name_})) {
-                fail_("LIVE relation-provider descriptor locator disagrees");
+                        != std::optional<std::string>{table_name_}) {
+                fail_("LIVE relation-backed descriptor locator disagrees");
             }
             return descriptor;
         } catch (...) {
@@ -10180,7 +9906,7 @@ public:
 private:
     [[nodiscard]] minimizer_generation_read_stats
     finish_full_generation_() {
-        if (state_ != State::full_generation_payload_complete
+        if (state_ != operation_state::full_generation_payload_complete
             || !metadata_ || next_group_ != 0 || !planned_groups_.empty()
             || !runtime_requests_.empty() || plan_permit_ || runtime_permit_
             || control_authorization_permit_
@@ -10291,7 +10017,7 @@ private:
             || stats_.index_scans != expected_index_scans
             || stats_.cache_lookups != 0 || stats_.cache_populations != 0
             || stats_.toast_values_read != 0 || stats_.detoast_bytes != 0
-            || !catalog_source_attested_
+            || !catalog_source_authorized_
             || stats_.source_parent_rows_read != 1
             || stats_.source_catalog_rows_read != 1
             || stats_.source_catalog_index_scans != 1
@@ -10299,7 +10025,7 @@ private:
             || stats_.source_decoded_bp != 0
             || stats_.source_storage_incarnations_checked < 1
             || stats_.source_storage_incarnations_checked > 2) {
-            fail_("full-generation read proof equations disagree");
+            fail_("full-generation read authorization equations disagree");
         }
         stats_.total_heap_rows_read = 0;
         checked_add_(stats_.total_heap_rows_read,
@@ -10318,29 +10044,29 @@ private:
         stats_.cold.add(
             stats_.cold.detoast_bytes, stats_.detoast_bytes);
         finalize_payload_timing_();
-        state_ = State::finished;
+        state_ = operation_state::finished;
         close_relations_checked_();
         return stats_;
     }
 
-    void plan_phase_groups_(
-            PayloadPhase phase,
+    void plan_section_groups_(
+            payload_section section,
             std::span<const minimizer_generation_payload_read_group> groups) {
         try {
-            const bool position_phase = phase == PayloadPhase::positions;
-            const State required_state = position_phase
-                ? State::controls_complete : State::metadata_ready;
+            const bool position_section = section == payload_section::positions;
+            const operation_state required_state = position_section
+                ? operation_state::controls_complete : operation_state::metadata_ready;
             if (state_ != required_state || !metadata_) {
-                fail_(position_phase
+                fail_(position_section
                     ? "position payload requests were planned before control payload completed or more than once"
                     : "control payload requests were planned before metadata or more than once");
             }
             if (!planned_groups_.empty() || next_group_ != 0 || plan_permit_
                 || !runtime_requests_.empty() || runtime_permit_
                 || active_scan_ != nullptr) {
-                fail_("payload phase planning found leaked prior-phase state");
+                fail_("payload section planning found leaked prior-section state");
             }
-            if (!position_phase
+            if (!position_section
                 && (!authorized_position_ordinals_.empty()
                     || control_authorization_permit_)) {
                 fail_("control payload authorization state was already populated");
@@ -10363,21 +10089,21 @@ private:
             std::uint64_t plan_bytes = 0;
             if (groups.size()
                     > (std::numeric_limits<std::uint64_t>::max)()
-                        / sizeof(PlannedGroup)
+                        / sizeof(planned_group)
                 || request_count
                     > (std::numeric_limits<std::uint64_t>::max)()
                         / sizeof(index_sub_key_request)
-                || (!position_phase
+                || (!position_section
                     && request_count
                         > (std::numeric_limits<std::uint64_t>::max)()
                             / sizeof(std::uint32_t))) {
                 fail_("payload plan admission size overflow");
             }
-            plan_bytes = groups.size() * sizeof(PlannedGroup);
+            plan_bytes = groups.size() * sizeof(planned_group);
             checked_add_(plan_bytes,
                 request_count * sizeof(index_sub_key_request),
                 "payload plan admission size overflow");
-            if (!position_phase && request_count != 0) {
+            if (!position_section && request_count != 0) {
                 const std::uint64_t authorization_bytes =
                     request_count * sizeof(std::uint32_t);
                 auto authorization_permit =
@@ -10418,9 +10144,9 @@ private:
                 if (range.generation_id != metadata_->manifest.generation_id
                     || range.position_segment < 0
                     || !projected_range
-                    || projected_range->position_extent != position_phase
+                    || projected_range->position_extent != position_section
                     || input.requests.empty()) {
-                    fail_(position_phase
+                    fail_(position_section
                         ? "position payload group range is empty, unqualified, or outside the position namespace"
                         : "control payload group range is empty, unqualified, or outside the control namespace");
                 }
@@ -10443,22 +10169,22 @@ private:
                     }
                 }
                 previous_range = range;
-                using DirectoryKey =
+                using directory_key_type =
                     std::pair<std::int32_t, index_sub_key_t>;
                 const auto entry_less_than_key = [](
                         const grouped_soa_bucket_directory_entry& entry,
-                        const DirectoryKey& key) noexcept {
-                    return DirectoryKey{
+                        const directory_key_type& key) noexcept {
+                    return directory_key_type{
                         entry.position_segment, entry.sub_key} < key;
                 };
                 const auto first_entry = std::lower_bound(
                     entries.begin(), entries.end(),
-                    DirectoryKey{range.position_segment,
+                    directory_key_type{range.position_segment,
                         projected_range->logical_begin},
                     entry_less_than_key);
                 const auto end_entry = std::lower_bound(
                     first_entry, entries.end(),
-                    DirectoryKey{range.position_segment,
+                    directory_key_type{range.position_segment,
                         projected_range->logical_end},
                     entry_less_than_key);
                 const std::size_t first_ordinal = static_cast<std::size_t>(
@@ -10519,7 +10245,7 @@ private:
                     }
                     const std::uint32_t directory_ordinal =
                         entries[request_entry_cursor].partition_id;
-                    if (!position_phase) {
+                    if (!position_section) {
                         if (!authorized_position_ordinals_.empty()
                             && authorized_position_ordinals_.back()
                                 >= directory_ordinal) {
@@ -10553,7 +10279,7 @@ private:
                 if (declared_chunks < wanted_chunks) {
                     fail_("payload skip budget is smaller than requested chunks");
                 }
-                planned_groups_.push_back(PlannedGroup{
+                planned_groups_.push_back(planned_group{
                     .range = range,
                     .requests = input.requests,
                     .first_directory_ordinal = first_ordinal,
@@ -10562,14 +10288,14 @@ private:
                     .position_extent = projected_range->position_extent,
                 });
             }
-            auto& phase_stats = position_phase
+            auto& section_stats = position_section
                 ? stats_.positions : stats_.controls;
-            checked_add_(phase_stats.plan_calls, 1,
-                "payload phase plan-call counter overflow");
-            checked_add_(phase_stats.planned_request_groups,
+            checked_add_(section_stats.plan_calls, 1,
+                "payload section plan-call counter overflow");
+            checked_add_(section_stats.planned_request_groups,
                 planned_groups_.size(),
-                "payload phase planned-group counter overflow");
-            checked_add_(phase_stats.control_authorization_checks,
+                "payload section planned-group counter overflow");
+            checked_add_(section_stats.control_authorization_checks,
                 authorization_checks,
                 "position control-authorization counter overflow");
             checked_add_(stats_.bulk_read_calls, 1,
@@ -10577,7 +10303,7 @@ private:
             checked_add_(stats_.planned_request_groups,
                 planned_groups_.size(),
                 "payload planned-group counter overflow");
-            if (!position_phase) {
+            if (!position_section) {
                 if (planned_groups_.empty()) {
                     stats_.cold.route_empty = 1;
                 } else {
@@ -10596,47 +10322,47 @@ private:
                 stats_.cold.route_selective_cost, requested_rows);
             const std::uint64_t group_penalty =
                 planned_groups_.size()
-                    > cold_index_preparation_stats::sql_bigint_max
+                    > cold_index_preparation_stats::k_sql_bigint_max
                         / k_ordered_range_scan_penalty_rows
-                ? cold_index_preparation_stats::sql_bigint_max
+                ? cold_index_preparation_stats::k_sql_bigint_max
                 : static_cast<std::uint64_t>(planned_groups_.size())
                     * k_ordered_range_scan_penalty_rows;
             stats_.cold.add(
                 stats_.cold.route_selective_cost, group_penalty);
             next_group_ = 0;
-            if (position_phase) {
+            if (position_section) {
                 release_control_authorization_();
                 state_ = planned_groups_.empty()
-                    ? State::payload_complete : State::positions_planned;
+                    ? operation_state::payload_complete : operation_state::positions_planned;
             } else {
                 state_ = planned_groups_.empty()
-                    ? State::controls_complete : State::controls_planned;
+                    ? operation_state::controls_complete : operation_state::controls_planned;
             }
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
     }
 
 public:
-    /// Stream the complete attested generation through one ordered physical
+    /// parallel_scan_stream the complete authorized generation through one ordered physical
     /// scan.  Payload bytes remain opaque and callback-scoped: this layer does
     /// not decode controls, globalize/rebase local positions, or retain a
     /// payload image.  A callback may copy into already-admitted host or mapped
     /// device storage, but command submission/fence waits must occur only after
     /// this method returns and `active_scan_` has been closed.
-    template <class ControlSink, class PositionSink>
+    template <class p_control_sink, class p_position_sink>
     requires (
-        bioseq::indexing::index_chunk_reader_fn<ControlSink>
-        || std::invocable<ControlSink&,
+        bioseq::indexing::index_chunk_reader_fn<p_control_sink>
+        || std::invocable<p_control_sink&,
             const validated_minimizer_generation_row_receipt&>)
           && (
-        bioseq::indexing::index_chunk_reader_fn<PositionSink>
-        || std::invocable<PositionSink&,
+        bioseq::indexing::index_chunk_reader_fn<p_position_sink>
+        || std::invocable<p_position_sink&,
             const validated_minimizer_generation_row_receipt&>)
     [[nodiscard]] index_chunk_read_stats read_full_generation_payload_once(
-            ControlSink&& control_sink,
-            PositionSink&& position_sink) {
+            p_control_sink&& control_sink,
+            p_position_sink&& position_sink) {
         index_chunk_read_stats local{};
         const BufferUsage payload_buffer_begin = pgBufferUsage;
         start_payload_timing_();
@@ -10644,8 +10370,8 @@ public:
             if (!minimizer_generation_full_crc_detail::concatenation_self_test()) {
                 fail_("full-generation CRC concatenation self-test failed");
             }
-            if (state_ != State::metadata_ready || !metadata_
-                || !catalog_source_attested_
+            if (state_ != operation_state::metadata_ready || !metadata_
+                || !catalog_source_authorized_
                 || active_scan_ != nullptr
                 || full_generation_batch_slot_count_ != 0
                 || !planned_groups_.empty()
@@ -10655,7 +10381,7 @@ public:
                 || !authorized_position_ordinals_.empty()) {
                 checked_add_(stats_.payload.repeated_chunk_reads, 1,
                     "full-generation repeated-read counter overflow");
-                fail_("full-generation payload scan was repeated, early, lacked catalog attestation, or found selected-range state");
+                fail_("full-generation payload scan was repeated, early, lacked catalog authorization, or found selected-range state");
             }
             const auto entries = metadata_->directory.entries();
             const std::uint32_t extent_payload_bytes =
@@ -10758,7 +10484,7 @@ public:
                 const pinned_minimizer_generation_projected_row& pinned =
                     batch.rows[batch_ordinal++];
                 record_payload_tid_(pinned.tid);
-                LoadedRow row =
+                loaded_row_type row =
                     load_minimizer_generation_projected_row_or_error(pinned.projected);
                 stats_.cold.add(
                     stats_.cold.row_crc_bytes, row.bytes.size());
@@ -10855,7 +10581,7 @@ public:
                 payload_row_checksum.update_little_endian(
                     validated_row_checksum);
                 if (position_extent) {
-                    if constexpr (std::invocable<PositionSink&,
+                    if constexpr (std::invocable<p_position_sink&,
                             const validated_minimizer_generation_row_receipt&>) {
                         std::invoke(
                             position_sink, *row.validated_receipt);
@@ -10870,7 +10596,7 @@ public:
                         row.bytes.size(),
                         "full-generation position byte counter overflow");
                 } else {
-                    if constexpr (std::invocable<ControlSink&,
+                    if constexpr (std::invocable<p_control_sink&,
                             const validated_minimizer_generation_row_receipt&>) {
                         std::invoke(
                             control_sink, *row.validated_receipt);
@@ -10949,7 +10675,7 @@ public:
                 || local.delivered_chunks != local.wanted_chunks
                 || local.delivered_bytes
                     != metadata_->manifest.payload_bytes) {
-                fail_("full-generation payload proof equations disagree");
+                fail_("full-generation payload authorization equations disagree");
             }
             stats_.full_generation.scan_calls = 1;
             stats_.full_generation.planned_extents = planned_extents;
@@ -10963,7 +10689,7 @@ public:
             stats_.payload_heap_rows_read = local.heap_rows_read;
             stats_.payload_bytes_read = local.delivered_bytes;
             add_cold_index_buffer_usage(stats_.cold, payload_buffer_begin);
-            state_ = State::full_generation_payload_complete;
+            state_ = operation_state::full_generation_payload_complete;
         } catch (...) {
             cleanup_failed_session_and_rethrow_();
         }
@@ -10972,28 +10698,28 @@ public:
 
     void plan_control_groups(
             std::span<const minimizer_generation_payload_read_group> groups) {
-        plan_phase_groups_(PayloadPhase::controls, groups);
+        plan_section_groups_(payload_section::controls, groups);
     }
 
     void plan_position_groups(
             std::span<const minimizer_generation_payload_read_group> groups) {
-        plan_phase_groups_(PayloadPhase::positions, groups);
+        plan_section_groups_(payload_section::positions, groups);
     }
 
-    template <class Sink>
-    requires bioseq::indexing::index_chunk_reader_fn<Sink>
-        || std::invocable<Sink&,
+    template <class p_sink>
+    requires bioseq::indexing::index_chunk_reader_fn<p_sink>
+        || std::invocable<p_sink&,
             const validated_minimizer_generation_row_receipt&>
     [[nodiscard]] index_chunk_read_stats read_chunks_in_range(
             std::size_t group_index,
             index_chunk_cache_policy cache_policy,
-            Sink&& sink) {
+            p_sink&& sink) {
         index_chunk_read_stats local{};
         const BufferUsage payload_buffer_begin = pgBufferUsage;
         start_payload_timing_();
         try {
-            const bool position_phase = state_ == State::positions_planned;
-            if ((state_ != State::controls_planned && !position_phase)
+            const bool position_section = state_ == operation_state::positions_planned;
+            if ((state_ != operation_state::controls_planned && !position_section)
                 || group_index != next_group_
                 || group_index >= planned_groups_.size()) {
                 checked_add_(stats_.payload.repeated_chunk_reads, 1,
@@ -11001,10 +10727,10 @@ public:
                 fail_("payload group was repeated, reordered, or not planned");
             }
             if (cache_policy != index_chunk_cache_policy::bypass_one_shot) {
-                fail_("attested generation session requires bypass_one_shot");
+                fail_("authorized generation session requires bypass_one_shot");
             }
-            PlannedGroup& group = planned_groups_[group_index];
-            if (group.position_extent != position_phase
+            planned_group& group = planned_groups_[group_index];
+            if (group.position_extent != position_section
                 || group.executed || active_scan_ != nullptr
                 || !runtime_requests_.empty() || runtime_permit_) {
                 checked_add_(stats_.payload.repeated_chunk_reads, 1,
@@ -11013,11 +10739,11 @@ public:
             }
             if (group.requests.size()
                 > (std::numeric_limits<std::uint64_t>::max)()
-                    / sizeof(RuntimeRequest)) {
+                    / sizeof(runtime_request)) {
                 fail_("payload runtime admission size overflow");
             }
             const std::uint64_t runtime_bytes =
-                group.requests.size() * sizeof(RuntimeRequest);
+                group.requests.size() * sizeof(runtime_request);
             auto runtime_permit =
                 bioseq::parallelism::memory_admission_controller::instance()
                     .try_reserve(runtime_bytes);
@@ -11033,7 +10759,7 @@ public:
             local.skip_budget_rows = group.skip_budget_rows;
             std::optional<index_sub_key_t> previous_subkey;
             for (const index_sub_key_request& request : group.requests) {
-                runtime_requests_.push_back(RuntimeRequest{
+                runtime_requests_.push_back(runtime_request{
                     .request = request,
                     .end_chunk_no = static_cast<std::uint64_t>(
                         request.first_chunk_no) + request.expected_chunk_count,
@@ -11084,7 +10810,7 @@ public:
                           active_scan_, ForwardScanDirection);
                   })) != nullptr;) {
                 record_payload_tid_(tuple);
-                LoadedRow row =
+                loaded_row_type row =
                     load_minimizer_generation_row_or_error(heap_relation_, tuple);
                 stats_.cold.add(
                     stats_.cold.row_crc_bytes, row.bytes.size());
@@ -11131,7 +10857,7 @@ public:
                 }
 
                 while (request_cursor < runtime_requests_.size()) {
-                    RuntimeRequest& request =
+                    runtime_request& request =
                         runtime_requests_[request_cursor];
                     const bool row_after_request =
                         row.address.sub_key > request.request.sub_key
@@ -11152,9 +10878,9 @@ public:
                     ++request_cursor;
                 }
 
-                RuntimeRequest* matched = nullptr;
+                runtime_request* matched = nullptr;
                 if (request_cursor < runtime_requests_.size()) {
-                    RuntimeRequest& request =
+                    runtime_request& request =
                         runtime_requests_[request_cursor];
                     if (row.address.sub_key == request.request.sub_key
                         && row.address.chunk_no
@@ -11210,7 +10936,7 @@ public:
                         row.bytes.size());
                     stats_.cold.add(
                         stats_.cold.extent_crc_combine_rows, 1);
-                    if constexpr (std::invocable<Sink&,
+                    if constexpr (std::invocable<p_sink&,
                             const validated_minimizer_generation_row_receipt&>) {
                         std::invoke(sink, *row.validated_receipt);
                     } else {
@@ -11245,7 +10971,7 @@ public:
                 fail_("payload scan ended before its complete directory range");
             }
             for (; request_cursor < runtime_requests_.size(); ++request_cursor) {
-                const RuntimeRequest& request =
+                const runtime_request& request =
                     runtime_requests_[request_cursor];
                 if (request.next_chunk_no != request.end_chunk_no
                     || request.total_bytes
@@ -11261,25 +10987,25 @@ public:
                 || local.heap_rows_read
                     != local.delivered_chunks + local.skipped_rows
                 || local.skipped_rows != local.skip_budget_rows) {
-                fail_("payload proof-counter equation disagrees");
+                fail_("payload authorization-counter equation disagrees");
             }
 
             group.executed = true;
             ++next_group_;
-            const bool phase_complete = next_group_ == planned_groups_.size();
-            auto& phase_stats = position_phase
+            const bool section_complete = next_group_ == planned_groups_.size();
+            auto& section_stats = position_section
                 ? stats_.positions : stats_.controls;
-            checked_add_(phase_stats.executed_request_groups, 1,
-                "payload phase executed-group counter overflow");
-            checked_add_(phase_stats.range_scan_calls, 1,
-                "payload phase range-scan counter overflow");
-            checked_add_(phase_stats.physical_heap_rows_read,
+            checked_add_(section_stats.executed_request_groups, 1,
+                "payload section executed-group counter overflow");
+            checked_add_(section_stats.range_scan_calls, 1,
+                "payload section range-scan counter overflow");
+            checked_add_(section_stats.physical_heap_rows_read,
                 local.heap_rows_read,
-                "payload phase physical-row counter overflow");
-            checked_add_(phase_stats.physical_bytes_read,
+                "payload section physical-row counter overflow");
+            checked_add_(section_stats.physical_bytes_read,
                 physical_payload_bytes,
-                "payload phase physical-byte counter overflow");
-            checked_add_read_stats_(phase_stats.read, local);
+                "payload section physical-byte counter overflow");
+            checked_add_read_stats_(section_stats.read, local);
             checked_add_(stats_.executed_request_groups, 1,
                 "executed request group count overflow");
             checked_add_(stats_.range_scan_calls, 1,
@@ -11290,20 +11016,20 @@ public:
             stats_.payload_heap_rows_read = stats_.payload.heap_rows_read;
             checked_add_(stats_.payload_bytes_read, physical_payload_bytes,
                 "payload physical byte count overflow");
-            std::vector<RuntimeRequest>{}.swap(runtime_requests_);
+            std::vector<runtime_request>{}.swap(runtime_requests_);
             runtime_permit_.release();
-            if (phase_complete) {
-                release_phase_plan_();
-                state_ = position_phase
-                    ? State::payload_complete : State::controls_complete;
+            if (section_complete) {
+                release_section_plan_();
+                state_ = position_section
+                    ? operation_state::payload_complete : operation_state::controls_complete;
             }
             add_cold_index_buffer_usage(stats_.cold, payload_buffer_begin);
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
         return local;
@@ -11313,34 +11039,34 @@ public:
     /// rereads only the active head. Borrowed snapshots remain caller-owned.
     void close_head_read() {
         try {
-            if (state_ != State::head_read || active_scan_ != nullptr
+            if (state_ != operation_state::head_read || active_scan_ != nullptr
                 || heap_relation_ == nullptr
                 || primary_index_relation_ == nullptr
                 || snapshot_ == nullptr) {
                 fail_("head-only generation read closed in an invalid state");
             }
-            state_ = State::finished;
+            state_ = operation_state::finished;
             close_relations_checked_();
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
     }
 
     /// Finish a grouped-SoA read whose immutable payload was consumed from the
     /// exact generation-bound mmap image. PostgreSQL remains the authority for
-    /// the active head, manifest, directory and source attestation; the image
+    /// the active head, manifest, directory and source authorization; the image
     /// itself was created only by the complete authenticated READY reread and
     /// was fsynced and durably renamed before publication.
     [[nodiscard]] minimizer_generation_read_stats
     finish_mapped_minimizer_fragment_payload() {
         try {
-            if (state_ != State::metadata_ready
-                || !catalog_source_attested_
+            if (state_ != operation_state::metadata_ready
+                || !catalog_source_authorized_
                 || !head_ || !metadata_
                 || metadata_->manifest.layout
                     != bioseq::indexing::minimizer_generation_layout::
@@ -11380,7 +11106,7 @@ public:
                 || stats_.source_decoded_bp != 0
                 || stats_.source_storage_incarnations_checked < 1
                 || stats_.source_storage_incarnations_checked > 2) {
-                fail_("mapped grouped-SoA metadata/source proof disagrees");
+                fail_("mapped grouped-SoA metadata/source authorization disagrees");
             }
             stats_.total_heap_rows_read = stats_.metadata_heap_rows_read;
             stats_.total_bytes_read = stats_.metadata_bytes_read;
@@ -11388,26 +11114,26 @@ public:
                 stats_.cold.toast_values, stats_.toast_values_read);
             stats_.cold.add(
                 stats_.cold.detoast_bytes, stats_.detoast_bytes);
-            state_ = State::finished;
+            state_ = operation_state::finished;
             close_relations_checked_();
             return stats_;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
     }
 
     /// Checked success close for the timed compact-H32 mmap route. PostgreSQL
     /// authenticates exactly one head row and one manifest row; the exact
-    /// chunk_no=0 scan qualification proves that no directory tuple was read.
-    /// Any control/payload planning or scan evidence makes this transition
+    /// chunk_no=0 scan qualification ensures that no directory tuple was read.
+    /// Any control/payload planning or scan stats make this transition
     /// invalid rather than silently falling back to the relation reader.
     [[nodiscard]] minimizer_generation_read_stats
     finish_mapped_compact_direct() {
         try {
             const minimizer_generation_manifest* const manifest =
                 active_manifest_();
-            const bool cold_payload_evidence_is_zero =
+            const bool cold_payload_stats_are_zero =
                 stats_.cold.payload_range_scans == 0u
                 && stats_.cold.route_empty == 0u
                 && stats_.cold.route_selective == 0u
@@ -11436,8 +11162,8 @@ public:
                 && stats_.cold.payload_ns == 0u
                 && stats_.cold.decode_ns == 0u
                 && stats_.cold.transfer_ns == 0u;
-            if (state_ != State::metadata_ready
-                || !catalog_source_attested_ || !head_
+            if (state_ != operation_state::metadata_ready
+                || !catalog_source_authorized_ || !head_
                 || manifest == nullptr || !manifest_only_ || metadata_
                 || manifest != &*manifest_only_
                 || manifest->layout
@@ -11463,19 +11189,19 @@ public:
                 || stats_.cache_lookups != 0u
                 || stats_.cache_populations != 0u
                 || !read_stats_are_zero_(stats_.payload)
-                || !phase_stats_are_zero_(stats_.controls)
-                || !phase_stats_are_zero_(stats_.positions)
+                || !section_stats_are_zero_(stats_.controls)
+                || !section_stats_are_zero_(stats_.positions)
                 || !full_payload_stats_are_zero_(stats_.full_generation)
-                || !cold_payload_evidence_is_zero) {
+                || !cold_payload_stats_are_zero) {
                 fail_(
                     "mapped compact-H32 generation read closed in an invalid state");
             }
 
-            constexpr std::uint64_t expected_manifest_bytes =
+            constexpr std::uint64_t k_expected_manifest_bytes =
                 minimizer_generation_manifest::encoded_bytes;
-            constexpr std::uint64_t expected_metadata_bytes =
+            constexpr std::uint64_t k_expected_metadata_bytes =
                 minimizer_generation_head::encoded_bytes
-                + expected_manifest_bytes;
+                + k_expected_manifest_bytes;
             if (stats_.relation_opens != 1u
                 || stats_.head_scans != 1u
                 || stats_.cold.head_scans != 1u
@@ -11485,14 +11211,14 @@ public:
                 || stats_.manifest_directory_scans != 1u
                 || stats_.cold.directory_scans != 1u
                 || stats_.manifest_rows_read != 1u
-                || stats_.manifest_bytes_read != expected_manifest_bytes
+                || stats_.manifest_bytes_read != k_expected_manifest_bytes
                 || stats_.directory_chunks_read != 0u
                 || stats_.directory_bytes_read != 0u
                 || stats_.metadata_repeated_reads != 0u
                 || stats_.metadata_heap_rows_read != 2u
-                || stats_.metadata_bytes_read != expected_metadata_bytes
+                || stats_.metadata_bytes_read != k_expected_metadata_bytes
                 || stats_.index_scans != 2u
-                || stats_.explicit_copy_bytes != expected_metadata_bytes
+                || stats_.explicit_copy_bytes != k_expected_metadata_bytes
                 || stats_.toast_values_read != 0u
                 || stats_.detoast_bytes != 0u
                 || stats_.total_heap_rows_read != 0u
@@ -11505,41 +11231,41 @@ public:
                 || stats_.source_storage_incarnations_checked < 1u
                 || stats_.source_storage_incarnations_checked > 2u) {
                 fail_(
-                    "mapped compact-H32 metadata/source evidence disagrees");
+                    "mapped compact-H32 metadata/source validation disagrees");
             }
 
             stats_.total_heap_rows_read = 2u;
-            stats_.total_bytes_read = expected_metadata_bytes;
-            state_ = State::finished;
+            stats_.total_bytes_read = k_expected_metadata_bytes;
+            state_ = operation_state::finished;
             close_relations_checked_();
             return stats_;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
     }
 
     /// Checked success close for callers that intentionally validate only the
     /// immutable head/manifest/directory contract and do not enter payload
-    /// phases. Borrowed snapshots remain caller-owned.
+    /// sections. Borrowed snapshots remain caller-owned.
     void close_metadata_read() {
         try {
-            if ((state_ != State::metadata_unattested
-                    && state_ != State::metadata_ready)
+            if ((state_ != operation_state::metadata_pending_source
+                    && state_ != operation_state::metadata_ready)
                 || active_manifest_() == nullptr
                 || active_scan_ != nullptr || heap_relation_ == nullptr
                 || primary_index_relation_ == nullptr
                 || snapshot_ == nullptr) {
                 fail_("metadata-only generation read closed in an invalid state");
             }
-            state_ = State::finished;
+            state_ = operation_state::finished;
             close_relations_checked_();
         } catch (const bioseq::postgres::support::postgres_error&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_relations_noexcept_();
             throw;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
     }
@@ -11547,47 +11273,47 @@ public:
     [[nodiscard]] minimizer_generation_read_stats finish() {
         minimizer_generation_read_stats result{};
         try {
-            if (state_ == State::full_generation_payload_complete) {
+            if (state_ == operation_state::full_generation_payload_complete) {
                 return finish_full_generation_();
             }
-            if (state_ != State::payload_complete
+            if (state_ != operation_state::payload_complete
                 || next_group_ != 0 || !planned_groups_.empty()
                 || !runtime_requests_.empty() || plan_permit_
                 || runtime_permit_ || control_authorization_permit_
                 || !authorized_position_ordinals_.empty()
                 || active_scan_ != nullptr || heap_relation_ == nullptr
                 || primary_index_relation_ == nullptr || snapshot_ == nullptr) {
-                fail_("generation read finished before position payload completed or with leaked phase state");
+                fail_("generation read finished before position payload completed or with leaked section state");
             }
             std::uint64_t expected_metadata_rows = 0;
             checked_add_(expected_metadata_rows, stats_.head_rows_read,
-                "metadata proof row equation overflow");
+                "metadata authorization row equation overflow");
             checked_add_(expected_metadata_rows, stats_.manifest_rows_read,
-                "metadata proof row equation overflow");
+                "metadata authorization row equation overflow");
             checked_add_(expected_metadata_rows,
                 stats_.directory_chunks_read,
-                "metadata proof row equation overflow");
+                "metadata authorization row equation overflow");
             std::uint64_t expected_metadata_bytes = 0;
             checked_add_(expected_metadata_bytes, stats_.head_bytes_read,
-                "metadata proof byte equation overflow");
+                "metadata authorization byte equation overflow");
             checked_add_(expected_metadata_bytes, stats_.manifest_bytes_read,
-                "metadata proof byte equation overflow");
+                "metadata authorization byte equation overflow");
             checked_add_(expected_metadata_bytes, stats_.directory_bytes_read,
-                "metadata proof byte equation overflow");
+                "metadata authorization byte equation overflow");
             std::uint64_t expected_index_scans = 0;
             checked_add_(expected_index_scans, stats_.head_scans,
-                "index scan proof equation overflow");
+                "index scan authorization equation overflow");
             checked_add_(expected_index_scans,
                 stats_.manifest_directory_scans,
-                "index scan proof equation overflow");
+                "index scan authorization equation overflow");
             checked_add_(expected_index_scans, stats_.range_scan_calls,
-                "index scan proof equation overflow");
+                "index scan authorization equation overflow");
             std::uint64_t expected_payload_rows = 0;
             checked_add_(expected_payload_rows,
                 stats_.payload.delivered_chunks,
-                "payload proof row equation overflow");
+                "payload authorization row equation overflow");
             checked_add_(expected_payload_rows, stats_.payload.skipped_rows,
-                "payload proof row equation overflow");
+                "payload authorization row equation overflow");
             std::uint64_t cold_tid_transitions = 0;
             checked_add_(cold_tid_transitions,
                 stats_.cold.heap_tid_adjacent,
@@ -11610,8 +11336,8 @@ public:
                         metadata_->manifest.layout)
                 || stats_.metadata_heap_rows_read != expected_metadata_rows
                 || stats_.metadata_bytes_read != expected_metadata_bytes
-                || !phase_equations_hold_(stats_.controls)
-                || !phase_equations_hold_(stats_.positions)
+                || !section_equations_hold_(stats_.controls)
+                || !section_equations_hold_(stats_.positions)
                 || stats_.controls.control_authorization_checks != 0
                 || stats_.positions.control_authorization_checks
                     != stats_.positions.read.wanted_extents
@@ -11700,32 +11426,32 @@ public:
                         || stats_.source_decoded_bp != 0
                         || stats_.source_storage_incarnations_checked < 1
                         || stats_.source_storage_incarnations_checked > 2))) {
-                fail_("generation read final proof equations disagree");
+                fail_("generation read final authorization equations disagree");
             }
             stats_.total_heap_rows_read = 0;
             checked_add_(stats_.total_heap_rows_read,
                 stats_.metadata_heap_rows_read,
-                "total heap row proof equation overflow");
+                "total heap row authorization equation overflow");
             checked_add_(stats_.total_heap_rows_read,
                 stats_.payload_heap_rows_read,
-                "total heap row proof equation overflow");
+                "total heap row authorization equation overflow");
             stats_.total_bytes_read = 0;
             checked_add_(stats_.total_bytes_read,
                 stats_.metadata_bytes_read,
-                "total byte proof equation overflow");
+                "total byte authorization equation overflow");
             checked_add_(stats_.total_bytes_read,
                 stats_.payload_bytes_read,
-                "total byte proof equation overflow");
+                "total byte authorization equation overflow");
             stats_.cold.add(
                 stats_.cold.toast_values, stats_.toast_values_read);
             stats_.cold.add(
                 stats_.cold.detoast_bytes, stats_.detoast_bytes);
             finalize_payload_timing_();
-            state_ = State::finished;
+            state_ = operation_state::finished;
             close_relations_checked_();
             result = stats_;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             throw;
         }
         return result;
@@ -11745,7 +11471,7 @@ struct minimizer_generation_read_session_open_result {
     std::optional<index_storage_fragment_generation_read_session> session{};
     minimizer_generation_relation_inspection failure{
         .kind = minimizer_generation_relation_kind::malformed,
-        .revision3_error = minimizer_generation_schema_error::none,
+        .schema_error = minimizer_generation_schema_error::none,
     };
 
     [[nodiscard]] explicit operator bool() const noexcept {
@@ -11783,7 +11509,7 @@ open_exact_minimizer_generation_read_session_pg(
 }
 
 namespace minimizer_generation_compile_contract_detail {
-struct QualifiedReadSink {
+struct qualified_read_sink {
     void operator()(
         const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -11791,10 +11517,10 @@ struct QualifiedReadSink {
 
 template index_chunk_read_stats
 index_storage_fragment_generation_read_session::read_chunks_in_range<
-    minimizer_generation_compile_contract_detail::QualifiedReadSink>(
+    minimizer_generation_compile_contract_detail::qualified_read_sink>(
         std::size_t,
         index_chunk_cache_policy,
-        minimizer_generation_compile_contract_detail::QualifiedReadSink&&);
+        minimizer_generation_compile_contract_detail::qualified_read_sink&&);
 
 /// Integration-only self-consistent metadata corruption. Both manifest and
 /// head source-content fields, the head's manifest checksum, and both physical
@@ -11808,7 +11534,7 @@ inline void rewrite_source_checksum_pg(
         || xor_mask == 0
         || !bioseq::indexing::sql_bigint_can_represent(query_key)) {
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption input is invalid");
+            "current generation checksum corruption input is invalid");
     }
     Relation relation = bioseq::postgres::support::invoke_pg_as_cpp(
         [table_oid] {
@@ -11821,7 +11547,7 @@ inline void rewrite_source_checksum_pg(
                 [relation] { relation_close(relation, AccessShareLock); });
         }
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption relation is invalid");
+            "current generation checksum corruption relation is invalid");
     }
     const minimizer_generation_schema_inspection schema =
         bioseq::postgres::support::invoke_pg_as_cpp(
@@ -11832,21 +11558,24 @@ inline void rewrite_source_checksum_pg(
         [relation] { relation_close(relation, AccessShareLock); });
     if (!schema) {
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption schema is invalid");
+            "current generation checksum corruption schema is invalid");
     }
 
     Snapshot active_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
         [] { return GetActiveSnapshot(); });
     if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption requires an active MVCC snapshot");
+            "current generation checksum corruption requires an active MVCC snapshot");
     }
     Snapshot registered_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
         [active_snapshot] { return RegisterSnapshot(active_snapshot); });
     minimizer_generation_head head{};
     minimizer_generation_manifest manifest{};
     {
-        constexpr expected_minimizer_generation_identity fixture_expected{
+        constexpr auto k_fixture_scheme =
+            bioseq::indexing::minimizer_scheme_identity_for_backend(
+                bioseq::indexing::minimizer_sketch_backend::scalar);
+        constexpr expected_minimizer_generation_identity k_fixture_expected{
             .layout = bioseq::indexing::minimizer_generation_layout::
                 grouped_soa_segment_local,
             .alphabet_code =
@@ -11856,10 +11585,8 @@ inline void rewrite_source_checksum_pg(
             .window_size = 10,
             .gpu_abi_revision =
                 bioseq::indexing::k_grouped_soa_gpu_abi_revision,
-            .minimizer_scheme_id =
-                bioseq::indexing::k_legacy_minimap_scheme_id,
-            .minimizer_scheme_revision =
-                bioseq::indexing::k_legacy_minimap_scheme_revision,
+            .minimizer_scheme_id = k_fixture_scheme.id,
+            .minimizer_scheme_revision = k_fixture_scheme.revision,
             .producer_backend_id = bioseq::indexing::
                 minimizer_producer_backend::scalar,
             .producer_identity_revision = bioseq::indexing::
@@ -11869,7 +11596,7 @@ inline void rewrite_source_checksum_pg(
         };
         index_storage_fragment_generation_read_session session{
             table_name, query_key, registered_snapshot,
-            fixture_expected,
+            k_fixture_expected,
             table_tablespace_oid,
             minimizer_generation_snapshot_registration::borrow_registered};
         head = session.read_active_head_once();
@@ -11884,7 +11611,7 @@ inline void rewrite_source_checksum_pg(
         bioseq::indexing::encode_minimizer_generation_manifest(manifest);
     if (!manifest_bytes) {
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption could not encode manifest");
+            "current generation checksum corruption could not encode manifest");
     }
     head.manifest_checksum = bioseq::indexing::crc64_ecma182(
         std::span<const std::byte>{*manifest_bytes});
@@ -11892,7 +11619,7 @@ inline void rewrite_source_checksum_pg(
         bioseq::indexing::encode_minimizer_generation_head(head);
     if (!head_bytes) {
         minimizer_generation_storage_error_as_cpp(
-            "rev3 checksum corruption could not encode head");
+            "current generation checksum corruption could not encode head");
     }
     const std::uint64_t manifest_row_checksum =
         bioseq::indexing::crc64_index_chunk_row(
@@ -11943,7 +11670,7 @@ inline void rewrite_source_checksum_pg(
         Int64GetDatum(0),
         Int64GetDatum(static_cast<std::int64_t>(k_generation_head_sub_key)),
     };
-    struct RewriteSpiState {
+    struct rewrite_spi_state {
         int connect_status = 0;
         int manifest_status = 0;
         int head_status = 0;
@@ -11984,7 +11711,7 @@ inline void rewrite_source_checksum_pg(
         || spi.head_rows != 1
         || spi.finish_status != SPI_OK_FINISH) {
         minimizer_generation_storage_error_as_cpp(fmt::format(
-            "rev3 checksum corruption SPI session disagrees: connect={} "
+            "current generation checksum corruption SPI session disagrees: connect={} "
             "manifest_status={} manifest_rows={} head_status={} head_rows={} "
             "finish={}",
             spi.connect_status, spi.manifest_status, spi.manifest_rows,
@@ -11995,13 +11722,13 @@ inline void rewrite_source_checksum_pg(
 }
 
 /// Setup-only identity carried across the mandatory E2E restart. The timed
-/// backend must obtain its own identity from statement attestation instead of
+/// backend must obtain its own identity from statement authorization instead of
 /// invoking this pre-restart inspection seam.
 struct ready_minimizer_generation_identity {
     std::uint64_t generation_id = 0;
     std::uint64_t source_identity = 0;
     std::uint64_t source_content_checksum = 0;
-    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
 
     [[nodiscard]] bool operator==(
         const ready_minimizer_generation_identity&) const = default;
@@ -12022,15 +11749,15 @@ inspect_ready_minimizer_generation_identity_pg(
     const auto minimizer_generation_storage_error = [](std::string_view message) {
         minimizer_generation_storage_error_as_cpp(message);
     };
-    struct SourceInspectionState {
+    struct source_inspection_state {
         Snapshot registered_snapshot = nullptr;
         MemoryContext work_context = nullptr;
         void* session_storage = nullptr;
         index_storage_fragment_generation_read_session* session = nullptr;
         bool session_constructed = false;
-        std::optional<minimizer_generation_catalog_source_proof> source_proof;
+        std::optional<minimizer_generation_catalog_source_authorization> source_authorization;
     };
-    auto* source = new SourceInspectionState{};
+    auto* source = new source_inspection_state{};
     ready_minimizer_generation_identity result{};
     try {
         if (identity.database_oid != MyDatabaseId
@@ -12047,15 +11774,15 @@ inspect_ready_minimizer_generation_identity_pg(
                 "generation identity inspection input is invalid");
         }
         source->registered_snapshot = executor_snapshot;
-        source->source_proof.emplace(
-            derive_minimizer_generation_catalog_source_proof_pg(
+        source->source_authorization.emplace(
+            authorize_minimizer_generation_catalog_source_pg(
                 identity, sequence_rowno,
                 source->registered_snapshot));
-        const minimizer_generation_source_locator& proven_source =
-            source->source_proof->source_for_diagnostics();
+        const minimizer_generation_source_locator& validated_source =
+            source->source_authorization->source_for_diagnostics();
         source->work_context = bioseq::postgres::support::invoke_pg_as_cpp([&] {
             return AllocSetContextCreate(
-                CurrentMemoryContext, "bioseq rev3 source inspection",
+                CurrentMemoryContext, "bioseq current generation source inspection",
                 ALLOCSET_DEFAULT_SIZES);
         });
 
@@ -12078,28 +11805,28 @@ inspect_ready_minimizer_generation_identity_pg(
         const minimizer_generation_read_metadata& metadata =
             source->session->read_manifest_directory_once(head);
         if (metadata.manifest.alphabet_code
-                != proven_source.alphabet_code
+                != validated_source.alphabet_code
             || metadata.manifest.storage_unit_byte_width
-                != proven_source.storage_unit_byte_width
+                != validated_source.storage_unit_byte_width
             || metadata.manifest.target_length
-                != proven_source.locator.logical_length) {
+                != validated_source.locator.logical_length) {
             minimizer_generation_storage_error(
                 "generation identity manifest/source row disagrees");
         }
-        const std::uint64_t proven_source_content_checksum =
-            source->source_proof
+        const std::uint64_t validated_source_content_checksum =
+            source->source_authorization
                 ->source_content_checksum_for_diagnostics();
-        const std::uint64_t proven_compatibility_checksum =
-            bioseq::indexing::minimizer_generation_compatibility_checksum(
+        const std::uint64_t validated_storage_contract_checksum =
+            bioseq::indexing::compute_minimizer_generation_storage_contract_checksum(
                 metadata.manifest);
-        source->session->validate_source_attestation(
-            std::move(*source->source_proof));
-        source->source_proof.reset();
+        source->session->consume_source_authorization(
+            std::move(*source->source_authorization));
+        source->source_authorization.reset();
         result = ready_minimizer_generation_identity{
             .generation_id = metadata.head.generation_id,
             .source_identity = metadata.head.source_identity,
-            .source_content_checksum = proven_source_content_checksum,
-            .compatibility_checksum = proven_compatibility_checksum,
+            .source_content_checksum = validated_source_content_checksum,
+            .storage_contract_checksum = validated_storage_contract_checksum,
         };
         source->session->plan_control_groups(
             std::span<const minimizer_generation_payload_read_group>{});
@@ -12145,18 +11872,18 @@ inspect_ready_minimizer_generation_identity_pg(
 }
 
 namespace minimizer_generation_pg_compile_contract_detail {
-using Publisher = ready_minimizer_generation_published_head_receipt (*)(
+using publisher_type = ready_minimizer_generation_published_head_receipt (*)(
     ready_minimizer_generation_token&&);
-using Inspector = ready_minimizer_generation_identity (*)(
+using inspector_type = ready_minimizer_generation_identity (*)(
     const minimizer_generation_administration_identity&,
     std::uint64_t,
     Snapshot,
     expected_minimizer_generation_identity);
 
 static_assert(std::same_as<
-    decltype(&publish_ready_minimizer_generation_head_pg), Publisher>);
+    decltype(&publish_ready_minimizer_generation_head_pg), publisher_type>);
 static_assert(std::same_as<
-    decltype(&inspect_ready_minimizer_generation_identity_pg), Inspector>);
+    decltype(&inspect_ready_minimizer_generation_identity_pg), inspector_type>);
 static_assert(requires(
     mapped_minimizer_fragment_image& image,
     const mapped_minimizer_fragment_lease_guard& guard,
@@ -12201,15 +11928,15 @@ static_assert(requires(
     { session.plan_control_groups(groups) };
     { session.plan_position_groups(groups) };
     { session.read_full_generation_payload_once(
-        minimizer_generation_compile_contract_detail::QualifiedReadSink{},
-        minimizer_generation_compile_contract_detail::QualifiedReadSink{}) }
+        minimizer_generation_compile_contract_detail::qualified_read_sink{},
+        minimizer_generation_compile_contract_detail::qualified_read_sink{}) }
         -> std::same_as<index_chunk_read_stats>;
     { session.finish() } -> std::same_as<minimizer_generation_read_stats>;
     { session.finish_mapped_compact_direct() }
         -> std::same_as<minimizer_generation_read_stats>;
 });
 
-constexpr minimizer_generation_source_locator kSourceIdentityGolden{
+constexpr minimizer_generation_source_locator k_source_identity_golden{
     .sequence_rowno = 17,
     .locator = sequence_locator{
         .payload_version = sequence_locator_payload_version,
@@ -12225,22 +11952,22 @@ constexpr minimizer_generation_source_locator kSourceIdentityGolden{
     .alphabet_code = 1,
     .storage_unit_byte_width = 8,
     .padding_letters = 3,
-    .compatibility_checksum = 0x0102030405060708ULL,
+    .storage_contract_checksum = 0x0102030405060708ULL,
 };
-constexpr auto kSourceIdentityDifferentEpoch = [] {
-    auto source = kSourceIdentityGolden;
+constexpr auto k_source_identity_different_epoch = [] {
+    auto source = k_source_identity_golden;
     ++source.locator.source_epoch;
     return source;
 }();
-static_assert(minimizer_generation_source_identity(42, kSourceIdentityGolden) == 101);
-static_assert(minimizer_generation_source_identity(42, kSourceIdentityGolden)
-    != minimizer_generation_source_identity(42, kSourceIdentityDifferentEpoch));
-static_assert(minimizer_generation_source_identity(42, kSourceIdentityGolden)
-    == minimizer_generation_source_identity(43, kSourceIdentityGolden));
+static_assert(minimizer_generation_source_identity(42, k_source_identity_golden) == 101);
+static_assert(minimizer_generation_source_identity(42, k_source_identity_golden)
+    != minimizer_generation_source_identity(42, k_source_identity_different_epoch));
+static_assert(minimizer_generation_source_identity(42, k_source_identity_golden)
+    == minimizer_generation_source_identity(43, k_source_identity_golden));
 }  // namespace minimizer_generation_pg_compile_contract_detail
 
 // =========================================================================
-//  Format-6 PostgreSQL storage adapter
+//  hash-major PostgreSQL storage adapter
 // =========================================================================
 
 namespace hash_major_minimizer_pg_detail {
@@ -12279,7 +12006,7 @@ namespace hash_major_minimizer_pg_detail {
         [] { return BufFileCreateTemp(false); });
     if (file == nullptr) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 temporary logical stream could not be created");
+            "hash-major temporary logical stream could not be created");
     }
     return file;
 }
@@ -12289,7 +12016,7 @@ inline void append_spool(
         std::span<const std::byte> bytes) {
     if (file == nullptr || bytes.empty()) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 logical stream append is invalid");
+            "hash-major logical stream append is invalid");
     }
     bioseq::postgres::support::invoke_pg_as_cpp(
         [file, bytes] {
@@ -12302,7 +12029,7 @@ inline void rewind_spool(BufFile* file) {
         || bioseq::postgres::support::invoke_pg_as_cpp(
             [file] { return BufFileSeek(file, 0, 0, SEEK_SET); }) != 0) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 logical stream rewind failed");
+            "hash-major logical stream rewind failed");
     }
 }
 
@@ -12311,7 +12038,7 @@ inline void read_spool_exact(
         std::span<std::byte> bytes) {
     if (file == nullptr || bytes.empty()) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 logical stream read is invalid");
+            "hash-major logical stream read is invalid");
     }
     bioseq::postgres::support::invoke_pg_as_cpp(
         [file, bytes] {
@@ -12355,7 +12082,7 @@ inline void abandon_spool(BufFile*& file) noexcept {
             static_cast<std::uint32_t>(bytes.size()),
             bytes)) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 row envelope is invalid");
+            "hash-major row envelope is invalid");
     }
     bytea* blob = bioseq::postgres::support::invoke_pg_as_cpp(
         [bytes] {
@@ -12419,7 +12146,7 @@ struct ready_hash_major_minimizer_published_head_receipt {
 publish_ready_hash_major_minimizer_head_pg(
     ready_hash_major_minimizer_token&& token);
 
-/// Move-only proof that the exact unpublished Format-6 generation was
+/// Move-only authorization that the exact unpublished hash-major generation was
 /// authenticated from PostgreSQL rows and bound to the authoritative source.
 class ready_hash_major_minimizer_token {
 private:
@@ -12513,21 +12240,21 @@ static_assert(std::is_nothrow_move_constructible_v<
 inline constexpr std::uint64_t k_hash_major_minimizer_publication_slice_bytes =
     std::uint64_t{8} << 20u;
 
-/// PostgreSQL-owned bounded sink for the storage-neutral Format-6 encoder.
+/// PostgreSQL-owned bounded sink for the storage-neutral hash-major encoder.
 /// The callback path only appends to three ResourceOwner-managed BufFiles.
 /// Sealing replays exact 8,064-byte rows in postings -> controls -> directory
 /// order, writes the manifest, and rereads the complete unpublished generation
 /// before a private publication token can be produced.
 class index_storage_hash_major_minimizer_writer {
 private:
-    enum class State : std::uint8_t {
+    enum class operation_state : std::uint8_t {
         accepting,
         sealed,
         failed,
         moved,
     };
 
-    static constexpr std::uint64_t kBatchRows = 1'024u;
+    static constexpr std::uint64_t k_batch_rows = 1'024u;
 
     minimizer_generation_administration_identity identity_{};
     Relation relation_ = nullptr;
@@ -12545,10 +12272,10 @@ private:
     std::vector<TupleTableSlot*> pending_slots_{};
     std::uint64_t pending_tuple_bytes_ = 0u;
     std::array<std::byte, k_hash_major_minimizer_row_payload_bytes> row_buffer_{};
-    State state_ = State::accepting;
+    operation_state state_ = operation_state::accepting;
 
     [[noreturn]] void fail_(std::string_view message) {
-        state_ = State::failed;
+        state_ = operation_state::failed;
         minimizer_generation_storage_error_as_cpp(message);
     }
 
@@ -12581,7 +12308,7 @@ private:
     void flush_batch_() {
         if (pending_slots_.empty()) {
             if (pending_tuple_bytes_ != 0u) {
-                fail_("Format-6 tuple batch accounting disagrees");
+                fail_("hash-major tuple batch accounting disagrees");
             }
             return;
         }
@@ -12589,7 +12316,7 @@ private:
             || pending_slots_.size()
                 > static_cast<std::size_t>(
                     (std::numeric_limits<int>::max)())) {
-            fail_("Format-6 tuple batch state is invalid");
+            fail_("hash-major tuple batch state is invalid");
         }
         bioseq::postgres::support::invoke_pg_as_cpp([&] {
             CatalogTuplesMultiInsertWithInfo(
@@ -12614,11 +12341,11 @@ private:
                 pending_slots_.size(),
                 pending_tuple_bytes_,
                 tuple_bytes,
-                kBatchRows,
+                k_batch_rows,
                 k_hash_major_minimizer_publication_slice_bytes);
         if (!decision.valid) {
             heap_freetuple(tuple);
-            fail_("Format-6 row exceeds the bounded publication batch");
+            fail_("hash-major row exceeds the bounded publication batch");
         }
         if (decision.flush_before) flush_batch_();
         TupleTableSlot* slot = bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -12638,7 +12365,7 @@ private:
         if (tuple_bytes
             > (std::numeric_limits<std::uint64_t>::max)()
                 - pending_tuple_bytes_) {
-            fail_("Format-6 publication byte counter overflow");
+            fail_("hash-major publication byte counter overflow");
         }
         pending_tuple_bytes_ += tuple_bytes;
         if (decision.flush_after) flush_batch_();
@@ -12658,7 +12385,7 @@ private:
             || descriptor.row_count
                 > static_cast<std::uint64_t>(
                     (std::numeric_limits<std::int32_t>::max)())) {
-            fail_("Format-6 stream descriptor disagrees with encoder output");
+            fail_("hash-major stream descriptor disagrees with encoder output");
         }
         hash_major_minimizer_pg_detail::rewind_spool(stream_spools_[index]);
         std::uint64_t remaining = descriptor.logical_bytes;
@@ -12669,7 +12396,7 @@ private:
             if (bytes == 0u
                 || (row + 1u < descriptor.row_count
                     && bytes != k_hash_major_minimizer_row_payload_bytes)) {
-                fail_("Format-6 physical stream row equation disagrees");
+                fail_("hash-major physical stream row equation disagrees");
             }
             auto payload = std::span<std::byte>{row_buffer_}.first(bytes);
             hash_major_minimizer_pg_detail::read_spool_exact(
@@ -12685,7 +12412,7 @@ private:
             remaining -= bytes;
         }
         if (remaining != 0u) {
-            fail_("Format-6 physical stream replay was incomplete");
+            fail_("hash-major physical stream replay was incomplete");
         }
     }
 
@@ -12720,7 +12447,7 @@ private:
                 validation_scan_, ForwardScanDirection);
         });
         if (!HeapTupleIsValid(tuple)) {
-            fail_("Format-6 validation row is missing");
+            fail_("hash-major validation row is missing");
         }
         minimizer_generation_loaded_row row =
             load_minimizer_generation_row_or_error(relation_, tuple);
@@ -12735,7 +12462,7 @@ private:
             || row.query_key != query_key_
             || row.address != expected_address) {
             row.release();
-            fail_("Format-6 validation row identity is ambiguous");
+            fail_("hash-major validation row identity is ambiguous");
         }
         return row;
     }
@@ -12789,7 +12516,7 @@ private:
                 || row.address != expected_address
                 || row.bytes.size() != expected_bytes) {
                 row.release();
-                fail_("Format-6 validation stream row length disagrees");
+                fail_("hash-major validation stream row length disagrees");
             }
             crc.update(row.bytes);
             bytes_read += row.bytes.size();
@@ -12802,7 +12529,7 @@ private:
         if (ordinal != descriptor.row_count
             || bytes_read != descriptor.logical_bytes
             || crc.checksum() != descriptor.stream_crc64) {
-            fail_("Format-6 validation stream aggregate disagrees");
+            fail_("hash-major validation stream aggregate disagrees");
         }
     }
 
@@ -12835,16 +12562,16 @@ public:
                 || !bioseq::indexing::sql_bigint_can_represent(query_key_)
                 || !bioseq::indexing::sql_bigint_can_represent(
                     generation_id_)) {
-                fail_("Format-6 writer identity is invalid");
+                fail_("hash-major writer identity is invalid");
             }
             auto permit =
                 bioseq::parallelism::memory_admission_controller::instance()
                     .try_reserve(k_hash_major_minimizer_publication_slice_bytes);
             if (!permit) {
-                fail_("Format-6 publication memory admission was denied");
+                fail_("hash-major publication memory admission was denied");
             }
             publication_permit_ = std::move(*permit);
-            pending_slots_.reserve(kBatchRows);
+            pending_slots_.reserve(k_batch_rows);
             advisory_lock_key_ = index_advisory_xact_lock_key(
                 identity_.database_oid,
                 identity_.tablespace_oid,
@@ -12872,7 +12599,7 @@ public:
                 })
                 : nullptr;
             if (relation_ == nullptr) {
-                fail_("Format-6 generation relation is missing");
+                fail_("hash-major generation relation is missing");
             }
             const minimizer_generation_schema_inspection schema =
                 bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -12886,20 +12613,20 @@ public:
                 });
             if (!schema) {
                 fail_(fmt::format(
-                    "Format-6 generation relation schema mismatch: {}",
+                    "hash-major generation relation schema mismatch: {}",
                     minimizer_generation_schema_error_name(schema.error)));
             }
             (void)verify_pg_inline_payload_layout(relation_);
             catalog_indexes_ = bioseq::postgres::support::invoke_pg_as_cpp(
                 [&] { return CatalogOpenIndexes(relation_); });
             if (catalog_indexes_ == nullptr) {
-                fail_("Format-6 CatalogOpenIndexes returned NULL");
+                fail_("hash-major CatalogOpenIndexes returned NULL");
             }
             for (BufFile*& file : stream_spools_) {
                 file = hash_major_minimizer_pg_detail::create_spool();
             }
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_noexcept_();
             throw;
         }
@@ -12933,7 +12660,7 @@ public:
           state_(other.state_) {
         other.stream_spools_.fill(nullptr);
         other.pending_tuple_bytes_ = 0u;
-        other.state_ = State::moved;
+        other.state_ = operation_state::moved;
     }
     index_storage_hash_major_minimizer_writer& operator=(
         index_storage_hash_major_minimizer_writer&&) = delete;
@@ -12944,7 +12671,7 @@ public:
     [[nodiscard]] bool append_logical_bytes(
             hash_major_minimizer_stream_kind kind,
             std::span<const std::byte> bytes) {
-        if (state_ != State::accepting
+        if (state_ != operation_state::accepting
             || !hash_major_minimizer_pg_detail::valid_stream_kind(kind)
             || bytes.empty()) {
             return false;
@@ -12974,10 +12701,10 @@ public:
     [[nodiscard]] ready_hash_major_minimizer_token
     seal_and_validate_ready(
             const hash_major_minimizer_encoded_metadata& metadata,
-            minimizer_generation_source_proof source) {
+            minimizer_generation_source_authorization source) {
         try {
-            if (state_ != State::accepting) {
-                fail_("Format-6 writer was sealed more than once");
+            if (state_ != operation_state::accepting) {
+                fail_("hash-major writer was sealed more than once");
             }
             auto decoded_head =
                 bioseq::indexing::decode_hash_major_minimizer_head(
@@ -12998,7 +12725,7 @@ public:
                     != hash_major_minimizer_stream_kind::controls
                 || metadata.manifest.streams[2].kind
                     != hash_major_minimizer_stream_kind::postings) {
-                fail_("Format-6 encoded metadata disagrees");
+                fail_("hash-major encoded metadata disagrees");
             }
             const TransactionId transaction_id =
                 bioseq::postgres::support::invoke_pg_as_cpp(
@@ -13019,7 +12746,7 @@ public:
                 || source.source_.sequence_rowno != query_key_) {
                 source.invalidate_();
                 fail_(
-                    "Format-6 source proof is not bound to this writer transaction");
+                    "hash-major source authorization is not bound to this writer transaction");
             }
             for (std::size_t index = 0u; index < 3u; ++index) {
                 const auto& stream = metadata.manifest.streams[index];
@@ -13029,7 +12756,7 @@ public:
                     || stream.row_count
                         != hash_major_minimizer_pg_detail::ceil_rows(
                             stream.logical_bytes)) {
-                    fail_("Format-6 logical stream receipt disagrees");
+                    fail_("hash-major logical stream receipt disagrees");
                 }
             }
 
@@ -13062,13 +12789,13 @@ public:
                 [] { CommandCounterIncrement(); });
             if (!bioseq::postgres::support::invoke_pg_as_cpp(
                     [] { return ActiveSnapshotSet(); })) {
-                fail_("Format-6 validation requires an active snapshot");
+                fail_("hash-major validation requires an active snapshot");
             }
             Snapshot active_snapshot =
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [] { return GetActiveSnapshot(); });
             if (!IsMVCCSnapshot(active_snapshot)) {
-                fail_("Format-6 validation snapshot is not MVCC");
+                fail_("hash-major validation snapshot is not MVCC");
             }
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [] { UpdateActiveSnapshotCommandId(); });
@@ -13088,7 +12815,7 @@ public:
                     })
                 : nullptr;
             if (validation_primary_index_ == nullptr) {
-                fail_("Format-6 validation primary index is missing");
+                fail_("hash-major validation primary index is missing");
             }
 
             minimizer_generation_loaded_row manifest_row = read_exact_row_(
@@ -13104,7 +12831,7 @@ public:
                     manifest_row.bytes,
                     metadata.encoded_manifest)) {
                 manifest_row.release();
-                fail_("Format-6 validation manifest disagrees");
+                fail_("hash-major validation manifest disagrees");
             }
             manifest_row.release();
             reread_stream_(
@@ -13133,11 +12860,11 @@ public:
                 || source.source_.locator.logical_length
                     != metadata.manifest.target_length
                 || source.source_.alphabet_code
-                    != metadata.manifest.compatibility.alphabet_code
+                    != metadata.manifest.storage_profile.alphabet_code
                 || expected_source != metadata.manifest.source_identity
                 || expected_source != metadata.head.source_identity) {
                 source.invalidate_();
-                fail_("Format-6 validation source attestation disagrees");
+                fail_("hash-major validation source authorization disagrees");
             }
             source.invalidate_();
 
@@ -13158,8 +12885,8 @@ public:
             }
             publication_permit_.release();
 
-            const Oid proven_relation_oid = RelationGetRelid(relation_);
-            const RelFileLocator proven_locator = relation_->rd_locator;
+            const Oid validated_relation_oid = RelationGetRelid(relation_);
+            const RelFileLocator validated_locator = relation_->rd_locator;
             Relation finished_relation =
                 std::exchange(relation_, nullptr);
             bioseq::postgres::support::invoke_pg_as_cpp(
@@ -13175,13 +12902,13 @@ public:
                     static_cast<std::uint32_t>(
                         metadata.encoded_head.size()),
                     metadata.encoded_head);
-            state_ = State::sealed;
-            minimizer_generation_administration_identity proven_identity =
+            state_ = operation_state::sealed;
+            minimizer_generation_administration_identity validated_identity =
                 std::move(identity_);
             return ready_hash_major_minimizer_token{
-                std::move(proven_identity),
-                proven_relation_oid,
-                proven_locator,
+                std::move(validated_identity),
+                validated_relation_oid,
+                validated_locator,
                 advisory_lock_key_,
                 query_key_,
                 generation_id_,
@@ -13191,7 +12918,7 @@ public:
                 head_row_checksum,
             };
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_noexcept_();
             throw;
         }
@@ -13235,14 +12962,14 @@ publish_ready_hash_major_minimizer_head_pg(
                         token.head_bytes_.size()),
                     token.head_bytes_)) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 publication token is invalid");
+                "hash-major publication token is invalid");
         }
         auto decoded_head =
             bioseq::indexing::decode_hash_major_minimizer_head(
                 token.head_bytes_);
         if (!decoded_head || *decoded_head != token.head_) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 publication token head disagrees");
+                "hash-major publication token head disagrees");
         }
         bioseq::postgres::support::invoke_pg_as_cpp([&] {
             acquire_index_advisory_xact_lock(
@@ -13267,7 +12994,7 @@ publish_ready_hash_major_minimizer_head_pg(
             || relation->rd_locator.relNumber
                 != token.sidecar_locator_.relNumber) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 publication relation identity changed");
+                "hash-major publication relation identity changed");
         }
         const minimizer_generation_schema_inspection schema =
             bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -13281,7 +13008,7 @@ publish_ready_hash_major_minimizer_head_pg(
             });
         if (!schema) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 publication relation schema changed");
+                "hash-major publication relation schema changed");
         }
         primary_index = bioseq::postgres::support::invoke_pg_as_cpp(
             [&] { return index_open(
@@ -13340,7 +13067,7 @@ publish_ready_hash_major_minimizer_head_pg(
                     != k_hash_major_minimizer_head_bytes) {
                 previous.release();
                 minimizer_generation_storage_error_as_cpp(
-                    "previous Format-6 head row is malformed");
+                    "previous hash-major head row is malformed");
             }
             auto previous_head =
                 bioseq::indexing::decode_hash_major_minimizer_head(
@@ -13351,7 +13078,7 @@ publish_ready_hash_major_minimizer_head_pg(
                 || previous_head->generation_id
                     == token.generation_id_) {
                 minimizer_generation_storage_error_as_cpp(
-                    "previous Format-6 head generation is invalid");
+                    "previous hash-major head generation is invalid");
             }
             replaced_generation_id =
                 previous_head->generation_id;
@@ -13365,7 +13092,7 @@ publish_ready_hash_major_minimizer_head_pg(
         scan = nullptr;
         if (HeapTupleIsValid(extra)) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 head primary key returned duplicates");
+                "hash-major head primary key returned duplicates");
         }
         if (replace) {
             bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -13411,7 +13138,7 @@ publish_ready_hash_major_minimizer_head_pg(
             });
         if (!HeapTupleIsValid(published_tuple)) {
             minimizer_generation_storage_error_as_cpp(
-                "published Format-6 head is missing");
+                "published hash-major head is missing");
         }
         minimizer_generation_loaded_row published =
             load_minimizer_generation_row_or_error(relation, published_tuple);
@@ -13426,7 +13153,7 @@ publish_ready_hash_major_minimizer_head_pg(
                 published.bytes, token.head_bytes_)) {
             published.release();
             minimizer_generation_storage_error_as_cpp(
-                "published Format-6 head differs from its token");
+                "published hash-major head differs from its token");
         }
         published.release();
         HeapTuple published_extra =
@@ -13439,7 +13166,7 @@ publish_ready_hash_major_minimizer_head_pg(
         scan = nullptr;
         if (HeapTupleIsValid(published_extra)) {
             minimizer_generation_storage_error_as_cpp(
-                "published Format-6 head is not unique");
+                "published hash-major head is not unique");
         }
         Relation finished_index =
             std::exchange(primary_index, nullptr);
@@ -13475,9 +13202,9 @@ publish_ready_hash_major_minimizer_head_pg(
     }
 }
 
-/// One Format-6 read session owns the exact revision-3 heap/primary-index
+/// One hash-major read session owns the exact current-generation heap/primary-index
 /// descriptors and borrows one already-registered executor MVCC snapshot.
-/// Metadata discovery, source attestation, and every logical stream callback
+/// Metadata discovery, source authorization, and every logical stream callback
 /// therefore observe one relation incarnation and one snapshot.
 struct hash_major_minimizer_catalog_stream_receipt {
     hash_major_minimizer_stream_kind kind =
@@ -13487,7 +13214,7 @@ struct hash_major_minimizer_catalog_stream_receipt {
     std::uint64_t exact_catalog_stream_crc64 = 0;
 };
 
-/// Test-only proof returned by the Format-6 parallel heap-scan experiment.
+/// Test-only authorization returned by the hash-major parallel heap-scan experiment.
 /// The production reader does not consult this object or switch to this path.
 struct hash_major_minimizer_parallel_scan_stats {
     std::uint32_t requested_workers = 0;
@@ -13517,17 +13244,17 @@ struct hash_major_minimizer_parallel_scan_stats {
 
 namespace hash_major_minimizer_parallel_probe_detail {
 
-inline constexpr std::uint64_t kTocMagic =
+inline constexpr std::uint64_t k_toc_magic =
     UINT64_C(0x4236534350524f42); // "B6SCPROB"
-inline constexpr std::uint64_t kHeaderTocKey =
+inline constexpr std::uint64_t k_header_toc_key =
     UINT64_C(0x4236534300000001);
-inline constexpr std::uint64_t kParallelScanTocKey =
+inline constexpr std::uint64_t k_parallel_scan_toc_key =
     UINT64_C(0x4236534300000002);
-inline constexpr std::uint64_t kSeenBitsetTocKey =
+inline constexpr std::uint64_t k_seen_bitset_toc_key =
     UINT64_C(0x4236534300000003);
-inline constexpr std::uint32_t kHeaderVersion = 1u;
+inline constexpr std::uint32_t k_parallel_header_format_revision = 1u;
 
-struct Stream {
+struct parallel_scan_stream {
     std::int64_t sub_key = 0;
     std::uint64_t logical_bytes = 0;
     std::uint64_t row_count = 0;
@@ -13536,9 +13263,9 @@ struct Stream {
 
 /// Pointer-free DSM state. Workers authenticate rows and publish only
 /// commutative counters plus one exact expected-row bit per accepted tuple.
-struct Header {
+struct parallel_scan_header {
     std::uint64_t magic = 0;
-    std::uint32_t version = 0;
+    std::uint32_t format_revision = 0;
     std::uint32_t requested_workers = 0;
     Oid relation_oid = InvalidOid;
     RelFileLocator relation_locator{};
@@ -13547,7 +13274,7 @@ struct Header {
     std::uint64_t expected_rows = 0;
     std::uint64_t expected_bytes = 0;
     std::uint64_t bitset_word_count = 0;
-    std::array<Stream, 3> streams{};
+    std::array<parallel_scan_stream, 3> streams{};
     pg_atomic_uint64 scanned_rows{};
     pg_atomic_uint64 scanned_bytes{};
     pg_atomic_uint64 duplicate_rows{};
@@ -13556,15 +13283,15 @@ struct Header {
     pg_atomic_uint64 receipt_digest{};
 };
 
-static_assert(std::is_trivially_destructible_v<Header>);
-static_assert(std::is_standard_layout_v<Header>);
+static_assert(std::is_trivially_destructible_v<parallel_scan_header>);
+static_assert(std::is_standard_layout_v<parallel_scan_header>);
 
-inline constexpr std::uint64_t kImageMagic =
+inline constexpr std::uint64_t k_image_magic =
     UINT64_C(0x42364636494d4147); // "B6F6IMAG"
-inline constexpr std::uint32_t kImageVersion = 1u;
-inline constexpr std::uint64_t kImageSectionAlignment = 4096u;
+inline constexpr std::uint32_t k_image_format_revision = 1u;
+inline constexpr std::uint64_t k_image_section_alignment = 4096u;
 
-struct ImageStream {
+struct parallel_image_stream {
     std::int64_t sub_key = 0;
     std::uint64_t logical_bytes = 0;
     std::uint64_t row_count = 0;
@@ -13572,12 +13299,10 @@ struct ImageStream {
     std::uint64_t payload_offset = 0;
 };
 
-/// Offset-only native POC image. Production adoption would persist this as a
-/// generation object via temp+fsync+durable rename; this probe writes a
-/// PostgreSQL-owned temporary file only.
-struct ImageHeader {
+/// Offset-only test image written to a PostgreSQL-owned temporary file.
+struct parallel_image_header {
     std::uint64_t magic = 0;
-    std::uint32_t version = 0;
+    std::uint32_t format_revision = 0;
     std::uint32_t header_bytes = 0;
     std::uint64_t generation_id = 0;
     std::uint64_t query_key = 0;
@@ -13586,19 +13311,19 @@ struct ImageHeader {
     std::uint64_t receipts_offset = 0;
     std::uint64_t payload_offset = 0;
     std::uint64_t image_bytes = 0;
-    std::array<ImageStream, 3> streams{};
+    std::array<parallel_image_stream, 3> streams{};
     std::uint64_t header_crc64 = 0;
 };
 
-static_assert(std::is_trivially_copyable_v<ImageHeader>);
-static_assert(std::is_standard_layout_v<ImageHeader>);
+static_assert(std::is_trivially_copyable_v<parallel_image_header>);
+static_assert(std::is_standard_layout_v<parallel_image_header>);
 
-struct ImageWriteTarget {
+struct parallel_image_write_target {
     File file = -1;
-    const ImageHeader* header = nullptr;
+    const parallel_image_header* header = nullptr;
 };
 
-struct ImageValidation {
+struct parallel_image_validation {
     std::uint64_t elapsed_ns = 0;
     std::uint64_t rows = 0;
     std::uint64_t bytes = 0;
@@ -13620,17 +13345,17 @@ struct ImageValidation {
 [[nodiscard]] inline std::uint64_t align_image_offset(
         std::uint64_t value) {
     if (value > (std::numeric_limits<std::uint64_t>::max)()
-            - (kImageSectionAlignment - 1u)) {
+            - (k_image_section_alignment - 1u)) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 mmap image offset overflows");
+            "hash-major mmap image offset overflows");
     }
-    return (value + kImageSectionAlignment - 1u)
-        / kImageSectionAlignment * kImageSectionAlignment;
+    return (value + k_image_section_alignment - 1u)
+        / k_image_section_alignment * k_image_section_alignment;
 }
 
 [[nodiscard]] inline std::uint64_t image_header_crc(
-        const ImageHeader& header) noexcept {
-    ImageHeader copy = header;
+        const parallel_image_header& header) noexcept {
+    parallel_image_header copy = header;
     copy.header_crc64 = 0;
     crc64_ecma182_accumulator crc{};
     crc.update(std::as_bytes(
@@ -13639,7 +13364,7 @@ struct ImageValidation {
 }
 
 [[noreturn]] inline void corrupt_row_pg_leaf(
-        Header* header,
+        parallel_scan_header* header,
         const char* detail) {
     if (header != nullptr) {
         (void)pg_atomic_fetch_add_u64(
@@ -13647,19 +13372,19 @@ struct ImageValidation {
     }
     ereport(ERROR,
         (errcode(ERRCODE_DATA_CORRUPTED),
-         errmsg("bioseq Format-6 parallel scan probe rejected a row"),
+         errmsg("bioseq hash-major parallel scan probe rejected a row"),
          errdetail_internal("%s", detail)));
     pg_unreachable();
 }
 
 [[noreturn]] inline void duplicate_row_pg_leaf(
-        Header* header,
+        parallel_scan_header* header,
         std::uint64_t global_row) {
     (void)pg_atomic_fetch_add_u64(
         &header->duplicate_rows, 1);
     ereport(ERROR,
         (errcode(ERRCODE_DATA_CORRUPTED),
-         errmsg("bioseq Format-6 parallel scan probe found a duplicate row"),
+         errmsg("bioseq hash-major parallel scan probe found a duplicate row"),
          errdetail_internal(
             "global_row=%llu",
             static_cast<unsigned long long>(global_row))));
@@ -13667,7 +13392,7 @@ struct ImageValidation {
 }
 
 [[nodiscard]] inline int stream_index_for_sub_key(
-        const Header& header,
+        const parallel_scan_header& header,
         std::int64_t sub_key) noexcept {
     for (std::size_t index = 0; index < header.streams.size();
          ++index) {
@@ -13681,12 +13406,12 @@ struct ImageValidation {
 inline void scan_table_desc_pg_leaf(
         Relation relation,
         TableScanDesc scan,
-        Header* header,
+        parallel_scan_header* header,
         pg_atomic_uint64* seen_words) {
     if (relation == nullptr || scan == nullptr || header == nullptr
         || seen_words == nullptr
-        || header->magic != kTocMagic
-        || header->version != kHeaderVersion
+        || header->magic != k_toc_magic
+        || header->format_revision != k_parallel_header_format_revision
         || RelationGetRelid(relation) != header->relation_oid
         || !RelFileLocatorEquals(
             relation->rd_locator, header->relation_locator)
@@ -13696,7 +13421,7 @@ inline void scan_table_desc_pg_leaf(
                 k_minimizer_generation_index_attribute_descriptors.size())) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq Format-6 parallel scan probe binding changed")));
+             errmsg("bioseq hash-major parallel scan probe binding changed")));
     }
 
     TupleTableSlot* slot = table_slot_create(relation, nullptr);
@@ -13714,7 +13439,7 @@ inline void scan_table_desc_pg_leaf(
         bool* nulls = slot->tts_isnull;
 
         // Filter on the four fixed identity columns before inspecting BYTEA.
-        // Old generations and metadata rows are deliberately outside this
+        // Non-active generations and metadata rows are deliberately outside this
         // probe's corruption authority.
         if (!nulls[k_minimizer_generation_attribute_generation_id - 1]
             && !nulls[k_minimizer_generation_attribute_query_key - 1]
@@ -13743,7 +13468,7 @@ inline void scan_table_desc_pg_leaf(
                 if (projected.error != nullptr) {
                     corrupt_row_pg_leaf(header, projected.error);
                 }
-                const Stream& stream =
+                const parallel_scan_stream& stream =
                     header->streams[
                         static_cast<std::size_t>(stream_index)];
                 const std::uint64_t row_ordinal =
@@ -13854,7 +13579,7 @@ inline void scan_table_desc_pg_leaf(
 inline void serial_scan_pg_leaf(
         Relation relation,
         Snapshot snapshot,
-        Header* header,
+        parallel_scan_header* header,
         pg_atomic_uint64* seen_words) {
     TableScanDesc scan =
         table_beginscan(relation, snapshot, 0, nullptr);
@@ -13866,7 +13591,7 @@ inline void serial_scan_pg_leaf(
 inline void parallel_scan_pg_leaf(
         Relation relation,
         ParallelTableScanDesc parallel_scan,
-        Header* header,
+        parallel_scan_header* header,
         pg_atomic_uint64* seen_words) {
     TableScanDesc scan =
         table_beginscan_parallel(relation, parallel_scan);
@@ -13876,7 +13601,7 @@ inline void parallel_scan_pg_leaf(
 }
 
 inline void initialize_header(
-        Header* header,
+        parallel_scan_header* header,
         Relation relation,
         const hash_major_minimizer_manifest& manifest,
         std::uint64_t query_key,
@@ -13887,11 +13612,11 @@ inline void initialize_header(
             manifest.generation_id)
         || !bioseq::indexing::sql_bigint_can_represent(query_key)) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe header is invalid");
+            "hash-major parallel scan probe header is invalid");
     }
     std::memset(header, 0, sizeof(*header));
-    header->magic = kTocMagic;
-    header->version = kHeaderVersion;
+    header->magic = k_toc_magic;
+    header->format_revision = k_parallel_header_format_revision;
     header->requested_workers = requested_workers;
     header->relation_oid = RelationGetRelid(relation);
     header->relation_locator = relation->rd_locator;
@@ -13920,9 +13645,9 @@ inline void initialize_header(
                 > (std::numeric_limits<std::uint64_t>::max)()
                     - total_bytes) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 parallel scan probe stream geometry is invalid");
+                "hash-major parallel scan probe stream geometry is invalid");
         }
-        header->streams[index] = Stream{
+        header->streams[index] = parallel_scan_stream{
             .sub_key =
                 hash_major_minimizer_pg_detail::stream_sub_key(expected_kind),
             .logical_bytes = descriptor.logical_bytes,
@@ -13941,7 +13666,7 @@ inline void initialize_header(
             > static_cast<std::uint64_t>(
                 MaxAllocSize / sizeof(pg_atomic_uint64))) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe bitset geometry is invalid");
+            "hash-major parallel scan probe bitset geometry is invalid");
     }
     pg_atomic_init_u64(&header->scanned_rows, 0);
     pg_atomic_init_u64(&header->scanned_bytes, 0);
@@ -13956,7 +13681,7 @@ inline void initialize_seen_words(
         std::uint64_t word_count) {
     if (words == nullptr || word_count == 0u) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe bitset is invalid");
+            "hash-major parallel scan probe bitset is invalid");
     }
     for (std::uint64_t index = 0; index < word_count; ++index) {
         pg_atomic_init_u64(&words[index], 0);
@@ -13965,7 +13690,7 @@ inline void initialize_seen_words(
 
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 finalize_result(
-        Header& header,
+        parallel_scan_header& header,
         pg_atomic_uint64* seen_words,
         std::uint32_t launched_workers,
         std::uint64_t elapsed_ns) {
@@ -13999,7 +13724,7 @@ finalize_result(
         || scanned_rows != header.expected_rows
         || scanned_bytes != header.expected_bytes) {
         minimizer_generation_storage_error_as_cpp(fmt::format(
-            "Format-6 parallel scan probe receipt equation failed: "
+            "hash-major parallel scan probe receipt equation failed: "
             "expected_rows={} seen_rows={} scanned_rows={} "
             "expected_bytes={} scanned_bytes={} duplicates={} "
             "missing={} corrupt={}",
@@ -14039,11 +13764,11 @@ run_probe(
         || !IsMVCCSnapshot(snapshot)
         || snapshot->regd_count == 0) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe requires a registered MVCC snapshot");
+            "hash-major parallel scan probe requires a registered MVCC snapshot");
     }
 
     if (requested_workers == 0u) {
-        Header header{};
+        parallel_scan_header header{};
         initialize_header(
             &header, relation, manifest, query_key, 0u);
         const Size bitset_bytes = static_cast<Size>(
@@ -14079,7 +13804,7 @@ run_probe(
     if (IsParallelWorker() || IsInParallelMode()
         || ParallelContextActive()) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe cannot nest a parallel context");
+            "hash-major parallel scan probe cannot nest a parallel context");
     }
     const Size parallel_scan_bytes =
         bioseq::postgres::support::invoke_pg_as_cpp(
@@ -14089,7 +13814,7 @@ run_probe(
             });
     if (parallel_scan_bytes == 0u) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe received an empty scan descriptor");
+            "hash-major parallel scan probe received an empty scan descriptor");
     }
 
     ParallelContext* context = nullptr;
@@ -14104,17 +13829,17 @@ run_probe(
             [&] {
                 return CreateParallelContext(
                     "bioseq",
-                    "bioseq_format6_parallel_scan_probe_worker_main",
+                    "bioseq_hash_major_parallel_scan_probe_worker_main",
                     static_cast<int>(requested_workers));
             });
         if (context == nullptr) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 parallel scan probe could not create a parallel context");
+                "hash-major parallel scan probe could not create a parallel context");
         }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&] {
                 shm_toc_estimate_chunk(
-                    &context->estimator, sizeof(Header));
+                    &context->estimator, sizeof(parallel_scan_header));
                 shm_toc_estimate_chunk(
                     &context->estimator, parallel_scan_bytes);
                 // The exact size becomes known only after the manifest-backed
@@ -14127,7 +13852,7 @@ run_probe(
                             - expected_rows) {
                         ereport(ERROR,
                             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                             errmsg("bioseq Format-6 parallel scan row count overflows")));
+                             errmsg("bioseq hash-major parallel scan row count overflows")));
                     }
                     expected_rows += descriptor.row_count;
                 }
@@ -14141,7 +13866,7 @@ run_probe(
                             / sizeof(pg_atomic_uint64))) {
                     ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                         errmsg("bioseq Format-6 parallel scan bitset is too large")));
+                         errmsg("bioseq hash-major parallel scan bitset is too large")));
                 }
                 shm_toc_estimate_chunk(
                     &context->estimator,
@@ -14153,14 +13878,14 @@ run_probe(
             });
         if (context->toc == nullptr) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 parallel scan probe has no DSM table of contents");
+                "hash-major parallel scan probe has no DSM table of contents");
         }
 
-        auto* header = static_cast<Header*>(
+        auto* header = static_cast<parallel_scan_header*>(
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [&] {
                     return shm_toc_allocate(
-                        context->toc, sizeof(Header));
+                        context->toc, sizeof(parallel_scan_header));
                 }));
         initialize_header(
             header, relation, manifest, query_key,
@@ -14190,12 +13915,12 @@ run_probe(
                 table_parallelscan_initialize(
                     relation, parallel_scan, snapshot);
                 shm_toc_insert(
-                    context->toc, kHeaderTocKey, header);
+                    context->toc, k_header_toc_key, header);
                 shm_toc_insert(
-                    context->toc, kParallelScanTocKey,
+                    context->toc, k_parallel_scan_toc_key,
                     parallel_scan);
                 shm_toc_insert(
-                    context->toc, kSeenBitsetTocKey,
+                    context->toc, k_seen_bitset_toc_key,
                     seen_words);
                 LaunchParallelWorkers(context);
                 WaitForParallelWorkersToAttach(context);
@@ -14242,11 +13967,11 @@ run_probe(
 
 class index_storage_hash_major_minimizer_read_session {
 private:
-    enum class State : std::uint8_t {
+    enum class operation_state : std::uint8_t {
         opened,
         head_absent,
         metadata_ready,
-        source_attested,
+        source_authorized,
         finished,
         failed,
         moved,
@@ -14270,7 +13995,7 @@ private:
     Snapshot snapshot_ = nullptr;
     std::uint64_t query_key_ = 0u;
     Oid expected_tablespace_oid_ = InvalidOid;
-    State state_ = State::opened;
+    operation_state state_ = operation_state::opened;
     encoded_hash_major_minimizer_head encoded_head_{};
     encoded_hash_major_minimizer_manifest encoded_manifest_{};
     std::optional<hash_major_minimizer_head> head_{};
@@ -14282,7 +14007,7 @@ private:
     minimizer_generation_read_stats stats_{};
 
     [[noreturn]] void fail_(std::string_view message) {
-        state_ = State::failed;
+        state_ = operation_state::failed;
         minimizer_generation_storage_error_as_cpp(message);
     }
 
@@ -14332,7 +14057,7 @@ private:
             std::size_t retained_ordinal) {
         if (!cached_boundary_row_valid_
             || retained_ordinal >= row_batch_slot_count_) {
-            fail_("Format-6 boundary-row cache slot is invalid");
+            fail_("hash-major boundary-row cache slot is invalid");
         }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [this, retained_ordinal] {
@@ -14411,14 +14136,14 @@ private:
     descriptor_(hash_major_minimizer_stream_kind kind) const {
         if (!manifest_ || !hash_major_minimizer_pg_detail::valid_stream_kind(kind)) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 stream descriptor requested before metadata");
+                "hash-major stream descriptor requested before metadata");
         }
         const std::size_t index =
             hash_major_minimizer_pg_detail::stream_index(kind);
         const auto& descriptor = manifest_->streams[index];
         if (descriptor.kind != kind) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 stream descriptor ordering changed");
+                "hash-major stream descriptor ordering changed");
         }
         return descriptor;
     }
@@ -14457,14 +14182,14 @@ private:
         }
     }
 
-    template <class Consumer>
+    template <class p_consumer>
     [[nodiscard]] bool scan_stream_rows_(
             hash_major_minimizer_stream_kind kind,
             std::uint64_t first_row,
             std::uint64_t last_row,
-            Consumer&& consume) {
+            p_consumer&& consume) {
         const auto& descriptor = descriptor_(kind);
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || active_scan_ != nullptr
             || first_row > last_row
             || last_row >= descriptor.row_count
@@ -14543,7 +14268,7 @@ private:
                 batch_ordinal = 0u;
                 if (batch.size == 0u) {
                     if (batch.eof) break;
-                    fail_("Format-6 batched stream scan made no progress");
+                    fail_("hash-major batched stream scan made no progress");
                 }
                 authenticate_minimizer_generation_projected_row_batch(
                     batch, validated_receipts);
@@ -14565,7 +14290,7 @@ private:
                         static_cast<std::uint32_t>(expected_row),
                 }) {
                 row.release();
-                fail_("Format-6 stream row identity/order disagrees");
+                fail_("hash-major stream row identity/order disagrees");
             }
             const std::uint64_t row_offset =
                 expected_row * k_hash_major_minimizer_row_payload_bytes;
@@ -14579,7 +14304,7 @@ private:
                     && row.bytes.size()
                         != k_hash_major_minimizer_row_payload_bytes)) {
                 row.release();
-                fail_("Format-6 stream physical row length disagrees");
+                fail_("hash-major stream physical row length disagrees");
             }
             record_stream_row_(kind, row.bytes.size());
             accepted = consume(expected_row, row.bytes);
@@ -14614,7 +14339,7 @@ private:
             hash_major_minimizer_stream_kind kind,
             std::uint64_t offset,
             std::span<std::byte> output) {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || !hash_major_minimizer_pg_detail::valid_stream_kind(kind)) {
             return false;
         }
@@ -14662,7 +14387,7 @@ private:
                 ranges,
             void* consumer_context,
             hash_major_minimizer_consume_control_block_fn consume) {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || consume == nullptr
             || ranges.empty()
             || ranges.size()
@@ -14782,7 +14507,7 @@ private:
                 ranges,
             void* consumer_context,
             hash_major_minimizer_consume_posting_bytes_fn consume) {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || consume == nullptr || ranges.empty()
             || ranges.size()
                 > static_cast<std::size_t>(
@@ -14909,7 +14634,7 @@ private:
         auto& self =
             *static_cast<index_storage_hash_major_minimizer_read_session*>(
                 context);
-        if (self.state_ != State::source_attested
+        if (self.state_ != operation_state::source_authorized
             || !hash_major_minimizer_pg_detail::valid_stream_kind(kind)) {
             return 0u;
         }
@@ -14960,7 +14685,7 @@ public:
                 || !OidIsValid(expected_tablespace_oid_)
                 || !bioseq::indexing::sql_bigint_can_represent(
                     query_key_)) {
-                fail_("Format-6 read binding is invalid");
+                fail_("hash-major read binding is invalid");
             }
             const Oid relation_oid =
                 bioseq::postgres::support::invoke_pg_as_cpp([&] {
@@ -14971,7 +14696,7 @@ public:
                 throw minimizer_generation_relation_open_failure{
                     .inspection = {
                         .kind = minimizer_generation_relation_kind::missing,
-                        .revision3_error = minimizer_generation_schema_error::none,
+                        .schema_error = minimizer_generation_schema_error::none,
                     },
                 };
             }
@@ -14983,7 +14708,7 @@ public:
                 throw minimizer_generation_relation_open_failure{
                     .inspection = {
                         .kind = minimizer_generation_relation_kind::missing,
-                        .revision3_error = minimizer_generation_schema_error::none,
+                        .schema_error = minimizer_generation_schema_error::none,
                     },
                 };
             }
@@ -15030,14 +14755,6 @@ public:
             stats_.cold.add(
                 stats_.cold.sidecar_schema_validations, 1u);
             if (!schema) {
-                const bool legacy_exact = exact_identity
-                    && primary_index_relation_ != nullptr
-                    && bioseq::postgres::support::invoke_pg_as_cpp([&] {
-                        return inspect_bound_exact_legacy_minimizer_index_schema(
-                            heap_relation_,
-                            primary_index_relation_,
-                            index_name_);
-                    });
                 if (primary_index_relation_ != nullptr) {
                     Relation finished = std::exchange(
                         primary_index_relation_, nullptr);
@@ -15057,23 +14774,19 @@ public:
                 snapshot_ = nullptr;
                 throw minimizer_generation_relation_open_failure{
                     .inspection = {
-                        .kind = legacy_exact
-                            ? minimizer_generation_relation_kind::
-                                legacy_exact
-                            : minimizer_generation_relation_kind::
-                                malformed,
-                        .revision3_error = schema.error,
+                        .kind = minimizer_generation_relation_kind::malformed,
+                        .schema_error = schema.error,
                     },
                 };
             }
             (void)verify_pg_inline_payload_layout(heap_relation_);
             stats_.relation_opens = 1u;
         } catch (const minimizer_generation_relation_open_failure&) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_noexcept_();
             throw;
         } catch (...) {
-            state_ = State::failed;
+            state_ = operation_state::failed;
             abandon_noexcept_();
             throw;
         }
@@ -15118,7 +14831,7 @@ public:
         other.invalidate_cached_boundary_row_();
         other.row_batch_slots_.fill(nullptr);
         other.row_batch_slot_count_ = 0u;
-        other.state_ = State::moved;
+        other.state_ = operation_state::moved;
     }
     index_storage_hash_major_minimizer_read_session& operator=(
         index_storage_hash_major_minimizer_read_session&&) = delete;
@@ -15127,11 +14840,11 @@ public:
     }
 
     /// Returns false only for an authenticated absence of the distinct
-    /// Format-6 head sentinel.  A present malformed head or manifest is a
+    /// hash-major head sentinel.  A present malformed head or manifest is a
     /// hard error and never enters the grouped-SoA fallback.
     [[nodiscard]] bool read_active_head_manifest_once() {
-        if (state_ != State::opened || active_scan_ != nullptr) {
-            fail_("Format-6 metadata was read more than once");
+        if (state_ != operation_state::opened || active_scan_ != nullptr) {
+            fail_("hash-major metadata was read more than once");
         }
         ScanKeyData head_keys[5];
         ScanKeyInit(&head_keys[0], k_minimizer_generation_index_generation_id,
@@ -15162,7 +14875,7 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [&] { systable_endscan_ordered(active_scan_); });
             active_scan_ = nullptr;
-            state_ = State::head_absent;
+            state_ = operation_state::head_absent;
             return false;
         }
         minimizer_generation_loaded_row head_row =
@@ -15177,7 +14890,7 @@ public:
             || head_row.bytes.size()
                 != k_hash_major_minimizer_head_bytes) {
             head_row.release();
-            fail_("Format-6 head row shape disagrees");
+            fail_("hash-major head row shape disagrees");
         }
         std::copy(
             head_row.bytes.begin(), head_row.bytes.end(),
@@ -15191,7 +14904,7 @@ public:
             [&] { systable_endscan_ordered(active_scan_); });
         active_scan_ = nullptr;
         if (HeapTupleIsValid(extra)) {
-            fail_("Format-6 head primary key returned duplicates");
+            fail_("hash-major head primary key returned duplicates");
         }
         auto decoded_head =
             bioseq::indexing::decode_hash_major_minimizer_head(
@@ -15201,14 +14914,14 @@ public:
             || decoded_head->generation_id == 0u
             || !bioseq::indexing::sql_bigint_can_represent(
                 decoded_head->generation_id)) {
-            fail_("Format-6 head fixed wire is invalid");
+            fail_("hash-major head fixed wire is invalid");
         }
         head_.emplace(*decoded_head);
         if (head_->query_key != query_key_
             || head_->generation_id == 0u
             || !bioseq::indexing::sql_bigint_can_represent(
                 head_->generation_id)) {
-            fail_("Format-6 head fixed wire is invalid");
+            fail_("hash-major head fixed wire is invalid");
         }
         stats_.head_rows_read = 1u;
         stats_.head_bytes_read = k_hash_major_minimizer_head_bytes;
@@ -15242,7 +14955,7 @@ public:
                 active_scan_, ForwardScanDirection);
         });
         if (!HeapTupleIsValid(tuple)) {
-            fail_("Format-6 manifest row is missing");
+            fail_("hash-major manifest row is missing");
         }
         minimizer_generation_loaded_row manifest_row =
             load_minimizer_generation_row_or_error(heap_relation_, tuple);
@@ -15256,7 +14969,7 @@ public:
             || manifest_row.bytes.size()
                 != k_hash_major_minimizer_manifest_bytes) {
             manifest_row.release();
-            fail_("Format-6 manifest row shape disagrees");
+            fail_("hash-major manifest row shape disagrees");
         }
         std::copy(
             manifest_row.bytes.begin(), manifest_row.bytes.end(),
@@ -15270,7 +14983,7 @@ public:
             [&] { systable_endscan_ordered(active_scan_); });
         active_scan_ = nullptr;
         if (HeapTupleIsValid(extra)) {
-            fail_("Format-6 manifest primary key returned duplicates");
+            fail_("hash-major manifest primary key returned duplicates");
         }
         auto decoded_manifest =
             bioseq::indexing::decode_hash_major_minimizer_manifest(
@@ -15284,9 +14997,9 @@ public:
                 != head_->source_identity
             || decoded_manifest->source_content_crc64
                 != head_->source_content_crc64
-            || decoded_manifest->compatibility_digest
-                != head_->compatibility_digest) {
-            fail_("Format-6 head/manifest authentication disagrees");
+            || decoded_manifest->storage_profile_digest
+                != head_->storage_profile_digest) {
+            fail_("hash-major head/manifest authentication disagrees");
         }
         manifest_.emplace(*decoded_manifest);
         if (manifest_->generation_id != head_->generation_id
@@ -15294,8 +15007,8 @@ public:
             || manifest_->source_identity != head_->source_identity
             || manifest_->source_content_crc64
                 != head_->source_content_crc64
-            || manifest_->compatibility_digest
-                != head_->compatibility_digest
+            || manifest_->storage_profile_digest
+                != head_->storage_profile_digest
             || head_->manifest_payload_crc64
                 != bioseq::indexing::crc64_ecma182(
                     encoded_manifest_)
@@ -15306,8 +15019,8 @@ public:
                         encoded_manifest_.size()),
                     encoded_manifest_)
             || !bioseq::indexing::
-                is_valid_hash_major_minimizer_compatibility(
-                    manifest_->compatibility,
+                is_valid_hash_major_minimizer_storage_profile(
+                    manifest_->storage_profile,
                     manifest_->target_length)
             || manifest_->streams[0].kind
                 != hash_major_minimizer_stream_kind::directory
@@ -15315,7 +15028,7 @@ public:
                 != hash_major_minimizer_stream_kind::controls
             || manifest_->streams[2].kind
                 != hash_major_minimizer_stream_kind::postings) {
-            fail_("Format-6 head/manifest authentication disagrees");
+            fail_("hash-major head/manifest authentication disagrees");
         }
         std::uint64_t first_row = 0u;
         for (std::size_t index = 0u; index < 3u; ++index) {
@@ -15330,7 +15043,7 @@ public:
                 || stream.row_count
                     > (std::numeric_limits<std::uint64_t>::max)()
                         - first_row) {
-                fail_("Format-6 stream row descriptor disagrees");
+                fail_("hash-major stream row descriptor disagrees");
             }
             first_row += stream.row_count;
         }
@@ -15344,22 +15057,22 @@ public:
         stats_.cold.add(
             stats_.cold.row_crc_bytes,
             k_hash_major_minimizer_manifest_bytes);
-        state_ = State::metadata_ready;
+        state_ = operation_state::metadata_ready;
         return true;
     }
 
     [[nodiscard]] std::span<const std::byte>
     encoded_head() const noexcept {
-        return state_ == State::metadata_ready
-                || state_ == State::source_attested
+        return state_ == operation_state::metadata_ready
+                || state_ == operation_state::source_authorized
             ? std::span<const std::byte>{encoded_head_}
             : std::span<const std::byte>{};
     }
 
     [[nodiscard]] std::span<const std::byte>
     encoded_manifest() const noexcept {
-        return state_ == State::metadata_ready
-                || state_ == State::source_attested
+        return state_ == operation_state::metadata_ready
+                || state_ == operation_state::source_authorized
             ? std::span<const std::byte>{encoded_manifest_}
             : std::span<const std::byte>{};
     }
@@ -15367,7 +15080,7 @@ public:
     [[nodiscard]] const hash_major_minimizer_head& head() const {
         if (!head_) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 head requested before metadata");
+                "hash-major head requested before metadata");
         }
         return *head_;
     }
@@ -15375,59 +15088,59 @@ public:
     [[nodiscard]] const hash_major_minimizer_manifest& manifest() const {
         if (!manifest_) {
             minimizer_generation_storage_error_as_cpp(
-                "Format-6 manifest requested before metadata");
+                "hash-major manifest requested before metadata");
         }
         return *manifest_;
     }
 
     [[nodiscard]] const expected_hash_major_minimizer_generation&
-    validate_source_attestation(minimizer_generation_catalog_source_proof&& proof) {
+    consume_source_authorization(minimizer_generation_catalog_source_authorization&& authorization) {
         try {
-            if (state_ != State::metadata_ready
+            if (state_ != operation_state::metadata_ready
                 || !head_ || !manifest_
-                || !proof.valid_
-                || !proof.counters_.timed_equation_holds()
-                || proof.snapshot_ != snapshot_
-                || proof.database_oid_ != MyDatabaseId
-                || proof.tablespace_oid_ != expected_tablespace_oid_
-                || proof.index_name_ != index_name_
-                || proof.source_.sequence_rowno != query_key_
-                || proof.table_name_ != table_name_) {
-                proof.invalidate_();
-                fail_("Format-6 source proof binding/work disagrees");
+                || !authorization.valid_
+                || !authorization.stats_.timed_equation_holds()
+                || authorization.snapshot_ != snapshot_
+                || authorization.database_oid_ != MyDatabaseId
+                || authorization.tablespace_oid_ != expected_tablespace_oid_
+                || authorization.index_name_ != index_name_
+                || authorization.source_.sequence_rowno != query_key_
+                || authorization.table_name_ != table_name_) {
+                authorization.invalidate_();
+                fail_("hash-major source authorization binding/work disagrees");
             }
             const auto source_identity =
                 bioseq::indexing::hash_major_minimizer_source_identity(
                     query_key_,
-                    proof.source_.locator.source_epoch,
-                    proof.source_content_checksum_,
-                    proof.source_.locator.logical_length);
-            if (proof.source_.locator.source_epoch
+                    authorization.source_.locator.source_epoch,
+                    authorization.source_content_checksum_,
+                    authorization.source_.locator.logical_length);
+            if (authorization.source_.locator.source_epoch
                     != manifest_->source_epoch
-                || proof.source_content_checksum_
+                || authorization.source_content_checksum_
                     != manifest_->source_content_crc64
-                || proof.source_.locator.logical_length
+                || authorization.source_.locator.logical_length
                     != manifest_->target_length
-                || proof.source_.alphabet_code
-                    != manifest_->compatibility.alphabet_code
+                || authorization.source_.alphabet_code
+                    != manifest_->storage_profile.alphabet_code
                 || source_identity != manifest_->source_identity
                 || source_identity != head_->source_identity) {
-                proof.invalidate_();
-                fail_("Format-6 source identity/content disagrees");
+                authorization.invalidate_();
+                fail_("hash-major source identity/content disagrees");
             }
             stats_.source_parent_rows_read =
-                proof.counters_.parent_rows_read;
+                authorization.stats_.parent_rows_read;
             stats_.source_catalog_rows_read =
-                proof.counters_.catalog_rows_read;
+                authorization.stats_.catalog_rows_read;
             stats_.source_catalog_index_scans =
-                proof.counters_.catalog_index_scans;
+                authorization.stats_.catalog_index_scans;
             stats_.source_fragment_rows_read =
-                proof.counters_.fragment_rows_read;
+                authorization.stats_.fragment_rows_read;
             stats_.source_decoded_bp =
-                proof.counters_.decoded_bp;
+                authorization.stats_.decoded_bp;
             stats_.source_storage_incarnations_checked =
-                proof.counters_.storage_incarnations_checked;
-            stats_.cold.merge(proof.cold_stats_);
+                authorization.stats_.storage_incarnations_checked;
+            stats_.cold.merge(authorization.cold_stats_);
             expected_generation_.emplace(
                 expected_hash_major_minimizer_generation{
                     .generation_id = head_->generation_id,
@@ -15436,21 +15149,21 @@ public:
                     .source_content_crc64 =
                         manifest_->source_content_crc64,
                     .target_length = manifest_->target_length,
-                    .compatibility = manifest_->compatibility,
+                    .storage_profile = manifest_->storage_profile,
                 });
-            proof.invalidate_();
-            state_ = State::source_attested;
+            authorization.invalidate_();
+            state_ = operation_state::source_authorized;
             return *expected_generation_;
         } catch (...) {
-            proof.invalidate_();
-            state_ = State::failed;
+            authorization.invalidate_();
+            state_ = operation_state::failed;
             throw;
         }
     }
 
     [[nodiscard]] hash_major_minimizer_logical_stream_source_ref
     source_ref() noexcept {
-        if (state_ != State::source_attested) return {};
+        if (state_ != operation_state::source_authorized) return {};
         return {
             .context = this,
             .read_bytes = &read_bytes_callback_,
@@ -15464,12 +15177,12 @@ public:
     /// changing the production selective-reader callbacks.
     [[nodiscard]] hash_major_minimizer_parallel_scan_stats
     run_parallel_scan_probe(std::uint32_t requested_workers) {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || active_scan_ != nullptr
             || heap_relation_ == nullptr
             || !manifest_) {
             fail_(
-                "Format-6 parallel scan probe is out of order");
+                "hash-major parallel scan probe is out of order");
         }
         return hash_major_minimizer_parallel_probe_detail::run_probe(
             heap_relation_, snapshot_, *manifest_,
@@ -15482,9 +15195,9 @@ public:
     [[nodiscard]] std::array<
         hash_major_minimizer_catalog_stream_receipt, 3>
     audit_complete_streams() {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || active_scan_ != nullptr || !manifest_) {
-            fail_("Format-6 complete stream audit is out of order");
+            fail_("hash-major complete stream audit is out of order");
         }
         std::array<hash_major_minimizer_catalog_stream_receipt, 3>
             receipts{};
@@ -15517,7 +15230,7 @@ public:
                 || rows != descriptor.row_count
                 || bytes != descriptor.logical_bytes
                 || crc.checksum() != descriptor.stream_crc64) {
-                fail_("Format-6 complete stream audit disagrees");
+                fail_("hash-major complete stream audit disagrees");
             }
         }
         return receipts;
@@ -15526,29 +15239,29 @@ public:
     /// Checked close used by a route-inapplicable, self-authenticated F6 head
     /// before the independent F5 sentinel is probed.
     void close_metadata_read() {
-        if (state_ != State::metadata_ready
+        if (state_ != operation_state::metadata_ready
             || active_scan_ != nullptr) {
-            fail_("Format-6 metadata close is out of order");
+            fail_("hash-major metadata close is out of order");
         }
-        state_ = State::finished;
+        state_ = operation_state::finished;
         close_relations_();
     }
 
     void close_head_absent() {
-        if (state_ != State::head_absent
+        if (state_ != operation_state::head_absent
             || active_scan_ != nullptr) {
-            fail_("Format-6 absent-head close is out of order");
+            fail_("hash-major absent-head close is out of order");
         }
-        state_ = State::finished;
+        state_ = operation_state::finished;
         close_relations_();
     }
 
     [[nodiscard]] minimizer_generation_read_stats finish() {
-        if (state_ != State::source_attested
+        if (state_ != operation_state::source_authorized
             || active_scan_ != nullptr
             || heap_relation_ == nullptr
             || primary_index_relation_ == nullptr) {
-            fail_("Format-6 read finished out of order");
+            fail_("hash-major read finished out of order");
         }
         stats_.total_heap_rows_read =
             stats_.metadata_heap_rows_read
@@ -15562,15 +15275,15 @@ public:
         stats_.cold.add(
             stats_.cold.payload_bytes_requested,
             stats_.payload_bytes_read);
-        stats_.hash_major.format_revision =
-            bioseq::indexing::k_hash_major_minimizer_format_revision;
+        stats_.hash_major.layout_revision =
+            bioseq::indexing::k_hash_major_minimizer_layout_revision;
         stats_.hash_major.sessions = 1u;
         stats_.hash_major.generation_id = head_->generation_id;
         stats_.hash_major.source_identity = head_->source_identity;
         stats_.hash_major.source_content_crc64 =
             head_->source_content_crc64;
-        stats_.hash_major.compatibility_digest =
-            manifest_->compatibility_digest;
+        stats_.hash_major.storage_contract_digest =
+            manifest_->storage_profile_digest;
         stats_.hash_major.directory_rows =
             stats_.directory_chunks_read;
         stats_.hash_major.directory_bytes =
@@ -15583,7 +15296,7 @@ public:
             stats_.positions.physical_heap_rows_read;
         stats_.hash_major.posting_bytes =
             stats_.positions.physical_bytes_read;
-        state_ = State::finished;
+        state_ = operation_state::finished;
         close_relations_();
         return stats_;
     }
@@ -15601,7 +15314,7 @@ struct hash_major_minimizer_read_session_open_result {
         session{};
     minimizer_generation_relation_inspection relation_failure{
         .kind = minimizer_generation_relation_kind::malformed,
-        .revision3_error = minimizer_generation_schema_error::none,
+        .schema_error = minimizer_generation_schema_error::none,
     };
     bool head_absent = false;
 
@@ -15618,7 +15331,7 @@ open_exact_hash_major_minimizer_read_session_pg(
         const borrowed_executor_read_context& executor_read) {
     if (!executor_read.valid()) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 read requires a valid executor context");
+            "hash-major read requires a valid executor context");
     }
     hash_major_minimizer_read_session_open_result result{};
     try {
@@ -15634,14 +15347,14 @@ open_exact_hash_major_minimizer_read_session_pg(
             result.head_absent = true;
             result.relation_failure = {
                 .kind =
-                    minimizer_generation_relation_kind::revision3_exact,
-                .revision3_error = minimizer_generation_schema_error::none,
+                    minimizer_generation_relation_kind::current_exact,
+                .schema_error = minimizer_generation_schema_error::none,
             };
         } else {
             result.relation_failure = {
                 .kind =
-                    minimizer_generation_relation_kind::revision3_exact,
-                .revision3_error = minimizer_generation_schema_error::none,
+                    minimizer_generation_relation_kind::current_exact,
+                .schema_error = minimizer_generation_schema_error::none,
             };
         }
     } catch (const minimizer_generation_relation_open_failure& failure) {
@@ -15650,8 +15363,8 @@ open_exact_hash_major_minimizer_read_session_pg(
     return result;
 }
 
-/// Read-only restart/audit receipt for the complete fixed Format-6 metadata
-/// surface. Stream descriptors carry the directory/control/posting counts,
+/// Read-only restart/audit receipt for the complete fixed hash-major metadata
+/// surface. parallel_scan_stream descriptors carry the directory/control/posting counts,
 /// byte lengths and CRCs; the manifest carries the generation CRC.
 struct ready_hash_major_minimizer_metadata_identity {
     hash_major_minimizer_head head{};
@@ -15660,7 +15373,7 @@ struct ready_hash_major_minimizer_metadata_identity {
     encoded_hash_major_minimizer_manifest encoded_manifest{};
     minimizer_generation_source_locator source{};
     std::uint64_t source_content_checksum = 0;
-    minimizer_generation_catalog_source_proof_counters source_counters{};
+    minimizer_generation_catalog_source_stats source_stats{};
     std::array<hash_major_minimizer_catalog_stream_receipt, 3>
         exact_catalog_streams{};
 };
@@ -15670,29 +15383,29 @@ inspect_ready_hash_major_minimizer_metadata_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t query_key,
         Snapshot registered_snapshot,
-        minimizer_generation_catalog_source_proof&& proof) {
+        minimizer_generation_catalog_source_authorization&& authorization) {
     if (identity.database_oid != MyDatabaseId
         || identity.index_name.empty()
         || registered_snapshot == nullptr
         || !IsMVCCSnapshot(registered_snapshot)
         || registered_snapshot->regd_count == 0) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 metadata inspection input is invalid");
+            "hash-major metadata inspection input is invalid");
     }
     const std::string table_name{
-        proof.table_name_for_diagnostics()};
+        authorization.table_name_for_diagnostics()};
     if (table_name.empty()
         || (!identity.table_name.empty()
             && identity.table_name != table_name)) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 metadata inspection source/table binding is invalid");
+            "hash-major metadata inspection source/table binding is invalid");
     }
     const minimizer_generation_source_locator source =
-        proof.source_for_diagnostics();
+        authorization.source_for_diagnostics();
     const std::uint64_t source_content_checksum =
-        proof.source_content_checksum_for_diagnostics();
-    const minimizer_generation_catalog_source_proof_counters source_counters =
-        proof.counters_for_diagnostics();
+        authorization.source_content_checksum_for_diagnostics();
+    const minimizer_generation_catalog_source_stats source_stats =
+        authorization.stats_for_diagnostics();
     index_storage_hash_major_minimizer_read_session session{
         table_name,
         identity.index_name,
@@ -15703,15 +15416,15 @@ inspect_ready_hash_major_minimizer_metadata_pg(
     if (!session.read_active_head_manifest_once()) {
         session.close_head_absent();
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 metadata inspection found no READY head");
+            "hash-major metadata inspection found no READY head");
     }
-    (void)session.validate_source_attestation(std::move(proof));
+    (void)session.consume_source_authorization(std::move(authorization));
     ready_hash_major_minimizer_metadata_identity result{
         .head = session.head(),
         .manifest = session.manifest(),
         .source = source,
         .source_content_checksum = source_content_checksum,
-        .source_counters = source_counters,
+        .source_stats = source_stats,
     };
     std::ranges::copy(
         session.encoded_head(), result.encoded_head.begin());
@@ -15729,23 +15442,23 @@ inspect_ready_hash_major_minimizer_metadata_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t query_key,
         Snapshot registered_snapshot) {
-    minimizer_generation_catalog_source_proof proof =
-        derive_minimizer_generation_catalog_source_proof_pg(
+    minimizer_generation_catalog_source_authorization authorization =
+        authorize_minimizer_generation_catalog_source_pg(
             identity, query_key, registered_snapshot);
     return inspect_ready_hash_major_minimizer_metadata_pg(
-        identity, query_key, registered_snapshot, std::move(proof));
+        identity, query_key, registered_snapshot, std::move(authorization));
 }
 
-/// Test-only transport POC. It authenticates the same READY head, manifest
+/// Test-only transport probe. It authenticates the same READY head, manifest
 /// and source binding as the production reader, then scans only the three
-/// current-generation Format-6 stream subkeys through either one serial heap
+/// current-generation hash-major stream subkeys through either one serial heap
 /// scan or one core ParallelContext/shared ParallelTableScanDesc.
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 probe_ready_hash_major_minimizer_parallel_scan_pg(
         const minimizer_generation_administration_identity& identity,
         std::uint64_t query_key,
         Snapshot registered_snapshot,
-        minimizer_generation_catalog_source_proof&& proof,
+        minimizer_generation_catalog_source_authorization&& authorization,
         std::uint32_t requested_workers) {
     if (identity.database_oid != MyDatabaseId
         || identity.index_name.empty()
@@ -15753,13 +15466,13 @@ probe_ready_hash_major_minimizer_parallel_scan_pg(
         || !IsMVCCSnapshot(registered_snapshot)
         || registered_snapshot->regd_count == 0) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe input is invalid");
+            "hash-major parallel scan probe input is invalid");
     }
     const std::string table_name{
-        proof.table_name_for_diagnostics()};
+        authorization.table_name_for_diagnostics()};
     if (table_name.empty()) {
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe table binding is empty");
+            "hash-major parallel scan probe table binding is empty");
     }
     index_storage_hash_major_minimizer_read_session session{
         table_name,
@@ -15771,9 +15484,9 @@ probe_ready_hash_major_minimizer_parallel_scan_pg(
     if (!session.read_active_head_manifest_once()) {
         session.close_head_absent();
         minimizer_generation_storage_error_as_cpp(
-            "Format-6 parallel scan probe found no READY head");
+            "hash-major parallel scan probe found no READY head");
     }
-    (void)session.validate_source_attestation(std::move(proof));
+    (void)session.consume_source_authorization(std::move(authorization));
     hash_major_minimizer_parallel_scan_stats result =
         session.run_parallel_scan_probe(requested_workers);
     (void)session.finish();
@@ -15788,25 +15501,25 @@ inline void hash_major_minimizer_parallel_scan_probe_worker_main_pg(
         || !IsParallelWorker()) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq Format-6 parallel scan worker binding is invalid")));
+             errmsg("bioseq hash-major parallel scan worker binding is invalid")));
     }
-    auto* header = static_cast<Header*>(
-        shm_toc_lookup(toc, kHeaderTocKey, false));
+    auto* header = static_cast<parallel_scan_header*>(
+        shm_toc_lookup(toc, k_header_toc_key, false));
     auto* parallel_scan =
         static_cast<ParallelTableScanDesc>(
-            shm_toc_lookup(toc, kParallelScanTocKey, false));
+            shm_toc_lookup(toc, k_parallel_scan_toc_key, false));
     auto* seen_words = static_cast<pg_atomic_uint64*>(
-        shm_toc_lookup(toc, kSeenBitsetTocKey, false));
+        shm_toc_lookup(toc, k_seen_bitset_toc_key, false));
     if (header == nullptr || parallel_scan == nullptr
         || seen_words == nullptr
-        || header->magic != kTocMagic
-        || header->version != kHeaderVersion
+        || header->magic != k_toc_magic
+        || header->format_revision != k_parallel_header_format_revision
         || header->relation_locator.dbOid != MyDatabaseId
         || GetActiveSnapshot() == nullptr
         || !IsMVCCSnapshot(GetActiveSnapshot())) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq Format-6 parallel scan worker state is invalid")));
+             errmsg("bioseq hash-major parallel scan worker state is invalid")));
     }
 
     // ParallelWorkerMain joined the leader's lock group before loading this
@@ -15819,9 +15532,7 @@ inline void hash_major_minimizer_parallel_scan_probe_worker_main_pg(
     table_close(relation, NoLock);
 }
 
-/// Result of one inactive revision-3/4 logical-index clear.  The operation is
-/// deliberately separate from the legacy `clear()` entry point until every
-/// live reader and writer is switched atomically to the generation format.
+/// Result of one current-generation logical-index clear.
 struct minimizer_generation_clear_result {
     std::uint64_t dropped_relation_count = 0;
     std::uint64_t deleted_metadata_age_rows = 0;
@@ -15882,8 +15593,8 @@ parse_canonical_generation_sidecar_name(
     };
 }
 
-/// Clear-only DDL executor.  Unlike the legacy helper, every SPI transition is
-/// checked and the caller-owned activity bit remains set if PostgreSQL jumps
+/// Clear-only DDL executor. Every SPI transition is checked and the caller-owned
+/// activity bit remains set if PostgreSQL jumps
 /// out of SPI_execute so the enclosing PG_CATCH can finish the connection.
 inline void run_checked_generation_clear_ddl(
         const char* ddl,
@@ -15895,7 +15606,7 @@ inline void run_checked_generation_clear_ddl(
     if (connect_rc != SPI_OK_CONNECT) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq revision-3 index: generation clear DDL SPI_connect failed"),
+             errmsg("bioseq current-generation index: generation clear DDL SPI_connect failed"),
              errdetail("SPI rc=%d", connect_rc)));
     }
     spi_active = true;
@@ -15906,7 +15617,7 @@ inline void run_checked_generation_clear_ddl(
     if (execute_rc != SPI_OK_UTILITY || finish_rc != SPI_OK_FINISH) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq revision-3 index: generation clear DDL failed"),
+             errmsg("bioseq current-generation index: generation clear DDL failed"),
              errdetail("execute_rc=%d finish_rc=%d",
                 execute_rc, finish_rc)));
     }
@@ -15937,7 +15648,7 @@ struct fragment_index_storage {
     mutable std::size_t   decoded_bytes_ = 0;
     mutable index_sub_key_t decoded_sub_ = k_directory_sub_key;
     mutable std::size_t   decoded_chunk_ = std::numeric_limits<std::size_t>::max();
-    struct CachedChunk {
+    struct cached_chunk {
         // Admission outlives the bytes it covers (reverse member destruction).
         bioseq::parallelism::memory_permit permit;
         index_sub_key_t sub_key = k_directory_sub_key;
@@ -15946,11 +15657,11 @@ struct fragment_index_storage {
         std::uint64_t last_used = 0;
         std::vector<char> bytes;
     };
-    mutable std::vector<CachedChunk> chunk_cache_;
+    mutable std::vector<cached_chunk> chunk_cache_;
     mutable std::uint64_t chunk_cache_clock_ = 0;
     mutable std::size_t chunk_cache_bytes_ = 0;
-    static constexpr std::size_t kChunkCacheMaxEntries = 8;
-    static constexpr std::size_t kChunkCacheMaxBytes = 256ULL << 20;
+    static constexpr std::size_t k_chunk_cache_max_entries = 8;
+    static constexpr std::size_t k_chunk_cache_max_bytes = 256ULL << 20;
     std::int64_t* scratch_ = nullptr;
     std::size_t   scratch_units_ = 0;
     std::size_t   run_buffer_override_bytes_ = 0;
@@ -15959,11 +15670,11 @@ struct fragment_index_storage {
     std::optional<sorted_pair_run_store> sorted_runs_;
 
 private:
-    /// Own the PostgreSQL resources used by one legacy fragment read while the
+    /// Own the PostgreSQL resources used by one direct fragment read while the
     /// surrounding C++ frame is live.  Destruction deliberately performs no
     /// PostgreSQL work: a healthy path must close explicitly, while a translated
     /// PostgreSQL ERROR must abandon the handles for transaction-abort cleanup.
-    struct LegacyFragmentReadResources {
+    struct fragment_read_resources {
         Relation relation = nullptr;
         Relation ordered_index_relation = nullptr;
         SysScanDesc scan = nullptr;
@@ -15973,19 +15684,19 @@ private:
         LOCKMODE relation_lock = NoLock;
         bool abandoned = false;
 
-        explicit LegacyFragmentReadResources(LOCKMODE lock) noexcept
+        explicit fragment_read_resources(LOCKMODE lock) noexcept
             : relation_lock(lock) {}
-        LegacyFragmentReadResources(
-            const LegacyFragmentReadResources&) = delete;
-        LegacyFragmentReadResources& operator=(
-            const LegacyFragmentReadResources&) = delete;
-        ~LegacyFragmentReadResources() {
+        fragment_read_resources(
+            const fragment_read_resources&) = delete;
+        fragment_read_resources& operator=(
+            const fragment_read_resources&) = delete;
+        ~fragment_read_resources() {
             DEBUG_ASSERT(
                 abandoned
                     || (relation == nullptr && scan == nullptr
                         && ordered_index_relation == nullptr
                         && detoasted == nullptr),
-                "legacy fragment read resources require checked close or abandonment");
+                "fragment read resources require checked close or abandonment");
         }
 
         [[nodiscard]] Relation release_relation() noexcept {
@@ -16063,21 +15774,21 @@ private:
         }
     };
     static_assert(!std::is_copy_constructible_v<
-        LegacyFragmentReadResources>);
+        fragment_read_resources>);
     static_assert(!std::is_copy_assignable_v<
-        LegacyFragmentReadResources>);
+        fragment_read_resources>);
     static_assert(std::is_nothrow_destructible_v<
-        LegacyFragmentReadResources>);
+        fragment_read_resources>);
     static_assert(noexcept(
-        std::declval<LegacyFragmentReadResources&>()
+        std::declval<fragment_read_resources&>()
             .abandon_after_pg_error_noexcept()));
 
-    /// Own every PostgreSQL object used by the legacy fragment writer while
+    /// Own every PostgreSQL object used by the direct fragment writer while
     /// the surrounding minimizer build still owns vectors, run stores and
     /// admission permits.  The destructor deliberately performs no PostgreSQL
     /// work: normal paths close explicitly and translated PostgreSQL errors
     /// abandon the handles for transaction-abort cleanup.
-    struct LegacyFragmentWriteResources {
+    struct fragment_write_resources {
         Relation relation = nullptr;
         SysScanDesc scan = nullptr;
         HeapTuple tuple = nullptr;
@@ -16085,18 +15796,18 @@ private:
         LOCKMODE relation_lock = NoLock;
         bool abandoned = false;
 
-        explicit LegacyFragmentWriteResources(LOCKMODE lock) noexcept
+        explicit fragment_write_resources(LOCKMODE lock) noexcept
             : relation_lock(lock) {}
-        LegacyFragmentWriteResources(
-            const LegacyFragmentWriteResources&) = delete;
-        LegacyFragmentWriteResources& operator=(
-            const LegacyFragmentWriteResources&) = delete;
-        ~LegacyFragmentWriteResources() {
+        fragment_write_resources(
+            const fragment_write_resources&) = delete;
+        fragment_write_resources& operator=(
+            const fragment_write_resources&) = delete;
+        ~fragment_write_resources() {
             DEBUG_ASSERT(
                 abandoned
                     || (relation == nullptr && scan == nullptr
                         && tuple == nullptr && blob == nullptr),
-                "legacy fragment write resources require checked close or abandonment");
+                "fragment write resources require checked close or abandonment");
         }
 
         void release_tuple_checked() {
@@ -16165,23 +15876,23 @@ private:
         }
     };
     static_assert(!std::is_copy_constructible_v<
-        LegacyFragmentWriteResources>);
+        fragment_write_resources>);
     static_assert(!std::is_copy_assignable_v<
-        LegacyFragmentWriteResources>);
+        fragment_write_resources>);
     static_assert(std::is_nothrow_destructible_v<
-        LegacyFragmentWriteResources>);
+        fragment_write_resources>);
     static_assert(noexcept(
-        std::declval<LegacyFragmentWriteResources&>()
+        std::declval<fragment_write_resources&>()
             .abandon_after_pg_error_noexcept()));
 
-    // Authority-bearing MPS spill state is intentionally not part of the
+    // Authority-bearing minimizer-sequence spill state is intentionally not part of the
     // otherwise duck-typed storage surface.  Callers may observe its immutable
     // binding and mutate it only through the narrow logical-event APIs below.
-    using SegmentRunEntry =
+    using segment_run_entry_type =
         std::pair<std::uint32_t, sorted_pair_run_store>;
     // Reverse destruction drops stores/vector nodes before metadata admission.
     bioseq::parallelism::memory_permit segment_sorted_runs_metadata_permit_;
-    std::vector<SegmentRunEntry> segment_sorted_runs_;
+    std::vector<segment_run_entry_type> segment_sorted_runs_;
     inline static std::atomic<std::uint64_t>
         next_segment_spill_generation_token_{1u};
     direct_minimizer_spill_storage_binding segment_spill_binding_{};
@@ -16191,7 +15902,7 @@ private:
             std::size_t required) {
         const std::uint64_t retained = bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(segment_sorted_runs_.capacity()),
-            static_cast<std::uint64_t>(sizeof(SegmentRunEntry)));
+            static_cast<std::uint64_t>(sizeof(segment_run_entry_type)));
         if (retained == (std::numeric_limits<std::uint64_t>::max)()
             || (retained != 0u
                 && (!segment_sorted_runs_metadata_permit_
@@ -16205,7 +15916,7 @@ private:
         const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
             bioseq::parallelism::saturating_mul(
                 static_cast<std::uint64_t>(required),
-                static_cast<std::uint64_t>(sizeof(SegmentRunEntry))),
+                static_cast<std::uint64_t>(sizeof(segment_run_entry_type))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
         const std::uint64_t peak = bioseq::parallelism::saturating_add(
             retained, headroom);
@@ -16229,7 +15940,7 @@ private:
         segment_sorted_runs_.reserve(required);
         const std::uint64_t exact = bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(segment_sorted_runs_.capacity()),
-            static_cast<std::uint64_t>(sizeof(SegmentRunEntry)));
+            static_cast<std::uint64_t>(sizeof(segment_run_entry_type)));
         if (exact == (std::numeric_limits<std::uint64_t>::max)()
             || exact > segment_sorted_runs_metadata_permit_.bytes()) {
             return false;
@@ -16278,7 +15989,7 @@ public:
         o.decoded_sub_=k_directory_sub_key;
         o.decoded_chunk_=(std::numeric_limits<std::size_t>::max)();
         {
-            std::vector<CachedChunk> empty;
+            std::vector<cached_chunk> empty;
             o.chunk_cache_.swap(empty);
         }
         o.chunk_cache_clock_=0; o.chunk_cache_bytes_=0;
@@ -16341,21 +16052,34 @@ public:
     // ---- validators (translate to ereport on the pg side) ----
     [[nodiscard]] minimizer_hashmap_fragment_index::encoded_header validate_minimizer_blob_or_error(
             const char* p, std::size_t bytes, std::optional<std::uint32_t> expected_bucket_count = std::nullopt) const {
-        using H = minimizer_hashmap_fragment_index::encoded_header;
-        using B = minimizer_hashmap_fragment_index::encoded_bucket;
-        if (bytes < sizeof(H)) index_error("minimizer blob truncated header");
-        H h{}; std::memcpy(&h, p, sizeof(H));
-        if (h.magic != minimizer_hashmap_fragment_index::k_encoded_magic || h.revision != minimizer_hashmap_fragment_index::k_encoded_format_revision)
-            index_error("minimizer blob magic/version");
-        const std::size_t expect = sizeof(H) + sizeof(B)*h.bucket_count + sizeof(std::uint64_t)*h.total_positions;
+        using header_type = minimizer_hashmap_fragment_index::encoded_header;
+        using bucket_type = minimizer_hashmap_fragment_index::encoded_bucket;
+        if (bytes < sizeof(header_type)) index_error("minimizer blob truncated header");
+        header_type header{};
+        std::memcpy(&header, p, sizeof(header_type));
+        if (header.magic != minimizer_hashmap_fragment_index::k_encoded_magic
+            || header.layout_revision
+                != minimizer_hashmap_fragment_index::k_encoded_layout_revision)
+            index_error("minimizer blob magic/layout revision");
+        const std::size_t expect = sizeof(header_type)
+            + sizeof(bucket_type) * header.bucket_count
+            + sizeof(std::uint64_t) * header.total_positions;
         if (bytes != expect) index_error("minimizer blob size mismatch");
-        if (expected_bucket_count && h.bucket_count != *expected_bucket_count) index_error("minimizer blob bucket_count mismatch");
-        return h;
+        if (expected_bucket_count
+            && header.bucket_count != *expected_bucket_count) {
+            index_error("minimizer blob bucket_count mismatch");
+        }
+        return header;
     }
     void validate_minimizer_directory_or_error(const char* p, std::size_t bytes) const {
         if (bytes < 40) index_error("directory truncated");
-        std::uint32_t magic{}, version{}; std::memcpy(&magic, p, 4); std::memcpy(&version, p+4, 4);
-        if (magic != 0xB1000002u || version != 2u) index_error("directory magic/version");
+        std::uint32_t magic{};
+        std::uint32_t format_revision{};
+        std::memcpy(&magic, p, 4);
+        std::memcpy(&format_revision, p + 4, 4);
+        if (magic != 0xB1000002u || format_revision != 2u) {
+            index_error("directory magic/format revision");
+        }
     }
     void validate_minimizer_chunk_metadata_or_error(index_sub_key_t sk, std::size_t chunk_no,
             std::size_t min_bytes, std::size_t /*alignment*/) const {
@@ -16387,8 +16111,8 @@ public:
 
     /// Ensure the same-name minimizer sidecar has the one canonical generation
     /// schema. Normal ensure is deliberately non-destructive: an exact relation
-    /// is reused by OID and any legacy/malformed same-name object fails closed.
-    /// Explicit clear/reset owns the only destructive cutover boundary.
+    /// is reused by OID and any malformed same-name object fails closed.
+    /// Explicit clear/reset owns the destructive replacement boundary.
     [[nodiscard]] Oid ensure_minimizer_generation_storage() {
         if (index_name_ != k_minimizers_per_fragment_index_name
             && index_name_ != k_minimizers_per_sequence_index_name) {
@@ -16447,7 +16171,7 @@ public:
                     relation, nullptr, expected_schema);
             if (schema) {
                 // Keep the AccessShare relation lock until transaction end so
-                // external DDL cannot replace the proven tuple descriptor
+                // external DDL cannot replace the validated tuple descriptor
                 // before the row sink opens it.
                 evict_generation_storage_residency_();
                 relation_close(relation, NoLock);
@@ -16519,7 +16243,7 @@ public:
         CacheInvalidateRelcacheByRelid(created_schema.primary_index_oid);
         // Broadcast on the owning relation because every residency key carries
         // `user_relid`, not the physical sidecar OID. Other backends can evict
-        // legacy bytes after this first canonical sidecar creation commits.
+        // cached bytes after this first canonical sidecar creation commits.
         CacheInvalidateRelcacheByRelid(user_relid_);
         evict_generation_storage_residency_();
         return relation_oid;
@@ -16532,13 +16256,13 @@ public:
     /// them together.
     [[nodiscard]] minimizer_generation_clear_result
     clear_minimizer_generation_storage() {
-        struct PhysicalRelation {
+        struct physical_relation {
             Oid oid = InvalidOid;
             std::string name;
             std::uint8_t bucket_idx = 0;
             std::uint32_t shard_idx = 0;
         };
-        struct ClearState {
+        struct clear_state {
             bool spi_active = false;
             Relation locked_relation = nullptr;
             LOCKMODE locked_relation_mode = NoLock;
@@ -16552,18 +16276,18 @@ public:
             std::string ddl_sql;
             std::vector<std::pair<std::uint8_t, std::uint32_t>>
                 owned_shards;
-            std::vector<PhysicalRelation> candidates;
-            std::vector<PhysicalRelation> relations;
-            std::vector<PhysicalRelation> verification_candidates;
+            std::vector<physical_relation> candidates;
+            std::vector<physical_relation> relations;
+            std::vector<physical_relation> verification_candidates;
             minimizer_generation_clear_result result{};
             std::exception_ptr cpp_error;
             bool completed = false;
         };
-        auto* state = new (std::nothrow) ClearState{};
+        auto* state = new (std::nothrow) clear_state{};
         if (state == nullptr) {
             ereport(ERROR,
                 (errcode(ERRCODE_OUT_OF_MEMORY),
-                 errmsg("bioseq revision-3 index: generation clear state allocation failed")));
+                 errmsg("bioseq current-generation index: generation clear state allocation failed")));
         }
         MemoryContext saved_context = CurrentMemoryContext;
         ErrorData* volatile postgres_error = nullptr;
@@ -16629,7 +16353,7 @@ public:
                 if (discovery_connect_rc != SPI_OK_CONNECT) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear discovery SPI_connect failed"),
+                         errmsg("bioseq current-generation index: generation clear discovery SPI_connect failed"),
                          errdetail("SPI rc=%d", discovery_connect_rc)));
                 }
                 state->spi_active = true;
@@ -16638,7 +16362,7 @@ public:
                 if (owned_rc != SPI_OK_SELECT) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear owned-shard discovery failed"),
+                         errmsg("bioseq current-generation index: generation clear owned-shard discovery failed"),
                          errdetail("SPI rc=%d", owned_rc)));
                 }
                 state->owned_shards.reserve(
@@ -16668,7 +16392,7 @@ public:
                 if (discover_rc != SPI_OK_SELECT) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear relation discovery failed"),
+                         errmsg("bioseq current-generation index: generation clear relation discovery failed"),
                          errdetail("SPI rc=%d", discover_rc)));
                 }
                 state->candidates.reserve(
@@ -16685,7 +16409,7 @@ public:
                             "generation clear discovery returned a NULL identity");
                     }
                     state->candidates.emplace_back();
-                    PhysicalRelation& candidate = state->candidates.back();
+                    physical_relation& candidate = state->candidates.back();
                     candidate.oid = DatumGetObjectId(oid_datum);
                     candidate.name.assign(state->spi_text);
                     pfree(state->spi_text);
@@ -16702,7 +16426,7 @@ public:
                 if (discovery_finish_rc != SPI_OK_FINISH) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear discovery SPI_finish failed"),
+                         errmsg("bioseq current-generation index: generation clear discovery SPI_finish failed"),
                          errdetail("SPI rc=%d", discovery_finish_rc)));
                 }
 
@@ -16712,7 +16436,7 @@ public:
                 for (std::size_t candidate_index = 0;
                      candidate_index < state->candidates.size();
                      ++candidate_index) {
-                    PhysicalRelation& candidate =
+                    physical_relation& candidate =
                         state->candidates[candidate_index];
                     const canonical_generation_sidecar_name parsed =
                         parse_canonical_generation_sidecar_name(
@@ -16755,7 +16479,7 @@ public:
                 for (std::size_t relation_index = 0;
                      relation_index < state->relations.size();
                      ++relation_index) {
-                    PhysicalRelation& target =
+                    physical_relation& target =
                         state->relations[relation_index];
                     state->locked_relation = bioseq::postgres::support::try_open_postgres_relation(
                         target.oid, AccessExclusiveLock);
@@ -16816,7 +16540,7 @@ public:
                 if (verify_connect_rc != SPI_OK_CONNECT) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear verification SPI_connect failed"),
+                         errmsg("bioseq current-generation index: generation clear verification SPI_connect failed"),
                          errdetail("SPI rc=%d", verify_connect_rc)));
                 }
                 state->spi_active = true;
@@ -16825,7 +16549,7 @@ public:
                 if (verify_rc != SPI_OK_SELECT) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear verification query failed"),
+                         errmsg("bioseq current-generation index: generation clear verification query failed"),
                          errdetail("SPI rc=%d", verify_rc)));
                 }
                 state->verification_candidates.reserve(
@@ -16842,7 +16566,7 @@ public:
                             "generation clear verification returned a NULL identity");
                     }
                     state->verification_candidates.emplace_back();
-                    PhysicalRelation& candidate =
+                    physical_relation& candidate =
                         state->verification_candidates.back();
                     candidate.oid = DatumGetObjectId(oid_datum);
                     candidate.name.assign(state->spi_text);
@@ -16855,14 +16579,14 @@ public:
                 if (verify_finish_rc != SPI_OK_FINISH) {
                     ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear verification SPI_finish failed"),
+                         errmsg("bioseq current-generation index: generation clear verification SPI_finish failed"),
                          errdetail("SPI rc=%d", verify_finish_rc)));
                 }
                 for (std::size_t candidate_index = 0;
                      candidate_index
                         < state->verification_candidates.size();
                      ++candidate_index) {
-                    PhysicalRelation& candidate =
+                    physical_relation& candidate =
                         state->verification_candidates[candidate_index];
                     const canonical_generation_sidecar_name parsed =
                         parse_canonical_generation_sidecar_name(
@@ -17004,7 +16728,7 @@ public:
             delete state;
             ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq revision-3 index: generation clear failed"),
+                 errmsg("bioseq current-generation index: generation clear failed"),
                  errdetail("C++ error=%s", cpp_error_detail)));
         }
         if (!state->completed) {
@@ -17017,9 +16741,9 @@ public:
         return result;
     }
 
-    /// Open the inactive revision-3 reader against the exact physical name,
-    /// intentionally bypassing the legacy cached OID. A five-column relation
-    /// therefore fails schema validation rather than entering a legacy route.
+    /// Open the current-generation reader against the exact physical name,
+    /// bypassing the cached OID. A five-column relation therefore fails schema
+    /// validation rather than entering the generation route.
     [[nodiscard]] generation_read_session begin_generation_read(
             std::uint64_t query_key,
             Snapshot executor_snapshot,
@@ -17063,7 +16787,7 @@ public:
             std::uint64_t generation_id) {
         if (query_key != query_key_) {
             minimizer_generation_storage_error(
-                "Format-6 writer changed the handle query key");
+                "hash-major writer changed the handle query key");
         }
         (void)ensure_minimizer_generation_storage();
         return hash_major_minimizer_generation_writer{
@@ -17090,7 +16814,7 @@ public:
             });
         // The C++ handle can outlive a PostgreSQL subtransaction.  Never trust
         // a cached OID unless the authoritative namespace/name lookup still
-        // resolves to exactly that OID; rollback may have restored an old
+        // resolves to exactly that OID; rollback may have restored a prior
         // relation or removed a relation created below a SAVEPOINT.
         if (OidIsValid(index_relid_) && index_relid_ == rid) {
             return index_relid_;
@@ -17154,19 +16878,19 @@ public:
         if (!OidIsValid(rid)) return nullptr;
         const std::string expected_name = this_table_name();
         constexpr std::array<minimizer_generation_index_attribute_descriptor, 5>
-            legacy_descriptors{{
-                {kAttQueryKey, "query_key", INT8OID},
-                {kAttSubKey, "sub_key", INT8OID},
-                {kAttChunkNo, "chunk_no", INT4OID},
-                {kAttChunkBytes, "chunk_bytes", INT4OID},
-                {kAttBlob, "blob", BYTEAOID},
+            k_fragment_descriptors{{
+                {k_attribute_query_key, "query_key", INT8OID},
+                {k_attribute_sub_key, "sub_key", INT8OID},
+                {k_attribute_chunk_number, "chunk_no", INT4OID},
+                {k_attribute_chunk_bytes, "chunk_bytes", INT4OID},
+                {k_attribute_blob, "blob", BYTEAOID},
             }};
         const Oid expected_namespace = bioseq_internal_ns();
         const char* expected_name_data = expected_name.c_str();
         const minimizer_generation_index_attribute_descriptor* descriptors =
-            legacy_descriptors.data();
-        const std::size_t descriptor_count = legacy_descriptors.size();
-        LegacyFragmentReadResources resources{lock};
+            k_fragment_descriptors.data();
+        const std::size_t descriptor_count = k_fragment_descriptors.size();
+        fragment_read_resources resources{lock};
         try {
             resources.relation = bioseq::postgres::support::invoke_pg_as_cpp(
                 [rid, lock] { return bioseq::postgres::support::try_open_postgres_relation(rid, lock); });
@@ -17189,8 +16913,8 @@ public:
                             return std::uint8_t{1};
                         }
 
-                        // This is the legacy five-column surface. Never apply
-                        // these attnos to the canonical generation relation.
+                        // This is the direct five-column surface. Never apply
+                        // these attnos to the generation relation.
                         TupleDesc tuple_desc = RelationGetDescr(relation);
                         if (tuple_desc == nullptr
                             || tuple_desc->natts
@@ -17224,7 +16948,7 @@ public:
                     ? fmt::format(
                         "{} has the wrong physical identity", expected_name)
                     : fmt::format(
-                        "legacy fragment API refuses non-legacy schema for {}",
+                        "fragment API refuses an incompatible schema for {}",
                         expected_name);
                 index_error(error);
             }
@@ -17348,7 +17072,7 @@ public:
             index_error("fragment chunk number exceeds PostgreSQL INT range");
         }
 
-        LegacyFragmentReadResources resources{AccessShareLock};
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -17375,13 +17099,13 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, stored_sub_key, stored_chunk_no] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey, BTEqualStrategyNumber,
+                        &key_data[1], k_attribute_sub_key, BTEqualStrategyNumber,
                         F_INT8EQ, stored_sub_key);
                     ScanKeyInit(
-                        &key_data[2], kAttChunkNo, BTEqualStrategyNumber,
+                        &key_data[2], k_attribute_chunk_number, BTEqualStrategyNumber,
                         F_INT4EQ, stored_chunk_no);
                 });
             resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -17405,7 +17129,7 @@ public:
             const Datum blob = bioseq::postgres::support::invoke_pg_as_cpp(
                 [relation = resources.relation, tuple, &is_null] {
                     return heap_getattr(
-                        tuple, kAttBlob, RelationGetDescr(relation),
+                        tuple, k_attribute_blob, RelationGetDescr(relation),
                         &is_null);
                 });
             if (is_null) {
@@ -17459,7 +17183,7 @@ public:
 
     // ---- const metadata queries (total: 0/empty on absent) ----
     [[nodiscard]] std::size_t number_of_sub_keys() const {
-        LegacyFragmentReadResources resources{AccessShareLock};
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -17479,10 +17203,10 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, data_sub_key_limit] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey, BTLessStrategyNumber,
+                        &key_data[1], k_attribute_sub_key, BTLessStrategyNumber,
                         F_INT8LT, data_sub_key_limit);
                 });
             resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -17506,7 +17230,7 @@ public:
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [relation = resources.relation, tuple, &is_null] {
                             return heap_getattr(
-                                tuple, kAttSubKey,
+                                tuple, k_attribute_sub_key,
                                 RelationGetDescr(relation), &is_null);
                         });
                 if (is_null) index_error("fragment sub-key is NULL");
@@ -17530,7 +17254,7 @@ public:
         }
     }
     [[nodiscard]] std::size_t number_of_chunks(index_sub_key_t sub_key) const {
-        LegacyFragmentReadResources resources{AccessShareLock};
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -17549,10 +17273,10 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, stored_sub_key] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey, BTEqualStrategyNumber,
+                        &key_data[1], k_attribute_sub_key, BTEqualStrategyNumber,
                         F_INT8EQ, stored_sub_key);
                 });
             resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -17583,7 +17307,7 @@ public:
                 (std::numeric_limits<std::int32_t>::max)())) {
             index_error("fragment chunk number exceeds PostgreSQL INT range");
         }
-        LegacyFragmentReadResources resources{AccessShareLock};
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -17604,13 +17328,13 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, stored_sub_key, stored_chunk_no] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey, BTEqualStrategyNumber,
+                        &key_data[1], k_attribute_sub_key, BTEqualStrategyNumber,
                         F_INT8EQ, stored_sub_key);
                     ScanKeyInit(
-                        &key_data[2], kAttChunkNo, BTEqualStrategyNumber,
+                        &key_data[2], k_attribute_chunk_number, BTEqualStrategyNumber,
                         F_INT4EQ, stored_chunk_no);
                 });
             resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -17630,7 +17354,7 @@ public:
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [relation = resources.relation, tuple, &is_null] {
                             return heap_getattr(
-                                tuple, kAttChunkBytes,
+                                tuple, k_attribute_chunk_bytes,
                                 RelationGetDescr(relation), &is_null);
                         });
                 if (is_null) index_error("fragment chunk byte count is NULL");
@@ -17653,13 +17377,15 @@ public:
         }
     }
 
-    template <class T>
-    [[nodiscard]] const T* read_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
-        static_assert(alignof(T) <= alignof(std::int64_t), "read_chunk<T>: T must be int64-aligned-compatible");
+    template <class p_value_type>
+    [[nodiscard]] const p_value_type* read_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
+        static_assert(
+            alignof(p_value_type) <= alignof(std::int64_t),
+            "read_chunk element type requires excessive alignment");
         if (decoded_ != nullptr && decoded_sub_ == sub_key && decoded_chunk_ == chunk_no)
-            return reinterpret_cast<const T*>(decoded_);
+            return reinterpret_cast<const p_value_type*>(decoded_);
         load_chunk_into_buffer_(sub_key, chunk_no);
-        return reinterpret_cast<const T*>(decoded_);
+        return reinterpret_cast<const p_value_type*>(decoded_);
     }
 
     void resize(index_sub_key_t sub_key, std::size_t bytes_count) {
@@ -17688,7 +17414,7 @@ public:
     }
 
     void upsert_chunk_row_(
-            LegacyFragmentWriteResources& resources,
+            fragment_write_resources& resources,
             std::uint64_t query_key,
             index_sub_key_t sub_key,
             std::size_t chunk_no,
@@ -17731,13 +17457,13 @@ public:
         bioseq::postgres::support::invoke_pg_as_cpp(
             [key_data, stored_query_key, stored_sub_key, stored_chunk_no] {
                 ScanKeyInit(
-                    &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                    &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                     F_INT8EQ, stored_query_key);
                 ScanKeyInit(
-                    &key_data[1], kAttSubKey, BTEqualStrategyNumber,
+                    &key_data[1], k_attribute_sub_key, BTEqualStrategyNumber,
                     F_INT8EQ, stored_sub_key);
                 ScanKeyInit(
-                    &key_data[2], kAttChunkNo, BTEqualStrategyNumber,
+                    &key_data[2], k_attribute_chunk_number, BTEqualStrategyNumber,
                     F_INT4EQ, stored_chunk_no);
             });
         resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -17796,7 +17522,7 @@ public:
             std::size_t chunk_no,
             std::span<const char> payload,
             bool written_in_current_xact) {
-        LegacyFragmentWriteResources resources{RowExclusiveLock};
+        fragment_write_resources resources{RowExclusiveLock};
         try {
             resources.relation = open_index_relation_(
                 true, RowExclusiveLock);
@@ -17817,10 +17543,11 @@ public:
         }
     }
 
-    template <class T, class F>
-    void write_to_each(index_sub_key_t sub_key, F&& writer) {
-        static_assert(bioseq::indexing::index_chunk_writer_fn<F, T>,
-            "write_to_each<T>: writer must be (size_t, T*, size_t) -> size_t");
+    template <class p_value_type, class p_callback>
+    void write_to_each(index_sub_key_t sub_key, p_callback&& writer) {
+        static_assert(
+            bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>,
+            "write_to_each writer has an incompatible element callback shape");
         auto it = chunk_payload_bytes_.find(sub_key);
         if (it == chunk_payload_bytes_.end()) {
             index_error("fragment write_to_each has no preceding resize");
@@ -17832,7 +17559,7 @@ public:
             if (payload_bytes > k_max_index_chunk_size_bytes) {
                 index_error("fragment write plan exceeds MAX chunk size");
             }
-            if (payload_bytes % sizeof(T) != 0) {
+            if (payload_bytes % sizeof(p_value_type) != 0) {
                 index_error("fragment write payload is not a whole number of elements");
             }
             max_payload = std::max(max_payload, payload_bytes);
@@ -17842,7 +17569,7 @@ public:
             : 1 + (max_payload - 1) / sizeof(std::int64_t);
         std::int64_t* buffer = scratch_buffer_(scratch_units);
 
-        LegacyFragmentWriteResources resources{RowExclusiveLock};
+        fragment_write_resources resources{RowExclusiveLock};
         try {
             resources.relation = open_index_relation_(
                 true, RowExclusiveLock);
@@ -17856,12 +17583,12 @@ public:
                 if (scratch_buffer_bytes_() < payload_bytes) {
                     index_error("fragment write scratch is undersized");
                 }
-                const std::size_t capacity = payload_bytes / sizeof(T);
+                const std::size_t capacity = payload_bytes / sizeof(p_value_type);
                 if (payload_bytes > 0) {
                     std::memset(buffer, 0, payload_bytes);
                 }
                 const std::size_t next = writer(
-                    chunk_no, reinterpret_cast<T*>(buffer), capacity);
+                    chunk_no, reinterpret_cast<p_value_type*>(buffer), capacity);
                 if (next < chunk_no) {
                     index_error("fragment writer moved backwards");
                 }
@@ -17884,9 +17611,9 @@ public:
         }
     }
 
-    template <class F> void read_chunks_in_range(index_sub_key_t lo, index_sub_key_t hi, F&& cb) {
+    template <class p_callback> void read_chunks_in_range(index_sub_key_t lo, index_sub_key_t hi, p_callback&& cb) {
         if (hi <= lo) return;
-        LegacyFragmentReadResources resources{AccessShareLock};
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -17916,14 +17643,14 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, first_sub_key, last_sub_key] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey,
+                        &key_data[1], k_attribute_sub_key,
                         BTGreaterEqualStrategyNumber, F_INT8GE,
                         first_sub_key);
                     ScanKeyInit(
-                        &key_data[2], kAttSubKey,
+                        &key_data[2], k_attribute_sub_key,
                         BTLessEqualStrategyNumber, F_INT8LE,
                         last_sub_key);
                 });
@@ -17950,7 +17677,7 @@ public:
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [relation = resources.relation, tuple, &is_null] {
                             return heap_getattr(
-                                tuple, kAttSubKey,
+                                tuple, k_attribute_sub_key,
                                 RelationGetDescr(relation), &is_null);
                         });
                 if (is_null) index_error("range row sub-key is NULL");
@@ -17964,7 +17691,7 @@ public:
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [relation = resources.relation, tuple, &is_null] {
                             return heap_getattr(
-                                tuple, kAttChunkNo,
+                                tuple, k_attribute_chunk_number,
                                 RelationGetDescr(relation), &is_null);
                         });
                 if (is_null) index_error("range row chunk number is NULL");
@@ -17980,7 +17707,7 @@ public:
                 const Datum blob = bioseq::postgres::support::invoke_pg_as_cpp(
                     [relation = resources.relation, tuple, &is_null] {
                         return heap_getattr(
-                            tuple, kAttBlob,
+                            tuple, k_attribute_blob,
                             RelationGetDescr(relation), &is_null);
                     });
                 if (is_null) index_error("range row blob is NULL");
@@ -18027,8 +17754,8 @@ public:
         }
     }
 
-    template <class F> void for_each_sub_key(F&& fn) const {
-        LegacyFragmentReadResources resources{AccessShareLock};
+    template <class p_callback> void for_each_sub_key(p_callback&& fn) const {
+        fragment_read_resources resources{AccessShareLock};
         try {
             resources.relation = open_index_relation_(
                 false, AccessShareLock);
@@ -18048,10 +17775,10 @@ public:
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [key_data, query_key, data_sub_key_limit] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey, BTEqualStrategyNumber,
+                        &key_data[0], k_attribute_query_key, BTEqualStrategyNumber,
                         F_INT8EQ, query_key);
                     ScanKeyInit(
-                        &key_data[1], kAttSubKey, BTLessStrategyNumber,
+                        &key_data[1], k_attribute_sub_key, BTLessStrategyNumber,
                         F_INT8LT, data_sub_key_limit);
                 });
             resources.scan = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -18074,7 +17801,7 @@ public:
                     bioseq::postgres::support::invoke_pg_as_cpp(
                         [relation = resources.relation, tuple, &is_null] {
                             return heap_getattr(
-                                tuple, kAttSubKey,
+                                tuple, k_attribute_sub_key,
                                 RelationGetDescr(relation), &is_null);
                         });
                 if (is_null) index_error("fragment sub-key is NULL");
@@ -18107,13 +17834,13 @@ public:
             return;
         }
         if (!bioseq::indexing::sql_bigint_can_represent(query_key_)) {
-            index_error("legacy fragment delete query key exceeds PostgreSQL BIGINT");
+            index_error("fragment delete query key exceeds PostgreSQL BIGINT");
         }
-        // Opening through the legacy validator is intentional: a canonical
+        // Opening through the five-column validator is intentional: a generation
         // generation table has query_key/sub_key columns too, so name-based
         // DELETE SQL could otherwise erase immutable generations while
-        // bypassing every old-attno check.
-        LegacyFragmentWriteResources resources{RowExclusiveLock};
+        // bypassing every direct-row attribute check.
+        fragment_write_resources resources{RowExclusiveLock};
         try {
             resources.relation = open_index_relation_(
                 false, RowExclusiveLock);
@@ -18123,7 +17850,7 @@ public:
                 [relation] { return bioseq::postgres::support::find_primary_key_oid(relation); });
             if (!OidIsValid(primary_index)) {
                 resources.close_checked();
-                index_error("legacy fragment delete requires a primary index");
+                index_error("fragment delete requires a primary index");
             }
 
             std::array<ScanKeyData, 3> keys{};
@@ -18145,15 +17872,15 @@ public:
                 [key_data, query_key, bounded,
                  first_sub_key, last_sub_key] {
                     ScanKeyInit(
-                        &key_data[0], kAttQueryKey,
+                        &key_data[0], k_attribute_query_key,
                         BTEqualStrategyNumber, F_INT8EQ, query_key);
                     if (bounded) {
                         ScanKeyInit(
-                            &key_data[1], kAttSubKey,
+                            &key_data[1], k_attribute_sub_key,
                             BTGreaterEqualStrategyNumber, F_INT8GE,
                             first_sub_key);
                         ScanKeyInit(
-                            &key_data[2], kAttSubKey,
+                            &key_data[2], k_attribute_sub_key,
                             BTLessEqualStrategyNumber, F_INT8LE,
                             last_sub_key);
                     }
@@ -18201,11 +17928,11 @@ public:
 
     [[nodiscard]] std::size_t run_buffer_bytes() const {
         if (run_buffer_override_bytes_ > 0) return run_buffer_override_bytes_;
-        constexpr std::uint64_t floor = std::uint64_t{64} << 20;
-        constexpr std::uint64_t ceil = std::uint64_t{8} << 30;
+        constexpr std::uint64_t k_floor = std::uint64_t{64} << 20;
+        constexpr std::uint64_t k_ceiling = std::uint64_t{8} << 30;
         const std::uint64_t desired = std::uint64_t{2} << 30;
         std::uint64_t capped =
-            bioseq::memory::default_budget().clamp_working_set(desired, floor, ceil);
+            bioseq::memory::default_budget().clamp_working_set(desired, k_floor, k_ceiling);
         const std::uint64_t index_cap =
             bioseq::parallelism::memory_admission_controller::instance().index_memory_cap_bytes();
         if (index_cap != 0) {
@@ -18228,7 +17955,7 @@ public:
 	        std::uint64_t admitted_bytes,
 	        bioseq::parallelism::memory_permit permit);
 	    void demote_resident_runs_until_available(std::uint64_t bytes_needed);
-	    template <class F> void merge_runs(F&& on_kmer);
+	    template <class p_callback> void merge_runs(p_callback&& on_kmer);
 	    std::size_t spill_sorted_segment_run(
 	        std::uint32_t position_segment,
 	        std::span<const std::pair<std::uint64_t,std::uint64_t>> sorted);
@@ -18236,7 +17963,7 @@ public:
 	        std::uint64_t old_span,
 	        std::uint64_t new_span,
 	        std::uint64_t target_length);
-	    template <class F> void merge_segment_runs(F&& on_segment_kmer);
+	    template <class p_callback> void merge_segment_runs(p_callback&& on_segment_kmer);
 	    [[nodiscard]] direct_minimizer_spill_storage_binding
 	    begin_segment_spill_generation();
 	    [[nodiscard]] direct_minimizer_spill_storage_binding
@@ -18252,10 +17979,10 @@ public:
 };
 
 // A bounded position cursor over one kmer's unique positions (one vector).
-struct PositionBatchCursor {
+struct position_batch_cursor {
     const std::vector<std::uint64_t>* v = nullptr;
     [[nodiscard]] std::uint64_t total_count() const { return v->size(); }
-    template <class F> void for_each_batch(F&& f) const {
+    template <class p_callback> void for_each_batch(p_callback&& f) const {
         if (!v->empty()) f(std::span<const std::uint64_t>(v->data(), v->size()));
     }
 };
@@ -18468,16 +18195,16 @@ struct sequence_index_storage {
     }
     [[nodiscard]] std::size_t number_of_chunks() const { return chunk_byte_size() == 0 ? 0 : 1; }
     [[nodiscard]] std::size_t chunk_byte_size() const { if (!decoded_valid_) load_(); return decoded_bytes_; }
-    template <class T> [[nodiscard]] const T* read_chunk() { if (!decoded_valid_) load_(); return reinterpret_cast<const T*>(decoded_); }
+    template <class p_value_type> [[nodiscard]] const p_value_type* read_chunk() { if (!decoded_valid_) load_(); return reinterpret_cast<const p_value_type*>(decoded_); }
     void resize(std::size_t bytes) { if (bytes > k_max_index_chunk_size_bytes) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index inline: bytes exceed single-chunk MAX"); planned_bytes_ = bytes; }
     void prefetch_chunk() {}
-    template <class T, class F> void write_to_each(F&& writer) {
-        static_assert(bioseq::indexing::index_chunk_writer_fn<F, T>, "inline write_to_each writer shape");
+    template <class p_value_type, class p_callback> void write_to_each(p_callback&& writer) {
+        static_assert(bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>, "inline write_to_each writer shape");
         if (planned_bytes_ == std::numeric_limits<std::size_t>::max()) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index inline: write_to_each without resize");
         const std::size_t payload = planned_bytes_;
-        if (payload % sizeof(T) != 0) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index inline: payload not whole T");
+        if (payload % sizeof(p_value_type) != 0) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index inline: payload is not a whole number of elements");
         std::vector<char> buf(payload, 0);
-        const std::size_t next = writer(0, reinterpret_cast<T*>(buf.data()), payload / sizeof(T));
+        const std::size_t next = writer(0, reinterpret_cast<p_value_type*>(buf.data()), payload / sizeof(p_value_type));
         if (next != 0) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index inline: writer emitted >1 chunk");
         Relation rel = open_(true, RowExclusiveLock);
         // upsert (delete then insert) so rebuild replaces the single row.
@@ -18506,7 +18233,7 @@ struct sequence_index_storage {
         decoded_valid_ = false;
     }
     void clear(std::string_view name);
-    /// pg-only reuse hook (§8.3) — reposition without re-allocating own_mctx_.
+    /// PostgreSQL-only reuse hook: reposition without reallocating own_mctx_.
     void reset_entity(const sequence_locator& loc, std::uint64_t sequence_rowno) {
         bucket_idx_ = (std::uint8_t)loc.bucket_index; shard_idx_ = loc.shard_index; query_key_ = sequence_rowno;
         index_relid_ = InvalidOid; decoded_valid_ = false; decoded_bytes_ = 0;
@@ -18591,9 +18318,9 @@ struct table_index_storage {
     [[nodiscard]] Relation open_(bool create, LOCKMODE lock) const { const Oid rid = resolve_relid_(create); if (!OidIsValid(rid)) return nullptr; return bioseq::postgres::support::try_open_postgres_relation(rid, lock); }
     void ensure_buffer_(std::size_t units) const {
         if (decoded_units_>=units && decoded_!=nullptr) return;
-        MemoryContext old = MemoryContextSwitchTo(own_mctx_);
+        MemoryContext previous_context = MemoryContextSwitchTo(own_mctx_);
         decoded_ = (decoded_==nullptr)?(std::int64_t*)palloc(units*sizeof(std::int64_t)):(std::int64_t*)repalloc(decoded_, units*sizeof(std::int64_t));
-        decoded_units_=units; MemoryContextSwitchTo(old);
+        decoded_units_=units; MemoryContextSwitchTo(previous_context);
     }
     [[nodiscard]] std::size_t number_of_chunks() const {
         Relation rel = open_(false, AccessShareLock); if (rel==nullptr) return 0;
@@ -18611,8 +18338,8 @@ struct table_index_storage {
             bioseq::postgres::support::pg_datum::from_raw(heap_getattr(t,2,RelationGetDescr(rel),&isnull)))); }
         systable_endscan(s); relation_close(rel, AccessShareLock); return out;
     }
-    template <class T> [[nodiscard]] const T* read_chunk(std::size_t chunk_no) {
-        if (decoded_!=nullptr && decoded_chunk_==(std::int64_t)chunk_no) return reinterpret_cast<const T*>(decoded_);
+    template <class p_value_type> [[nodiscard]] const p_value_type* read_chunk(std::size_t chunk_no) {
+        if (decoded_!=nullptr && decoded_chunk_==(std::int64_t)chunk_no) return reinterpret_cast<const p_value_type*>(decoded_);
         Relation rel = open_(false, AccessShareLock);
         if (rel==nullptr) index_error("table index relation missing");
         const Oid pk = bioseq::postgres::support::find_primary_key_oid(rel);
@@ -18631,17 +18358,17 @@ struct table_index_storage {
         raw_detoasted.free_if_copy();
         decoded_chunk_=(std::int64_t)chunk_no; decoded_bytes_=payload;
         systable_endscan(s); relation_close(rel, AccessShareLock);
-        return reinterpret_cast<const T*>(decoded_);
+        return reinterpret_cast<const p_value_type*>(decoded_);
     }
     void resize(std::size_t bytes) { planned_bytes_for_chunk_ = bytes; }
     void prefetch_chunk(std::size_t) {}
-    template <class T, class F> void write_to_each(F&& writer) { write_to<T>(0, std::forward<F>(writer)); }
-    template <class T, class F> void write_to(std::size_t chunk_no, F&& writer) {
-        static_assert(bioseq::indexing::index_chunk_writer_fn<F, T>, "table write_to writer shape");
+    template <class p_value_type, class p_callback> void write_to_each(p_callback&& writer) { write_to<p_value_type>(0, std::forward<p_callback>(writer)); }
+    template <class p_value_type, class p_callback> void write_to(std::size_t chunk_no, p_callback&& writer) {
+        static_assert(bioseq::indexing::index_chunk_writer_fn<p_callback, p_value_type>, "table write_to writer shape");
         const std::size_t payload = planned_bytes_for_chunk_;
-        if (payload % sizeof(T) != 0) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index table: payload not whole T");
+        if (payload % sizeof(p_value_type) != 0) bioseq_log<logging_level::error, logging_target::postgres>( "bioseq index table: payload is not a whole number of elements");
         std::vector<char> buf(payload, 0);
-        writer(chunk_no, reinterpret_cast<T*>(buf.data()), payload / sizeof(T));
+        writer(chunk_no, reinterpret_cast<p_value_type*>(buf.data()), payload / sizeof(p_value_type));
         Relation rel = open_(true, RowExclusiveLock);
         { const Oid pk = bioseq::postgres::support::find_primary_key_oid(rel);
           ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,
@@ -18659,7 +18386,7 @@ struct table_index_storage {
         CatalogTupleInsert(rel, tup); heap_freetuple(tup); pfree(blob);
         relation_close(rel, RowExclusiveLock); decoded_chunk_ = -1;
     }
-    template <class F> void for_each_sequence(F&& loader);
+    template <class p_callback> void for_each_sequence(p_callback&& loader);
     void clear(std::string_view name);
 };
 
@@ -18946,14 +18673,14 @@ export namespace bioseq::storage::indexing {
 void
 drop_index_relations(drop_index_relation_selector selector)
 {
-    static constexpr char all_index_tables_query[] =
+    static constexpr char k_all_index_tables_query[] =
         "SELECT c.relname "
         "FROM pg_catalog.pg_class AS c "
         "WHERE c.relnamespace = $1::oid "
         "AND c.relkind = 'r'::\"char\" "
         "AND (starts_with(c.relname::text, 'seqidx_') "
         "OR starts_with(c.relname::text, 'seqidxtab_'))";
-    static constexpr char prefix_query[] =
+    static constexpr char k_prefix_query[] =
         "SELECT c.relname "
         "FROM pg_catalog.pg_class AS c "
         "WHERE c.relnamespace = $1::oid "
@@ -18984,7 +18711,7 @@ drop_index_relations(drop_index_relation_selector selector)
                     ObjectIdGetDatum(internal_namespace)
                 };
                 return SPI_execute_with_args(
-                    all_index_tables_query,
+                    k_all_index_tables_query,
                     1, argument_types, argument_values, nullptr,
                     true, 0);
             })
@@ -18997,7 +18724,7 @@ drop_index_relations(drop_index_relation_selector selector)
                     CStringGetTextDatum(prefix_data)
                 };
                 const int status = SPI_execute_with_args(
-                    prefix_query,
+                    k_prefix_query,
                     2, argument_types, argument_values, nullptr,
                     true, 0);
                 pfree(DatumGetPointer(argument_values[1]));
@@ -19117,21 +18844,21 @@ inline std::size_t fragment_index_storage::spill_sorted_run_owned(
 	    }
 	}
 
-template <class F>
-inline void fragment_index_storage::merge_runs(F&& on_kmer) {
+template <class p_callback>
+inline void fragment_index_storage::merge_runs(p_callback&& on_kmer) {
     if (!sorted_runs_.has_value()) {
         return;
     }
     g_last_index_merge_run_count = std::max<std::uint64_t>(
         g_last_index_merge_run_count, sorted_runs_->run_count());
-    sorted_runs_->merge_runs(std::forward<F>(on_kmer));
+    sorted_runs_->merge_runs(std::forward<p_callback>(on_kmer));
 }
 
 inline direct_minimizer_spill_storage_binding
 fragment_index_storage::begin_segment_spill_generation() {
     if (segment_spill_pg_poisoned_) {
         minimizer_generation_storage_error_as_cpp(
-            "poisoned MPS spill storage reused after PostgreSQL error");
+            "poisoned minimizer-sequence spill storage reused after PostgreSQL error");
     }
     try {
         for (auto& [segment, runs] : segment_sorted_runs_) {
@@ -19169,7 +18896,7 @@ fragment_index_storage::begin_segment_spill_generation() {
     }
     segment_spill_binding_ = direct_minimizer_spill_storage_binding{
         .generation_token = token,
-        .mutation_version = 0,
+        .mutation_revision = 0,
     };
     return segment_spill_binding_;
 }
@@ -19178,12 +18905,12 @@ inline void fragment_index_storage::record_segment_spill_mutation_() noexcept {
     if (!segment_spill_binding_.valid()) {
         return;
     }
-    if (segment_spill_binding_.mutation_version
+    if (segment_spill_binding_.mutation_revision
             == (std::numeric_limits<std::uint64_t>::max)()) {
         segment_spill_binding_ = {};
         return;
     }
-    ++segment_spill_binding_.mutation_version;
+    ++segment_spill_binding_.mutation_revision;
 }
 
 inline std::size_t fragment_index_storage::spill_sorted_segment_run(
@@ -19191,7 +18918,7 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
         std::span<const std::pair<std::uint64_t,std::uint64_t>> sorted) {
     if (segment_spill_pg_poisoned_) {
         minimizer_generation_storage_error_as_cpp(
-            "poisoned MPS spill storage reused after PostgreSQL error");
+            "poisoned minimizer-sequence spill storage reused after PostgreSQL error");
     }
     if (!segment_spill_binding_.valid()) {
         (void)begin_segment_spill_generation();
@@ -19200,7 +18927,7 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
         segment_sorted_runs_.begin(),
         segment_sorted_runs_.end(),
         position_segment,
-        [](const SegmentRunEntry& entry, std::uint32_t segment) {
+        [](const segment_run_entry_type& entry, std::uint32_t segment) {
             return entry.first < segment;
         });
     if (iterator == segment_sorted_runs_.end()
@@ -19210,21 +18937,22 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
         if (!ensure_segment_run_metadata_capacity_(
                 segment_sorted_runs_.size() + 1u)) {
             minimizer_generation_storage_error_as_cpp(
-                "MPS spill segment metadata admission failed");
+                "minimizer-sequence spill segment metadata admission failed");
         }
         iterator = segment_sorted_runs_.insert(
             segment_sorted_runs_.begin()
                 + static_cast<std::ptrdiff_t>(offset),
-            SegmentRunEntry{position_segment, sorted_pair_run_store{}});
+            segment_run_entry_type{position_segment, sorted_pair_run_store{}});
     }
     // sorted_pair_run_store may compact/demote physical runs internally. Those
     // transformations preserve the exact canonical pair stream; this one
-    // version increment therefore names the logical run injection, not its
+    // The mutation revision increment names the logical run injection, not its
     // eventual memory-vs-BufFile representation.
     try {
         const std::size_t run = iterator->second.spill_sorted_run(sorted);
         inject_minimizer_generation_failure_as_cpp(
-            minimizer_generation_failure_injection::mps_spill, "mps_spill");
+            minimizer_generation_failure_injection::minimizer_sequence_spill,
+            "minimizer_sequence_spill");
         record_segment_spill_mutation_();
         return run;
     } catch (const bioseq::postgres::support::postgres_error&) {
@@ -19246,25 +18974,25 @@ inline bool fragment_index_storage::reroute_segment_runs(
         || old_span == 0 || new_span == 0) {
         if (segment_spill_pg_poisoned_) {
             minimizer_generation_storage_error_as_cpp(
-                "poisoned MPS reroute storage reused after PostgreSQL error");
+                "poisoned minimizer-sequence reroute storage reused after PostgreSQL error");
         }
         return false;
     }
-    struct AdmittedSegmentRuns {
+    struct admitted_segment_runs {
         bioseq::parallelism::memory_permit permit;
-        std::vector<SegmentRunEntry> values;
+        std::vector<segment_run_entry_type> values;
     } rerouted;
-    struct AdmittedPairBatch {
+    struct admitted_pair_batch {
         bioseq::parallelism::memory_permit permit;
         std::vector<std::pair<std::uint64_t,std::uint64_t>> values;
     } routed_batch;
-    const auto ensure_capacity = []<class T>(
+    const auto ensure_capacity = []<class p_value_type>(
             bioseq::parallelism::memory_permit& permit,
-            std::vector<T>& values,
+            std::vector<p_value_type>& values,
             std::size_t required) -> bool {
         const std::uint64_t retained = bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(values.capacity()),
-            static_cast<std::uint64_t>(sizeof(T)));
+            static_cast<std::uint64_t>(sizeof(p_value_type)));
         if (retained == (std::numeric_limits<std::uint64_t>::max)()
             || (retained != 0u
                 && (!permit || permit.bytes() < retained))) {
@@ -19276,7 +19004,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
         const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
             bioseq::parallelism::saturating_mul(
                 static_cast<std::uint64_t>(required),
-                static_cast<std::uint64_t>(sizeof(T))),
+                static_cast<std::uint64_t>(sizeof(p_value_type))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
         const std::uint64_t peak = bioseq::parallelism::saturating_add(
             retained, headroom);
@@ -19300,7 +19028,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
         values.reserve(required);
         const std::uint64_t exact = bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(values.capacity()),
-            static_cast<std::uint64_t>(sizeof(T)));
+            static_cast<std::uint64_t>(sizeof(p_value_type)));
         if (exact == (std::numeric_limits<std::uint64_t>::max)()
             || exact > permit.bytes()) {
             return false;
@@ -19314,7 +19042,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
             rerouted.values.begin(),
             rerouted.values.end(),
             segment,
-            [](const SegmentRunEntry& entry, std::uint32_t value) {
+            [](const segment_run_entry_type& entry, std::uint32_t value) {
                 return entry.first < value;
             });
         if (iterator == rerouted.values.end() || iterator->first != segment) {
@@ -19325,11 +19053,11 @@ inline bool fragment_index_storage::reroute_segment_runs(
                     rerouted.values,
                     rerouted.values.size() + 1u)) {
                 minimizer_generation_storage_error_as_cpp(
-                    "MPS reroute segment metadata admission failed");
+                    "minimizer-sequence reroute segment metadata admission failed");
             }
             iterator = rerouted.values.insert(
                 rerouted.values.begin() + static_cast<std::ptrdiff_t>(offset),
-                SegmentRunEntry{segment, sorted_pair_run_store{}});
+                segment_run_entry_type{segment, sorted_pair_run_store{}});
         }
         return iterator->second;
     };
@@ -19379,7 +19107,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
                                         routed_batch.values,
                                         count)) {
                                     minimizer_generation_storage_error_as_cpp(
-                                        "MPS reroute pair batch admission failed");
+                                        "minimizer-sequence reroute pair batch admission failed");
                                 }
                                 routed_batch.values.clear();
                                 for (std::size_t i = offset; i < end; ++i) {
@@ -19405,7 +19133,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
                 return false;
             }
         }
-        // Every old store has been replayed successfully. Close its PostgreSQL
+        // Every source store has been replayed successfully. Close its PostgreSQL
         // handles at a checked boundary before publication of the replacement;
         // the replacement stores remain open for qualification/encode replay.
         for (auto& [segment, runs] : segment_sorted_runs_) {
@@ -19443,12 +19171,12 @@ inline bool fragment_index_storage::reroute_segment_runs(
     return true;
 }
 
-template <class F>
+template <class p_callback>
 inline void fragment_index_storage::merge_segment_runs(
-        F&& on_segment_kmer) {
+        p_callback&& on_segment_kmer) {
     if (segment_spill_pg_poisoned_) {
         minimizer_generation_storage_error_as_cpp(
-            "poisoned MPS merge storage reused after PostgreSQL error");
+            "poisoned minimizer-sequence merge storage reused after PostgreSQL error");
     }
     std::uint64_t total_runs = 0;
     for (const auto& [segment, runs] : segment_sorted_runs_) {
@@ -19467,8 +19195,9 @@ inline void fragment_index_storage::merge_segment_runs(
                     if (first_callback) {
                         first_callback = false;
                         inject_minimizer_generation_failure_as_cpp(
-                            minimizer_generation_failure_injection::mps_merge,
-                            "mps_merge_callback");
+                            minimizer_generation_failure_injection::
+                                minimizer_sequence_merge,
+                            "minimizer_sequence_merge_callback");
                     }
                     on_segment_kmer(segment, hash, positions);
                 });
@@ -19495,27 +19224,28 @@ inline void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
     const sorted_run_store_stats st = sorted_runs_->stats();
     const std::uint64_t total_runs = sorted_runs_->run_count();
     g_last_index_merge_run_count = total_runs;
-    g_last_mps_build_stats = last_mps_build_stats{
-        .backend_pid = static_cast<std::uint64_t>(MyProcPid),
-        .db_oid = static_cast<std::uint64_t>(db_oid_),
-        .relfilenode = static_cast<std::uint64_t>(main_relfilenode_),
-        .sequence_rowno = static_cast<std::uint64_t>(query_key_),
-        .total_run_count = total_runs,
-        .resident_runs = st.resident_runs,
-        .file_runs = st.file_runs,
-        .resident_run_bytes = st.resident_bytes,
-        .resident_peak_bytes = st.resident_peak_bytes,
-        .spilled_run_bytes = st.spilled_bytes,
-        .postgres_temp_file_bytes = st.postgres_temp_file_bytes,
-        .postgres_temp_file_count = st.postgres_temp_file_count,
-        .merge_reader_buffer_bytes = st.merge_reader_buffer_bytes,
-        .merge_pass_count = st.merge_pass_count,
-        .spill_count_from_pressure = st.spill_count_from_pressure,
-        .resident_demotions = st.resident_demotions,
-        .position_spill_bytes = st.position_spill_bytes,
-        .position_spill_count = st.position_spill_count,
-    };
-    bioseq_log<logging_level::debug>("[bioseq.index.mps_build.row] backend_pid={} db_oid={} relfilenode={} sequence_rowno={} "
+    g_last_minimizer_sequence_build_stats =
+        last_minimizer_sequence_build_stats{
+            .backend_pid = static_cast<std::uint64_t>(MyProcPid),
+            .db_oid = static_cast<std::uint64_t>(db_oid_),
+            .relfilenode = static_cast<std::uint64_t>(main_relfilenode_),
+            .sequence_rowno = static_cast<std::uint64_t>(query_key_),
+            .total_run_count = total_runs,
+            .resident_runs = st.resident_runs,
+            .file_runs = st.file_runs,
+            .resident_run_bytes = st.resident_bytes,
+            .resident_peak_bytes = st.resident_peak_bytes,
+            .spilled_run_bytes = st.spilled_bytes,
+            .postgres_temp_file_bytes = st.postgres_temp_file_bytes,
+            .postgres_temp_file_count = st.postgres_temp_file_count,
+            .merge_reader_buffer_bytes = st.merge_reader_buffer_bytes,
+            .merge_pass_count = st.merge_pass_count,
+            .spill_count_from_pressure = st.spill_count_from_pressure,
+            .resident_demotions = st.resident_demotions,
+            .position_spill_bytes = st.position_spill_bytes,
+            .position_spill_count = st.position_spill_count,
+        };
+    bioseq_log<logging_level::debug>("[bioseq.index.minimizer_sequence_build.row] backend_pid={} db_oid={} relfilenode={} sequence_rowno={} "
             "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
             "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
             "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "
@@ -19694,8 +19424,8 @@ inline void mark_serialized_index_write_successful_pg(
 }
 
 // ---- table_index_storage::for_each_sequence (test-only CHUNKED_PER_TABLE) ---
-template <class F>
-inline void table_index_storage::for_each_sequence(F&& loader) {
+template <class p_callback>
+inline void table_index_storage::for_each_sequence(p_callback&& loader) {
     Relation main = table_open(user_relid_, AccessShareLock);
     TupleDesc td = RelationGetDescr(main);
     Snapshot snap = RegisterSnapshot(GetTransactionSnapshot());
@@ -19712,17 +19442,17 @@ inline void table_index_storage::for_each_sequence(F&& loader) {
 	    while (read_next_column_row(rs, valp, nulls, &rowno)) {
 	        if (nulls[column_attno_ - 1]) continue;
 	        MemoryContextReset(inner);
-	        MemoryContext old = MemoryContextSwitchTo(inner);
+	        MemoryContext previous_context = MemoryContextSwitchTo(inner);
 	        auto hdr_detoasted = bioseq::postgres::support::detoast_as<bioseq::pg_types::seq>(
 	            bioseq::postgres::support::pg_datum::from_raw(valp[column_attno_ - 1]));
 	        bioseq::pg_types::seq* hdr = hdr_detoasted.ptr;
-	        MemoryContextSwitchTo(old);
+	        MemoryContextSwitchTo(previous_context);
         const std::uint8_t alpha = hdr->alphabet_code;
         const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
         if (!is_locator_stub(hdr)) {
             bioseq::pg_types::seq::dispatch_instance(
-                alpha, bw, [hdr, &loader, rowno, total]<class S>() {
-                compact_sequence_range<S> rng{*hdr};
+                alpha, bw, [hdr, &loader, rowno, total]<class p_sequence_type>() {
+                compact_sequence_range<p_sequence_type> rng{*hdr};
                 const auto view =
                     bioseq::storage::make_lazy_sequence_view(rng);
                 loader(view, static_cast<std::size_t>(rowno), total);
@@ -19732,15 +19462,15 @@ inline void table_index_storage::for_each_sequence(F&& loader) {
             bioseq::pg_types::seq::dispatch_instance(
                 alpha,
                 bw,
-                [this, &loader, loc, rowno, total, rs, inner]<class S>() {
-                using SourceBinding =
-                    bioseq::storage::postgres_lazy_sequence_binding<S>;
-                const SourceBinding source_binding{
+                [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
+                using source_binding =
+                    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
+                const source_binding source_binding{
                     db_oid_, tablespace_oid_, main_relfilenode_,
                     column_attno_, loc,
-                    SourceBinding::expected_last_fragment_padding(loc),
+                    source_binding::expected_last_fragment_padding(loc),
                     rs->snapshot, read_caches_, inner};
-                bioseq::storage::with_postgres_lazy_sequence<S>(
+                bioseq::storage::with_postgres_lazy_sequence<p_sequence_type>(
                     source_binding,
                     [&loader, rowno, total](auto view){
                         loader(view, static_cast<std::size_t>(rowno), total);
@@ -19760,15 +19490,16 @@ inline void table_index_storage::for_each_sequence(F&& loader) {
     table_close(main, AccessShareLock);
 }
 
-// ---- conformance gates (§8) ----
-template <class Storage>
-concept publicly_mutable_mps_segment_spill_state = requires(Storage& storage) {
-    storage.segment_sorted_runs_;
-    storage.segment_spill_binding_;
-    storage.segment_spill_pg_poisoned_;
-    storage.next_segment_spill_generation_token_;
-};
-static_assert(!publicly_mutable_mps_segment_spill_state<
+// ---- conformance gates ---------------------------------------------------
+template <class p_storage>
+concept publicly_mutable_minimizer_sequence_segment_spill_state =
+    requires(p_storage& storage) {
+        storage.segment_sorted_runs_;
+        storage.segment_spill_binding_;
+        storage.segment_spill_pg_poisoned_;
+        storage.next_segment_spill_generation_token_;
+    };
+static_assert(!publicly_mutable_minimizer_sequence_segment_spill_state<
     fragment_index_storage>);
 static_assert(!std::is_move_assignable_v<fragment_index_storage>);
 static_assert(!std::is_move_assignable_v<sequence_index_storage>);
@@ -19786,7 +19517,7 @@ static_assert(bioseq::indexing::is_index_chunked_storage_for<
 }  // namespace bioseq::storage::indexing
 
 extern "C" PGDLLEXPORT void
-bioseq_format6_parallel_scan_probe_worker_main(
+bioseq_hash_major_parallel_scan_probe_worker_main(
         dsm_segment* segment,
         shm_toc* toc) {
     bioseq::storage::indexing::

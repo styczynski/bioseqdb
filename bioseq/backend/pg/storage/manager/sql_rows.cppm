@@ -14,7 +14,9 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::storage::catalog_rows {
 
 /**
- * @brief Immutable minimizer generation descriptor; provider 0 uses a PostgreSQL relation, provider 1 a mapped file; state 1 is live and state 2 retired.
+ * @brief Immutable relation-backed minimizer generation descriptor. The
+ * serialized provider discriminator is fixed at 0; state 1 is live and state
+ * 2 is retired.
  */
 struct [[bioseq_sql::table({
             .schema =
@@ -100,35 +102,23 @@ generation_id)SQL"},
     std::int64_t generation_id;
 
     [[bioseq_sql::check({
-        .expression = bioseq::sql::checked_sql{"provider IN (0, 1)"},
+        .expression = bioseq::sql::checked_sql{"provider = 0"},
     })]]
     std::int16_t provider;
 
     [[bioseq_sql::check({
         .expression = bioseq::sql::checked_sql{
-            R"SQL((provider = 0
-AND payload_relation_oid IS NOT NULL
-AND payload_database_oid IS NOT NULL
-AND payload_tablespace_oid IS NOT NULL
-AND payload_relfilenode IS NOT NULL
-AND payload_relation_name IS NOT NULL
-AND payload_relation_oid <> 0
+            R"SQL(payload_relation_oid <> 0
 AND payload_database_oid = database_oid
 AND payload_tablespace_oid <> 0
-AND payload_relfilenode <> 0)
-OR (provider = 1
-AND payload_relation_oid IS NULL
-AND payload_database_oid IS NULL
-AND payload_tablespace_oid IS NULL
-AND payload_relfilenode IS NULL
-AND payload_relation_name IS NULL))SQL"},
+AND payload_relfilenode <> 0)SQL"},
     })]]
-    std::optional<Oid> payload_relation_oid;
+    Oid payload_relation_oid;
 
-    std::optional<Oid> payload_database_oid;
-    std::optional<Oid> payload_tablespace_oid;
-    std::optional<Oid> payload_relfilenode;
-    std::optional<NameData> payload_relation_name;
+    Oid payload_database_oid;
+    Oid payload_tablespace_oid;
+    Oid payload_relfilenode;
+    NameData payload_relation_name;
 
     [[bioseq_sql::check({
         .expression = bioseq::sql::checked_sql{"image_bytes >= 4096"},
@@ -151,7 +141,7 @@ OR (state = 2 AND retire_full_xid IS NOT NULL))SQL"},
 };
 
 /**
- * @brief Cursor for bounded mapped-generation orphan reconciliation.
+ * @brief Cursor for bounded generation-image orphan reconciliation.
  */
 struct [[bioseq_sql::table({
             .schema =

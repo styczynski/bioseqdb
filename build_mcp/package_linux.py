@@ -35,7 +35,7 @@ REPORTING_SUBDIR = "bioseq_package_linux"
 IMAGE_TAG = "debian:trixie"
 POSTGRES_MAJOR = 17
 ARCHITECTURE = "arm64"
-PACKAGE_PROFILE_VERSION = 2
+PACKAGE_PROFILE_REVISION = 2
 MINIMUM_FREE_BYTES = 80 * 1024**3
 LIQUID_VERSION = "2.3.0"
 EXPECTED_BASENAMES = frozenset({
@@ -49,7 +49,7 @@ EXPECTED_BASENAMES = frozenset({
 PACKAGE_CACHE_VALUES = {
     "CMAKE_BUILD_TYPE": "Release",
     "BIOSEQ_PACKAGE_BUILD": "ON",
-    "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+    "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
     "BIOSEQ_BUILD_CORE": "ON",
     "BIOSEQ_BUILD_CACHE": "ON",
     "BIOSEQ_BUILD_PAPERS": "OFF",
@@ -78,7 +78,6 @@ _SOURCE_SNAPSHOT_FILES = (
     "CMakePresets.json",
     "vcpkg.json",
     "vcpkg-configuration.json",
-    "build.sh",
 )
 _SOURCE_SNAPSHOT_DIRECTORIES = (
     "bench",
@@ -93,8 +92,6 @@ _SOURCE_SNAPSHOT_DIRECTORIES = (
     "DOCS",
     "infra",
     "overlays",
-    "research/postgres_prototype",
-    "research/python_aligner",
     "vendor",
     "website",
 )
@@ -160,6 +157,39 @@ def _validate_seal(value: object, label: str) -> dict[str, object]:
         raise PackageLinuxError(f"{label} has no valid content seal")
     if _canonical_sha256(body) != digest:
         raise PackageLinuxError(f"{label} content seal changed")
+    return value
+
+
+def _require_exact_keys(
+    value: Mapping[str, object], expected: set[str], label: str,
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise PackageLinuxError(
+            f"{label} has unexpected keys: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+
+
+def _require_document_contract(
+    value: dict[str, object],
+    *,
+    label: str,
+    revision: int,
+    artifact_kind: str,
+    keys: set[str],
+) -> dict[str, object]:
+    _require_exact_keys(
+        value,
+        {"schema_revision", "artifact_kind", *keys},
+        label,
+    )
+    if (
+        type(value["schema_revision"]) is not int
+        or value["schema_revision"] != revision
+        or value["artifact_kind"] != artifact_kind
+    ):
+        raise PackageLinuxError(f"{label} schema is invalid")
     return value
 
 
@@ -416,7 +446,7 @@ def _docker_cli_identity(entry_path: Path) -> dict[str, object]:
         raise PackageLinuxError(
             f"Docker CLI entry does not resolve to an executable regular file: {entry}")
     entry_identity: dict[str, object] = {
-        "schema_version": 1,
+        "schema_revision": 1,
         "artifact_kind": "bioseq-docker-cli-identity",
         "entry_path": str(entry),
         "entry_basename": entry.name,
@@ -438,6 +468,18 @@ def _docker_cli_identity(entry_path: Path) -> dict[str, object]:
 
 def _validated_docker_entry(identity: object) -> Path:
     expected = _validate_seal(identity, "Docker CLI identity")
+    _require_document_contract(
+        expected,
+        label="Docker CLI identity",
+        revision=1,
+        artifact_kind="bioseq-docker-cli-identity",
+        keys={
+            "entry_path", "entry_basename", "entry_kind", "entry_mode",
+            "entry_size_bytes", "symlink_chain", "entry_identity_sha256",
+            "target_lexical_path", "target_resolved_path", "target_mode",
+            "target_size_bytes", "target_sha256", "content_sha256",
+        },
+    )
     entry_raw = expected.get("entry_path")
     if not isinstance(entry_raw, str) or not Path(entry_raw).is_absolute():
         raise PackageLinuxError("Docker CLI identity has an invalid entry path")
@@ -611,7 +653,7 @@ def _validate_snapshot_extension_dso_contract(
 ) -> None:
     """Fail before Docker when the source-snapshot Linux DSO producer drifts."""
     helper = _require_regular(
-        source / "cmake/AddPostgreSQLExtension.cmake",
+        source / "cmake/add_postgresql_extension.cmake",
         "source snapshot extension DSO producer contract",
     )
     try:
@@ -719,7 +761,7 @@ def _package_python(
     ):
         raise PackageLinuxError("committed Poetry inputs do not pin python-liquid 2.3.0")
     contract = {
-        "schema_version": 1,
+        "schema_revision": 1,
         "python": dict(identity),
         "pyproject_sha256": _sha256_file(pyproject),
         "poetry_lock_sha256": _sha256_file(lock),
@@ -735,6 +777,13 @@ def _package_python(
     if marker.is_file() and python.is_file() and not marker.is_symlink():
         try:
             observed = _load_json(marker, "package environment marker", sealed=True)
+            _require_document_contract(
+                observed,
+                label="package environment marker",
+                revision=1,
+                artifact_kind="bioseq-package-python-environment",
+                keys={"contract", "content_sha256"},
+            )
             version = _run(
                 [str(python), "-c",
                  "import importlib.metadata;print(importlib.metadata.version('python-liquid'))"],
@@ -755,7 +804,7 @@ def _package_python(
                 log=log, deadline=deadline,
             )
             _write_json_atomic(marker, _sealed({
-                "schema_version": 1,
+                "schema_revision": 1,
                 "artifact_kind": "bioseq-package-python-environment",
                 "contract": contract,
             }))
@@ -862,11 +911,18 @@ def _load_cached_artifact(
         return None
     try:
         manifest = _load_json(manifest_path, "package cache manifest", sealed=True)
+        _require_document_contract(
+            manifest,
+            label="package cache manifest",
+            revision=2,
+            artifact_kind="bioseq-local-linux-package-cache",
+            keys={
+                "build_key", "build_contract", "package", "package_files",
+                "configuration", "content_sha256",
+            },
+        )
         if (
-            manifest.get("schema_version") != 2
-            or manifest.get("artifact_kind")
-                != "bioseq-local-linux-package-cache-v2"
-            or manifest.get("build_key") != build_key
+            manifest.get("build_key") != build_key
             or manifest.get("build_contract") != build_contract
         ):
             return None
@@ -917,8 +973,8 @@ def _promote_artifact(
         source_list, artifact_root / "objects/package-files", suffix=".list")
     list_evidence = _package_file_list(package_files)
     manifest = _sealed({
-        "schema_version": 2,
-        "artifact_kind": "bioseq-local-linux-package-cache-v2",
+        "schema_revision": 2,
+        "artifact_kind": "bioseq-local-linux-package-cache",
         "build_key": build_key,
         "build_contract": dict(build_contract),
         "package": {
@@ -982,6 +1038,17 @@ python3 /source/build_mcp/package_linux.py --internal-inspect \
                 "retained validator did not prove the fixed package contract")
         payload_value = _load_json(
             payload, "extracted package payload receipt", sealed=True)
+        _require_document_contract(
+            payload_value,
+            label="extracted package payload receipt",
+            revision=1,
+            artifact_kind="bioseq-extracted-deb-payload-qualification",
+            keys={
+                "architecture", "postgres_major", "exact_six",
+                "expected_basenames", "artifacts", "elf", "inspection_tool",
+                "validator_sha256", "content_sha256",
+            },
+        )
         return payload_value, validator, payload
     except Exception:
         _safe_rmtree(validation_root, state_root)
@@ -1043,8 +1110,8 @@ def run_package_linux(
         package_python, python_environment = _package_python(
             state_root, source, python_identity, log=log_handle, deadline=deadline)
         build_contract = {
-            "schema_version": 2,
-            "artifact_kind": "bioseq-local-linux-package-build-contract-v2",
+            "schema_revision": 2,
+            "artifact_kind": "bioseq-local-linux-package-build-contract",
             "mode": MODE,
             "revision": snapshot["revision"],
             "source_tree": snapshot["source_tree"],
@@ -1054,7 +1121,7 @@ def run_package_linux(
             "docker_cli": docker_identity,
             "architecture": ARCHITECTURE,
             "postgres_major": POSTGRES_MAJOR,
-            "profile_version": PACKAGE_PROFILE_VERSION,
+            "profile_revision": PACKAGE_PROFILE_REVISION,
             "python_environment_key": python_environment["cache_key"],
         }
         build_key = _canonical_sha256(build_contract)
@@ -1075,7 +1142,7 @@ def run_package_linux(
             result_path = run_root / "build-result.json"
             internal_environment = dict(docker_environment)
             internal_environment.update({
-                "BIOSEQ_OPTTIMIZATION_LEVEL": "0",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
                 "BIOSEQ_PACKAGE_DOCKER_IDENTITY": json.dumps(
                     docker_identity, sort_keys=True, separators=(",", ":")),
                 "SOURCE_DATE_EPOCH": _git(
@@ -1092,6 +1159,16 @@ def run_package_linux(
                 log=log_handle, deadline=deadline, environment=internal_environment,
             )
             result = _load_json(result_path, "retained DEB build result", sealed=True)
+            _require_document_contract(
+                result,
+                label="retained DEB build result",
+                revision=1,
+                artifact_kind="bioseq-retained-deb-build-result",
+                keys={
+                    "package", "package_files", "cmake_cache",
+                    "toolchain_cache", "content_sha256",
+                },
+            )
             configuration = _configuration_evidence(result)
             package, cache_manifest = _promote_artifact(
                 result, artifact_root, build_key, build_contract, configuration)
@@ -1113,8 +1190,8 @@ def run_package_linux(
         payload_copy = _store_content_addressed(
             payload_path, artifact_root / "objects/evidence", suffix="-payload.json")
         receipt = _sealed({
-            "schema_version": 2,
-            "artifact_kind": "bioseq-local-linux-package-qualification-v2",
+            "schema_revision": 2,
+            "artifact_kind": "bioseq-local-linux-package-qualification",
             "status": "passed",
             "mode": MODE,
             "source": {
@@ -1141,7 +1218,7 @@ def run_package_linux(
             "build": {
                 "build_key": build_key,
                 "cache_reused": cache_reused,
-                "profile_version": PACKAGE_PROFILE_VERSION,
+                "profile_revision": PACKAGE_PROFILE_REVISION,
                 "configuration": configuration,
                 "cache_manifest_content_sha256": cache_manifest["content_sha256"],
             },
@@ -1243,7 +1320,7 @@ def _internal_build(arguments: argparse.Namespace) -> int:
     package = deb.find_artifact(cell)
     package_files = cell.paths.root / "source/_bioseq-package-build/package-files.list"
     result = _sealed({
-        "schema_version": 1,
+        "schema_revision": 1,
         "artifact_kind": "bioseq-retained-deb-build-result",
         "package": str(_require_regular(package, "built DEB")),
         "package_files": str(_require_regular(package_files, "package-file manifest")),
@@ -1343,7 +1420,7 @@ def _internal_inspect(arguments: argparse.Namespace) -> int:
     readelf = Path(shutil.which("readelf") or "").resolve(strict=True)
     readelf = _require_regular(readelf, "readelf")
     receipt = _sealed({
-        "schema_version": 1,
+        "schema_revision": 1,
         "artifact_kind": "bioseq-extracted-deb-payload-qualification",
         "architecture": ARCHITECTURE,
         "postgres_major": POSTGRES_MAJOR,

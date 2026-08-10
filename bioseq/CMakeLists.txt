@@ -14,62 +14,118 @@ set(BIOSEQ_PG_BUILD_PROFILE_HEADER
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${BIOSEQ_PG_BUILD_PROFILE_HEADER}")
 file(STRINGS "${BIOSEQ_PG_BUILD_PROFILE_HEADER}"
-  _bioseq_opttimization_level_line
-  REGEX "^#define BIOSEQ_OPTTIMIZATION_LEVEL [0-5]$")
-list(LENGTH _bioseq_opttimization_level_line
-  _bioseq_opttimization_level_line_count)
-if(NOT _bioseq_opttimization_level_line_count EQUAL 1)
+  _bioseq_template_flatten_profile_line
+  REGEX "^#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE [a-z0-9_]+$")
+list(LENGTH _bioseq_template_flatten_profile_line
+  _bioseq_template_flatten_profile_line_count)
+if(NOT _bioseq_template_flatten_profile_line_count EQUAL 1)
   message(FATAL_ERROR
     "${BIOSEQ_PG_BUILD_PROFILE_HEADER} must contain exactly one literal "
-    "'#define BIOSEQ_OPTTIMIZATION_LEVEL N' with N in 0..5")
+    "'#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE <semantic-profile>'")
 endif()
 string(REGEX REPLACE
-  "^#define BIOSEQ_OPTTIMIZATION_LEVEL ([0-5])$" "\\1"
-  BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL
-  "${_bioseq_opttimization_level_line}")
-if(NOT BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL MATCHES "^[0-5]$")
+  "^#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE ([a-z0-9_]+)$" "\\1"
+  BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE
+  "${_bioseq_template_flatten_profile_line}")
+set(BIOSEQ_TEMPLATE_FLATTEN_PROFILES
+  dna4_uint64
+  all_alphabets_uint64
+  all_coordinates
+  all_coordinates_adaptive_lengths
+  extended_kmer_coordinates
+  full_specialization)
+list(FIND BIOSEQ_TEMPLATE_FLATTEN_PROFILES
+  "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}"
+  _bioseq_default_template_flatten_profile_index)
+if(_bioseq_default_template_flatten_profile_index EQUAL -1)
   message(FATAL_ERROR
-    "default BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range "
-    "0..5; got '${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL}'")
+    "unsupported default BIOSEQ_TEMPLATE_FLATTEN_PROFILE "
+    "'${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}'")
 endif()
 
 # Keep the checked-in header literal as the everyday source of truth while
 # allowing isolated qualification presets to compile the complete profile in
-# a separate build tree.  The override is deliberately a distinct cache key:
-# passing -DBIOSEQ_OPTTIMIZATION_LEVEL directly would make the CMake source
-# graph and the preprocessor disagree.
-set(BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE "" CACHE STRING
-  "Qualification-only BIOSEQ_OPTTIMIZATION_LEVEL override (empty or 0..5)")
-set_property(CACHE BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE PROPERTY
-  STRINGS "" 0 1 2 3 4 5)
-if(NOT "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL ""
-   AND NOT BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE MATCHES "^[0-5]$")
-  message(FATAL_ERROR
-    "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE must be empty or an integer in "
-    "the range 0..5; got '${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}'")
+# a separate build tree. An empty cache entry selects the checked-in default;
+# named qualification presets set the same public profile key explicitly.
+set(BIOSEQ_TEMPLATE_FLATTEN_PROFILE "" CACHE STRING
+  "Template-flatten specialization profile (empty selects header default)")
+set_property(CACHE BIOSEQ_TEMPLATE_FLATTEN_PROFILE PROPERTY
+  STRINGS "" ${BIOSEQ_TEMPLATE_FLATTEN_PROFILES})
+if("${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "")
+  set(BIOSEQ_TEMPLATE_FLATTEN_PROFILE
+    "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}")
+  set(_bioseq_template_flatten_profile_source "pg_build_profile.h default")
+else()
+  list(FIND BIOSEQ_TEMPLATE_FLATTEN_PROFILES
+    "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
+    _bioseq_template_flatten_profile_index)
+  if(_bioseq_template_flatten_profile_index EQUAL -1)
+    message(FATAL_ERROR
+      "unsupported BIOSEQ_TEMPLATE_FLATTEN_PROFILE "
+      "'${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}'")
+  endif()
+  set(_bioseq_template_flatten_profile_source "explicit cache selection")
 endif()
 
-if("${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL "")
-  set(BIOSEQ_OPTTIMIZATION_LEVEL
-    "${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL}")
-  set(_bioseq_opttimization_level_source "pg_build_profile.h default")
+set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 OFF)
+set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES OFF)
+set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS OFF)
+set(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES OFF)
+set(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION OFF)
+set(_bioseq_template_flatten_capability_definitions)
+if(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "dna4_uint64")
+  # The baseline profile deliberately enables no cumulative capability macro.
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "all_alphabets_uint64")
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 ON)
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "all_coordinates")
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES ON)
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL
+    "all_coordinates_adaptive_lengths")
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS ON)
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL
+    "extended_kmer_coordinates")
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES ON)
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "full_specialization")
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64 ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES ON)
+  set(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION ON)
 else()
-  set(BIOSEQ_OPTTIMIZATION_LEVEL
-    "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}")
-  set(_bioseq_opttimization_level_source "qualification preset override")
+  message(FATAL_ERROR
+    "internal unsupported template-flatten profile "
+    "'${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}'")
 endif()
+
+foreach(_bioseq_template_flatten_capability IN ITEMS
+    BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64
+    BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES
+    BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS
+    BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES
+    BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
+  if(${_bioseq_template_flatten_capability})
+    list(APPEND _bioseq_template_flatten_capability_definitions
+      "${_bioseq_template_flatten_capability}=1")
+  endif()
+endforeach()
 # Generated Highway implementation units intentionally do not include the
-# PostgreSQL build-profile header. Publish the one resolved CMake value for
-# every profile so the generated partition switches and the owner manifest
-# cannot disagree when the checked-in default is raised to level 4 or 5.
-# Header-consuming translation units see the same value through its guarded
-# definition, so this does not change the selected profile's semantics.
+# PostgreSQL build-profile header. Publish the resolved semantic profile and
+# cumulative capabilities to every translation unit so generated partitions,
+# authored sources, and the owner manifest cannot disagree.
 add_compile_definitions(
-  BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL})
+  BIOSEQ_TEMPLATE_FLATTEN_PROFILE=${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
+  ${_bioseq_template_flatten_capability_definitions})
 message(STATUS
-  "bioseq: BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL} "
-  "(${_bioseq_opttimization_level_source}; checked-in default="
-  "${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL})")
+  "bioseq: BIOSEQ_TEMPLATE_FLATTEN_PROFILE="
+  "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE} "
+  "(${_bioseq_template_flatten_profile_source}; checked-in default="
+  "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE})")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
@@ -139,20 +195,20 @@ set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
 # the representation-erasure boundary.  Keep this list explicit: a new test is
 # not implicitly exempt merely because its filename ends in `_test.cpp`.
 set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/block_aligner_reference_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipeline_pipe_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/gpu_sort_oracle_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/boundary_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/lazy_minimizer_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_exact_checked_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_aligner_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_pipeline_parity_test.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_checked_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_minimizers_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_aligner_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_sequence_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_pipeline_parity_test.cpp)
 file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp
@@ -163,7 +219,14 @@ file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.h
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.h
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.hpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.hpp)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.hpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/**/*.cpp)
+string(CONCAT _bioseq_lazy_concrete_pattern
+  "(\\.scanner[ \t]*\\("
+  "|\\.underlying[ \t]*\\("
+  "|(^|[^A-Za-z0-9_])lazy_sequence[ \t]*<"
+  "|chunked_span_sequence_scanner[ \t]*<)")
 foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
   list(FIND BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
     "${_bioseq_lazy_source}" _bioseq_lazy_allowlist_index)
@@ -190,7 +253,7 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
       continue()
     endif()
     if(_bioseq_lazy_code_line MATCHES
-        "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_sequence[ \t]*<|chunked_span_sequence_scanner[ \t]*<)")
+        "${_bioseq_lazy_concrete_pattern}")
       message(FATAL_ERROR
         "Lazy-facade representation-erasure violation in ${_bioseq_lazy_source}; "
         "consume lazy_sequence_view or update the documented ownership boundary; "
@@ -198,6 +261,7 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
     endif()
   endforeach()
 endforeach()
+unset(_bioseq_lazy_concrete_pattern)
 
 # Lazy-facade completion gate. The broad boundary gate above prevents a
 # concrete lazy/scanner type from escaping anywhere in backend code; this
@@ -249,6 +313,11 @@ function(bioseq_private_packed_access_scope_names
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
     set(_bioseq_scopes
+      two_stack_simd_iteration_resident_kernel
+      decode_packed_dna4_rank_vector
+      decode_packed_nt4_rank_vector
+      reset_two_stack_nthash
+      consume_two_stack_nthash_packed_fragment
       consume_two_stack_nthash_fragment
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
       run_fragmented_impl)
@@ -257,8 +326,10 @@ function(bioseq_private_packed_access_scope_names
     set(_bioseq_scopes
       byte_upload_range_address_adapter
       vulkan_sketchable_sequence
+      sketch_segment_context_units
       compute_segment_descriptor
       make_sketch_segment_window
+      admitted_sketch_collection_limit_bp
       sketch_segment_windows
       make_upload_view_from_window
       make_sequence_upload_view
@@ -332,7 +403,33 @@ function(bioseq_private_packed_access_line_allowed
     endif()
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
-    if("${_bioseq_scope}" STREQUAL "consume_two_stack_nthash_fragment"
+    if("${_bioseq_scope}" STREQUAL
+        "two_stack_simd_iteration_resident_kernel"
+        AND "${_bioseq_line}" STREQUAL
+          "p_sequence_traits::letters_per_unit + local_pos;")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "decode_packed_dna4_rank_vector"
+        AND "${_bioseq_line}" STREQUAL
+          "static_assert(p_alphabet_traits::letters_per_unit == letters_per_unit);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "decode_packed_nt4_rank_vector"
+        AND "${_bioseq_line}" STREQUAL
+          "static_assert(p_alphabet_traits::letters_per_unit == letters_per_unit);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "reset_two_stack_nthash"
+        AND "${_bioseq_line}" STREQUAL
+          "|| p_alphabet_traits::letters_per_unit")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "consume_two_stack_nthash_packed_fragment"
+        AND ("${_bioseq_line}" STREQUAL
+            "|| p_alphabet_traits::letters_per_unit"
+          OR "${_bioseq_line}" STREQUAL
+            "> packed_fragment.size() * p_alphabet_traits::letters_per_unit) {"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "consume_two_stack_nthash_fragment"
         AND "${_bioseq_line}" STREQUAL
           ": fragment.read_cptr(fragment.cbegin());")
       set(_bioseq_allowed TRUE)
@@ -359,6 +456,10 @@ function(bioseq_private_packed_access_line_allowed
         AND ("${_bioseq_line}" STREQUAL "{ seq.padding() };"
           OR "${_bioseq_line}" STREQUAL "{ seq.read_cptr(seq.cbegin()) };"))
       set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "sketch_segment_context_units"
+        AND "${_bioseq_line}" STREQUAL
+          "std::max<std::uint64_t>(1u, p_traits::letters_per_unit);")
+      set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL "compute_segment_descriptor"
         AND ("${_bioseq_line}" STREQUAL
           "constexpr std::size_t letters_per_unit = traits::letters_per_unit;"
@@ -368,6 +469,11 @@ function(bioseq_private_packed_access_line_allowed
     elseif("${_bioseq_scope}" STREQUAL "make_sketch_segment_window"
         AND "${_bioseq_line}" STREQUAL
           "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "admitted_sketch_collection_limit_bp"
+        AND "${_bioseq_line}" STREQUAL
+          "std::max<std::uint64_t>(1u, p_traits::letters_per_unit);")
       set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL "sketch_segment_windows"
         AND "${_bioseq_line}" STREQUAL
@@ -695,11 +801,10 @@ find_package(spirv_cross_glsl CONFIG REQUIRED)
 find_package(spirv_cross_msl CONFIG REQUIRED)
 find_package(VulkanUtilityLibraries CONFIG REQUIRED)
 
-# DOC0304 Phase A — Vulkan/MoltenVK + glslang for the G3SA tiled-DP chaining
-# backend. CMake's FindVulkan only materialises Vulkan::glslang when the glslang
-# component is requested, so it is listed explicitly. DXC is intentionally NOT
-# required: the Phase A shader is GLSL compiled through glslang, and hard-
-# requiring DXC would break otherwise-valid MoltenVK / non-Windows configs.
+# Vulkan/MoltenVK and glslang provide the G3SA tiled-DP chaining backend.
+# CMake's FindVulkan only materialises Vulkan::glslang when the glslang
+# component is requested, so it is listed explicitly. The shader is GLSL and
+# does not require DXC, preserving valid MoltenVK and non-Windows configurations.
 find_package(Vulkan REQUIRED COMPONENTS glslang)
 
 if(NOT TARGET Vulkan::glslang)
@@ -721,33 +826,23 @@ foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
   endif()
 endforeach()
 
-# === bench target wiring lives in bench/bench_v10.cmake ===
-# (Old AddCommonTargetX block deleted as part of the V10 migration.
-# `bioseq_bench` is now built on top of `bench_framework`.)
+# Benchmark target wiring is included near the end of this file;
+# `bioseq_benchmark` consumes `bench_framework`.
 
 # ============================================================================
-# DOC0269 Phase A — cross-target BMI sharing via an OBJECT library that owns
-# the Domain N (NO_POSTGRES) module file set.
-#
-# Before this change every consumer (bioseq_unit_tests, bioseq_bench,
-# bioseq_io_bench, bioseq_bench_framework_example, …) rebuilt
-# its own copy of every shared module (~68 BMIs at ~25 s each). With the
-# library owning the FILE_SET CXX_MODULES PUBLIC, consumers link in the BMIs
-# instead and only compile their target-private modules. See
-# DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_VIA_SHARED_MODULE_LIBRARY_IMPORT_STD_AND_PIPE_PARTITIONS__DOC0269.md.
+# Cross-target BMI sharing uses an OBJECT library that owns the domain-neutral
+# (NO_POSTGRES) module file set. Consumers link its PUBLIC CXX_MODULES file set
+# and compile only their target-private modules.
 #
 # `testing.cppm` is excluded — it pulls in Catch2 reporter headers; non-test
-# binaries (bioseq_bench, bench_framework_example, bioseq_io_bench) don't link
-# Catch2. Test targets add it as their own
-# per-target module on top of the shared lib.
+# binaries do not link Catch2. Test targets add it as a target-private module.
 # ============================================================================
 
-# DOC0322 Option A — Domain-N membership is now STRUCTURAL: everything under
-# backend/** (and instrumentation/**) EXCEPT the Domain-P column-store set relocated
-# under backend/pg/** is Domain N. Replaces the previously hand-maintained explicit
-# list. PostgreSQL-domain implementation units are reclassified below after
-# the structural glob so named implementations are ordinary private sources.
-# testing.cppm stays per-target (Catch2), so it is excluded here.
+# Domain-neutral membership is structural: everything under backend/** and
+# instrumentation/** except the PostgreSQL-owned set under backend/pg/**.
+# PostgreSQL implementation units are reclassified below after the structural
+# glob so named implementations remain ordinary private sources. testing.cppm
+# stays target-private because it imports Catch2.
 file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
@@ -759,10 +854,10 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS}
   ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
 
-# DOC0398 generator inputs are authored module interfaces only so Clang can
-# prove their namespace/callable structure. They are never final providers:
+# Highway generator inputs are authored module interfaces whose namespace and
+# callable structure are validated by Clang. They are never final providers:
 # bioseq_codegen emits one uniquely named production module graph per enabled
-# Highway target. Keep this explicit list out of both ordinary module globs.
+# Highway target. Keep this explicit ownership list out of ordinary module globs.
 set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm"
@@ -777,11 +872,11 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm")
 
-# DOC0398 template-flatten inputs have the same exact-set ownership contract as
+# Template-flatten inputs have the same exact-set ownership contract as
 # Highway target templates. A marked source is scan-only generator input, never
 # an ordinary module provider, and every registered input must carry the marker.
 set(BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES
@@ -825,7 +920,7 @@ foreach(_bioseq_highway_candidate IN LISTS
     "${_bioseq_highway_candidate_contents}")
   if(_bioseq_highway_cppm_include)
     message(FATAL_ERROR
-      "DOC0398 production module units may not textually include another "
+      "Production module units may not textually include another "
       ".cppm: ${_bioseq_highway_candidate}")
   endif()
   string(REGEX REPLACE "[ \t\r\n]+" ""
@@ -848,7 +943,7 @@ foreach(_bioseq_highway_registered IN LISTS
     BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES)
   if(NOT EXISTS "${_bioseq_highway_registered}")
     message(FATAL_ERROR
-      "DOC0398 Highway generator input does not exist: "
+      "Highway generator input does not exist: "
       "${_bioseq_highway_registered}")
   endif()
   get_filename_component(_bioseq_highway_registered
@@ -860,7 +955,7 @@ foreach(_bioseq_highway_registered IN LISTS
   if(NOT _bioseq_highway_registered_in_source
       OR _bioseq_highway_registered_in_binary)
     message(FATAL_ERROR
-      "DOC0398 Highway generator inputs must be authored beneath "
+      "Highway generator inputs must be authored beneath "
       "${CMAKE_CURRENT_LIST_DIR}, not generated/build-tree files: "
       "${_bioseq_highway_registered}")
   endif()
@@ -889,7 +984,7 @@ if(_bioseq_highway_unregistered_marked_modules
   string(JOIN "\n    " _bioseq_highway_extra_text
     ${_bioseq_highway_unmarked_registered_modules})
   message(FATAL_ERROR
-    "DOC0398 [[bioseq::simd]] ownership registry is not an exact set.\n"
+    "[[bioseq::simd]] template ownership registry is not an exact set.\n"
     "  Marked but unregistered:\n    ${_bioseq_highway_missing_text}\n"
     "  Registered but unmarked:\n    ${_bioseq_highway_extra_text}")
 endif()
@@ -962,7 +1057,7 @@ foreach(_bioseq_template_flatten_registered IN LISTS
     BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES)
   if(NOT EXISTS "${_bioseq_template_flatten_registered}")
     message(FATAL_ERROR
-      "DOC0398 template-flatten generator input does not exist: "
+      "Template-flatten generator input does not exist: "
       "${_bioseq_template_flatten_registered}")
   endif()
   get_filename_component(_bioseq_template_flatten_registered
@@ -976,7 +1071,7 @@ foreach(_bioseq_template_flatten_registered IN LISTS
   if(NOT _bioseq_template_flatten_registered_in_source
       OR _bioseq_template_flatten_registered_in_binary)
     message(FATAL_ERROR
-      "DOC0398 template-flatten inputs must be authored beneath "
+      "Template-flatten inputs must be authored beneath "
       "${CMAKE_CURRENT_LIST_DIR}, not generated/build-tree files: "
       "${_bioseq_template_flatten_registered}")
   endif()
@@ -1000,7 +1095,7 @@ foreach(_bioseq_template_flatten_registered IN LISTS
     _bioseq_cross_codegen_source_index)
   if(NOT _bioseq_cross_codegen_source_index EQUAL -1)
     message(FATAL_ERROR
-      "DOC0398 Highway and template-flatten generator source sets must be "
+      "Highway and template-flatten generator source sets must be "
       "disjoint: ${_bioseq_template_flatten_registered}")
   endif()
 endforeach()
@@ -1018,7 +1113,7 @@ if(_bioseq_template_flatten_unregistered_marked_modules
   string(JOIN "\n    " _bioseq_template_flatten_extra_text
     ${_bioseq_template_flatten_unmarked_registered_modules})
   message(FATAL_ERROR
-    "DOC0398 [[bioseq::template_flatten]] ownership registry is not an exact set.\n"
+    "[[bioseq::template_flatten]] ownership registry is not an exact set.\n"
     "  Marked but unregistered:\n    ${_bioseq_template_flatten_missing_text}\n"
     "  Registered but unmarked:\n    ${_bioseq_template_flatten_extra_text}")
 endif()
@@ -1052,18 +1147,22 @@ set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/summary_writer/implementation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap/implementation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence/pair_sort.cppm")
-set(BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES
+# The public PMU facade defines inline dispatch through each platform backend,
+# so importers require these BMIs as part of the public module closure. Their
+# backend namespaces remain implementation detail; CMake visibility here
+# describes BMI reachability rather than API stability.
+set(BIOSEQ_INSTRUMENTATION_BACKEND_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/linux.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/macos.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/unsupported.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
-  ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES})
+  ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
-  ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES})
+  ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
 
 # The IO reader closure is PostgreSQL-independent and is shared by the
 # extension, external providers, and the IO benchmark. The benchmark launcher
@@ -1078,6 +1177,9 @@ list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
 set(BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool/tbb_runtime_symbols.cppm)
+set_source_files_properties(
+  ${BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 set(BIOSEQ_RUNTIME_CORE_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/index.cppm
@@ -1093,11 +1195,11 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
 set(BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_NOPG_MODULES})
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 
-# DOC0372 — single-owner leaf targets extracted from the Domain-N set. These
-# stay in BIOSEQ_NOPG_MODULES (so the PG glob still excludes them) but leave
-# BIOSEQ_NOPG_OWNED_MODULES so they are compiled exactly once, here, with no
-# runtime/TBB/logging/IO/PG edge. Isolated generated + provider metadata targets
-# link these leaves without inheriting the sequence graph. Checked arithmetic
+# Single-owner leaf targets stay in BIOSEQ_NOPG_MODULES so the PostgreSQL glob
+# excludes them, but leave BIOSEQ_NOPG_OWNED_MODULES so they compile exactly
+# once without runtime, TBB, logging, I/O, or PostgreSQL edges. Generated and
+# provider-metadata targets link these leaves without inheriting the sequence
+# graph. Checked arithmetic
 # is owned tree-wide by common/checked_arithmetic and is therefore not part of
 # the Bioseq source glob.
 set(BIOSEQ_SINK_CONTROL_MODULE
@@ -1143,10 +1245,9 @@ target_sources(bioseq_io_source
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_IO_SOURCE_MODULE}")
 
-# DOC0372 §413-424 / DOC0371 §37.2 — the admission controller remains a
-# single-owner leaf, while OS probes and MemoryBudget now have one shared
-# implementation in bioseq_memory_budget. The compatibility sysinfo facade
-# remains in the broad Domain-N module set and only forwards to that library.
+# The admission controller is a single-owner leaf, while OS probes and
+# MemoryBudget share one implementation in bioseq_memory_budget. The sysinfo
+# forwarding facade remains in the broad domain-neutral module set.
 set(BIOSEQ_MEMORY_ADMISSION_CORE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
@@ -1158,12 +1259,14 @@ set_target_properties(bioseq_memory_admission_core PROPERTIES
   CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_compile_definitions(bioseq_memory_admission_core PRIVATE NO_POSTGRES=1)
-target_link_libraries(bioseq_memory_admission_core PUBLIC bioseq_memory_budget)
+target_link_libraries(bioseq_memory_admission_core PUBLIC
+  bioseq_checked_arithmetic_core
+  bioseq_memory_budget)
 target_sources(bioseq_memory_admission_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_MEMORY_ADMISSION_CORE_MODULES})
 
-# DOC0372 — lightweight templating core: value sequence, compile-time string,
+# Lightweight templating core: value sequence, compile-time string,
 # pack iterate/search, and one-time runtime dispatch. Links Highway (required by
 # pack_for_each) but has no sequence, alphabet, PG, or external edge. The
 # Domain-N umbrella (bioseq.common.templating) and its remaining leaves keep
@@ -1219,7 +1322,9 @@ list(REMOVE_ITEM SRC_MOD_FILES
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm")
 set_source_files_properties(
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm"
-  PROPERTIES CXX_SCAN_FOR_MODULES ON)
+  PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+    COMPILE_OPTIONS "-x;c++")
 
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION})
@@ -1245,17 +1350,15 @@ set_target_properties(bioseq_modules_nopg PROPERTIES
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
   # IPO disabled here for the same reason as the test executables
-  # variants (see AddPostgreSQLExtension.cmake, comment on
+  # variants (see add_postgresql_extension.cmake, comment on
   # `INTERPROCEDURAL_OPTIMIZATION FALSE` for `_tests_exec`): clang's
   # ThinLTO drops module-attached TLS init wrappers (the `_ZTHW…` symbols
   # for `mlogging::fmtlogDetailT<0>::sbc`) at link time. With the lib's
   # objects feeding into every Domain N consumer — including
   # `bioseq_unit_tests` which we know reproduces the bug — the
   # lib has to stay non-LTO so the test execs link cleanly. The lib's
-  # codegen is still `-O3 -DNDEBUG` per bench-opt; the only thing we
-  # lose is cross-TU inlining BETWEEN the lib's objects and the
-  # consumer's main TUs. Worth revisiting once the clang TLS-init bug
-  # is fixed upstream (tracked in DOC0269 §12). `-O3` is preserved.
+  # codegen remains `-O3 -DNDEBUG` per bench-opt; only cross-TU inlining
+  # between the library objects and consumer translation units is disabled.
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 # Attach the heavy_compile Ninja pool (defined at top level when
@@ -1273,10 +1376,10 @@ endif()
 # NO_POSTGRES is PRIVATE so the flag governs *this lib's own TU compilation only*
 # — it does NOT propagate into linking consumers. Aligner and the test execs
 # (which also need NO_POSTGRES=1) set the flag on themselves via
-# AddPostgreSQLExtension.cmake's `target_compile_definitions(... PUBLIC -DNO_POSTGRES=1)`
+# add_postgresql_extension.cmake's `target_compile_definitions(... PUBLIC -DNO_POSTGRES=1)`
 # call for non-POSTGRES_EXTENSION targets, so the private scope here is sufficient
-# to keep the existing aligner/test pipeline intact. postgresql_bioseq, which now
-# also consumes this library (DOC0270), MUST NOT receive NO_POSTGRES — its
+# for aligner and test consumers. postgresql_bioseq also consumes this library
+# but MUST NOT receive NO_POSTGRES — its
 # Domain P modules include <postgres.h> and rely on palloc, ereport, etc. The
 # POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
 # Domain P consumers care about the major-version-conditional code paths.
@@ -1293,10 +1396,9 @@ target_compile_options(bioseq_modules_nopg PRIVATE
   "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
 
 target_include_directories(bioseq_modules_nopg PUBLIC
-  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/hwy_contrib"
-  "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
@@ -1319,7 +1421,6 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   bioseq_io_source
   bioseq_memory_admission_core
   bioseq_common_templating_core
-  safestring_static
   fmt
   ZLIB::ZLIB
   reflectcpp::reflectcpp
@@ -1335,17 +1436,17 @@ target_link_libraries(bioseq_modules_nopg PRIVATE
 
 target_sources(bioseq_modules_nopg
   PRIVATE ${BIOSEQ_NOPG_SOURCES}
-  PRIVATE FILE_SET bioseq_instrumentation_backend_modules
+  PUBLIC FILE_SET bioseq_instrumentation_backend_modules
     TYPE CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES}
+    FILES ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_OWNED_MODULES})
 
-# P0 of DOC0398 proves the complete annotation -> prepared Clang closure ->
-# fixed-target module -> one generated binder/registry path with SneakySnake.
-# Further families extend these explicit registries; target discovery itself
+# The generation contract validates the complete annotation -> prepared Clang
+# closure -> fixed-target module -> generated binder/registry path, including
+# SneakySnake. Families extend explicit registries while target discovery
 # remains Highway-owned through HWY_VISIT_TARGETS.
 set(BIOSEQ_HIGHWAY_GENERATED_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/highway")
@@ -1367,7 +1468,7 @@ cmake_path(IS_PREFIX BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
 if(_bioseq_template_flatten_root_inside_highway_root
     OR _bioseq_highway_root_inside_template_flatten_root)
   message(FATAL_ERROR
-    "DOC0398 Highway and template-flatten generated roots must be disjoint; "
+    "Highway and template-flatten generated roots must be disjoint; "
     "highway='${BIOSEQ_HIGHWAY_GENERATED_ROOT}', "
     "template_flatten='${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}'")
 endif()
@@ -1378,7 +1479,7 @@ bioseq_template_flatten_probe(
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
   OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
   OUTPUT_MODULE bioseq.postgres.scheduler.dispatch_processor
-  PROFILE "${BIOSEQ_OPTTIMIZATION_LEVEL}"
+  PROFILE "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
   OUT_CONFIGURE_TOPOLOGY_MANIFEST BIOSEQ_TYPED_CONFIGURE_TOPOLOGY
   OUT_TOPOLOGY_DIGEST BIOSEQ_TYPED_TOPOLOGY_DIGEST
   OUT_ENABLED_ORDINALS BIOSEQ_TYPED_ENABLED_ORDINALS
@@ -1433,8 +1534,8 @@ unset(_bioseq_highway_alignment_alphabet_ordinal)
 # Each synthetic family is one Cartesian case; the Highway renderer validates
 # exact 2 x 4 closure and folds these leaves back into the neutral three-member
 # MinimizerKernels table. The renderer also reconciles these records with the
-# typed alignment families to emit the root table's neutral alphabet-identity
-# evidence; no additional CMake alphabet registry participates.
+# typed alignment families to emit the root table's neutral alphabet identity;
+# no additional CMake alphabet registry participates.
 set(BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS)
 set(BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS)
 foreach(_bioseq_highway_minimizer_alphabet_label
@@ -1496,7 +1597,7 @@ unset(_bioseq_highway_minimizer_alphabet_label)
 unset(_bioseq_highway_minimizer_alphabet_replacement)
 unset(_bioseq_highway_minimizer_alphabet_ordinal)
 
-# DOC0399 keeps target-private semantic probes as four ordinary implementation
+# Target-private semantic probes are four ordinary implementation
 # units of the one already-generated static-target primary. They are generator
 # templates, never authored/final module providers or production slot owners.
 set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
@@ -1506,8 +1607,9 @@ set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   "two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/two_stack.cppm.in")
 # One bounded ordinary owner per admitted result representation prevents every
 # coarse input-width wrapper from instantiating the complete result-layout
-# switch. K15-only profiles have 7 owners / 14 typed instantiations; profile 4+
-# adds K7/K27 identities for exactly 13 owners / 24 instantiations per target.
+# switch. Baseline k-mer profiles have 7 owners / 14 typed instantiations;
+# extended-k-mer profiles add K7/K27 identities for exactly 13 owners / 24
+# instantiations per target.
 set(BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
   "minimap2_reference_l15_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
   "minimap2_reference_l28_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
@@ -1516,7 +1618,7 @@ set(BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
   "bounded_nthash_l15_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
   "bounded_nthash_l28_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
   "bounded_nthash_l63_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<63u,15u>|u32,u64")
-if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
+if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
   list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
     "minimap2_reference_l7_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<7u,7u>|u32,u64"
     "minimap2_reference_l17_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<17u,7u>|u32,u64"
@@ -1559,7 +1661,7 @@ bioseq_add_highway_codegen(
     "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils"
     "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils"
     "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils"
-    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
+    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
     "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
   SLOT_RECORDS
@@ -1607,9 +1709,9 @@ math(EXPR _bioseq_highway_expected_representation_output_count
 if(NOT _bioseq_highway_unit_probe_record_count EQUAL 4
     OR NOT _bioseq_highway_unit_probe_output_count EQUAL 4)
   message(FATAL_ERROR
-    "DOC0399 requires exactly four fixed-target unit probe owners/outputs")
+    "Fixed-target generation requires exactly four unit validation owners/outputs")
 endif()
-if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
+if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
   set(_bioseq_highway_expected_representation_owner_count 13)
 else()
   set(_bioseq_highway_expected_representation_owner_count 7)
@@ -1619,7 +1721,7 @@ if(NOT _bioseq_highway_representation_owner_count EQUAL
     OR NOT _bioseq_highway_representation_output_count EQUAL
       _bioseq_highway_expected_representation_output_count)
   message(FATAL_ERROR
-    "DOC0399 minimizer representation owner/output closure diverged: "
+    "Minimizer representation owner/output closure diverged: "
     "owners=${_bioseq_highway_representation_owner_count}, "
     "outputs=${_bioseq_highway_representation_output_count}, "
     "targets=${_bioseq_highway_compiled_target_count}")
@@ -1633,7 +1735,7 @@ list(LENGTH _bioseq_highway_unique_probe_outputs
   _bioseq_highway_unique_probe_output_count)
 if(NOT _bioseq_highway_probe_output_count EQUAL
     _bioseq_highway_unique_probe_output_count)
-  message(FATAL_ERROR "DOC0399 Highway probe outputs are not disjoint")
+  message(FATAL_ERROR "Highway validation outputs are not disjoint")
 endif()
 foreach(_bioseq_highway_unit_probe
     IN LISTS BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS)
@@ -1683,10 +1785,67 @@ set(BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS
 list(FILTER BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS
   EXCLUDE REGEX "/(binder|instances/[a-z][a-z0-9_]*)\\.cppm$")
 
+# The compiler-selected fixed target has one reusable owner. Production,
+# unit tests, and benchmarks consume the same BMI/object closure by linking
+# these targets instead of compiling the generated files independently.
+set(BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES
+  ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES})
+list(REMOVE_ITEM BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES
+  "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}")
+set(BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS
+  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_ORDINARY_IMPLEMENTATIONS})
+list(REMOVE_ITEM BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS})
+set(BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS
+  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_PARTITIONS})
+list(REMOVE_ITEM BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
+
+add_library(bioseq_highway_fixed_target STATIC)
+set_target_properties(bioseq_highway_fixed_target PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_highway_fixed_target
+  PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+    FILES
+      "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+      ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
+target_link_libraries(bioseq_highway_fixed_target PUBLIC
+  bioseq_modules_nopg
+  bioseq_highway_target_policy)
+add_dependencies(
+  bioseq_highway_fixed_target bioseq_highway_target_modules)
+
+add_library(bioseq_highway_test_support STATIC)
+set_target_properties(bioseq_highway_test_support PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_highway_test_support
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+    FILES "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}")
+target_link_libraries(bioseq_highway_test_support PUBLIC
+  bioseq_highway_fixed_target)
+add_dependencies(
+  bioseq_highway_test_support bioseq_highway_target_modules)
+
 if(NOT BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS STREQUAL
     BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES)
   message(FATAL_ERROR
-    "DOC0398 Highway source registry and final-provider exclusion diverged")
+    "Highway template ownership and final-provider exclusion diverged")
 endif()
 
 if(APPLE)
@@ -1698,7 +1857,9 @@ if(APPLE)
         ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS})
   set_source_files_properties(
     ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS}
-    PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    PROPERTIES
+      CXX_SCAN_FOR_MODULES ON
+      COMPILE_OPTIONS "-x;c++")
   target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
   if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
     install(TARGETS bioseq_gpu_archive_builder
@@ -1708,69 +1869,180 @@ if(APPLE)
 endif()
 
 # ============================================================================
-# Tests/integration-tests module file lists. testing.cppm is per-target
-# because the shared lib excludes Catch2.
+# Tests/integration-tests source ownership. Catch2 support stays outside the
+# production module library and is shared by the test executables below.
 # ============================================================================
 
-file(GLOB_RECURSE BIOSEQ_UNIT_TEST_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/*_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/*_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp
-  # DOC0286 §13 — NO_POSTGRES file_utils unit test. Listed explicitly (NOT the
-  # whole io/*_test.cpp glob) so the heavyweight io_test.cpp (kseq++) stays out
-  # of the unit exec; file_utils only needs bioseq_io.{file_utils,options}, now
-  # in bioseq_modules_nopg.
-  ${CMAKE_CURRENT_LIST_DIR}/io/file_utils_test.cpp
-  # DOC0295 §13.7 — NO_POSTGRES identifier-parser unit tests (formats/tables,
-  # lexer, resolver order, FASTQ sampler). Same lightweight pattern.
-  ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_formats_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_parser_test.cpp)
+find_package(Catch2 3 REQUIRED)
 
-file(GLOB_RECURSE BIOSEQ_INTEGRATION_TEST_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cpp)
+# Bench-prefilter correctness metrics are also unit-tested. Keep their named
+# module in one reusable owner instead of recompiling it in the benchmark and
+# unit-test targets.
+add_library(bioseq_bench_prefilter_metrics STATIC)
+set_target_properties(bioseq_bench_prefilter_metrics PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_bench_prefilter_metrics
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/.."
+    FILES
+      "${CMAKE_CURRENT_LIST_DIR}/../bench/prefilter_pipeline_metrics.cppm")
 
-# Integration-tests module set: shared lib provides mlogging.cppm + the
-# whole Domain N core, so we only list testing.cppm + the integration-test-
-# specific modules here.
-file(GLOB_RECURSE BIOSEQ_INTEGRATION_TEST_MODULES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm)
+# Indexing storage fakes and the libpq integration client each have one reusable
+# test-support owner. Test executables link these targets instead of recompiling
+# the same providers in every consumer.
+add_library(bioseq_testing_support OBJECT)
+set_target_properties(bioseq_testing_support PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_testing_support
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES
+      "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm")
+target_link_libraries(bioseq_testing_support
+  PUBLIC
+    bioseq_modules_nopg
+    libassert::assert
+  PRIVATE
+    Catch2::Catch2)
+
+add_library(bioseq_integration_test_support STATIC)
+set_target_properties(bioseq_integration_test_support PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_integration_test_support
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index.cppm")
+target_link_libraries(bioseq_integration_test_support PUBLIC
+  fmt
+  libassert::assert
+  PostgreSQL::PostgreSQL)
+
+# Catch source ownership is explicit. The repository-level ownership audit
+# discovers *_test.cpp only to reject omissions or duplicate owners; discovery
+# never feeds a target source list.
+set(BIOSEQ_UNIT_TEST_SUPPORT_SOURCES
+  "${CMAKE_CURRENT_LIST_DIR}/tests/support/test_event_listener.cpp")
+set(BIOSEQ_UNIT_TEST_SOURCES
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/edit_distance_accounting_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/chaining/simd_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/chaining/vulkan_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/common/logging_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/index_chunk_io_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/merge_runs_multicursor_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_fragment_compact_hash32_adapter_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/storage_concept_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/io/file_kind_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/io/identifier_parser/formats_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/io/identifier_parser/identifier_parser_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/highway_minimizer_sink_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/kmers_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/minimizer_collector_admission_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/nt4_minimizer_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_checked_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_continuation_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_output_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_minimizers_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/parallelism/pool_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/gatekeeper_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/sneaky_snake_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/seeding/vulkan_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/edit_distance_threshold_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/packed_sequence_split_units_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/packed_sequence_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/rank_pack_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/sequence_generator_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/simd/highway_dispatch_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/simd/highway_fixed_target_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/simd/sorting_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/simd/vector_stream_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/layout_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_aligner_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_pipeline_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_sequence_test.cpp")
+
+set(BIOSEQ_INTEGRATION_TEST_SOURCES
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/admin_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/btree_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/chunked_storage_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/e2e_smoke_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/gpu_mmsearch_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_invariance_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_mixed_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_table_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/insert_hook_multifragment_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/io/reader_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/join_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/large_table_alignment_smoke_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_expression_property_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_acceptance_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/load_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/minimizers_per_sequence_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/reindex_scanner_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/row_mask_write_state_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sample_table_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/scalar_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sequence_basic_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sequence_fragment_storage_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sequence_typmod_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_lifetime_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_boundary_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_row_codec_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/storage_buckets_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/substring_property_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/symbol_count_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/typmod_coalesce_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/wire_test.cpp")
 
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
 
-# DOC0270 — drop every module that the shared bioseq_modules_nopg OBJECT
-# library already owns from postgresql_bioseq's per-target module set. Without
-# this `list(REMOVE_ITEM)`, postgresql_bioseq's `SRC_MOD_FILES` GLOB collects
-# all backend/**/*.cppm files (including the ~50 Domain N modules already in
-# the shared lib) and ninja rebuilds them inside the extension's own target —
-# the same ~25 s × ~50 BMI compile that DOC0269 Phase A eliminated for the
-# aligner / tests but never reached the postgres extension. The
-# `SHARED_MODULE_LIBS bioseq_modules_nopg` argument in the
-# `AddCommonTargetX(postgresql_bioseq …)` call below links the lib's BMIs in
-# instead. Net effect: the Domain N module set is compiled exactly once
-# across the whole build, not twice (lib + postgresql_bioseq) as before.
+# Remove modules owned by the shared bioseq_modules_nopg OBJECT library from
+# postgresql_bioseq's private module set. The `SHARED_MODULE_LIBS
+# bioseq_modules_nopg` argument below supplies the PUBLIC BMIs, so the
+# domain-neutral module set has one build owner.
 #
-# IMPORTANT — the lib's BMIs are baked with NO_POSTGRES=1 (lib-private), so
-# the two Domain N modules that branch on NO_POSTGRES end up with the
-# DEBUG_ASSERT variant in postgresql_bioseq:
+# The shared BMIs are compiled with private NO_POSTGRES=1. The domain-neutral
+# modules that branch on NO_POSTGRES therefore use their standalone contracts:
 #
 #   - sequences/simd_implementation.cppm  ::stdc_compare contract-violation paths use
-#     DEBUG_ASSERT instead of PostgreSQL ERROR logging. With -DNDEBUG the
-#     DEBUG_ASSERT compiles out, so the violations become silent. These
-#     paths are unreachable in well-formed code (caller passes mixed-alphabet
-#     stdc values, or cross-storage-width non-bit-castable pair); the
-#     follow-up to keep the loud PostgreSQL ERROR behaviour is to extract
-#     those calls into a Domain P wrapper that postgresql_bioseq imports
-#     separately — not done here to keep the diff scoped to the build-time fix.
+#     DEBUG_ASSERT. Well-formed callers exclude mixed-alphabet values and
+#     cross-storage-width non-bit-castable pairs.
 #   - common/mlogging.cppm remains PG-header-free. PG-target logging is
-#     delivered through the sink registered by _PG_init(); before registration
-#     or under NO_POSTGRES, it falls back to BIOSEQ_LOG_FILE or
+#     delivered through the sink registered by _PG_init(); without a registered
+#     sink it falls back to BIOSEQ_LOG_FILE or
 #     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 
@@ -1779,11 +2051,15 @@ list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 # facets. Both the extension and the dedicated contract OBJECT target import
 # these PUBLIC BMIs; the contract objects themselves never enter the DSO.
 set(BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/configuration/aligner.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/configuration/core.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/configuration/scheduler.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/configuration/storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/column/metadata/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/datums.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/runtime_test_counters.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/runtime_diagnostics.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_catalog_entities.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/aggregate.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/guc_storage.cppm"
@@ -1799,26 +2075,26 @@ set(BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS})
 
-# Compiler-owned DOC0388 module-reachability fixtures. They are removed from
+# Compiler-owned SQL module-reachability fixtures. They are removed from
 # the production source globs here and compiled only by the dedicated OBJECT
 # target declared after generated provider paths are known.
 set(BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/catalog_entity_handle_producer_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/generated_guc_producer_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_boundary_template_producer_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/result_materialization_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_entity_handles_test.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/catalog_entity_handle_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/generated_guc_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/sql_boundary_template_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/result_materialization_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/sql_entity_handles_test.cppm")
 set(BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/catalog_entity_handle_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/generated_guc_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_boundary_template_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/active_generated_guc_consumer_test.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/catalog_entity_handle_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/generated_guc_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/sql_boundary_template_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/contract/postgres/sql/active_generated_guc_consumer_test.cpp")
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES})
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 list(REMOVE_DUPLICATES SRC_FILES)
 
-# DOC0372 — the external CustomScan (backend/pg/external/scan.cppm) and its row
+# External CustomScan (backend/pg/external/scan.cppm) and its row
 # writer (row_writer.cppm) import the external provider stack, so they compile
 # into the extension only when the external API clients are enabled. The rest of
 # backend/pg/external/ (relation/errors/path_builder_slot) imports no provider
@@ -1894,9 +2170,9 @@ if(NOT "${BIOSEQ_TYPED_PROBED_ENABLED_SOURCES}" STREQUAL
   message(FATAL_ERROR
     "Template-flatten probe and generator disagree on enabled scheduler units")
 endif()
-if(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "0")
+if(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "dna4_uint64")
   set(_bioseq_typed_expected_count 7)
-elseif(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "1")
+elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "all_alphabets_uint64")
   set(_bioseq_typed_expected_count 14)
 else()
   set(_bioseq_typed_expected_count 56)
@@ -1906,7 +2182,7 @@ list(LENGTH BIOSEQ_TYPED_IMPLEMENTATION_UNITS
 if(NOT BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT EQUAL
     _bioseq_typed_expected_count)
   message(FATAL_ERROR
-    "Template-flatten profile ${BIOSEQ_OPTTIMIZATION_LEVEL} requires "
+    "Template-flatten profile ${BIOSEQ_TEMPLATE_FLATTEN_PROFILE} requires "
     "${_bioseq_typed_expected_count} scheduler units, generated "
     "${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT}")
 endif()
@@ -2064,12 +2340,10 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
     "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
 endif()
 
-# The unit-test target owns only testing.cppm; every other Domain N module is
-# delivered by bioseq_modules_nopg. The integration target replaces this file
-# set with its integration-specific modules below.
-set(BIOSEQ_UNIT_TEST_MODULES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm)
-
+# The unit target alone compiles the event listener through its TESTS closure.
+# Both core Catch executables link the shared indexing fakes; every Domain N
+# module is delivered by bioseq_modules_nopg. The integration target adds its
+# integration-specific modules below.
 set(BIOSEQ_TEST_TARGET_ARGUMENTS
   TYPE EXEC
   CXX 26
@@ -2078,20 +2352,21 @@ set(BIOSEQ_TEST_TARGET_ARGUMENTS
   VERSION ${INSTALL_VERSION}
   COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
   TESTS
+    ${BIOSEQ_UNIT_TEST_SUPPORT_SOURCES}
     ${BIOSEQ_UNIT_TEST_SOURCES}
   INTEGRATION_TESTS
     ${BIOSEQ_INTEGRATION_TEST_SOURCES}
   INTEGRATION_TESTS_LINKS
     sqlgen::sqlgen
-  INTEGRATION_TESTS_MODULES
-    ${BIOSEQ_INTEGRATION_TEST_MODULES}
+    bioseq_integration_test_support
+    kseq++::kseq++
   LINKS
     safestring_static
     fmt
@@ -2104,26 +2379,27 @@ set(BIOSEQ_TEST_TARGET_ARGUMENTS
     Vulkan::glslang
     spirv-cross-msl
     Vulkan::LayerSettings
+    bioseq_pg_support
+    bioseq_bench_prefilter_metrics
+    bioseq_testing_support
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}"
-  CXX_MOD_FILES
-    ${BIOSEQ_UNIT_TEST_MODULES}
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
 
-AddCommonTarget(
+bioseq_add_postgresql_extension_variant(
   bioseq_unit_tests
   ON
   ${BIOSEQ_TEST_TARGET_ARGUMENTS})
 set_target_properties(bioseq_unit_tests PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
-AddCommonTarget(
+bioseq_add_postgresql_extension_variant(
   bioseq_integration_tests
   INTEGRATION
   ${BIOSEQ_TEST_TARGET_ARGUMENTS})
@@ -2131,27 +2407,27 @@ set_target_properties(bioseq_integration_tests PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 unset(BIOSEQ_TEST_TARGET_ARGUMENTS)
 
+if(BUILD_TESTING)
+  add_test(
+    NAME bioseq_unit_tests
+    COMMAND "$<TARGET_FILE:bioseq_unit_tests>" "[component:bioseq]")
+  set_tests_properties(bioseq_unit_tests PROPERTIES
+    LABELS
+      "component:bioseq;layer:unit;feature:alignment;feature:alphabet;feature:chaining;feature:configuration;feature:gpu_runtime;feature:index;feature:io;feature:minimizer;feature:pipeline;feature:planner;feature:prefilter;feature:scheduler;feature:seeding;feature:sequence;feature:simd_primitives;feature:sql_api;feature:storage;resource:filesystem;resource:gpu;resource:highway;resource:large_memory;resource:subprocess")
+  add_test(
+    NAME bioseq_integration_tests
+    COMMAND "$<TARGET_FILE:bioseq_integration_tests>"
+      "[component:bioseq][layer:integration]")
+  set_tests_properties(bioseq_integration_tests PROPERTIES
+    LABELS
+      "component:bioseq;layer:integration;feature:alignment;feature:alphabet;feature:configuration;feature:extension_lifecycle;feature:index;feature:io;feature:pipeline;feature:planner;feature:prefilter;feature:scheduler;feature:sequence;feature:sql_api;feature:storage;resource:filesystem;resource:highway;resource:large_memory;resource:postgres;resource:subprocess"
+    RESOURCE_LOCK "bioseq_private_postgres")
+endif()
+
 # Unit tests use one generator-proven fixed target, chosen from the compiler's
 # HWY_STATIC_TARGET record. The test provider imports the same generated
 # canonical partitions as production and never performs runtime dispatch.
 if(TARGET bioseq_unit_tests)
-  set_source_files_properties(
-    "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
-    "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
-    ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
-    PROPERTIES GENERATED TRUE)
-  set_source_files_properties(
-    ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
-    PROPERTIES COMPILE_OPTIONS "-x;c++")
-  target_sources(bioseq_unit_tests
-    PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
-    PRIVATE FILE_SET bioseq_highway_fixed_target_test_modules
-      TYPE CXX_MODULES
-      BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
-      FILES
-        "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
-        "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
-        ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
   if(BIOSEQ_TEST_INDEXES)
     set_source_files_properties(
       ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS}
@@ -2160,34 +2436,27 @@ if(TARGET bioseq_unit_tests)
       ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS})
   endif()
   target_link_libraries(bioseq_unit_tests PRIVATE
-    bioseq_highway_target_policy)
+    bioseq_highway_test_support)
   add_dependencies(
     bioseq_unit_tests bioseq_highway_target_modules)
 endif()
 
-set(BIOSEQ_SQL_RETIRED_EXTERNAL_FRAGMENT
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_external--1.0.sql")
-if(EXISTS "${BIOSEQ_SQL_RETIRED_EXTERNAL_FRAGMENT}")
-  message(FATAL_ERROR
-    "The optional external SQL surface is generated from natural C++ owners; "
-    "the retired bioseq_external--1.0.sql fragment must not be restored")
-endif()
-include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake")
 include(
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/PostgresErrorSafety.cmake")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/postgres_error_safety.cmake")
 include(
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/RuntimeEvidence.cmake")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/postgres_error_safety_runtime.cmake")
 
 target_link_libraries(bioseq_modules_nopg
   PUBLIC bioseq_sql_annotation_model)
 
 add_library(bioseq_sql_annotation_probe OBJECT
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/annotation_probe.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/annotation_probe.cpp")
 target_sources(bioseq_sql_annotation_probe
   PRIVATE FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../codegen"
     FILES
-      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/annotation_probe.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/annotation_probe.cppm")
 target_link_libraries(bioseq_sql_annotation_probe
   PRIVATE bioseq_sql_annotation_model)
 target_compile_options(bioseq_sql_annotation_probe
@@ -2210,11 +2479,13 @@ set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
-# Both profile prepares need this named-module provider in the raw compile
-# database. The extension imports and executes its test API only when
-# BIOSEQ_TEST_INDEXES is enabled.
-list(APPEND SRC_MOD_FILES
-  "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+# The test-indexes extension imports and owns this provider. Production keeps
+# it out of the DSO; a dedicated excluded target declared after the generated
+# SQL provider closure supplies its raw compile command to dual-profile PREPARE.
+if(BIOSEQ_TEST_INDEXES)
+  list(APPEND SRC_MOD_FILES
+    "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+endif()
 set(BIOSEQ_SQL_CODEGEN_DIR
   "${CMAKE_CURRENT_BINARY_DIR}/generated/sql")
 set(BIOSEQ_SQL_PROFILE_ARTIFACT_ROOT
@@ -2269,21 +2540,21 @@ else()
     "${BIOSEQ_SQL_PRODUCTION_GENERATED_STAMP}")
 endif()
 set(BIOSEQ_SQL_VALIDATOR
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/validate_evidence.py")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/validate_postgres_error_safety.py")
 set(BIOSEQ_SQL_SAFETY_PROVENANCE
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/fixtures/pg17_provenance.json")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/tests/contract/fixtures/pg17_provenance.json")
 set(BIOSEQ_SQL_SAFETY_RUNTIME_POLICY
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/fixtures/doc0388_runtime_policy.json")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/policy/postgres_error_safety_policy.json")
 set(BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE "" CACHE FILEPATH
-  "Reviewed profile-neutral DOC0388 PostgreSQL runtime case template")
+  "Reviewed profile-neutral PostgreSQL runtime case template")
 set(BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR "" CACHE PATH
   "Inverse-profile runtime-instrumented Bioseq build tree")
 set(BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE "isolated" CACHE STRING
-  "Runtime evidence cluster relationship (isolated only)")
+  "Runtime validation cluster relationship (isolated only)")
 set_property(CACHE BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE
   PROPERTY STRINGS isolated)
 set(BIOSEQ_SQL_SAFETY_RUNTIME_TIMEOUT_SECONDS "600" CACHE STRING
-  "Per-child timeout for PostgreSQL runtime evidence")
+  "Per-child timeout for PostgreSQL runtime validation")
 mark_as_advanced(
   BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE
   BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR
@@ -2292,12 +2563,12 @@ mark_as_advanced(
 set(BIOSEQ_SQL_VALIDATOR_SELF_TEST_STAMP
   "${BIOSEQ_SQL_CODEGEN_DIR}/validator-self-test.stamp")
 set(BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/clang_structural/test_prepare_incremental.py")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/structural_analysis/tests/integration/test_prepare_incremental.py")
 set(BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP
   "${BIOSEQ_SQL_CODEGEN_DIR}/prepare-incremental-self-test.stamp")
 if(NOT EXISTS "${BIOSEQ_SQL_VALIDATOR}")
   message(FATAL_ERROR
-    "Missing PostgreSQL safety evidence validator: ${BIOSEQ_SQL_VALIDATOR}")
+    "Missing PostgreSQL safety validator: ${BIOSEQ_SQL_VALIDATOR}")
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 if(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST)
@@ -2323,20 +2594,20 @@ add_custom_command(
     "${BIOSEQ_SQL_VALIDATOR}"
     "${BIOSEQ_SQL_SAFETY_PROVENANCE}"
     "${BIOSEQ_SQL_SAFETY_RUNTIME_POLICY}"
-  COMMENT "Running PostgreSQL safety evidence validator self-tests"
+  COMMENT "Running PostgreSQL safety validator self-tests"
   VERBATIM)
 add_custom_target(bioseq_sql_validator_self_test
   DEPENDS "${BIOSEQ_SQL_VALIDATOR_SELF_TEST_STAMP}")
 set(BIOSEQ_SQL_NEGATIVE_FIXTURES
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/invalid_nested_annotation_namespace.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/invalid_class_head_placement.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/invalid_guc_enumerator_placement.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/invalid_mixed_guc_alias_initialization.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_catalog_handle_specialization.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_access.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_catalog_handle_namespace_alias.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_access_using_declaration.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_type_alias.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/invalid_nested_annotation_namespace.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/invalid_class_head_placement.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/invalid_guc_enumerator_placement.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/invalid_mixed_guc_alias_initialization.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/authored_catalog_handle_specialization.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/authored_guc_registration_access.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/authored_catalog_handle_namespace_alias.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/authored_guc_access_using_declaration.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/negative/authored_guc_registration_type_alias.cppm")
 set(BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP
   "${BIOSEQ_SQL_CODEGEN_DIR}/negative-contracts.stamp")
 if(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST)
@@ -2353,7 +2624,7 @@ if(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST)
       ${BIOSEQ_SQL_NEGATIVE_FIXTURES}
       "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/index.cppm"
     COMMENT
       "Running real structural SQL negative/provenance contract fixtures"
     VERBATIM)
@@ -2468,7 +2739,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_SEQUENCES_SAMPLE_TABLE_UDF
     "${_bioseq_sql_fmgr_entrypoints_dir}/sequences_sample_table_udf.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_COMPACT_SEQUENCE
-    "${_bioseq_sql_fmgr_entrypoints_dir}/types_pg_compact_sequence.entrypoints.cppm")
+    "${_bioseq_sql_fmgr_entrypoints_dir}/postgres_types_compact_sequence.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_INTEGER
     "${_bioseq_sql_fmgr_entrypoints_dir}/vector_types_integer.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_DATE
@@ -2578,9 +2849,9 @@ set(_bioseq_sql_completion_args
 set(_bioseq_sql_completion_target_option
   REQUIRE_COMPLETE_CODEGEN)
 set(BIOSEQ_SQL_SAFETY_EVIDENCE_DIR "" CACHE PATH
-  "Reviewed production/test-index PostgreSQL safety evidence bundle")
+  "Reviewed production/test-index PostgreSQL safety validation bundle")
 mark_as_advanced(BIOSEQ_SQL_SAFETY_EVIDENCE_DIR)
-set(_bioseq_sql_safety_evidence_inputs)
+set(_bioseq_sql_safety_review_inputs)
 if(NOT "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}" STREQUAL "")
   get_filename_component(BIOSEQ_SQL_SAFETY_EVIDENCE_DIR
     "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}" ABSOLUTE)
@@ -2596,7 +2867,7 @@ if(NOT "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}" STREQUAL "")
     "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}/runtime-matrix.json")
   set(BIOSEQ_SQL_SAFETY_REVIEWED_RUNTIME_MATRIX
     "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}/reviewed/runtime-matrix.json")
-  set(_bioseq_sql_safety_evidence_inputs
+  set(_bioseq_sql_safety_review_inputs
     "${BIOSEQ_SQL_SAFETY_PRODUCTION_LEDGER}"
     "${BIOSEQ_SQL_SAFETY_TEST_INDEXES_LEDGER}"
     "${BIOSEQ_SQL_SAFETY_REVIEWED_PRODUCTION_LEDGER}"
@@ -2606,10 +2877,10 @@ if(NOT "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}" STREQUAL "")
     "${BIOSEQ_SQL_SAFETY_RUNTIME_MATRIX}"
     "${BIOSEQ_SQL_SAFETY_REVIEWED_RUNTIME_MATRIX}")
   foreach(_bioseq_sql_safety_input
-      IN LISTS _bioseq_sql_safety_evidence_inputs)
+      IN LISTS _bioseq_sql_safety_review_inputs)
     if(NOT EXISTS "${_bioseq_sql_safety_input}")
       message(FATAL_ERROR
-        "Incomplete PostgreSQL safety evidence bundle: missing "
+        "Incomplete PostgreSQL safety validation bundle: missing "
         "${_bioseq_sql_safety_input}")
     endif()
   endforeach()
@@ -2845,7 +3116,7 @@ bioseq_register_sql_owner(
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS table_access_hooks)
 bioseq_register_sql_owner(
-  OWNER_KEY types_pg_compact_sequence
+  OWNER_KEY postgres_types_compact_sequence
   MODULE bioseq.postgres.types.compact_sequence
   SOURCES
     backend/pg/types/compact_sequence/array_string.cppm
@@ -2860,7 +3131,7 @@ bioseq_register_sql_owner(
     backend/pg/types/compact_sequence/tree_ops.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
-  FMGR_ENTRYPOINTS types_pg_compact_sequence)
+  FMGR_ENTRYPOINTS postgres_types_compact_sequence)
 bioseq_register_sql_owner(
   OWNER_KEY vector_types
   MODULE bioseq.postgres.vectorization.types
@@ -2899,7 +3170,7 @@ bioseq_finalize_sql_owner_registry(
     table_access_hooks
     storage_load_pg
     sequences_sample_table_udf
-    types_pg_compact_sequence
+    postgres_types_compact_sequence
     vector_types_integer
     vector_types_date
     vector_types_aggregates
@@ -3060,6 +3331,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "vector_aggregate_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}"
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
+      --generated-module-prefix bioseq.postgres.sql.generated
       --extension-schema public
     DEPENDS
       bioseq_codegen_project
@@ -3175,6 +3447,7 @@ add_custom_command(
       "storage_indexing_pg_chunked_storage=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_INDEXING_CHUNKED}"
     --entity-handles-output
       "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
+    --generated-module-prefix bioseq.postgres.sql.generated
     --extension-schema public
   DEPENDS
     bioseq_codegen_project
@@ -3361,7 +3634,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       --fmgr-entrypoints-output
         "sequences_sample_table_udf=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_SEQUENCES_SAMPLE_TABLE_UDF}"
       --fmgr-entrypoints-output
-        "types_pg_compact_sequence=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_COMPACT_SEQUENCE}"
+        "postgres_types_compact_sequence=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_COMPACT_SEQUENCE}"
       --fmgr-entrypoints-output
         "vector_types_integer=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_INTEGER}"
       --fmgr-entrypoints-output
@@ -3376,6 +3649,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
       ${_bioseq_sql_completion_args}
+      --generated-module-prefix bioseq.postgres.sql.generated
       --extension-schema public
     DEPENDS
       bioseq_codegen_project
@@ -3437,49 +3711,31 @@ add_custom_command(
   APPEND
   DEPENDS "${BIOSEQ_SQL_CORE_GENERATED_STAMP}")
 
-# The production determinism gate regenerates the complete SUPPORT/CORE/FINAL
-# artifact closure from canonical, reversed, and deterministically shuffled
-# owner inventories.  Each process has a distinct working/output root and a
-# symlink-free workspace mirror of selected project source/build inputs.
-# Source, context, and output paths preserve their ordinary source-root-relative
-# identities. Generated outputs and same-root PREPARE closures are compared as
-# exact bytes; independently validated cross-root PREPARE manifests are compared
-# through their exact relocation-semantic projections.
-set(BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/verify_production_determinism.py")
-set(BIOSEQ_SQL_PRODUCTION_DETERMINISM_ROOT
-  "${BIOSEQ_SQL_CODEGEN_DIR}/production-determinism")
-set(BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT
-  "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_ROOT}/report.json")
-set(BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP
-  "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_ROOT}/self-test.stamp")
 set(BIOSEQ_SQL_REQUIRED_TARGET_DYNDEP_INVENTORY
   "${BIOSEQ_SQL_CODEGEN_DIR}/required-target-dyndeps.tsv")
-if(NOT EXISTS "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}")
-  message(FATAL_ERROR
-    "Missing production SQL determinism gate: "
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}")
-endif()
 
 # PREPARE consumes every C++ module row in CMake's raw compile database.
 # Depending only on the extension dyndep therefore leaves unrelated, unique
 # response-file classes (bench, cache, and compiler-contract fixtures)
 # unmaterialized in a clean tree.  These top-level dyndep anchors are the
 # bounded minimum that covers every current source+standard equivalence class
-# through CMake's generated CXXModules dependencies.  The determinism harness
-# still rejects any newly introduced unique class not covered by these anchors.
+# through CMake's generated CXXModules dependencies.
 #
 # Resolve paths from target BINARY_DIR only after this directory has declared
-# its benchmark targets.  File dependencies materialize scans/modmaps without
-# making the compile targets depend on SQL proofs; the extension proof remains
-# a link-only dependency below.
+# its benchmark targets. File dependencies materialize scans/modmaps without
+# making compile targets depend on SQL validation; the extension link
+# validation remains a link-only dependency below.
 function(_bioseq_finalize_sql_target_dyndep_anchors)
   set(_bioseq_sql_target_dyndep_anchors
-    bioseq_bench
-    bioseq_bench_e2e_tests_exec
+    bioseq_benchmark
+    bioseq_benchmark_e2e_contract_tests
     bioseq_sql_annotation_probe
     bioseq_sql_gcc_compile_contract_objects
     postgresql_bioseq)
+  if(TARGET bioseq_sql_row_codec_runtime_test_support_compile_donor)
+    list(APPEND _bioseq_sql_target_dyndep_anchors
+      bioseq_sql_row_codec_runtime_test_support_compile_donor)
+  endif()
   if(BIOSEQ_BUILD_CACHE)
     list(APPEND _bioseq_sql_target_dyndep_anchors
       postgresql_bioseq_cache)
@@ -3487,7 +3743,7 @@ function(_bioseq_finalize_sql_target_dyndep_anchors)
   list(SORT _bioseq_sql_target_dyndep_anchors)
 
   string(CONCAT _bioseq_sql_target_dyndep_inventory
-    "schema\tbioseq_sql_target_dyndep_inventory/v1\n"
+    "schema\tbioseq_sql_target_dyndep_inventory\n"
     "target\tdyndep\n")
   set(_bioseq_sql_target_dyndep_paths)
   foreach(_bioseq_sql_target IN LISTS
@@ -3522,7 +3778,6 @@ function(_bioseq_finalize_sql_target_dyndep_anchors)
     @ONLY
     NEWLINE_STYLE UNIX)
   foreach(_bioseq_sql_prepare_output IN ITEMS
-      "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"
       "${BIOSEQ_SQL_SAFETY_PRODUCTION_PREPARE_STAMP}"
       "${BIOSEQ_SQL_SAFETY_TEST_INDEXES_PREPARE_STAMP}")
     if("${_bioseq_sql_prepare_output}" STREQUAL "")
@@ -3539,216 +3794,6 @@ function(_bioseq_finalize_sql_target_dyndep_anchors)
 endfunction()
 cmake_language(DEFER CALL
   _bioseq_finalize_sql_target_dyndep_anchors)
-
-add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP}"
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "PYTHONDONTWRITEBYTECODE=1"
-    "BIOSEQ_REVIEWED_REPOSITORY_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
-    "${Python3_EXECUTABLE}"
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}" self-test
-  COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP}"
-  DEPENDS "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}"
-  COMMENT
-    "Running production SQL determinism mutation self-tests"
-  VERBATIM)
-add_custom_target(bioseq_sql_production_determinism_self_test
-  DEPENDS "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP}")
-
-add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "PYTHONDONTWRITEBYTECODE=1"
-    "BIOSEQ_REVIEWED_REPOSITORY_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
-    "${Python3_EXECUTABLE}"
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}" run
-    --codegen "$<TARGET_FILE:bioseq_codegen>"
-    --owner-registry-metadata
-      "${BIOSEQ_SQL_OWNER_REGISTRY_METADATA}"
-    --support-source-list
-      "${BIOSEQ_SQL_REGISTRY_PRODUCTION_SUPPORT_FILE}"
-    --test-indexes-support-source-list
-      "${BIOSEQ_SQL_REGISTRY_TEST_INDEXES_SUPPORT_FILE}"
-    --core-source-list
-      "${BIOSEQ_SQL_REGISTRY_CORE_FILE}"
-    --final-source-list
-      "${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_FILE}"
-    --raw-compile-database
-      "${BIOSEQ_SQL_RAW_COMPILE_DATABASE}"
-    --required-target-dyndep-inventory
-      "${BIOSEQ_SQL_REQUIRED_TARGET_DYNDEP_INVENTORY}"
-    --source-root
-      "${CMAKE_CURRENT_LIST_DIR}/.."
-    --build-root
-      "${CMAKE_BINARY_DIR}"
-    --ordinary-context-root
-      "${BIOSEQ_SQL_CLANG_CONTEXT_ROOT}"
-    --ordinary-output
-      "artifacts/support/support-manifest.json=${BIOSEQ_SQL_PRODUCTION_SUPPORT_MANIFEST}"
-    --ordinary-output
-      "artifacts/support/support.stamp=${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"
-    --ordinary-output
-      "artifacts/test-support/support-manifest.json=${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_MANIFEST}"
-    --ordinary-output
-      "artifacts/test-support/support.stamp=${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}"
-    --ordinary-output
-      "artifacts/core/core-manifest.json=${BIOSEQ_SQL_CORE_MANIFEST}"
-    --ordinary-output
-      "artifacts/core/core-descriptor.sha256=${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
-    --ordinary-output
-      "artifacts/core/core.stamp=${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
-    --ordinary-output
-      "artifacts/final/bioseq--1.0.sql=${BIOSEQ_SQL_PRODUCTION_GENERATED_INSTALL}"
-    --ordinary-output
-      "artifacts/final/bioseq-sql-manifest.json=${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
-    --ordinary-output
-      "artifacts/final/bioseq-sql.stamp=${BIOSEQ_SQL_PRODUCTION_GENERATED_STAMP}"
-    --ordinary-output
-      "artifacts/row-codecs/storage_metadata.row_codecs.cppm=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_METADATA}"
-    --ordinary-output
-      "artifacts/row-codecs/storage_indexing_pg.row_codecs.cppm=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_INDEXING_PG}"
-    --ordinary-output
-      "artifacts/row-codecs/storage_load_pg.row_codecs.cppm=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_LOAD_PG}"
-    --ordinary-output
-      "artifacts/row-codecs/storage_manager.row_codecs.cppm=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_MANAGER}"
-    --ordinary-output
-      "artifacts/row-codecs/table.row_codecs.cppm=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_TABLE}"
-    --ordinary-output
-      "artifacts/test-row-codecs/storage_metadata.row_codecs.cppm=${BIOSEQ_SQL_TEST_INDEXES_ROW_CODECS_STORAGE_METADATA}"
-    --ordinary-output
-      "artifacts/test-row-codecs/storage_indexing_pg.row_codecs.cppm=${BIOSEQ_SQL_TEST_INDEXES_ROW_CODECS_STORAGE_INDEXING_PG}"
-    --ordinary-output
-      "artifacts/test-row-codecs/storage_load_pg.row_codecs.cppm=${BIOSEQ_SQL_TEST_INDEXES_ROW_CODECS_STORAGE_LOAD_PG}"
-    --ordinary-output
-      "artifacts/test-row-codecs/storage_manager.row_codecs.cppm=${BIOSEQ_SQL_TEST_INDEXES_ROW_CODECS_STORAGE_MANAGER}"
-    --ordinary-output
-      "artifacts/test-row-codecs/table.row_codecs.cppm=${BIOSEQ_SQL_TEST_INDEXES_ROW_CODECS_TABLE}"
-    --ordinary-output
-      "artifacts/handles/storage_metadata_core.entity_handles.cppm=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_METADATA_CORE}"
-    --ordinary-output
-      "artifacts/handles/storage_indexing_pg_chunked_storage.entity_handles.cppm=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_INDEXING_CHUNKED}"
-    --ordinary-output
-      "artifacts/handles/storage_manager_sequence_storage_manager.entity_handles.cppm=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
-    --ordinary-output
-      "artifacts/fmgr/mod.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_MOD}"
-    --ordinary-output
-      "artifacts/fmgr/highway_target_test_support.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT}"
-    --ordinary-output
-      "artifacts/fmgr/storage_manager_sequence_storage_manager.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_STORAGE_MANAGER}"
-    --ordinary-output
-      "artifacts/fmgr/table_access_hooks.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS}"
-    --ordinary-output
-      "artifacts/fmgr/storage_load_pg.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_STORAGE_LOAD_PG}"
-    --ordinary-output
-      "artifacts/fmgr/sequences_sample_table_udf.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_SEQUENCES_SAMPLE_TABLE_UDF}"
-    --ordinary-output
-      "artifacts/fmgr/types_pg_compact_sequence.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_COMPACT_SEQUENCE}"
-    --ordinary-output
-      "artifacts/fmgr/vector_types_integer.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_VECTOR_TYPES_INTEGER}"
-    --ordinary-output
-      "artifacts/fmgr/vector_types_date.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_VECTOR_TYPES_DATE}"
-    --ordinary-output
-      "artifacts/fmgr/vector_types_aggregates.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_VECTOR_TYPES_AGGREGATES}"
-    --ordinary-output
-      "artifacts/fmgr/vector_comparison_registry.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_VECTOR_COMPARISON_REGISTRY}"
-    --ordinary-output
-      "artifacts/fmgr/vector_aggregate_registry.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_VECTOR_AGGREGATE_REGISTRY}"
-    --ordinary-output
-      "artifacts/test-fmgr/vector_comparison_registry.entrypoints.cppm=${BIOSEQ_SQL_TEST_INDEXES_VECTOR_COMPARISON_REGISTRY}"
-    --ordinary-output
-      "artifacts/test-fmgr/vector_aggregate_registry.entrypoints.cppm=${BIOSEQ_SQL_TEST_INDEXES_VECTOR_AGGREGATE_REGISTRY}"
-    --ordinary-output
-      "artifacts/gucs/production/guc_registry.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/production/guc_registry.cppm"
-    --ordinary-output
-      "artifacts/gucs/production/owners/bioseq.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/production/owners/bioseq.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/production/owners/scheduler.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/production/owners/scheduler.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/production/owners/storage.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/production/owners/storage.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/production/owners/aligner.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/production/owners/aligner.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/test_indexes/guc_registry.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/guc_registry.cppm"
-    --ordinary-output
-      "artifacts/gucs/test_indexes/owners/bioseq.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/bioseq.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/test_indexes/owners/scheduler.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/scheduler.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/test_indexes/owners/storage.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/storage.gucs.cppm"
-    --ordinary-output
-      "artifacts/gucs/test_indexes/owners/aligner.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/aligner.gucs.cppm"
-    --clang-binary
-      "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    --clang-scan-deps
-      "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    --llvm-config
-      "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    --compiler-module-inventory
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-    --clang-sha256
-      "${BIOSEQ_CODEGEN_CLANG_SHA256}"
-    --clang-scan-deps-sha256
-      "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
-    --llvm-config-sha256
-      "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
-    --compiler-module-inventory-sha256
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
-    --output-root
-      "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_ROOT}"
-    --report
-      "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"
-  COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"
-  DEPENDS
-    bioseq_codegen_project
-    "${BIOSEQ_CODEGEN_EXECUTABLE}"
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}"
-    "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP}"
-    "${BIOSEQ_SQL_OWNER_REGISTRY_METADATA}"
-    "${BIOSEQ_SQL_RAW_COMPILE_DATABASE}"
-    "${BIOSEQ_SQL_REGISTRY_PRODUCTION_SUPPORT_FILE}"
-    ${BIOSEQ_SQL_REGISTRY_PRODUCTION_SUPPORT_SOURCES}
-    "${BIOSEQ_SQL_REGISTRY_TEST_INDEXES_SUPPORT_FILE}"
-    ${BIOSEQ_SQL_REGISTRY_TEST_INDEXES_SUPPORT_SOURCES}
-    "${BIOSEQ_SQL_REGISTRY_CORE_FILE}"
-    ${BIOSEQ_SQL_REGISTRY_CORE_SOURCES}
-    "${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_FILE}"
-    ${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_SOURCES}
-    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_MANIFEST}"
-    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"
-    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_MANIFEST}"
-    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}"
-    "${BIOSEQ_SQL_CORE_MANIFEST}"
-    "${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
-    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
-    "${BIOSEQ_SQL_PRODUCTION_GENERATED_INSTALL}"
-    "${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
-    "${BIOSEQ_SQL_PRODUCTION_GENERATED_STAMP}"
-    ${BIOSEQ_SQL_PRODUCTION_ROW_CODEC_MODULES}
-    ${BIOSEQ_SQL_TEST_INDEXES_ROW_CODEC_MODULES}
-    ${BIOSEQ_SQL_ENTITY_HANDLE_MODULES}
-    ${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINT_MODULES}
-    ${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_VECTOR_REGISTRY_MODULES}
-    ${BIOSEQ_SQL_GUC_production_MODULES}
-    ${BIOSEQ_SQL_GUC_test_indexes_MODULES}
-    "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-  JOB_POOL sql_codegen_ast_proof
-  COMMENT
-    "Proving production SQL generation is byte-identical under owner discovery permutations"
-  VERBATIM)
-add_custom_target(bioseq_sql_production_determinism
-  DEPENDS "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}")
-# Full canonical/reversed/shuffled replay is an explicit opt-in proof.  Default
-# extension linking retains the cheap mutation self-tests and all ordinary
-# generation, ledger, and static/GCC gates below.
-add_dependencies(
-  bioseq_sql_production_determinism
-  bioseq_sql_production_determinism_self_test
-  bioseq_sql_final_production)
 
 # Reusable provider closure for generated SQL C++ facets. The extension links
 # these objects and PUBLIC BMIs, while the test-only OBJECT target below only
@@ -3783,7 +3828,7 @@ target_sources(bioseq_sql_compile_contract_providers
     BASE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/generated"
     FILES ${BIOSEQ_SQL_COMPILE_CONTRACT_GENERATED_PROVIDERS})
 target_include_directories(bioseq_sql_compile_contract_providers PUBLIC
-  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -3812,12 +3857,45 @@ set_target_properties(bioseq_sql_compile_contract_providers PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 # These objects compile only active-profile SUPPORT providers and
 # profile-neutral CORE handles. Keep those exact generation prerequisites, but
-# do not serialize their compilation behind either FINAL SQL proof closure.
-# FINAL generation and every dual-profile proof remain ordinary DSO/link gates.
+# do not serialize compilation behind the FINAL SQL validation closures. FINAL
+# generation and dual-profile validation remain ordinary DSO/link gates.
 add_dependencies(
   bioseq_sql_compile_contract_providers
   bioseq_sql_support_${_bioseq_sql_active_profile}
   bioseq_sql_core_entity_handles)
+
+# A production configure still prepares the independent test_indexes Clang
+# profile. Give PREPARE one non-linking compile-command owner for the
+# test-profile-only row-codec provider without attaching it to the production
+# extension. In a BIOSEQ_TEST_INDEXES build the extension above is the owner,
+# so this donor is deliberately absent.
+if(NOT BIOSEQ_TEST_INDEXES)
+  add_library(
+    bioseq_sql_row_codec_runtime_test_support_compile_donor
+    OBJECT EXCLUDE_FROM_ALL)
+  target_sources(
+    bioseq_sql_row_codec_runtime_test_support_compile_donor
+    PRIVATE
+      FILE_SET bioseq_sql_row_codec_runtime_test_support_compile_donor_modules
+      TYPE CXX_MODULES
+      BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+      FILES "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+  target_link_libraries(
+    bioseq_sql_row_codec_runtime_test_support_compile_donor
+    PRIVATE bioseq_sql_compile_contract_providers)
+  set_target_properties(
+    bioseq_sql_row_codec_runtime_test_support_compile_donor
+    PROPERTIES
+      CXX_STANDARD 26
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS ON
+      CXX_MODULE_STD ON
+      POSITION_INDEPENDENT_CODE ON
+      INTERPROCEDURAL_OPTIMIZATION FALSE)
+  add_dependencies(
+    bioseq_sql_row_codec_runtime_test_support_compile_donor
+    bioseq_sql_compile_contract_providers)
+endif()
 
 add_library(bioseq_sql_gcc_compile_contract_objects OBJECT EXCLUDE_FROM_ALL
   ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})
@@ -3828,7 +3906,7 @@ target_sources(bioseq_sql_gcc_compile_contract_objects
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES})
 target_include_directories(bioseq_sql_gcc_compile_contract_objects PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend")
 target_link_libraries(bioseq_sql_gcc_compile_contract_objects PRIVATE
   bioseq_sql_compile_contract_providers)
@@ -3849,7 +3927,7 @@ add_dependencies(
 # step independently rejects authored specializations/access and proves both
 # generated profiles describe the same invariant handle modules.
 set(BIOSEQ_SQL_GCC_CONTRACT_VERIFIER
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/verify_gcc_only_contracts.py")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/test_gcc_only_graph.py")
 set(BIOSEQ_SQL_GCC_CONTRACT_NEGATIVE_FIXTURES
   ${BIOSEQ_SQL_NEGATIVE_FIXTURES})
 set(BIOSEQ_SQL_GCC_CONTRACT_STAMP
@@ -3864,15 +3942,15 @@ set(BIOSEQ_SQL_GCC_CONTRACT_SOURCE_INPUTS
   "${CMAKE_SOURCE_DIR}/CMakeLists.txt"
   "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/CMakeLists.txt"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/PostgresErrorSafety.cmake"
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqCodegen.cmake"
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqGccToolchain.cmake"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/postgres_error_safety.cmake"
+  "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_codegen.cmake"
+  "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_gcc_toolchain.cmake"
   "${CMAKE_CURRENT_LIST_DIR}/../cmake/gcc_hwy_header_unit_launcher.py"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/annotation_probe.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/annotation_probe.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/annotation_probe.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/fixtures/annotation_probe.cppm"
   ${BIOSEQ_SQL_GCC_CONTRACT_NEGATIVE_FIXTURES}
   ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES}
   ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES}
@@ -3938,8 +4016,8 @@ add_dependencies(
 # ledger artifacts so neither profile can discharge the other's obligations.
 set(BIOSEQ_SQL_SAFETY_ARTIFACT_ROOT
   "${BIOSEQ_SQL_CODEGEN_DIR}/safety")
-set(BIOSEQ_SQL_SAFETY_GENERATOR_REVISION
-  "bioseq-postgres-error-safety-v2")
+set(BIOSEQ_SQL_SAFETY_GENERATION_CONTRACT
+  "bioseq-postgres-error-safety")
 set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES
   "${BIOSEQ_SQL_SAFETY_ARTIFACT_ROOT}")
 foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
@@ -4028,7 +4106,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     COMPILE_GRAPH
       "${BIOSEQ_SQL_SAFETY_${_bioseq_sql_profile_key}_COMPILE_GRAPH}"
     PROVENANCE "${BIOSEQ_SQL_SAFETY_PROVENANCE}"
-    GENERATOR_REVISION "${BIOSEQ_SQL_SAFETY_GENERATOR_REVISION}"
+    GENERATOR_REVISION "${BIOSEQ_SQL_SAFETY_GENERATION_CONTRACT}"
     OUTPUT_LEDGER
       "${BIOSEQ_SQL_SAFETY_${_bioseq_sql_profile_key}_GENERATED_LEDGER}"
     OUTPUT_STAMP
@@ -4063,7 +4141,7 @@ add_dependencies(
   bioseq_sql_postgres_error_safety_inventory_test_indexes)
 
 set(BIOSEQ_SQL_EXTERNAL_FEATURE_CONTRACT_SCRIPT
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/verify_external_feature_contract.py")
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/test_external_feature.py")
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   set(_bioseq_sql_external_feature_expect enabled)
 else()
@@ -4099,21 +4177,18 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
 endforeach()
 add_custom_target(bioseq_sql_external_feature_contract
   DEPENDS ${_bioseq_sql_external_feature_contract_stamps})
-add_dependencies(
-  bioseq_sql_external_feature_contract
-  bioseq_sql_production_determinism_self_test)
 
 set(_bioseq_sql_generation_contract_outputs
   ${_bioseq_sql_final_stamps}
   ${_bioseq_sql_external_feature_contract_stamps})
-# The full post-FINAL Clang facts/proof closure is intentionally opt-in.  Keep
-# its static validator report available without pulling it into the ordinary
-# generated-SQL or extension-link gates.
-if(NOT "${_bioseq_sql_safety_evidence_inputs}" STREQUAL "")
-  set(BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT
-    "${BIOSEQ_SQL_CODEGEN_DIR}/bioseq-safety-static-evidence.json")
+# The full post-FINAL Clang facts validation is opt-in. Keep its static report
+# available without pulling it into ordinary generated-SQL or extension-link
+# gates.
+if(NOT "${_bioseq_sql_safety_review_inputs}" STREQUAL "")
+  set(BIOSEQ_SQL_SAFETY_VALIDATION_REPORT
+    "${BIOSEQ_SQL_CODEGEN_DIR}/bioseq-safety-static-validation.json")
   add_custom_command(
-    OUTPUT "${BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT}"
+    OUTPUT "${BIOSEQ_SQL_SAFETY_VALIDATION_REPORT}"
     COMMAND "${Python3_EXECUTABLE}"
       "${BIOSEQ_SQL_VALIDATOR}"
       --static-only
@@ -4156,7 +4231,7 @@ if(NOT "${_bioseq_sql_safety_evidence_inputs}" STREQUAL "")
       --test-indexes-sql-manifest
         "${BIOSEQ_SQL_TEST_INDEXES_GENERATED_MANIFEST}"
       ${_bioseq_sql_completion_args}
-      --report "${BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT}"
+      --report "${BIOSEQ_SQL_SAFETY_VALIDATION_REPORT}"
     DEPENDS
       bioseq_sql_postgres_error_safety
       "${BIOSEQ_SQL_VALIDATOR}"
@@ -4175,21 +4250,20 @@ if(NOT "${_bioseq_sql_safety_evidence_inputs}" STREQUAL "")
       "${BIOSEQ_SQL_SAFETY_TEST_INDEXES_COMPILER_FACTS}"
       "${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
       "${BIOSEQ_SQL_TEST_INDEXES_GENERATED_MANIFEST}"
-      ${_bioseq_sql_safety_evidence_inputs}
+      ${_bioseq_sql_safety_review_inputs}
     COMMENT
-      "Validating current PostgreSQL ERROR-safety ledgers against reviewed static evidence"
+      "Validating current PostgreSQL ERROR-safety ledgers against reviewed inputs"
     VERBATIM)
   add_custom_target(bioseq_sql_postgres_error_safety_static_evidence
-    DEPENDS "${BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT}")
+    DEPENDS "${BIOSEQ_SQL_SAFETY_VALIDATION_REPORT}")
 endif()
 add_custom_target(bioseq_sql_generation_contract
   DEPENDS ${_bioseq_sql_generation_contract_outputs})
 add_dependencies(
   bioseq_sql_generation_contract
   bioseq_sql_validator_self_test
-  bioseq_sql_external_feature_contract
-  bioseq_sql_production_determinism_self_test)
-AddCommonTargetX(
+  bioseq_sql_external_feature_contract)
+bioseq_add_postgresql_extension(
   postgresql_bioseq
   TYPE POSTGRES_EXTENSION
   CXX 26
@@ -4199,7 +4273,7 @@ AddCommonTargetX(
   VERSION ${INSTALL_VERSION}
   COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -4236,7 +4310,7 @@ AddCommonTargetX(
     Pg_magic_func
     _PG_init
     bioseq_scheduler_supervisor_main
-    bioseq_format6_parallel_scan_probe_worker_main
+    bioseq_hash_major_parallel_scan_probe_worker_main
   ${_bioseq_sql_completion_target_option}
   PG_ENTRYPOINT_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/lifecycle.cppm"
@@ -4252,28 +4326,29 @@ add_dependencies(postgresql_bioseq
 # Algorithm partitions and the dispatch-processor registry are named module
 # partition providers, so CMake must own them through a CXX_MODULES file set.
 set_source_files_properties(
-  ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
-  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
+  ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES}
+  ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
+  ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS}
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES GENERATED TRUE)
 set_source_files_properties(
-  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_ORDINARY_IMPLEMENTATIONS}
+  ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES COMPILE_OPTIONS "-x;c++")
 target_sources(postgresql_bioseq
   PRIVATE
-    ${BIOSEQ_HIGHWAY_GENERATED_TARGET_ORDINARY_IMPLEMENTATIONS}
+    ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
     "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PRIVATE FILE_SET bioseq_highway_generated_primaries
     TYPE CXX_MODULES
     BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
     FILES
-      ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
-      ${BIOSEQ_HIGHWAY_GENERATED_TARGET_PARTITIONS}
+      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PRIMARY_MODULES}
+      ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_PARTITIONS}
       "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}")
 target_link_libraries(postgresql_bioseq PRIVATE
-  bioseq_highway_target_policy)
+  bioseq_highway_fixed_target)
 target_link_libraries(bioseq_modules_nopg PRIVATE
   bioseq_highway_target_policy)
 add_dependencies(postgresql_bioseq bioseq_highway_target_modules)
@@ -4313,29 +4388,29 @@ target_link_libraries(postgresql_bioseq PRIVATE
   bioseq_pg_sql_boundary
   bioseq_sql_annotation_model)
 
-# Proofs consume the generator-owned scan/modmap closure, while the DSO link
-# must consume the completed proofs.  A concrete link dependency expresses
-# that partial order without making every source scan wait on its own proof.
-set(BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP
-  "${BIOSEQ_SQL_CODEGEN_DIR}/postgresql-bioseq-link-proof.stamp")
+# Link validation consumes the generator-owned scan/modmap closure before the
+# DSO link. A concrete link dependency expresses that ordering without making
+# every source scan wait on its own validation.
+set(BIOSEQ_SQL_POSTGRES_EXTENSION_LINK_VALIDATION_STAMP
+  "${BIOSEQ_SQL_CODEGEN_DIR}/postgresql-bioseq-link-validation.stamp")
 add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP}"
+  OUTPUT "${BIOSEQ_SQL_POSTGRES_EXTENSION_LINK_VALIDATION_STAMP}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory
     "${BIOSEQ_SQL_CODEGEN_DIR}"
   COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP}"
+    "${BIOSEQ_SQL_POSTGRES_EXTENSION_LINK_VALIDATION_STAMP}"
   DEPENDS
     bioseq_sql_generation_contract
     bioseq_sql_gcc_compile_contracts
   COMMENT
-    "Sealing SQL generation and boundary proofs before linking bioseq"
+    "Validating SQL generation and module boundaries before linking bioseq"
   VERBATIM)
 add_custom_target(bioseq_sql_postgresql_link_proof
-  DEPENDS "${BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP}")
+  DEPENDS "${BIOSEQ_SQL_POSTGRES_EXTENSION_LINK_VALIDATION_STAMP}")
 set_property(TARGET postgresql_bioseq APPEND PROPERTY LINK_DEPENDS
-  "${BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP}")
+  "${BIOSEQ_SQL_POSTGRES_EXTENSION_LINK_VALIDATION_STAMP}")
 
-# Keep only compile-readiness dependencies target-wide.  Proof targets belong
+# Keep only compile-readiness dependencies target-wide. Validation targets belong
 # to the link gate above; attaching them here would re-enter CXX.dd through the
 # extension's .ddi object-order dependency.
 add_dependencies(postgresql_bioseq bioseq_codegen_project)
@@ -4345,21 +4420,13 @@ if(TARGET bioseq_gpu_archive_builder)
   add_dependencies(postgresql_bioseq bioseq_gpu_archive_builder)
 endif()
 
-# DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
-# by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the
-# heavy dispatch_buffer.cppm template fan-out: clang first instantiates the
-# full (alphabet × storage_unit_byte_width) Cartesian product at per-TU
-# compile time, then ThinLTO re-runs inlining/optimisation across all TUs at
-# link time. The pre-DOC0270 baseline (DOC0268 §2) timed out a fresh
-# postgresql_bioseq build at the 50 min hard ceiling; the link-phase
-# template-instantiation tail accounts for a sizeable share of that. The
-# bioseq_modules_nopg OBJECT library also runs with IPO=FALSE (see the
-# comment on its property block above) for the same TLS-init-wrapper bug
-# that drove the test execs to opt out; keeping the postgresql_bioseq
-# linkage non-LTO matches that posture.
+# Disable LTO on the PostgreSQL extension. ThinLTO repeats optimization across
+# the dispatch-buffer template fan-out and can drop module-attached TLS-init
+# wrappers. bioseq_modules_nopg uses the same non-LTO policy, so the extension
+# retains consistent linkage and bounded template-instantiation work.
 set_target_properties(postgresql_bioseq PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE
-  # DOC0341 — the PostgreSQL extension must NOT link-load libvulkan in the
+# The PostgreSQL extension must not link-load libvulkan in the
   # postmaster, because the macOS loader stack maps Metal/IOAccelerator before
   # backend fork. Keep the vcpkg rpath only so Runtime::init() can later
   # dlopen("@rpath/libvulkan...") inside the selected-GPU backend process.
@@ -4389,7 +4456,7 @@ if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
   endif()
 endif()
 
-# DOC0279 §11.5/§16.2 — compile the test-only indexing descriptors
+# Compile the test-only indexing descriptors
 # (TestTableCountIndex, a CHUNKED_PER_TABLE index) into the server-loaded
 # extension dylib AND the integration/unit test execs. Default OFF (production);
 # the integration CI preset sets -DBIOSEQ_TEST_INDEXES=ON so the
@@ -4411,7 +4478,7 @@ if(TARGET bioseq_integration_tests)
     postgresql_bioseq)
 endif()
 
-# Runtime ERROR evidence is an explicit, non-ALL gate. One build tree owns the
+# Runtime ERROR validation is an explicit, non-ALL gate. One build tree owns the
 # active profile DSO and both profile-specific sealed harnesses; the inverse
 # profile DSO must come from a separately configured, runtime-instrumented build
 # so the two compilation profiles can never collapse to one binary.
@@ -4423,7 +4490,7 @@ if("${BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE}" STREQUAL "")
   endif()
   add_custom_target(bioseq_sql_postgres_error_safety_evidence
     COMMAND "${CMAKE_COMMAND}" -E echo
-      "DOC0388 runtime evidence is not configured. Set "
+      "Runtime safety validation is not configured. Set "
       "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE to build sealed profile "
       "plans and instrument the active DSO."
     COMMAND "${CMAKE_COMMAND}" -E false
@@ -4436,7 +4503,7 @@ else()
      OR IS_DIRECTORY "${_bioseq_sql_runtime_case_template}"
      OR IS_SYMLINK "${_bioseq_sql_runtime_case_template}")
     message(FATAL_ERROR
-      "DOC0388 case template must be an existing regular non-symlink file: "
+      "Runtime case template must be an existing regular non-symlink file: "
       "${_bioseq_sql_runtime_case_template}")
   endif()
 
@@ -4464,7 +4531,9 @@ else()
   bioseq_add_postgres_error_safety_runtime_control(
     TARGET "${_bioseq_sql_runtime_control_target}"
     SOURCE
-      "${CMAKE_CURRENT_LIST_DIR}/integration_tests/safety_runtime_control.cc"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_control.cppm"
+    INCLUDE_DIRS
+      "${CMAKE_SOURCE_DIR}"
     LINKS
       PostgreSQL::ServerHeaders
       ${CMAKE_DL_LIBS})
@@ -4492,7 +4561,7 @@ else()
       RUNTIME_POLICY "${BIOSEQ_SQL_SAFETY_RUNTIME_POLICY}"
       CASE_TEMPLATE "${_bioseq_sql_runtime_case_template}"
       HARNESS_SOURCE
-        "${CMAKE_CURRENT_LIST_DIR}/integration_tests/safety_runtime_harness_main.cc"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_main.cc"
       OUTPUT_DIRECTORY
         "${_bioseq_sql_runtime_root}/${_bioseq_sql_runtime_profile}"
       LINKS
@@ -4546,8 +4615,8 @@ else()
   if("${BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR}" STREQUAL "")
     add_custom_target(bioseq_sql_postgres_error_safety_evidence
       COMMAND "${CMAKE_COMMAND}" -E echo
-        "Sealed DOC0388 profile artifacts are configured, but the live "
-        "dual-profile evidence gate requires "
+        "Sealed profile artifacts are configured, but the live "
+        "dual-profile validation gate requires "
         "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR."
       COMMAND "${CMAKE_COMMAND}" -E false
       USES_TERMINAL
@@ -4555,13 +4624,13 @@ else()
   else()
     if(BIOSEQ_TEST_INDEXES)
       message(FATAL_ERROR
-        "DOC0388 aggregate evidence must run from the production profile "
+        "Aggregate validation must run from the production profile "
         "with a sibling test-index build tree")
     endif()
     if(NOT BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE STREQUAL "isolated")
       message(FATAL_ERROR
         "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE must be isolated for "
-        "dual-profile evidence")
+        "dual-profile validation")
     endif()
     if(NOT BIOSEQ_SQL_SAFETY_RUNTIME_TIMEOUT_SECONDS
        MATCHES "^[1-9][0-9]*$")
@@ -4592,20 +4661,20 @@ else()
       "$<TARGET_FILE_NAME:postgresql_bioseq>")
 
     set(_bioseq_sql_runtime_lifecycle
-      "${CMAKE_CURRENT_LIST_DIR}/../cmake/run_private_runtime_evidence.py")
+      "${CMAKE_CURRENT_LIST_DIR}/../cmake/run_private_postgres_safety_tests.py")
     set(_bioseq_sql_runtime_stage_script
       "${CMAKE_CURRENT_LIST_DIR}/../cmake/stage_private_postgres.cmake")
     set(_bioseq_sql_runtime_config_template
       "${CMAKE_CURRENT_LIST_DIR}/../cmake/private_postgresql.conf.in")
     set(_bioseq_sql_runtime_producer
-      "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/runtime_evidence.py")
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/run_postgres_error_safety_tests.py")
     file(REAL_PATH "${CMAKE_COMMAND}"
       _bioseq_sql_runtime_cmake_executable)
     if(NOT EXISTS "${_bioseq_sql_runtime_cmake_executable}"
        OR IS_DIRECTORY "${_bioseq_sql_runtime_cmake_executable}"
        OR IS_SYMLINK "${_bioseq_sql_runtime_cmake_executable}")
       message(FATAL_ERROR
-        "DOC0388 runtime evidence requires CMake to resolve to a regular "
+        "Runtime validation requires CMake to resolve to a regular "
         "executable: ${_bioseq_sql_runtime_cmake_executable}")
     endif()
     foreach(_bioseq_sql_runtime_source IN ITEMS
@@ -4616,7 +4685,7 @@ else()
       if(NOT EXISTS "${${_bioseq_sql_runtime_source}}"
          OR IS_DIRECTORY "${${_bioseq_sql_runtime_source}}")
         message(FATAL_ERROR
-          "DOC0388 runtime evidence source is missing: "
+          "Runtime validation source is missing: "
           "${${_bioseq_sql_runtime_source}}")
       endif()
     endforeach()
@@ -4638,7 +4707,7 @@ else()
     set(_bioseq_sql_runtime_reviewed_root
       "${_bioseq_sql_runtime_candidate_root}/reviewed")
     set(_bioseq_sql_runtime_validation_report
-      "${_bioseq_sql_runtime_candidate_root}/evidence-validation.json")
+      "${_bioseq_sql_runtime_candidate_root}/runtime-validation.json")
 
     add_custom_command(
       OUTPUT
@@ -4718,7 +4787,7 @@ else()
         "${BIOSEQ_SQL_SAFETY_RUNTIME_TEST_INDEXES_PLAN}"
         "${_bioseq_sql_runtime_test_indexes_dso}"
       COMMENT
-        "Publishing dual-profile PostgreSQL ERROR runtime evidence candidate"
+        "Publishing dual-profile PostgreSQL ERROR runtime validation candidate"
       USES_TERMINAL
       VERBATIM)
 
@@ -4818,22 +4887,22 @@ else()
         "${_bioseq_sql_runtime_candidate_test_indexes_stage_manifest}"
         "${_bioseq_sql_runtime_cmake_executable}"
       COMMENT
-        "Validating promoted dual-profile PostgreSQL ERROR runtime evidence"
+        "Validating promoted dual-profile PostgreSQL ERROR runtime results"
       USES_TERMINAL
       VERBATIM)
   endif()
 endif()
 
-include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
-
 # bench_framework — generic, algorithm-agnostic benchmark orchestration.
 include("${CMAKE_CURRENT_LIST_DIR}/../bench_framework/build.cmake")
 
-# V10 aligner bench target (bioseq_bench), built on top of bench_framework.
-include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_v10.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
 
-# DOC0286 Part 2 — end-to-end SQL bench target (bioseq_bench_e2e), drives
-# postgres over libpq (bioseq.load + mmsearch) vs minimap2.
+# Primary alignment benchmark, built on top of bench_framework.
+include("${CMAKE_CURRENT_LIST_DIR}/../bench/alignment_benchmark.cmake")
+
+# End-to-end SQL benchmark, driving PostgreSQL over libpq
+# (bioseq.load + mmsearch) against minimap2.
 include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_e2e.cmake")
 
 # External API descriptors are build-time inputs. Keep their generated clients
@@ -4846,9 +4915,9 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   set(BIOSEQ_EXTERNAL_GENERATED_ROOT
     "${CMAKE_CURRENT_BINARY_DIR}/generated/external")
   add_subdirectory(external)
-  if(TARGET bioseq_external_integration_tests_exec)
+  if(TARGET bioseq_external_api_integration_tests)
     add_dependencies(
-      bioseq_external_integration_tests_exec
+      bioseq_external_api_integration_tests
       bioseq_sql_external_feature_contract)
   endif()
   if(TARGET bioseq_external_codegen)

@@ -25,21 +25,21 @@ export module bioseq.postgres.support.datums;
 
 export namespace bioseq::postgres::support {
 
-template<class T, class Enable = void>
+template<class p_value, class p_enable = void>
 struct pg_datum_conversion
 {
-	static Datum from(T value) = delete;
-	static T to(Datum value) = delete;
+	static Datum from(p_value value) = delete;
+	static p_value to(Datum value) = delete;
 };
 
-template<class T>
-concept is_convertible_to_datum = requires(T value) {
-	{ pg_datum_conversion<std::remove_cvref_t<T>>::from(value) } -> std::same_as<Datum>;
+template<class p_value>
+concept is_convertible_to_datum = requires(p_value value) {
+	{ pg_datum_conversion<std::remove_cvref_t<p_value>>::from(value) } -> std::same_as<Datum>;
 };
 
-template<class T>
+template<class p_value>
 concept is_convertible_from_datum = requires(Datum value) {
-	{ pg_datum_conversion<std::remove_cvref_t<T>>::to(value) } -> std::same_as<std::remove_cvref_t<T>>;
+	{ pg_datum_conversion<std::remove_cvref_t<p_value>>::to(value) } -> std::same_as<std::remove_cvref_t<p_value>>;
 };
 
 struct pg_datum
@@ -47,11 +47,11 @@ struct pg_datum
 private:
 	Datum value_ = static_cast<Datum>(0);
 
-	template<class T>
-	[[nodiscard]] static inline T *
+	template<class p_value>
+	[[nodiscard]] static inline p_value *
 	alloc_zeroed_bytes(std::size_t byte_count)
 	{
-		return static_cast<T *>(palloc0(byte_count));
+		return static_cast<p_value *>(palloc0(byte_count));
 	}
 
 public:
@@ -79,20 +79,20 @@ public:
 		return lhs.value_ == rhs.value_;
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
-	from(T value) noexcept
+	from(p_value value) noexcept
 	{
-		return pg_datum{pg_datum_conversion<std::remove_cvref_t<T>>::from(value)};
+		return pg_datum{pg_datum_conversion<std::remove_cvref_t<p_value>>::from(value)};
 	}
 
-	template<class T>
-	requires is_convertible_from_datum<T>
-	[[nodiscard]] [[gnu::always_inline]] static inline T
+	template<class p_value>
+	requires is_convertible_from_datum<p_value>
+	[[nodiscard]] [[gnu::always_inline]] static inline p_value
 	to(pg_datum value) noexcept
 	{
-		return pg_datum_conversion<std::remove_cvref_t<T>>::to(value.value_);
+		return pg_datum_conversion<std::remove_cvref_t<p_value>>::to(value.value_);
 	}
 
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
@@ -179,11 +179,11 @@ public:
 		return pg_datum{PointerGetDatum(value)};
 	}
 
-	template<class T>
-	[[nodiscard]] [[gnu::always_inline]] static inline T *
+	template<class p_value>
+	[[nodiscard]] [[gnu::always_inline]] static inline p_value *
 	to_pointer(pg_datum value) noexcept
 	{
-		return reinterpret_cast<T *>(DatumGetPointer(value.value_));
+		return reinterpret_cast<p_value *>(DatumGetPointer(value.value_));
 	}
 
 	[[nodiscard]] [[gnu::always_inline]] static inline pg_datum
@@ -315,12 +315,12 @@ struct pg_datum_conversion<std::int64_t>
 	[[nodiscard]] [[gnu::always_inline]] static inline std::int64_t to(Datum value) noexcept { return DatumGetInt64(value); }
 };
 
-template<class T>
-requires (std::same_as<T, int64> && !std::same_as<T, std::int64_t>)
-struct pg_datum_conversion<T>
+template<class p_value>
+requires (std::same_as<p_value, int64> && !std::same_as<p_value, std::int64_t>)
+struct pg_datum_conversion<p_value>
 {
-	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(T value) noexcept { return Int64GetDatum(value); }
-	[[nodiscard]] [[gnu::always_inline]] static inline T to(Datum value) noexcept { return static_cast<T>(DatumGetInt64(value)); }
+	[[nodiscard]] [[gnu::always_inline]] static inline Datum from(p_value value) noexcept { return Int64GetDatum(value); }
+	[[nodiscard]] [[gnu::always_inline]] static inline p_value to(Datum value) noexcept { return static_cast<p_value>(DatumGetInt64(value)); }
 };
 
 template<>
@@ -378,42 +378,42 @@ struct pg_nullable_datum
 		return pg_nullable_datum{.value = datum, .is_null = false};
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	[[nodiscard]] static inline pg_nullable_datum
-	from(T value) noexcept
+	from(p_value value) noexcept
 	{
 		return not_null(pg_datum::from(value));
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	[[nodiscard]] static inline pg_nullable_datum
-	from_optional(const std::optional<T> &value) noexcept
+	from_optional(const std::optional<p_value> &value) noexcept
 	{
 		return value.has_value() ? from(*value) : null();
 	}
 
-	template<class T>
-	requires is_convertible_from_datum<T>
-	[[nodiscard]] inline std::optional<T>
+	template<class p_value>
+	requires is_convertible_from_datum<p_value>
+	[[nodiscard]] inline std::optional<p_value>
 	to_optional() const noexcept
 	{
 		if (is_null)
 		{
 			return std::nullopt;
 		}
-		return pg_datum::to<T>(value);
+		return pg_datum::to<p_value>(value);
 	}
 };
 
-template<std::size_t Dimensions>
+template<std::size_t p_dimensions>
 struct pg_datum_list
 {
-	static constexpr std::size_t dimensions = Dimensions;
+	static constexpr std::size_t dimensions = p_dimensions;
 
-	std::array<Datum, Dimensions> values{};
-	std::array<bool, Dimensions> nulls{};
+	std::array<Datum, p_dimensions> values{};
+	std::array<bool, p_dimensions> nulls{};
 
 	pg_datum_list() noexcept
 	{
@@ -438,7 +438,7 @@ struct pg_datum_list
 	att_index(int attnum) noexcept
 	{
 		DEBUG_ASSERT(attnum >= 1 &&
-					 static_cast<std::size_t>(attnum) <= Dimensions,
+					 static_cast<std::size_t>(attnum) <= p_dimensions,
 					 "pg_datum_list attnum out of bounds");
 		return static_cast<std::size_t>(attnum - 1);
 	}
@@ -447,7 +447,7 @@ struct pg_datum_list
 	assert_tuple_desc_fits(TupleDesc tuple_desc) noexcept
 	{
 		DEBUG_ASSERT(tuple_desc != nullptr, "pg_datum_list tuple descriptor is null");
-		DEBUG_ASSERT(tuple_desc->natts <= static_cast<int>(Dimensions),
+		DEBUG_ASSERT(tuple_desc->natts <= static_cast<int>(p_dimensions),
 					 "pg_datum_list dimensions smaller than tuple descriptor natts");
 	}
 
@@ -487,10 +487,10 @@ struct pg_datum_list
 		return nulls[att_index(attnum)];
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	void
-	set(int attnum, T value) noexcept
+	set(int attnum, p_value value) noexcept
 	{
 		const std::size_t idx = att_index(attnum);
 		values[idx] = pg_datum::from(value).raw();
@@ -571,12 +571,12 @@ struct pg_datum_list
 	}
 };
 
-template<std::size_t Dimensions>
+template<std::size_t p_dimensions>
 struct pg_datum_update
 {
-	std::array<Datum, Dimensions> values{};
-	std::array<bool, Dimensions> nulls{};
-	std::array<bool, Dimensions> replace{};
+	std::array<Datum, p_dimensions> values{};
+	std::array<bool, p_dimensions> nulls{};
+	std::array<bool, p_dimensions> replace{};
 
 	pg_datum_update() noexcept
 	{
@@ -587,7 +587,7 @@ struct pg_datum_update
 	att_index(int attnum) noexcept
 	{
 		DEBUG_ASSERT(attnum >= 1 &&
-					 static_cast<std::size_t>(attnum) <= Dimensions,
+					 static_cast<std::size_t>(attnum) <= p_dimensions,
 					 "pg_datum_update attnum out of bounds");
 		return static_cast<std::size_t>(attnum - 1);
 	}
@@ -596,14 +596,14 @@ struct pg_datum_update
 	assert_tuple_desc_fits(TupleDesc tuple_desc) noexcept
 	{
 		DEBUG_ASSERT(tuple_desc != nullptr, "pg_datum_update tuple descriptor is null");
-		DEBUG_ASSERT(tuple_desc->natts <= static_cast<int>(Dimensions),
+		DEBUG_ASSERT(tuple_desc->natts <= static_cast<int>(p_dimensions),
 					 "pg_datum_update dimensions smaller than tuple descriptor natts");
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	void
-	set(int attnum, T value) noexcept
+	set(int attnum, p_value value) noexcept
 	{
 		const std::size_t idx = att_index(attnum);
 		values[idx] = pg_datum::from(value).raw();
@@ -732,10 +732,10 @@ struct pg_slot_datums_view
 		return slot->tts_isnull[attnum - 1];
 	}
 
-	template<class T>
-	requires is_convertible_to_datum<T>
+	template<class p_value>
+	requires is_convertible_to_datum<p_value>
 	void
-	set(int attnum, T value) const noexcept
+	set(int attnum, p_value value) const noexcept
 	{
 		assert_slot_arrays();
 		DEBUG_ASSERT(attnum >= 1 && attnum <= natts(),
@@ -772,15 +772,15 @@ struct pg_slot_datums_view
 	}
 };
 
-template<class T = varlena>
+template<class p_value = varlena>
 struct pg_detoasted_ptr
 {
-	T *ptr = nullptr;
+	p_value *ptr = nullptr;
 	bool is_copy = false;
 
 	pg_detoasted_ptr() = default;
 
-	pg_detoasted_ptr(T *pointer, bool copied)
+	pg_detoasted_ptr(p_value *pointer, bool copied)
 		: ptr(pointer), is_copy(copied)
 	{
 	}
@@ -821,24 +821,24 @@ struct pg_detoasted_ptr
 	}
 };
 
-template<class T = varlena>
-[[nodiscard]] inline pg_detoasted_ptr<T>
+template<class p_value = varlena>
+[[nodiscard]] inline pg_detoasted_ptr<p_value>
 detoast_as(pg_datum datum)
 {
-	auto *detoasted = reinterpret_cast<T *>(PG_DETOAST_DATUM(datum.raw()));
+	auto *detoasted = reinterpret_cast<p_value *>(PG_DETOAST_DATUM(datum.raw()));
 	const bool copied =
 		reinterpret_cast<void *>(detoasted) != reinterpret_cast<void *>(DatumGetPointer(datum.raw()));
-	return pg_detoasted_ptr<T>{detoasted, copied};
+	return pg_detoasted_ptr<p_value>{detoasted, copied};
 }
 
-template<class T = varlena>
-[[nodiscard]] inline pg_detoasted_ptr<T>
+template<class p_value = varlena>
+[[nodiscard]] inline pg_detoasted_ptr<p_value>
 detoast_packed_as(pg_datum datum)
 {
-	auto *detoasted = reinterpret_cast<T *>(PG_DETOAST_DATUM_PACKED(datum.raw()));
+	auto *detoasted = reinterpret_cast<p_value *>(PG_DETOAST_DATUM_PACKED(datum.raw()));
 	const bool copied =
 		reinterpret_cast<void *>(detoasted) != reinterpret_cast<void *>(DatumGetPointer(datum.raw()));
-	return pg_detoasted_ptr<T>{detoasted, copied};
+	return pg_detoasted_ptr<p_value>{detoasted, copied};
 }
 
 [[gnu::always_inline]] inline void
@@ -890,16 +890,16 @@ struct pg_spi_cell
 		return pg_spi_cell{.value = pg_datum::from_raw(raw), .is_null = local_is_null};
 	}
 
-	template<class T>
-	requires is_convertible_from_datum<T>
-	[[nodiscard]] std::optional<T>
+	template<class p_value>
+	requires is_convertible_from_datum<p_value>
+	[[nodiscard]] std::optional<p_value>
 	optional() const noexcept
 	{
 		if (is_null)
 		{
 			return std::nullopt;
 		}
-		return pg_datum::to<T>(value);
+		return pg_datum::to<p_value>(value);
 	}
 
 	[[nodiscard]] std::optional<Oid>

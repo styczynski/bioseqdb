@@ -31,19 +31,22 @@
 #include <libassert/assert-catch2.hpp>
 
 template<
-    std::ranges::contiguous_range R,
-    typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+    std::ranges::contiguous_range p_range,
+    typename p_value =
+        std::remove_reference_t<std::ranges::range_reference_t<p_range>>
 >
 requires (
-    std::ranges::sized_range<R>
+    std::ranges::sized_range<p_range>
 )
-bool assert_range_set_equality(const R& expected, const R& actual) {
-    std::set<T> expected_set = std::ranges::to<std::set>(expected);
-    std::set<T> actual_set = std::ranges::to<std::set>(actual);
+bool assert_range_set_equality(
+    const p_range& expected,
+    const p_range& actual) {
+    std::set<p_value> expected_set = std::ranges::to<std::set>(expected);
+    std::set<p_value> actual_set = std::ranges::to<std::set>(actual);
 
-    std::vector<T> els_not_present;
-    std::vector<T> els_extra;
-    std::vector<T> els_common;
+    std::vector<p_value> els_not_present;
+    std::vector<p_value> els_extra;
+    std::vector<p_value> els_common;
 
     std::ranges::set_difference(expected_set, actual_set, std::back_inserter(els_not_present));
     std::ranges::set_difference(actual_set, expected_set, std::back_inserter(els_extra));
@@ -73,24 +76,29 @@ bool assert_range_set_equality(const R& expected, const R& actual) {
     return true;
 }
 
-template<typename T>
-std::vector<T> increasing_vector(std::size_t length, T start = 0) {
-    std::vector<T> v(length);
+template<typename p_value>
+std::vector<p_value> increasing_vector(
+    std::size_t length,
+    p_value start = 0) {
+    std::vector<p_value> v(length);
     std::iota(v.begin(), v.end(), start);
     return v;
 }
 
-template<typename T, std::size_t L>
-std::vector<T> increasing_array(T start = 0) {
-    std::vector<T> v(L);
+template<typename p_value, std::size_t p_length>
+std::vector<p_value> increasing_array(p_value start = 0) {
+    std::vector<p_value> v(p_length);
     std::iota(v.begin(), v.end(), start);
     return v;
 }
 
-template<typename T>
-std::vector<std::vector<T>> vector_increasing_matrix_2d(std::size_t dim_rows, std::size_t dim_cols, T start = 0) {
-    std::vector<std::vector<T>> v(dim_cols);
-    T val = start;
+template<typename p_value>
+std::vector<std::vector<p_value>> vector_increasing_matrix_2d(
+    std::size_t dim_rows,
+    std::size_t dim_cols,
+    p_value start = 0) {
+    std::vector<std::vector<p_value>> v(dim_cols);
+    p_value val = start;
     for(std::size_t row_no=0;row_no<dim_rows;++row_no) {
         v[row_no].resize(dim_cols);
         for(std::size_t col_no=0;col_no<dim_cols;++col_no) {
@@ -100,26 +108,30 @@ std::vector<std::vector<T>> vector_increasing_matrix_2d(std::size_t dim_rows, st
     return v;
 }
 
-template<typename R>
-concept nested_range = std::ranges::input_range<R> && std::ranges::range<std::ranges::range_reference_t<R>>;
+template<typename p_range>
+concept nested_range =
+    std::ranges::input_range<p_range> &&
+    std::ranges::range<std::ranges::range_reference_t<p_range>>;
 
 struct flatten_t {
-    template<nested_range R>
-    auto operator()(R && r) const
+    template<nested_range p_range>
+    auto operator()(p_range&& range) const
     {
-        return std::forward<R>(r) | std::ranges::views::transform(*this) | std::ranges::views::join;
+        return std::forward<p_range>(range) |
+            std::ranges::views::transform(*this) |
+            std::ranges::views::join;
     }
 
-    template<typename T>
-    auto operator()(T && t) const
+    template<typename p_value>
+    auto operator()(p_value&& value) const
     {
-        return std::forward<T>(t);
+        return std::forward<p_value>(value);
     }
 };
 
-template<typename T>
-auto operator |(T && t, flatten_t f) {
-    return f(std::forward<T>(t));
+template<typename p_value>
+auto operator |(p_value&& value, flatten_t flatten_fn) {
+    return flatten_fn(std::forward<p_value>(value));
 };
 
 constexpr flatten_t flatten;

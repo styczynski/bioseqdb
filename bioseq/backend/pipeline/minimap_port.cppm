@@ -53,7 +53,6 @@ export module bioseq.pipeline.minimap_port;
 import bioseq.common.logging;
 export import bioseq.highway.dispatch_contract;
 export import bioseq.prefilter.execution_contract;
-import bioseq.postgres.configuration.core;
 import bioseq.common.seqan_adapter;
 import bioseq.common.memory_budget;
 import bioseq.sequences;
@@ -489,10 +488,8 @@ void collect_seed_hits(
     static const auto* _idx_lookup_desc =
         bioseq::instrumentation::register_static_region("target_index_lookup");
     auto _idx_lookup_scope = bioseq::instrumentation::region(_idx_lookup_desc);
-    // The compact p_minimizer no longer carries a per-minimizer span field
-    // — for the dna4 bench path span is identically equal to the
-    // configured kmer size, so we hoist it from `kmer_size` once outside
-    // the loop instead of reading a now-removed bitfield.
+    // On the dna4 benchmark path every minimizer span equals the configured
+    // kmer size, so hoist that constant outside the lookup loop.
     const uint32_t query_span_value = static_cast<uint32_t>(kmer_size);
     // Precompute the constant added to the negated forward_query_pos in the
     // reverse-strand branch:
@@ -1016,7 +1013,7 @@ void classify_primary_secondary(
 // Stage 7: Base-level alignment — dual-affine gap DP (KSW2 equivalent)
 // ============================================================================
 
-// generate_score_matrix is now scoring_matrix<Alphabet>::generate.
+// Score-matrix generation is owned by the alphabet-specialized matrix.
 
 // ============================================================================
 // KSW2 alignment wrapper
@@ -1188,10 +1185,8 @@ struct scalar_pipeline_execution_stats {
  * Accepts compact_sequence_range directly with sub-region indices so that
  * sequence encoding happens only inside the KSW2 core kernel.
  *
- * @tparam is_reversed  True for reverse-complement query strand
- * @tparam QueryRange   compact_sequence_range type for query
- * @tparam TargetRange  compact_sequence_range type for target
- * @tparam AlphabetDim  Scoring matrix dimension (default: alphabet_size + 1)
+ * @tparam p_is_reversed True for reverse-complement query strand.
+ * @tparam p_alphabet Logical alphabet shared by both lazy sequence views.
  */
 [[nodiscard]] constexpr bool block_aligner_native_penalties_representable(
         const minimap2_parameters& params) noexcept {
@@ -1226,17 +1221,17 @@ struct scalar_pipeline_execution_stats {
 }
 
 template<
-    bool is_reversed,
-    sequence_alphabet Alphabet>
+    bool p_is_reversed,
+    sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result ksw2_align_pair(
-    bioseq::storage::lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::lazy_sequence_view<Alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const scoring_matrix<Alphabet>& scoring_matrix,
-    const alignment_kernels<Alphabet>& alignment_kernels,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const alignment_kernels<p_alphabet>& alignment_kernels,
     const minimap2_parameters& params,
     int align_bandwidth, int end_bonus, int zdrop, ksw_flags ksw_flags,
     block_aligner_execution_stats* forbidden_block_stats = nullptr,
@@ -1262,7 +1257,7 @@ template<
             .flags      = ksw_flags,
         };
         return alignment_kernels.align_ksw2_single_affine(
-            is_reversed,
+            p_is_reversed,
             query_seq, target_seq,
             query_start, query_end, target_start, target_end,
             scoring_matrix, z2_params);
@@ -1278,7 +1273,7 @@ template<
         .flags            = ksw_flags,
     };
     return alignment_kernels.align_ksw2_dual_affine(
-        is_reversed,
+        p_is_reversed,
         query_seq, target_seq,
         query_start, query_end, target_start, target_end,
         scoring_matrix, d2_params);
@@ -1304,18 +1299,18 @@ template<
  * instead of a KSW2 or scalar fallback.
  */
 template<
-    bool is_reversed,
-    bool enable_diagonal_certificate = true,
-    sequence_alphabet Alphabet>
+    bool p_is_reversed,
+    bool p_enable_diagonal_certificate = true,
+    sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result block_aligner_align_pair(
-    bioseq::storage::lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::lazy_sequence_view<Alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const scoring_matrix<Alphabet>& scoring_matrix,
-    const alignment_kernels<Alphabet>& alignment_kernels,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const alignment_kernels<p_alphabet>& alignment_kernels,
     const minimap2_parameters& params,
     block_alignment_stage stage,
     block_aligner_execution_stats* execution_stats)
@@ -1337,7 +1332,7 @@ template<
     const block_aligner_parameters ba_params = project_block_aligner_params(
         params, stage);
     return alignment_kernels.align_block(
-        is_reversed, enable_diagonal_certificate,
+        p_is_reversed, p_enable_diagonal_certificate,
         query_seq, target_seq,
         query_start, query_end, target_start, target_end,
         scoring_matrix, ba_params, execution_stats,
@@ -1360,7 +1355,7 @@ template<
  * indices — no pre-encoding into uint8_t vectors is needed. The selected
  * base-alignment kernel encodes only the admitted sub-regions.
  *
- * @tparam base_alignment_algorithm  Compile-time selector between KSW2 and
+ * @tparam p_base_alignment_algorithm Compile-time selector between KSW2 and
  *                                   block aligner. Templated so the inner
  *                                   gap-fill branch is resolved at compile
  *                                   time and no runtime branch exists in the
@@ -1369,13 +1364,11 @@ template<
 /**
  * @brief Single-stage aligner — left extension + gap fill + right extension.
  *
- * Materialises the three KSW2/block-aligner calls per region into a struct
- * ( R4: replace the `[&]<bool>()` capture-all template lambda
- * that previously lived inside `align_regions::for(auto& region : regions)`
- * with a non-capturing functor whose configuration is stored by value).
+ * Materialises the three KSW2/block-aligner calls per region in a
+ * non-capturing functor whose configuration is stored by value.
  * Inlines to the same instructions at -O3.
  *
- * `run<strand_reversed>` is templated on the strand because the alignment
+ * `run<p_strand_reversed>` is templated on the strand because the alignment
  * kernels are themselves templated on the reverse-complement encoding bit.
  * Native Block left extension additionally emits reversed compact input and
  * reverses its traced operations back to source order.
@@ -1508,14 +1501,14 @@ template <class p_callback>
     return expected;
 }
 
-template <base_alignment_algorithm base_alignment_algorithm,
-          sequence_alphabet Alphabet,
-          bool enable_diagonal_certificate = true>
+template <base_alignment_algorithm p_base_alignment_algorithm,
+          sequence_alphabet p_alphabet,
+          bool p_enable_diagonal_certificate = true>
 struct align_one_region {
-    bioseq::storage::lazy_sequence_view<Alphabet> query_seq;
-    bioseq::storage::lazy_sequence_view<Alphabet> target_seq;
-    const scoring_matrix<Alphabet>&              scoring_matrix;
-    const alignment_kernels<Alphabet>&           alignment_kernels;
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq;
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq;
+    const scoring_matrix<p_alphabet>&              scoring_matrix;
+    const alignment_kernels<p_alphabet>&           alignment_kernels;
     const minimap2_parameters&                      params;
     int32_t                                    align_bandwidth;
 
@@ -1526,14 +1519,14 @@ struct align_one_region {
      * query/target ranks are resident. Other kernels retain the established
      * post-result expansion path and therefore keep identical semantics.
      */
-    template <bool strand_reversed>
+    template <bool p_strand_reversed>
     [[gnu::always_inline]] sequence_size_t exact_edit_distance_for_fill(
             const ksw_alignment_result& fill_result,
             std::size_t query_start,
             std::size_t query_end,
             std::size_t target_start,
             std::size_t target_end) const {
-        if constexpr (base_alignment_algorithm
+        if constexpr (p_base_alignment_algorithm
                 == base_alignment_algorithm::block_aligner) {
             if (!fill_result.is_edit_distance_valid) {
                 bioseq_log<logging_level::error>(
@@ -1542,14 +1535,14 @@ struct align_one_region {
             }
             return static_cast<sequence_size_t>(fill_result.edit_distance);
         } else {
-            return exact_edit_distance_from_packed_cigar<strand_reversed>(
+            return exact_edit_distance_from_packed_cigar<p_strand_reversed>(
                 query_seq, target_seq,
                 query_start, query_end, target_start, target_end,
                 std::span<const std::uint32_t>(fill_result.cigar));
         }
     }
 
-    template <bool strand_reversed>
+    template <bool p_strand_reversed>
     [[gnu::always_inline]] bool apply_gap_fill_result(
             alignment_region& region,
             const ksw_alignment_result& fill_result,
@@ -1568,7 +1561,7 @@ struct align_one_region {
             ? qs + (fill_result.max_q + 1) : qe;
         if (params.compute_edit_distance) {
             region.edit_distance += exact_edit_distance_for_fill<
-                strand_reversed>(
+                p_strand_reversed>(
                     fill_result,
                     static_cast<std::size_t>(qs),
                     static_cast<std::size_t>(fill_query_end),
@@ -1589,7 +1582,7 @@ struct align_one_region {
         return false;
     }
 
-    template <bool strand_reversed>
+    template <bool p_strand_reversed>
     [[gnu::always_inline]] void run(
         alignment_region&            region,
         std::span<const anchor> anchors,
@@ -1613,9 +1606,9 @@ struct align_one_region {
         std::int64_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
             ksw_alignment_result left_result;
-            if constexpr (base_alignment_algorithm
+            if constexpr (p_base_alignment_algorithm
                     == base_alignment_algorithm::block_aligner) {
-                left_result = block_aligner_align_pair<strand_reversed>(
+                left_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq, target_seq,
                     static_cast<size_t>(outer_query_start),
                     static_cast<size_t>(seed_query_start),
@@ -1625,7 +1618,7 @@ struct align_one_region {
                     block_alignment_stage::left_extension,
                     block_execution_stats);
             } else {
-                left_result = ksw2_align_pair<strand_reversed>(
+                left_result = ksw2_align_pair<p_strand_reversed>(
                     query_seq, target_seq,
                     static_cast<size_t>(outer_query_start),
                     static_cast<size_t>(seed_query_start),
@@ -1651,7 +1644,7 @@ struct align_one_region {
             final_query_start = seed_query_start - left_query_offset;
             if (params.compute_edit_distance) {
                 region.edit_distance += exact_edit_distance_for_fill<
-                    strand_reversed>(
+                    p_strand_reversed>(
                         left_result,
                         static_cast<std::size_t>(final_query_start),
                         static_cast<std::size_t>(seed_query_start),
@@ -1690,9 +1683,9 @@ struct align_one_region {
                     rs = re;
                     continue;
                 }
-                if constexpr (base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
+                if constexpr (p_base_alignment_algorithm == base_alignment_algorithm::block_aligner) {
                     block_packed_certificate_attempt packed_attempt{};
-                    if constexpr (enable_diagonal_certificate) {
+                    if constexpr (p_enable_diagonal_certificate) {
                         // Prepare the immutable matrix/contract state only
                         // after the anchor walk produces its first valid gap.
                         // Invalid minimap penalty projections remain on the
@@ -1710,7 +1703,7 @@ struct align_one_region {
                             }
                             packed_attempt =
                                 alignment_kernels.try_block_certified_gap(
-                                        strand_reversed,
+                                        p_strand_reversed,
                                         query_seq, target_seq,
                                         static_cast<size_t>(qs),
                                         static_cast<size_t>(qe),
@@ -1747,7 +1740,7 @@ struct align_one_region {
                         record_block_certified_global_gap(
                                 packed_gap_plan,
                                 packed_attempt.certificate,
-                                strand_reversed,
+                                p_strand_reversed,
                                 block_execution_stats);
                         continue;
                     }
@@ -1762,7 +1755,7 @@ struct align_one_region {
                         // the unchanged DP path without paying for the byte
                         // certificate a second time.
                         fill_result = block_aligner_align_pair<
-                            strand_reversed, false>(
+                            p_strand_reversed, false>(
                                 query_seq, target_seq,
                                 static_cast<size_t>(qs),
                                 static_cast<size_t>(qe),
@@ -1776,8 +1769,8 @@ struct align_one_region {
                         // non-candidate geometry retain today's route,
                         // including the existing byte certificate.
                         fill_result = block_aligner_align_pair<
-                            strand_reversed,
-                            enable_diagonal_certificate>(
+                            p_strand_reversed,
+                            p_enable_diagonal_certificate>(
                                 query_seq, target_seq,
                                 static_cast<size_t>(qs),
                                 static_cast<size_t>(qe),
@@ -1787,7 +1780,7 @@ struct align_one_region {
                                 block_alignment_stage::gap_extension,
                                 block_execution_stats);
                     }
-                    if (apply_gap_fill_result<strand_reversed>(
+                    if (apply_gap_fill_result<p_strand_reversed>(
                             region, fill_result, qe, re, qs, rs,
                             final_query_end, final_ref_end)) {
                         zdropped_any = true;
@@ -1795,7 +1788,7 @@ struct align_one_region {
                     }
                 } else {
                     ksw_alignment_result fill_result =
-                        ksw2_align_pair<strand_reversed>(
+                        ksw2_align_pair<p_strand_reversed>(
                         query_seq, target_seq,
                         static_cast<size_t>(qs),
                         static_cast<size_t>(qe),
@@ -1811,7 +1804,7 @@ struct align_one_region {
                         block_execution_stats,
                         scalar_execution_stats,
                         scalar_ksw2_stage::gap);
-                    if (apply_gap_fill_result<strand_reversed>(
+                    if (apply_gap_fill_result<p_strand_reversed>(
                             region, fill_result, qe, re, qs, rs,
                             final_query_end, final_ref_end)) {
                         zdropped_any = true;
@@ -1831,7 +1824,7 @@ struct align_one_region {
             }
             if (params.compute_edit_distance) {
                 region.edit_distance += exact_edit_distance_for_implicit_seed<
-                    strand_reversed>(
+                    p_strand_reversed>(
                         query_seq, target_seq,
                         static_cast<std::size_t>(seed_query_start),
                         static_cast<std::size_t>(seed_query_end),
@@ -1841,16 +1834,16 @@ struct align_one_region {
         }
 
         // === 3. Right extension ===
-        if ((base_alignment_algorithm
+        if ((p_base_alignment_algorithm
                 == base_alignment_algorithm::block_aligner
                 || !prior_stage_zdropped)
             && seed_query_end < outer_query_end
             && seed_ref_end < outer_ref_end)
         {
             ksw_alignment_result right_result;
-            if constexpr (base_alignment_algorithm
+            if constexpr (p_base_alignment_algorithm
                     == base_alignment_algorithm::block_aligner) {
-                right_result = block_aligner_align_pair<strand_reversed>(
+                right_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq, target_seq,
                     static_cast<size_t>(seed_query_end),
                     static_cast<size_t>(outer_query_end),
@@ -1860,7 +1853,7 @@ struct align_one_region {
                     block_alignment_stage::right_extension,
                     block_execution_stats);
             } else {
-                right_result = ksw2_align_pair<strand_reversed>(
+                right_result = ksw2_align_pair<p_strand_reversed>(
                     query_seq, target_seq,
                     static_cast<size_t>(seed_query_end),
                     static_cast<size_t>(outer_query_end),
@@ -1885,7 +1878,7 @@ struct align_one_region {
             final_query_end = seed_query_end + right_query_offset;
             if (params.compute_edit_distance) {
                 region.edit_distance += exact_edit_distance_for_fill<
-                    strand_reversed>(
+                    p_strand_reversed>(
                         right_result,
                         static_cast<std::size_t>(seed_query_end),
                         static_cast<std::size_t>(final_query_end),
@@ -1910,16 +1903,16 @@ struct align_one_region {
 };
 
 template<
-    base_alignment_algorithm base_alignment_algorithm,
-    bool enable_diagonal_certificate = true,
-    sequence_alphabet Alphabet>
+    base_alignment_algorithm p_base_alignment_algorithm,
+    bool p_enable_diagonal_certificate = true,
+    sequence_alphabet p_alphabet>
 void align_regions(
     std::span<alignment_region> regions,
     std::span<const anchor> anchors,
-    bioseq::storage::lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::lazy_sequence_view<Alphabet> target_seq,
-    const scoring_matrix<Alphabet>& scoring_matrix,
-    const alignment_kernels<Alphabet>& alignment_kernels,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const alignment_kernels<p_alphabet>& alignment_kernels,
     const minimap2_parameters& params,
     block_aligner_execution_stats* block_execution_stats = nullptr,
     scalar_pipeline_execution_stats* scalar_execution_stats = nullptr)
@@ -1934,14 +1927,12 @@ void align_regions(
     const std::int64_t target_length = static_cast<std::int64_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
 
-    // Per R4: the `[&]<bool>()` capture-all template lambda
-    // that used to live inside the per-region loop body is replaced by the
-    // non-capturing functor `align_one_region`.  Constructed once per region
-    // batch with the kernel-invariant references; the per-region call
-    // surface is `aligner.template run<is_reversed>(...)`.
+    // Construct the non-capturing `align_one_region` functor once per region
+    // batch with kernel-invariant references. The per-region call surface is
+    // `aligner.template run<p_is_reversed>(...)`.
     const align_one_region<
-        base_alignment_algorithm, Alphabet,
-        enable_diagonal_certificate> aligner{
+        p_base_alignment_algorithm, p_alphabet,
+        p_enable_diagonal_certificate> aligner{
         query_seq, target_seq, scoring_matrix, alignment_kernels, params,
         align_bandwidth};
 
@@ -1949,14 +1940,14 @@ void align_regions(
     // diagnostic storage. When enabled, each worker writes one disjoint slot;
     // the deterministic reduction below avoids atomics in the DP hot path.
     std::vector<block_aligner_execution_stats> per_region_block_stats;
-    if constexpr (base_alignment_algorithm
+    if constexpr (p_base_alignment_algorithm
             == base_alignment_algorithm::block_aligner) {
         if (block_execution_stats != nullptr) {
             per_region_block_stats.resize(regions.size());
         }
     }
     std::vector<scalar_pipeline_execution_stats> per_region_scalar_stats;
-    if constexpr (base_alignment_algorithm
+    if constexpr (p_base_alignment_algorithm
             == base_alignment_algorithm::ksw2) {
         if (scalar_execution_stats != nullptr) {
             per_region_scalar_stats.resize(regions.size());
@@ -2052,7 +2043,7 @@ void align_regions(
         region.edit_distance = 0;
 
         block_aligner_execution_stats* region_block_stats = nullptr;
-        if constexpr (base_alignment_algorithm
+        if constexpr (p_base_alignment_algorithm
                 == base_alignment_algorithm::block_aligner) {
             if (!per_region_block_stats.empty()) {
                 region_block_stats = &per_region_block_stats[region_index];
@@ -2078,7 +2069,7 @@ void align_regions(
             }
         }
         scalar_pipeline_execution_stats* region_scalar_stats = nullptr;
-        if constexpr (base_alignment_algorithm
+        if constexpr (p_base_alignment_algorithm
                 == base_alignment_algorithm::ksw2) {
             if (!per_region_scalar_stats.empty()) {
                 region_scalar_stats =
@@ -2086,16 +2077,10 @@ void align_regions(
             }
         }
 
-        // Per-region diagnostic logs were previously emitted on every region
-        // boundary (left-extension skipped, gap-fill skipped, right-extension
-        // skipped, "determine actions" entry). Each fmtlog enqueue + format
-        // is ~1-5us, and the bench harness installs `bioseq::settings::diagnostics::logging::enabled = true`
-        // via `log_configure(true)` so they fire during measurement runs.
-        // For very-long pairs with many regions this stacks up to ~ms of
-        // overhead per timed sample. Removed — the same information can be
-        // derived from `region.cigar.empty()` and the seed/outer span fields
-        // by any debugger-driven introspection without polluting the
-        // bench wall-clock. See REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_3.md.
+        // Per-region diagnostics are derived from `region.cigar.empty()` and
+        // the seed/outer spans during debugger inspection. Avoiding a formatted
+        // log at every boundary keeps measurement runs free of per-region
+        // logging overhead.
 
         // Dispatch the three alignment stages based on strand orientation
         // via the non-capturing `aligner` functor ( R4).
@@ -2147,7 +2132,7 @@ void align_regions(
     const bool task_parallel_candidate =
         bioseq::parallelism::has_parallel_tasks(pool.get_mode())
         && pool.maximum_concurrency() > 1
-        && base_alignment_algorithm != base_alignment_algorithm::ksw2_batched
+        && p_base_alignment_algorithm != base_alignment_algorithm::ksw2_batched
         && lazy_is_worker_shareable(query_seq)
         && lazy_is_worker_shareable(target_seq)
         && regions.size() >= bioseq::parallelism::task_parallel_minimums::k_region_count;
@@ -2179,13 +2164,17 @@ void align_regions(
         // multi-Mbp seed span) can dominate wall-clock; the per-stage milestones
         // alone would show a long silence with no sign of progress. Emit (and flush)
         // a heartbeat at most ~once/second so `tail -f` of the log shows which
-        // region index is in flight and the live footprint. Gated on bioseq::settings::diagnostics::logging::enabled
-        // so production pays only the loop counter.
-        std::int64_t hb_last_ns = bioseq::settings::diagnostics::logging::enabled ? bioseq::instrumentation::clock::now_ns() : 0;
+        // region index is in flight and the live footprint. The logging facade
+        // reads PostgreSQL's active flag when installed and the standalone
+        // fallback otherwise, preserving this module's domain-neutral closure.
+        const bool debug_logging_enabled = is_bioseq_debug_logging_enabled();
+        std::int64_t hb_last_ns = debug_logging_enabled
+            ? bioseq::instrumentation::clock::now_ns()
+            : 0;
         std::size_t hb_region_idx = 0;
         for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
             ++hb_region_idx;
-            if (bioseq::settings::diagnostics::logging::enabled) {
+            if (debug_logging_enabled) {
                 const std::int64_t hb_now_ns = bioseq::instrumentation::clock::now_ns();
                 if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
                     hb_last_ns = hb_now_ns;
@@ -2202,7 +2191,7 @@ void align_regions(
         }
     }
 
-    if constexpr (base_alignment_algorithm
+    if constexpr (p_base_alignment_algorithm
             == base_alignment_algorithm::block_aligner) {
         if (block_execution_stats != nullptr) {
             *block_execution_stats = {};
@@ -2232,7 +2221,7 @@ void align_regions(
             }
         }
     }
-    if constexpr (base_alignment_algorithm
+    if constexpr (p_base_alignment_algorithm
             == base_alignment_algorithm::ksw2) {
         if (scalar_execution_stats != nullptr) {
             *scalar_execution_stats = {};
@@ -2305,31 +2294,15 @@ void estimate_divergence_from_seeds(
     //   * membership at position p:   prefix_count[p+1] > prefix_count[p]
     //   * #mini_pos in [a, b]:         prefix_count[b+1] - prefix_count[a]
     //
-    // Build cost is O(N + query_len). For VERY_LONG (903 kbp) this is a
-    // single ~1 M-iteration linear pass — vs previous implementation's 5–6 ms `std::sort` on
-    // 168 k entries (the SIMD previous implementation dual-stream collector emits in
-    // lane-interleaved order, so the array is NOT sorted on output and
-    // std::sort cannot detect already-sorted input). The previous implementation stage
-    // breakdown's `mm_est_err = 7.96 ms` for SIMD-DP forward chains was
-    // dominated by this sort, not the per-seed walk we previously thought.
-    //
-    // Bench (VERY_LONG, post-current implementation): mm_est_err per-call drops from 7.96 ms
-    // to <2 ms (-75%) because the sort is gone and the per-seed walk hits
-    // the cumulative array via two random-access loads (~3 ns each).
-    //
-    // current implementation also drops the earlier implementation reverse-chain search-range split: with the
-    // direction-aware `compute_forward_pos(s)` lambda BOTH forward and
-    // reverse chains have ASCENDING forward_pos for s=0..seed_count-1, so
-    // the previous "search [begin, match_start_idx+1)" for reverse chains
-    // was structurally wrong (last_seed_pos > first_forward_pos for both
-    // directions — earlier implementation fix was a no-op at best, broken-fast-path at worst).
+    // Build cost is O(N + query_len). The lane-interleaved SIMD collector does
+    // not produce sorted positions, so the prefix-count table avoids a sort
+    // and answers membership/range queries with two random-access loads.
+    // `compute_forward_pos(s)` gives both forward and reverse chains ascending
+    // forward positions for s=0..seed_count-1, so one search range is correct
+    // for both directions.
     // ----------------------------------------------------------------------
-    // The compact minimap_sketch_data no longer carries a per-minimizer
-    // span field — for dna4 (the only bench alphabet) every minimizer's
-    // span is identically equal to the configured kmer size. The
-    // previous `span_sum / count` average therefore degenerates to the
-    // constant `kmer_size`, which we use directly instead of touching
-    // a now-removed bitfield.
+    // For dna4 (the only benchmark alphabet), every minimizer span equals the
+    // configured kmer size, so the average span is exactly `kmer_size`.
     const float avg_kmer_span = static_cast<float>(kmer_size);
 
     // Build the prefix-count array in two linear passes:
@@ -2339,7 +2312,7 @@ void estimate_divergence_from_seeds(
     //
     // Size is (query_len + 2) so `mini_pos_count[query_len + 1]` is a
     // valid index (covers the case where last_pos == query_len, even
-    // though the previous implementation collector's emit clamps to query_len - 1). Using
+    // though collector emission clamps to query_len - 1). Using
     // uint32_t supports up to 4 G minimizers — vastly above realistic
     // cell-genome scale.
     const size_t prefix_size = static_cast<size_t>(query_len) + 2;
@@ -2354,12 +2327,8 @@ void estimate_divergence_from_seeds(
         mini_pos_count[i] += mini_pos_count[i - 1];
     }
 
-    // Per R4: the three `[&]` lambdas previously declared
-    // here (`is_minimizer`, `range_count`, `compute_forward_pos`) are
-    // converted to non-capturing struct functors so the file-wide grep gate
-    // for capture-all lambdas under `bioseq/backend/pipeline/**.cppm` runs
-    // clean.  Each functor stores its dependencies by value (no `&`); the
-    // compiler treats them identically to inline methods at -O3 (M15).
+    // Non-capturing functors store their dependencies by value, keeping the hot
+    // path inlineable without capture-all lifetime coupling.
     struct is_minimizer {
         const std::uint32_t* mini_pos_count;
         sequence_size_t      query_len;
@@ -3937,21 +3906,6 @@ struct match_result_collection {
         }
     }
 };
-
-/**
- * @brief Print alignment results in exact minimap2 PAF format.
- *
- * Free function wrapper for backwards compatibility. Delegates to
- * match_result_collection::print().
- */
-void print_match_results(
-    const match_result_collection& collection,
-    const std::string& query_name  = "query",
-    const std::string& target_name = "target")
-{
-    collection.print(query_name, target_name);
-}
-
 
 } // namespace bioseq::simd
 

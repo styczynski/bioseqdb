@@ -266,7 +266,7 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
   # libstdc++'s std/std.compat module inventory before project() can cache a
   # mixed toolchain. The ordinary macOS environment remains Clang; Homebrew GCC
   # is considered only when this GCC-only environment is explicitly selected.
-  include("${CMAKE_CURRENT_LIST_DIR}/cmake/BioseqGccToolchain.cmake")
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/bioseq_gcc_toolchain.cmake")
   set(_BIOSEQ_REQUESTED_GCC16_ROOT "")
   if(DEFINED ENV{BIOSEQ_GCC16_ROOT})
     set(_BIOSEQ_REQUESTED_GCC16_ROOT "$ENV{BIOSEQ_GCC16_ROOT}")
@@ -374,8 +374,8 @@ endif()
 # -g and pays the DWARF RSS tax that the preset comment warns about
 # — dispatch_buffer.cppm jumps from ~5 GB to >11 GB peak RSS, which is
 # enough to push lower-RAM Apple Silicon hosts into swap and stall single
-# compiles for hours on memory-pressure-driven major page faults; see
-# DOC{NNNN}_BUILD_SPEED_RAM_LIMITED). Using DEFINED CACHE{...} keeps
+# compiles for hours on memory-pressure-driven major page faults). Using
+# DEFINED CACHE{...} keeps
 # the fallback for non-preset configures while letting any preset value
 # (including the empty string) take precedence.
 if(NOT DEFINED CACHE{CMAKE_CXX_FLAGS_DEBUG})
@@ -459,48 +459,6 @@ set(BIOSEQ_REPOSITORY_ROOT "${_bioseq_repository_root}"
   CACHE INTERNAL "Canonical Bioseq repository source root" FORCE)
 unset(_bioseq_repository_root)
 
-# `APPLE` now reflects the configured target rather than pre-project host
-# state. Remove only exact cache values proven to have been seeded by Bioseq's
-# former host defaults; explicit command-line/toolchain identities retain
-# their distinct help marker and remain fail-closed in probe validation.
-if(NOT APPLE)
-  if(DEFINED CACHE{CMAKE_OSX_SYSROOT})
-    get_property(_bioseq_legacy_sysroot_value CACHE
-      CMAKE_OSX_SYSROOT PROPERTY VALUE)
-    get_property(_bioseq_legacy_sysroot_help CACHE
-      CMAKE_OSX_SYSROOT PROPERTY HELPSTRING)
-    if(_bioseq_legacy_sysroot_value STREQUAL
-        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
-        AND _bioseq_legacy_sysroot_help STREQUAL
-        "${_bioseq_apple_sdk_cache_help}")
-      unset(CMAKE_OSX_SYSROOT CACHE)
-      if(CMAKE_OSX_SYSROOT STREQUAL "${_bioseq_legacy_sysroot_value}")
-        unset(CMAKE_OSX_SYSROOT)
-      endif()
-    endif()
-    unset(_bioseq_legacy_sysroot_value)
-    unset(_bioseq_legacy_sysroot_help)
-  endif()
-
-  if(DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET})
-    get_property(_bioseq_legacy_deployment_value CACHE
-      CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY VALUE)
-    get_property(_bioseq_legacy_deployment_help CACHE
-      CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
-    if(_bioseq_legacy_deployment_value STREQUAL "14.0"
-        AND (_bioseq_legacy_deployment_help STREQUAL ""
-        OR _bioseq_legacy_deployment_help STREQUAL
-          "${_bioseq_apple_deployment_cache_help}"))
-      unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
-      if(CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL
-          "${_bioseq_legacy_deployment_value}")
-        unset(CMAKE_OSX_DEPLOYMENT_TARGET)
-      endif()
-    endif()
-    unset(_bioseq_legacy_deployment_value)
-    unset(_bioseq_legacy_deployment_help)
-  endif()
-endif()
 unset(_bioseq_apple_sdk_cache_help)
 unset(_bioseq_apple_deployment_cache_help)
 
@@ -531,12 +489,13 @@ if(BIOSEQ_PACKAGE_BUILD)
     message(FATAL_ERROR
       "BIOSEQ_PACKAGE_BUILD requires AWS_MACHINE_LINUX_CLANG22")
   endif()
-  if(NOT DEFINED ENV{BIOSEQ_OPTTIMIZATION_LEVEL}
-      OR NOT "$ENV{BIOSEQ_OPTTIMIZATION_LEVEL}" STREQUAL "0"
-      OR NOT "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL "0")
+  if(NOT DEFINED ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
+      OR NOT "$ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64"
+      OR NOT "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64")
     message(FATAL_ERROR
-      "every package build must explicitly set BIOSEQ_OPTTIMIZATION_LEVEL=0 "
-      "and BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0")
+      "every package build must explicitly set "
+      "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64 in both the environment "
+      "and CMake cache")
   endif()
 
   set(BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "" CACHE FILEPATH
@@ -652,7 +611,7 @@ endif()
 # Heavy template TUs in this tree (dispatch_buffer.cppm, two_stacks_minimizers
 # .cppm, the columnar_customscan/aggregator units, …) peak at 5+ GB RSS per
 # clang invocation even at -O3 without -g. On a 16 GB Apple Silicon laptop
-# the default `--parallel 32` from build.sh oversubscribes RAM by ~10x and
+# an unbounded high-parallelism build oversubscribes RAM by roughly 10x and
 # the OS resolves it via compressed-memory + swap, which serializes the
 # heavy compile against a single CPU core servicing major page faults. This
 # is the failure mode that turns a 1-2 second utils.cppm compile on the
@@ -726,8 +685,8 @@ SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always -Wno-everythi
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 
-include(AddPostgreSQLExtension)
-include(BioseqSqlAnnotationModel)
+include(add_postgresql_extension)
+include(bioseq_sql_annotation_model)
 
 # add_definitions(-DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
@@ -743,6 +702,10 @@ if(BIOSEQ_BUILD_WEBSITE)
     message(FATAL_ERROR
       "BIOSEQ_BUILD_WEBSITE=ON requires BIOSEQ_BUILD_CORE=ON")
   endif()
+  if(NOT BIOSEQ_BUILD_CACHE)
+    message(FATAL_ERROR
+      "BIOSEQ_BUILD_WEBSITE=ON requires BIOSEQ_BUILD_CACHE=ON")
+  endif()
 endif()
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_WEBSITE)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -752,9 +715,9 @@ endif()
 # union (extension SQL + external API clients + website). Consumers depend on
 # the returned bioseq_codegen / bioseq_codegen_project targets and never create
 # another ExternalProject.
-include(BioseqCodegen)
-include(BioseqHighwayCodegen)
-include(BioseqTemplateFlattenCodegen)
+include(bioseq_codegen)
+include(bioseq_highway_codegen)
+include(bioseq_template_flatten_codegen)
 if(BIOSEQ_BUILD_CORE)
   set(_bioseq_highway_builder_contract_root
     "${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-builder-contracts")
@@ -765,20 +728,20 @@ if(BIOSEQ_BUILD_CORE)
       "[bioseq-highway-contract] BEGIN header-closure"
     COMMAND "${CMAKE_COMMAND}"
       "-DTEST_ROOT=${_bioseq_highway_builder_contract_root}/header-closure"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_header_closure.cmake"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_header_closure_test.cmake"
     COMMAND "${CMAKE_COMMAND}" -E echo
       "[bioseq-highway-contract] PASS header-closure"
     COMMAND "${CMAKE_COMMAND}" -E echo
       "[bioseq-highway-contract] BEGIN target-order"
     COMMAND "${CMAKE_COMMAND}"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_target_order.cmake"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_target_order_test.cmake"
     COMMAND "${CMAKE_COMMAND}" -E echo
       "[bioseq-highway-contract] PASS target-order"
     COMMAND "${CMAKE_COMMAND}" -E echo
       "[bioseq-highway-contract] BEGIN probe-identity"
     COMMAND "${CMAKE_COMMAND}"
       "-DTEST_ROOT=${_bioseq_highway_builder_contract_root}/probe-identity"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_probe_identity.cmake"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_probe_identity_test.cmake"
     COMMAND "${CMAKE_COMMAND}" -E echo
       "[bioseq-highway-contract] PASS probe-identity"
     COMMENT "Running always-on Highway CMake builder contracts"
@@ -790,14 +753,14 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
     NAME bioseq_highway_header_closure_contract
     COMMAND "${CMAKE_COMMAND}"
       "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-header-closure-contract"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_header_closure.cmake")
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_header_closure_test.cmake")
   set_tests_properties(
     bioseq_highway_header_closure_contract
     PROPERTIES LABELS "core;unit;cmake;highway")
   add_test(
     NAME bioseq_highway_target_order_contract
     COMMAND "${CMAKE_COMMAND}"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_target_order.cmake")
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_target_order_test.cmake")
   set_tests_properties(
     bioseq_highway_target_order_contract
     PROPERTIES LABELS "core;unit;cmake;highway")
@@ -805,10 +768,21 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
     NAME bioseq_highway_probe_identity_contract
     COMMAND "${CMAKE_COMMAND}"
       "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-probe-identity-contract"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_probe_identity.cmake")
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/highway_probe_identity_test.cmake")
   set_tests_properties(
     bioseq_highway_probe_identity_contract
     PROPERTIES LABELS "core;unit;cmake;highway")
+  set(_private_postgres_artifact_writer_contract
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/private_postgres_artifact_writer_test.cmake")
+  add_test(
+    NAME bioseq_private_postgres_artifact_writer_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-Dtest_root=${CMAKE_CURRENT_BINARY_DIR}/cmake/private-postgres-artifact-writer-contract"
+      -P "${_private_postgres_artifact_writer_contract}")
+  set_tests_properties(
+    bioseq_private_postgres_artifact_writer_contract
+    PROPERTIES LABELS "core;unit;cmake;postgres")
+  unset(_private_postgres_artifact_writer_contract)
 endif()
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
@@ -837,7 +811,7 @@ if(BIOSEQ_BUILD_CORE)
   # no runtime test registration: successful module scan, compile, and link on
   # both supported toolchains is the contract.
   add_subdirectory(
-    codegen/namespace_materialization/tests/module_canary)
+    codegen/namespace_materialization/tests/integration/module_canary)
 endif()
 
 # Include extensions and their shared code
@@ -870,11 +844,11 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_postgres_error_safety_mode.py"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_server.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
@@ -890,15 +864,15 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/cmake/test_production_dso_qualification.py"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_production_dso_qualification.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/cmake/test_postgresql_extension_elf_visibility.py"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_postgresql_extension_elf_visibility.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
-      "${CMAKE_SOURCE_DIR}/cmake/test_postgresql_extension_macho_visibility.py"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_postgresql_extension_macho_visibility.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running bioseq-build configure freshness contract tests"
     VERBATIM)
@@ -915,7 +889,7 @@ if(BIOSEQ_BUILD_CORE)
   endif()
   foreach(_bioseq_highway_validation_consumer IN ITEMS
       bioseq_unit_tests
-      bioseq_external_integration_tests_exec)
+      bioseq_external_api_integration_tests)
     if(TARGET ${_bioseq_highway_validation_consumer})
       add_dependencies(
         ${_bioseq_highway_validation_consumer}
@@ -924,17 +898,17 @@ if(BIOSEQ_BUILD_CORE)
   endforeach()
   unset(_bioseq_highway_validation_dependencies)
   unset(_bioseq_highway_validation_consumer)
-  if(TARGET bioseq_cache_bioseq_bench)
+  if(TARGET bioseq_cache_bioseq_benchmark)
     # The cache benchmark target is declared before Bioseq so cache-only builds
     # remain valid. Complete the direct-target dependency once the sibling DSO
     # exists; callers must never have to know this declaration order.
     add_dependencies(
-      bioseq_cache_bioseq_bench
+      bioseq_cache_bioseq_benchmark
       postgresql_bioseq)
   endif()
   if(BIOSEQ_BUILD_CACHE AND BIOSEQ_CACHE_BUILD_TESTS)
     include(
-      "${CMAKE_SOURCE_DIR}/cmake/BioseqPrivatePostgresStage.cmake")
+      "${CMAKE_SOURCE_DIR}/cmake/bioseq_private_postgres_stage.cmake")
     bioseq_add_private_postgres_stage(
       TARGET bioseq_cache_bioseq_production_postgres_stage
       PG_CONFIG "${PostgreSQL_CONFIG}"
@@ -951,13 +925,13 @@ if(BIOSEQ_BUILD_CORE)
         BIOSEQ_EXTENSION_INSTALL_SQL
         BIOSEQ_EXTENSION_INSTALL_SQL)
     include(
-      "${CMAKE_SOURCE_DIR}/cmake/BioseqProductionDsoQualification.cmake")
+      "${CMAKE_SOURCE_DIR}/cmake/bioseq_production_dso_qualification.cmake")
     bioseq_add_production_dso_qualification(
       TARGET bioseq_cache_bioseq_production_dso_qualification
       BIOSEQ_TARGET postgresql_bioseq
       CACHE_TARGET postgresql_bioseq_cache)
     add_dependencies(
-      bioseq_cache_bioseq_bench
+      bioseq_cache_bioseq_benchmark
       bioseq_cache_bioseq_production_postgres_stage)
 
     if(TARGET postgresql_bioseq_cache_test_support)
@@ -992,7 +966,7 @@ if(BIOSEQ_BUILD_CORE)
           BIOSEQ_EXTENSION_INSTALL_SQL)
     endif()
   endif()
-  include(BioseqExternalPostgresAcceptance)
+  include(bioseq_external_postgres_acceptance)
   add_subdirectory(vendor)
 endif()
 
@@ -1051,9 +1025,15 @@ if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
       "cache, and Bioseq extension artifact targets")
   endif()
   add_subdirectory(
-    "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/bioseq"
-    "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/test/bioseq")
+    "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/tests/integration/bioseq"
+    "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/tests/integration/bioseq")
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/tests/e2e/bioseq"
+    "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/tests/e2e/bioseq")
 endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bioseq_catch_test_ownership.cmake")
+bioseq_assert_first_party_test_source_ownership()
 
 # Add target that bundles for pgxn
 #configure_file(META.json.in META.json)

@@ -3,8 +3,8 @@
     "bioseq_block_simd_dp_two_stack_nthash_no_index": {
       "_": {"type": "integer", "default": 0, "description": "SIMD frontend baseline; block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; load(no index)+recompute align"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"]},
-      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"]},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"]}
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off", "on"]},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"]}
     }
   },
   "test_cases": {
@@ -19,7 +19,7 @@
   },
   "bench_e2e": {
     "tags": ["e2e", "simd", "probe"],
-    "description": "SIMD baseline on the REAL e2e anchor/chain profile (small query vs large target) — MPF no_index CPU SIMD.",
+    "description": "SIMD baseline on the REAL e2e anchor/chain profile (small query vs large target) — grouped-SoA no_index CPU SIMD.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {

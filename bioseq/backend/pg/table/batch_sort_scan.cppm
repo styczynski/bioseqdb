@@ -20,7 +20,7 @@
  *   4. re-emits the buffered rows in that order.
  *
  * The batch processor orders with the GPU seq-sort path when Vulkan is enabled.
- * When `bioseq.aligner_vulkan_enabled` is disabled, this executor sorts the
+ * When `bioseq.aligner.vulkan.enabled` is disabled, this executor sorts the
  * same canonical facade views with the scalar logical-rank comparator.
  *
  * Layout invariant: bioseq_batch_sort_state keeps CustomScanState as its first

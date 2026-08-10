@@ -89,22 +89,22 @@ private:
 
 // ---------------------------------------------------------------------------
 // Provider / policy identity. Deliberately not closed enums: every adapter
-// declares a static CompTimeStr and these views point at that process-lifetime
+// declares a static compile_time_string and these views point at that process-lifetime
 // storage. Plans serialize the canonical string and resolve it against the
 // pack.
 // ---------------------------------------------------------------------------
 struct provider_id {
-  std::string_view value; // Points to a provider type's static CompTimeStr.
+  std::string_view value; // Points to a provider type's static compile_time_string.
   constexpr auto operator<=>(const provider_id &) const = default;
 };
 
 struct locator_policy_id {
-  std::string_view value; // Process-lifetime CompTimeStr storage.
+  std::string_view value; // Process-lifetime compile_time_string storage.
   constexpr auto operator<=>(const locator_policy_id &) const = default;
 };
 
 struct request_policy_id {
-  std::string_view value; // Process-lifetime CompTimeStr storage.
+  std::string_view value; // Process-lifetime compile_time_string storage.
   constexpr auto operator<=>(const request_policy_id &) const = default;
 };
 

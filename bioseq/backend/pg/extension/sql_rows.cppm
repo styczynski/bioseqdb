@@ -53,7 +53,7 @@ struct active_read_policy_debug_row final {
     std::int64_t prohibited_file_writer_entries;
 };
 
-struct last_mps_build_stats_row final {
+struct last_minimizer_sequence_build_stats_row final {
     std::int64_t backend_pid;
     std::int64_t db_oid;
     std::int64_t relfilenode;
@@ -74,7 +74,7 @@ struct last_mps_build_stats_row final {
     std::int64_t position_spill_count;
 };
 
-struct scheduler_mps_build_stats_row final {
+struct scheduler_minimizer_sequence_build_stats_row final {
     std::int64_t backend_pid;
     std::int64_t db_oid;
     std::int64_t relfilenode;
@@ -101,7 +101,7 @@ struct scheduler_mps_build_stats_row final {
     std::int64_t shareable_lazy_workers;
 };
 
-struct async_mps_worker_boundary_stats_row final {
+struct async_minimizer_sequence_worker_boundary_stats_row final {
     std::int64_t relation_leaf_calls;
     std::int64_t spi_leaf_calls;
     std::int64_t materialize_interrupt_leaf_calls;
@@ -239,7 +239,7 @@ struct read_minimizer_fixture_row final {
     bioseq::postgres::support::jsonb_value selective_cold_index_preparation;
 };
 
-struct scan_minimizer_generation_fixture_row final {
+struct scan_grouped_soa_minimizer_generation_test_row final {
     std::string sidecar_table;
     std::string selected_backend;
     std::int64_t generation_id;
@@ -268,7 +268,7 @@ struct generation_storage_state_row final {
     std::optional<bool> is_assembled_cache_hit;
 };
 
-struct build_ready_mpf_generation_row final {
+struct build_ready_minimizer_fragment_generation_row final {
     std::string sidecar_table;
     std::int16_t column_attno;
     std::int64_t source_sequence_rowno;
@@ -316,7 +316,7 @@ struct build_ready_mpf_generation_row final {
     std::int64_t vulkan_downloaded_minimizers;
 };
 
-struct build_ready_mps_generation_row final {
+struct build_ready_minimizer_sequence_generation_row final {
     std::string sidecar_table;
     std::int16_t column_attno;
     std::int64_t source_sequence_rowno;
@@ -394,17 +394,18 @@ struct build_ready_mps_generation_row final {
 static_assert(std::is_aggregate_v<vulkan_runtime_status_row>);
 static_assert(std::is_aggregate_v<list_metadata_row>);
 static_assert(std::is_aggregate_v<active_read_policy_debug_row>);
-static_assert(std::is_aggregate_v<last_mps_build_stats_row>);
-static_assert(std::is_aggregate_v<scheduler_mps_build_stats_row>);
-static_assert(std::is_aggregate_v<async_mps_worker_boundary_stats_row>);
+static_assert(std::is_aggregate_v<last_minimizer_sequence_build_stats_row>);
+static_assert(std::is_aggregate_v<scheduler_minimizer_sequence_build_stats_row>);
+static_assert(std::is_aggregate_v<async_minimizer_sequence_worker_boundary_stats_row>);
 static_assert(std::is_aggregate_v<scheduler_stats_row>);
 static_assert(std::is_aggregate_v<inspect_cold_no_index_absence_row>);
 static_assert(std::is_aggregate_v<inspect_ready_minimizer_generation_row>);
 static_assert(std::is_aggregate_v<build_minimizer_fixture_row>);
 static_assert(std::is_aggregate_v<read_minimizer_fixture_row>);
-static_assert(std::is_aggregate_v<scan_minimizer_generation_fixture_row>);
+static_assert(
+    std::is_aggregate_v<scan_grouped_soa_minimizer_generation_test_row>);
 static_assert(std::is_aggregate_v<generation_storage_state_row>);
-static_assert(std::is_aggregate_v<build_ready_mpf_generation_row>);
-static_assert(std::is_aggregate_v<build_ready_mps_generation_row>);
+static_assert(std::is_aggregate_v<build_ready_minimizer_fragment_generation_row>);
+static_assert(std::is_aggregate_v<build_ready_minimizer_sequence_generation_row>);
 
 }  // namespace bioseq::postgres::sql_rows

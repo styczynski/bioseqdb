@@ -3,8 +3,8 @@
     "bioseq_block_gpu_dp_gpu_seed_no_index": {
       "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute"},
-      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the recompute minimizer index for async persistence (off = pure from-scratch no-index measure)"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the recompute minimizer index for async persistence (off = pure from-scratch no-index measure)"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     }
   },
 

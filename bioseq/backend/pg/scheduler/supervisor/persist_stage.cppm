@@ -61,7 +61,7 @@ static_assert(std::is_trivially_copyable_v<minimizer_sequence_build_dsm_header>)
     switch (static_cast<minimizer_sketch_backend>(backend_value)) {
         case minimizer_sketch_backend::scalar:
         case minimizer_sketch_backend::vulkan_segment:
-        case minimizer_sketch_backend::two_stack_nthash:
+        case minimizer_sketch_backend::exact_simd:
         case minimizer_sketch_backend::bounded_nthash_simd:
             return true;
     }
@@ -72,26 +72,27 @@ static_assert(std::is_trivially_copyable_v<minimizer_sequence_build_dsm_header>)
         std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     const auto backend = static_cast<minimizer_sketch_backend>(backend_value);
-    return backend == minimizer_sketch_backend::two_stack_nthash
+    return backend == minimizer_sketch_backend::exact_simd
         || backend == minimizer_sketch_backend::bounded_nthash_simd;
 }
 
-[[nodiscard]] constexpr bool minimizer_backend_allowed_in_async_mps(
+[[nodiscard]] constexpr bool minimizer_backend_allowed_in_async_minimizer_sequence(
         std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     const auto backend = static_cast<minimizer_sketch_backend>(backend_value);
     return backend == minimizer_sketch_backend::scalar
         || backend == minimizer_sketch_backend::vulkan_segment
-        || backend == minimizer_sketch_backend::two_stack_nthash;
+        || backend == minimizer_sketch_backend::exact_simd;
 }
 
 inline bool g_persist_xact_callback_registered = false;
 
 #ifdef BIOSEQ_TEST_INDEXES
 inline thread_local async_minimizer_sequence_stage_pg_failure
-    g_async_mps_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
+    g_async_minimizer_sequence_stage_pg_failure =
+        async_minimizer_sequence_stage_pg_failure::none;
 inline thread_local std::uint64_t
-    g_async_mps_stage_injected_failures = 0;
+    g_async_minimizer_sequence_stage_injected_failures = 0;
 #endif
 
 [[nodiscard]] bool arm_async_minimizer_sequence_stage_pg_failure(
@@ -101,7 +102,7 @@ inline thread_local std::uint64_t
         || point > async_minimizer_sequence_stage_pg_failure::dsm_detach) {
         return false;
     }
-    g_async_mps_stage_pg_failure = point;
+    g_async_minimizer_sequence_stage_pg_failure = point;
     return true;
 #else
     (void)point;
@@ -111,36 +112,38 @@ inline thread_local std::uint64_t
 
 void disarm_async_minimizer_sequence_stage_pg_failure() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    g_async_mps_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
+    g_async_minimizer_sequence_stage_pg_failure =
+        async_minimizer_sequence_stage_pg_failure::none;
 #endif
 }
 
 [[nodiscard]] async_minimizer_sequence_stage_pg_failure
-async_mps_stage_pg_failure_armed() noexcept {
+async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    return g_async_mps_stage_pg_failure;
+    return g_async_minimizer_sequence_stage_pg_failure;
 #else
     return async_minimizer_sequence_stage_pg_failure::none;
 #endif
 }
 
 [[nodiscard]] std::uint64_t
-async_mps_stage_injected_failure_count() noexcept {
+async_minimizer_sequence_stage_injected_failure_count() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    return g_async_mps_stage_injected_failures;
+    return g_async_minimizer_sequence_stage_injected_failures;
 #else
     return 0u;
 #endif
 }
 
-void inject_async_mps_stage_pg_failure_leaf(
+void inject_async_minimizer_sequence_stage_pg_failure_leaf(
         async_minimizer_sequence_stage_pg_failure point) {
 #ifdef BIOSEQ_TEST_INDEXES
-    if (g_async_mps_stage_pg_failure != point) {
+    if (g_async_minimizer_sequence_stage_pg_failure != point) {
         return;
     }
-    g_async_mps_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
-    ++g_async_mps_stage_injected_failures;
+    g_async_minimizer_sequence_stage_pg_failure =
+        async_minimizer_sequence_stage_pg_failure::none;
+    ++g_async_minimizer_sequence_stage_injected_failures;
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous minimizer-sequence staging PostgreSQL leaf failure"),
@@ -150,15 +153,15 @@ void inject_async_mps_stage_pg_failure_leaf(
 #endif
 }
 
-template <class F>
-auto invoke_async_mps_stage_pg_leaf(
+template <class p_function>
+auto invoke_async_minimizer_sequence_stage_pg_leaf(
         async_minimizer_sequence_stage_pg_failure point,
-        F&& function)
-    -> std::invoke_result_t<std::remove_reference_t<F>&> {
+        p_function&& function)
+    -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
     return bioseq::postgres::support::invoke_pg_as_cpp(
         [point, &function]() ->
-            std::invoke_result_t<std::remove_reference_t<F>&> {
-            inject_async_mps_stage_pg_failure_leaf(point);
+            std::invoke_result_t<std::remove_reference_t<p_function>&> {
+            inject_async_minimizer_sequence_stage_pg_failure_leaf(point);
             return std::invoke(function);
         });
 }
@@ -178,7 +181,7 @@ void release_pinned_dsm(dsm_handle handle) noexcept {
 }
 
 [[nodiscard]] std::optional<minimizer_sequence_build_metadata>
-parse_mps_build_metadata(const char* base, Size mapped) {
+parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
     if (mapped < sizeof(minimizer_sequence_build_dsm_header)) {
         return std::nullopt;
     }
@@ -191,7 +194,7 @@ parse_mps_build_metadata(const char* base, Size mapped) {
             header.pair_sort_impl)
         || !valid_minimizer_sketch_backend_wire_value(
             header.index_sketch_backend)
-        || !minimizer_backend_allowed_in_async_mps(
+        || !minimizer_backend_allowed_in_async_minimizer_sequence(
             header.index_sketch_backend)
         || (minimizer_backend_requires_highway_target(
                 header.index_sketch_backend)
@@ -224,7 +227,7 @@ void ensure_persist_xact_callback_registered() {
     if (g_persist_xact_callback_registered) {
         return;
     }
-    invoke_async_mps_stage_pg_leaf(
+    invoke_async_minimizer_sequence_stage_pg_leaf(
         async_minimizer_sequence_stage_pg_failure::register_xact_callback,
         [] { register_persist_xact_callback_pg_leaf(); });
     // RegisterXactCallback can ERROR while allocating its callback node. Set
@@ -270,7 +273,8 @@ void ensure_persist_xact_callback_registered() {
             });
         pg_unreachable();
     }
-    if (!minimizer_backend_allowed_in_async_mps(index_sketch_backend)) {
+    if (!minimizer_backend_allowed_in_async_minimizer_sequence(
+            index_sketch_backend)) {
         return false;
     }
     if (minimizer_backend_requires_highway_target(index_sketch_backend)
@@ -305,7 +309,7 @@ void ensure_persist_xact_callback_registered() {
         return false;
     }
     if (!async_persist_queue_available()) {
-        bioseq_log<logging_level::debug>("[bioseq] index: async mps build skipped row={} index={} target_bp={} fragments={} because shared supervisor queue is unavailable",
+        bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence build skipped row={} index={} target_bp={} fragments={} because shared supervisor queue is unavailable",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 target.index_name,
                 static_cast<unsigned long long>(locator.logical_length),
@@ -361,7 +365,7 @@ void ensure_persist_xact_callback_registered() {
     };
 
     try {
-        dsm.attached = invoke_async_mps_stage_pg_leaf(
+        dsm.attached = invoke_async_minimizer_sequence_stage_pg_leaf(
             async_minimizer_sequence_stage_pg_failure::dsm_create,
             [bytes_total] {
                 return dsm_create(
@@ -405,15 +409,15 @@ void ensure_persist_xact_callback_registered() {
         // ERROR after making the pin effective; an unpin of an unpinned handle
         // is itself bridged and swallowed while preserving the first error.
         dsm.unpin_cleanup_required = true;
-        invoke_async_mps_stage_pg_leaf(
+        invoke_async_minimizer_sequence_stage_pg_leaf(
             async_minimizer_sequence_stage_pg_failure::dsm_pin,
             [&dsm] { dsm_pin_segment(dsm.attached); });
-        invoke_async_mps_stage_pg_leaf(
+        invoke_async_minimizer_sequence_stage_pg_leaf(
             async_minimizer_sequence_stage_pg_failure::dsm_detach,
             [&dsm] { dsm_detach(dsm.attached); });
         dsm.attached = nullptr;
 
-        enqueue_pending_mps_build(
+        enqueue_pending_minimizer_sequence_build(
             target,
             dsm.handle,
             bytes_total);
@@ -427,7 +431,7 @@ void ensure_persist_xact_callback_registered() {
     }
     const std::uint64_t queued_ns =
         static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
-    bioseq_log<logging_level::debug>("[bioseq] index: staged async mps build job row={} index={} target_bp={} fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} total_stage_ns={}",
+    bioseq_log<logging_level::debug>("[bioseq] index: staged async minimizer-sequence build job row={} index={} target_bp={} fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} total_stage_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             target.index_name,
             static_cast<unsigned long long>(locator.logical_length),

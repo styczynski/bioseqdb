@@ -1,6 +1,6 @@
 /**
  * @file bench/prefilters/index.cppm
- * @brief Stand-alone rank-prefilter benchmarks registered in bioseq_bench.
+ * @brief Stand-alone rank-prefilter benchmarks registered in bioseq_benchmark.
  *
  * Dataset parsing, byte-rank materialisation, the bundled-source oracle, and
  * thresholded edit-distance truth are prepared in on_input.  The measured
@@ -12,7 +12,6 @@
  */
 module;
 
-#include "../prefilter_small_seed_keys.hpp"
 #include "SneakySnake.h"
 
 #include <simdjson.h>
@@ -36,6 +35,7 @@ module;
 export module bioseq.bench.prefilters;
 
 import bioseq.bench.framework;
+import bioseq.bench.prefilter_algorithm_selection;
 import bioseq.instrumentation;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
@@ -63,6 +63,7 @@ namespace {
 using bioseq::bench::framework::parameter_map;
 using bioseq::bench::framework::run_constraints;
 namespace prefilter = bioseq::prefilter;
+namespace algorithm_selection = bioseq::bench::prefilter_algorithm_selection;
 using bioseq::prefilter::prefilter_batch_input;
 using bioseq::prefilter::prefilter_job;
 using bioseq::prefilter::prefilter_result;
@@ -99,7 +100,7 @@ struct prefilter_input {
     std::string error;
 };
 
-/** Timed backend output and post-region validation evidence. */
+/** Timed backend output and post-region validation stats. */
 struct prefilter_output {
     std::vector<std::uint8_t> accepted;
     std::vector<std::uint32_t> lower_bounds;
@@ -163,7 +164,7 @@ struct prefilter_output {
 [[nodiscard]] std::uint32_t max_edits_from_tuple(
     const bioseq::bench::framework::resolved_execution_tuple& tuple) noexcept
 {
-    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+    if (const auto fixed = algorithm_selection::fixed_max_edits_for_algorithm(
             tuple.algorithm_name);
         fixed.has_value()) {
         return *fixed;
@@ -175,7 +176,7 @@ struct prefilter_output {
     std::string_view algorithm,
     const parameter_map& params) noexcept
 {
-    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+    if (const auto fixed = algorithm_selection::fixed_max_edits_for_algorithm(
             algorithm);
         fixed.has_value()) {
         return *fixed;
@@ -186,13 +187,13 @@ struct prefilter_output {
 [[nodiscard]] constexpr bool is_gatekeeper_algorithm(
     std::string_view algorithm) noexcept
 {
-    return small_seed::is_gatekeeper_algorithm(algorithm);
+    return algorithm_selection::is_gatekeeper_algorithm(algorithm);
 }
 
 [[nodiscard]] constexpr bool is_small_seed_algorithm(
     std::string_view algorithm) noexcept
 {
-    return small_seed::is_algorithm(algorithm);
+    return algorithm_selection::is_algorithm(algorithm);
 }
 
 [[nodiscard]] constexpr bool is_sneaky_vulkan_algorithm(
@@ -734,7 +735,7 @@ void validate_available_backend(
         is_gatekeeper_algorithm(algorithm) && output.backend_available
             ? 1.0 : 0.0);
     if (is_small_seed_algorithm(algorithm)
-        && !small_seed::has_required_hardware_validation({
+        && !algorithm_selection::has_required_hardware_validation({
             .input_valid = input.valid,
             .backend_available = output.backend_available,
             .validation_performed = output.runtime_validation_performed,

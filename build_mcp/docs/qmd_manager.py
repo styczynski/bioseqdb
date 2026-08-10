@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parents[1]
 QMD_BIN = HERE / "node_modules" / ".bin" / "qmd"
 PORT = int(os.environ.get("BIOSEQ_QMD_PORT", "8181"))
 COL_CURRENT, COL_ARCHIVE = "bioseq-docs-current", "bioseq-docs-archive"
+COLLECTION_MASK = "**/*.md"
 SYNC_INTERVAL = 600.0
 EMBED_MAX_MB = os.environ.get("BIOSEQ_QMD_EMBED_MAX_MB")
 ACTIVITY_REGISTRY = Path(
@@ -346,27 +347,101 @@ class QmdManager:
                 finally:
                     self.end_external_update()
 
-    def _has_collection(self, name: str) -> bool:
-        try:
-            return name in self._cli(["collection", "list"], timeout=60).stdout
-        except Exception:
-            return False
+    def _collection_settings(
+        self, name: str,
+    ) -> tuple[Path, str, bool] | None:
+        result = self._cli(["collection", "show", name], timeout=60)
+        if result.returncode != 0:
+            return None
+        path_match = re.search(r"^\s*Path:\s*(.+?)\s*$", result.stdout, re.MULTILINE)
+        pattern_match = re.search(
+            r"^\s*Pattern:\s*(.+?)\s*$", result.stdout, re.MULTILINE)
+        include_match = re.search(
+            r"^\s*Include:\s*(yes|no)(?:\s|$)", result.stdout, re.MULTILINE)
+        if path_match is None or pattern_match is None or include_match is None:
+            raise QmdUnavailable(
+                f"qmd returned malformed collection settings for {name!r}")
+        return (
+            Path(path_match.group(1)).expanduser().resolve(),
+            pattern_match.group(1),
+            include_match.group(1) == "yes",
+        )
+
+    def _require_collection_command(
+        self, arguments: List[str], *, label: str, timeout: float,
+    ) -> None:
+        result = self._cli(arguments, timeout=timeout)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise QmdUnavailable(
+                f"{label} failed" + (f": {detail}" if detail else ""))
+
+    def _reconcile_collection(
+        self,
+        *,
+        name: str,
+        root: Path,
+        context: str,
+        include_by_default: bool,
+    ) -> None:
+        expected_path = root.resolve()
+        observed = self._collection_settings(name)
+        if observed is not None and observed[:2] != (
+            expected_path, COLLECTION_MASK,
+        ):
+            _log(
+                f"recreating {name} for {expected_path}; "
+                f"persisted path/pattern was {observed[0]} ({observed[1]})")
+            self._require_collection_command(
+                ["collection", "remove", name],
+                label=f"remove stale collection {name}",
+                timeout=120,
+            )
+            observed = None
+        if observed is None:
+            self._require_collection_command(
+                [
+                    "collection", "add", str(expected_path), "--name", name,
+                    "--mask", COLLECTION_MASK,
+                ],
+                label=f"add collection {name}",
+                timeout=120,
+            )
+            self._require_collection_command(
+                ["context", "add", f"qmd://{name}", context],
+                label=f"add context for collection {name}",
+                timeout=60,
+            )
+            observed_include = True
+        else:
+            observed_include = observed[2]
+        if observed_include != include_by_default:
+            action = "include" if include_by_default else "exclude"
+            self._require_collection_command(
+                ["collection", action, name],
+                label=f"{action} collection {name}",
+                timeout=60,
+            )
 
     def _ensure_collections(self) -> None:
         registry.CURRENT_ROOT.mkdir(parents=True, exist_ok=True)
         registry.ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
-        if not self._has_collection(COL_CURRENT):
-            self._cli(["collection", "add", str(registry.CURRENT_ROOT), "--name", COL_CURRENT,
-                       "--mask", "**/*.md"], timeout=120)
-            self._cli(["context", "add", f"qmd://{COL_CURRENT}",
-                       "Active bioseqdb engineering docs (specs, plans, reports, prompts, "
-                       "research). Files are NNNN_TITLE.md; higher number = newer."], timeout=60)
-        if not self._has_collection(COL_ARCHIVE):
-            self._cli(["collection", "add", str(registry.ARCHIVE_ROOT), "--name", COL_ARCHIVE,
-                       "--mask", "**/*.md"], timeout=120)
-            self._cli(["context", "add", f"qmd://{COL_ARCHIVE}",
-                       "Archived / superseded bioseqdb documents (historical)."], timeout=60)
-            self._cli(["collection", "exclude", COL_ARCHIVE], timeout=60)
+        self._reconcile_collection(
+            name=COL_CURRENT,
+            root=registry.CURRENT_ROOT,
+            context=(
+                "Active bioseqdb engineering docs (specs, plans, reports, "
+                "prompts, research). Files are NNNN_TITLE.md; higher number "
+                "= newer."
+            ),
+            include_by_default=True,
+        )
+        self._reconcile_collection(
+            name=COL_ARCHIVE,
+            root=registry.ARCHIVE_ROOT,
+            context="Archived / superseded bioseqdb documents (historical).",
+            include_by_default=False,
+        )
 
     def _ensure_server(self) -> None:
         if self.client.health():

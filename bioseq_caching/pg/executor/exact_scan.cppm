@@ -21,58 +21,58 @@ export namespace bioseq::cache::pg::executor::exact_scan {
  * pointers (no per-tuple dispatch layer).
  */
 template<
-    auto Begin,
-    auto Execute,
-    auto End,
-    auto Rescan,
-    auto Explain>
+    auto p_begin,
+    auto p_execute,
+    auto p_end,
+    auto p_rescan,
+    auto p_explain>
 [[nodiscard]] const CustomExecMethods& exact_executor_methods() noexcept {
     static const CustomExecMethods methods{
         .CustomName = "BioseqCacheScan",
-        .BeginCustomScan = Begin,
-        .ExecCustomScan = Execute,
-        .EndCustomScan = End,
-        .ReScanCustomScan = Rescan,
-        .ExplainCustomScan = Explain,
+        .BeginCustomScan = p_begin,
+        .ExecCustomScan = p_execute,
+        .EndCustomScan = p_end,
+        .ReScanCustomScan = p_rescan,
+        .ExplainCustomScan = p_explain,
     };
     return methods;
 }
 
 /** Own the exact planner-to-executor state factory table. */
-template<auto CreateState>
+template<auto p_create_state>
 [[nodiscard]] const CustomScanMethods& exact_scan_methods() noexcept {
     static const CustomScanMethods methods{
         .CustomName = "BioseqCacheScan",
-        .CreateCustomScanState = CreateState,
+        .CreateCustomScanState = p_create_state,
     };
     return methods;
 }
 
 /** Own the companion reusable-coverage executor callback table. */
 template<
-    auto Begin,
-    auto Execute,
-    auto End,
-    auto Rescan,
-    auto Explain>
+    auto p_begin,
+    auto p_execute,
+    auto p_end,
+    auto p_rescan,
+    auto p_explain>
 [[nodiscard]] const CustomExecMethods& coverage_executor_methods() noexcept {
     static const CustomExecMethods methods{
         .CustomName = "BioseqReusableCoverageScan",
-        .BeginCustomScan = Begin,
-        .ExecCustomScan = Execute,
-        .EndCustomScan = End,
-        .ReScanCustomScan = Rescan,
-        .ExplainCustomScan = Explain,
+        .BeginCustomScan = p_begin,
+        .ExecCustomScan = p_execute,
+        .EndCustomScan = p_end,
+        .ReScanCustomScan = p_rescan,
+        .ExplainCustomScan = p_explain,
     };
     return methods;
 }
 
 /** Own the reusable-coverage planner-to-executor state factory table. */
-template<auto CreateState>
+template<auto p_create_state>
 [[nodiscard]] const CustomScanMethods& coverage_scan_methods() noexcept {
     static const CustomScanMethods methods{
         .CustomName = "BioseqReusableCoverageScan",
-        .CreateCustomScanState = CreateState,
+        .CreateCustomScanState = p_create_state,
     };
     return methods;
 }

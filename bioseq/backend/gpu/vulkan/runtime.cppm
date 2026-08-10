@@ -282,12 +282,12 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
 /// routes through `runtime::destroy_buffer` (the single cleanup path).
 struct buffer {
     buffer() = default;
-    buffer(runtime* owner, VkBuffer buffer, VkDeviceMemory memory,
+    buffer(runtime* owner, VkBuffer buffer_handle, VkDeviceMemory memory,
            std::uint64_t bytes, std::uint64_t allocation_bytes,
            VkMemoryPropertyFlags memory_properties,
            bool process_footprint_reflected,
            void* mapped) noexcept
-        : owner(owner), buffer(buffer), memory(memory), bytes(bytes),
+        : owner(owner), buffer_handle(buffer_handle), memory(memory), bytes(bytes),
           allocation_bytes(allocation_bytes),
           memory_properties(memory_properties),
           process_footprint_reflected(process_footprint_reflected),
@@ -305,7 +305,9 @@ struct buffer {
     ~buffer() { reset(); }
 
     void reset() noexcept;
-    [[nodiscard]] bool is_valid() const noexcept { return buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] bool is_valid() const noexcept {
+        return buffer_handle != VK_NULL_HANDLE;
+    }
     [[nodiscard]] bool is_host_visible_coherent() const noexcept {
         constexpr VkMemoryPropertyFlags required =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -314,7 +316,7 @@ struct buffer {
     }
 
     runtime* owner = nullptr;
-    VkBuffer buffer = VK_NULL_HANDLE;
+    VkBuffer buffer_handle = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::uint64_t bytes = 0;
     std::uint64_t allocation_bytes = 0;
@@ -325,7 +327,7 @@ struct buffer {
 private:
     void move_from(buffer& other) noexcept {
         owner = other.owner;
-        buffer = other.buffer;
+        buffer_handle = other.buffer_handle;
         memory = other.memory;
         bytes = other.bytes;
         allocation_bytes = other.allocation_bytes;
@@ -333,7 +335,7 @@ private:
         process_footprint_reflected = other.process_footprint_reflected;
         mapped = other.mapped;
         other.owner = nullptr;
-        other.buffer = VK_NULL_HANDLE;
+        other.buffer_handle = VK_NULL_HANDLE;
         other.memory = VK_NULL_HANDLE;
         other.bytes = 0;
         other.allocation_bytes = 0;
@@ -376,18 +378,18 @@ struct runtime_buffer_identity {
 };
 
 /// @brief Captures the allocation identity required by operation receipts.
-/// @param buffer Runtime-owned allocation to capture.
+/// @param allocation Runtime-owned allocation to capture.
 /// @return The allocation identity, or an empty identity for null input.
 [[nodiscard]] inline runtime_buffer_identity make_runtime_buffer_identity(
-    const buffer* buffer) noexcept {
-    if (buffer == nullptr) return {};
+    const buffer* allocation) noexcept {
+    if (allocation == nullptr) return {};
     return runtime_buffer_identity{
-        .object = buffer,
-        .owner = buffer->owner,
-        .buffer_handle = vulkan_handle_identity(buffer->buffer),
-        .memory_handle = vulkan_handle_identity(buffer->memory),
-        .bytes = buffer->bytes,
-        .allocation_bytes = buffer->allocation_bytes,
+        .object = allocation,
+        .owner = allocation->owner,
+        .buffer_handle = vulkan_handle_identity(allocation->buffer_handle),
+        .memory_handle = vulkan_handle_identity(allocation->memory),
+        .bytes = allocation->bytes,
+        .allocation_bytes = allocation->allocation_bytes,
     };
 }
 
@@ -540,7 +542,7 @@ struct runtime_metal_archive_configuration {
             const auto receipt = sealed_shader_cache_detail::
                 parse_metal_archive_qualification_receipt(
                     receipt_image->bytes);
-            if (!receipt || !receipt->production_accepted()
+            if (!receipt || !receipt->is_production_accepted()
                 || receipt->archive_size != archive.size
                 || receipt->archive_sha256 != archive.sha256
                 || receipt->negative_error.domain
@@ -1695,7 +1697,7 @@ inline bool runtime_pipeline_operation_token::is_prepared_exactly(
 inline bool runtime_pipeline_operation_token::is_valid_for_query_sketch()
     const noexcept {
     constexpr std::array required{
-        shader_kind::sketch_tile,
+        shader_kind::ordered_sketch_tile,
         shader_kind::prefix_scan_block,
         shader_kind::prefix_scan_add,
     };
@@ -1707,7 +1709,7 @@ inline bool runtime_pipeline_operation_token::is_valid_for_query_sketch()
     }
     const runtime_pipeline_job_use_audit& job = audit_.jobs.front();
     if (job.committed_submissions != 2u
-        || job.count(shader_kind::sketch_tile) != 2u
+        || job.count(shader_kind::ordered_sketch_tile) != 2u
         || job.count(shader_kind::prefix_scan_block) != 1u
         || job.count(shader_kind::prefix_scan_add) != 2u) {
         return false;
@@ -1796,7 +1798,7 @@ inline bool runtime_pipeline_operation_token::is_valid_for_grouped_soa_coordinat
             || job.count(shader_kind::coordinate_vote_reduce) != 0u
             || job.count(
                 shader_kind::coordinate_vote_reduce_batch) != 0u
-            || job.count(shader_kind::sketch_tile) != 0u) {
+            || job.count(shader_kind::ordered_sketch_tile) != 0u) {
             return false;
         }
     }
@@ -2278,7 +2280,7 @@ self_test_causal_collector_contract(
     }
     const std::array<shader_variant_key, 11> keys{
         make_shader_key(
-            shader_kind::sketch_tile, 384u, 64u, 10u),
+            shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(
             shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(
@@ -2356,9 +2358,9 @@ self_test_causal_collector_contract(
         || query.audit_.jobs[0].submission_ordinals[0] != 1u
         || query.audit_.jobs[0].submission_ordinals[1] != 2u
         || query.audit_.jobs[0].count(
-            shader_kind::sketch_tile) != 2u
+            shader_kind::ordered_sketch_tile) != 2u
         || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
-            shader_kind::sketch_tile)] != 6u
+            shader_kind::ordered_sketch_tile)] != 6u
         || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
             shader_kind::prefix_scan_block)] != 2u
         || query.audit_.jobs[0].workgroups[static_cast<std::size_t>(
@@ -3347,7 +3349,7 @@ struct gpu_built_index {
     buffer slots;
     buffer positions;
     gpu_index_gate_identity gate_identity{};
-    bioseq::parallelism::memory_materialization_commit materialization{};
+    bioseq::parallelism::memory_materialization_result materialization{};
     gpu_index_build_stats ownership{};
     std::uint64_t peak_admission_bytes = 0;
     std::uint64_t observed_device_peak_bytes = 0;
@@ -3649,18 +3651,18 @@ struct gpu_seed_coordinate_batch_stats {
         && lhs.chain_score == rhs.chain_score
         && lhs.seed_count == rhs.seed_count
         && lhs.is_reverse == rhs.is_reverse
-        && lhs.valid == rhs.valid;
+        && lhs.is_valid == rhs.is_valid;
 }
 
 [[nodiscard]] inline constexpr bool is_coordinate_result_wire_well_formed(
     const gpu_coordinate_result_wire& result,
     const std::uint64_t query_len,
     const std::uint64_t target_len) noexcept {
-    if (result.valid == 0u) {
+    if (result.is_valid == 0u) {
         return are_coordinate_result_wires_equal(
             result, gpu_coordinate_result_wire{});
     }
-    if (result.valid != 1u || result.is_reverse > 1u
+    if (result.is_valid != 1u || result.is_reverse > 1u
         || result.seed_count <= 0
         || result.query_start >= result.query_end
         || result.query_end > query_len
@@ -4048,7 +4050,7 @@ struct persisted_grouped_soa_coordinate_job_receipt_preview {
 
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         if (!audit.is_internally_consistent() || audit.anchor_count == 0u
-            || audit.range_count == 0u || audit.result.valid != 1u
+            || audit.range_count == 0u || audit.result.is_valid != 1u
             || shape_pipeline_operation_identity == 0u) {
             return false;
         }
@@ -4790,8 +4792,8 @@ public:
         std::uint32_t minimizer_words32,
         std::uint64_t max_minimizers);
     /// @brief Releases a runtime-owned Vulkan buffer and clears its identity.
-    /// @param buffer Buffer owner to release and invalidate.
-    void destroy_buffer(buffer& buffer) noexcept;
+    /// @param allocation Buffer owner to release and invalidate.
+    void destroy_buffer(buffer& allocation) noexcept;
 
     /// @brief Runs one complete Vulkan chaining submission. This records all H2D copies,
     /// the compute dispatch, all D2H copies, and all barriers into one command
@@ -5304,7 +5306,7 @@ private:
     [[nodiscard]] std::uint64_t
     prefilter_workspace_allocation_bytes_locked() const noexcept;
     void ensure_prefilter_workspace_buffer_locked(
-        buffer& buffer,
+        buffer& allocation,
         std::uint64_t bytes,
         VkBufferUsageFlags usage);
     void release_prefilter_workspace_locked() noexcept;
@@ -5856,7 +5858,7 @@ make_runtime_metal_archive_configuration_image(
     }
     if (archive_count == 0u
         || archive_count
-            > sealed_shader_cache_detail::maximum_seed_image_artifacts) {
+            > sealed_shader_cache_detail::k_maximum_seed_image_artifacts) {
         return std::unexpected(
             "runtime Metal archive configuration archive count is invalid");
     }
@@ -5870,7 +5872,7 @@ make_runtime_metal_archive_configuration_image(
                 archive_count,
                 sizeof(runtime_metal_archive_spec)
                     + 2u * (sealed_shader_cache_detail::
-                                maximum_manifest_filename_bytes
+                                k_maximum_manifest_filename_bytes
                             + 1024u))),
         2u * 1024u);
     const std::uint64_t peak = saturating_mul(
@@ -5924,7 +5926,7 @@ make_runtime_metal_archive_configuration_image(
                 parse_metal_archive_qualification_receipt(
                     qualification_image->bytes);
             if (!qualification
-                || !qualification->production_accepted()
+                || !qualification->is_production_accepted()
                 || qualification->archive_size != artifact.descriptor.size
                 || qualification->archive_sha256
                     != artifact.descriptor.sha256) {
@@ -6871,7 +6873,7 @@ capture_metal_archive_file_snapshot(
     }
     constexpr std::size_t scratch_bytes = 64u * 1024u;
     std::array<std::byte, scratch_bytes> scratch{};
-    sealed_shader_cache_detail::Sha256 hasher;
+    sealed_shader_cache_detail::sha256_hasher hasher;
     std::uint64_t streamed_bytes = 0u;
     bool seed_matches = true;
     for (;;) {
@@ -7226,9 +7228,11 @@ public:
             && ::lstat(path_.c_str(), &path_status) == 0
             && S_ISREG(fd_status.st_mode) && S_ISREG(path_status.st_mode)
             && !S_ISLNK(path_status.st_mode)
-            && sealed_shader_cache_detail::regular_file_identity(fd_status)
+            && sealed_shader_cache_detail::regular_file_identity_from_stat(
+                   fd_status)
                 == identity_
-            && sealed_shader_cache_detail::regular_file_identity(path_status)
+            && sealed_shader_cache_detail::regular_file_identity_from_stat(
+                   path_status)
                 == identity_;
     }
 
@@ -7253,7 +7257,8 @@ public:
         }
         struct stat fd_status {};
         if (::fstat(fd_, &fd_status) != 0
-            || sealed_shader_cache_detail::regular_file_identity(fd_status)
+            || sealed_shader_cache_detail::regular_file_identity_from_stat(
+                   fd_status)
                 != identity_) {
             return std::unexpected(
                 "unlinked private Metal archive descriptor identity changed");
@@ -7323,7 +7328,7 @@ write_open_private_metal_archive(
     }
     open_private_metal_archive result{
         fd_owner.get(), path,
-        sealed_shader_cache_detail::regular_file_identity(status)};
+        sealed_shader_cache_detail::regular_file_identity_from_stat(status)};
     (void)fd_owner.release();
     unlink_owner.release();
     return result;
@@ -7341,7 +7346,7 @@ hash_open_private_metal_archive_once(
         return std::unexpected(
             "private Metal archive is not stable before qualification hash");
     }
-    sealed_shader_cache_detail::Sha256 hasher;
+    sealed_shader_cache_detail::sha256_hasher hasher;
     std::array<std::byte, 64u << 10u> scratch{};
     std::uint64_t streamed = 0u;
     for (;;) {
@@ -7723,7 +7728,7 @@ struct metal_error_identity {
     std::int64_t code = 0;
 };
 
-[[nodiscard]] metal_error_identity metal_error_identity(
+[[nodiscard]] metal_error_identity metal_error_identity_from_error(
     metal_pipeline_archive_interpose& state,
     void* error) {
     if (error == nullptr || state.sel_error_domain == nullptr
@@ -8012,7 +8017,7 @@ enum class metal_pipeline_intercept_verdict : std::uint8_t {
             return metal_pipeline_intercept_verdict::rejected;
         }
         const metal_error_identity negative_identity =
-            metal_error_identity(state, negative_error);
+            metal_error_identity_from_error(state, negative_error);
         scope->audit.observed_negative_error_domain =
             negative_identity.domain;
         scope->audit.observed_negative_error_code = negative_identity.code;
@@ -8844,11 +8849,11 @@ verify_runtime_private_archive_snapshot_for_test(
 // ---------------------------------------------------------------------------
 
 void buffer::reset() noexcept {
-    if (owner != nullptr && buffer != VK_NULL_HANDLE) {
+    if (owner != nullptr && buffer_handle != VK_NULL_HANDLE) {
         owner->destroy_buffer(*this);
     }
     owner = nullptr;
-    buffer = VK_NULL_HANDLE;
+    buffer_handle = VK_NULL_HANDLE;
     memory = VK_NULL_HANDLE;
     bytes = 0;
     allocation_bytes = 0;
@@ -9462,11 +9467,13 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
     buf_info.usage = usage;
     buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkBuffer buffer = VK_NULL_HANDLE;
-    check_vk(vkCreateBuffer(device_, &buf_info, nullptr, &buffer), "vkCreateBuffer(host)");
+    VkBuffer buffer_handle = VK_NULL_HANDLE;
+    check_vk(
+        vkCreateBuffer(device_, &buf_info, nullptr, &buffer_handle),
+        "vkCreateBuffer(host)");
 
     VkMemoryRequirements reqs{};
-    vkGetBufferMemoryRequirements(device_, buffer, &reqs);
+    vkGetBufferMemoryRequirements(device_, buffer_handle, &reqs);
 
     VkMemoryAllocateInfo alloc{};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -9481,18 +9488,18 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
 
     VkDeviceMemory memory = VK_NULL_HANDLE;
     if (vkAllocateMemory(device_, &alloc, nullptr, &memory) != VK_SUCCESS) {
-        vkDestroyBuffer(device_, buffer, nullptr);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkAllocateMemory(host)");
     }
-    if (vkBindBufferMemory(device_, buffer, memory, 0) != VK_SUCCESS) {
+    if (vkBindBufferMemory(device_, buffer_handle, memory, 0) != VK_SUCCESS) {
         vkFreeMemory(device_, memory, nullptr);
-        vkDestroyBuffer(device_, buffer, nullptr);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkBindBufferMemory(host)");
     }
     void* mapped = nullptr;
     if (vkMapMemory(device_, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
         vkFreeMemory(device_, memory, nullptr);
-        vkDestroyBuffer(device_, buffer, nullptr);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkMapMemory(host)");
     }
     const bool footprint_reflected =
@@ -9504,7 +9511,7 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
 #else
         false;
 #endif
-    return buffer{this, buffer, memory, bytes, reqs.size,
+    return buffer{this, buffer_handle, memory, bytes, reqs.size,
                   selected_properties, footprint_reflected, mapped};
 }
 
@@ -9550,11 +9557,11 @@ void runtime::release_prefilter_workspace_locked() noexcept
 }
 
 void runtime::ensure_prefilter_workspace_buffer_locked(
-    buffer& buffer,
+    buffer& allocation,
     std::uint64_t bytes,
     VkBufferUsageFlags usage)
 {
-    if (buffer.is_valid() && buffer.bytes >= bytes) return;
+    if (allocation.is_valid() && allocation.bytes >= bytes) return;
 
     using bioseq::common::saturating_add;
     const std::uint64_t allocation_requirement =
@@ -9597,7 +9604,7 @@ void runtime::ensure_prefilter_workspace_buffer_locked(
             throw vulkan_runtime_error(
                 "rank-prefilter workspace allocation requirement changed");
         }
-        buffer = std::move(replacement);
+        allocation = std::move(replacement);
     } catch (...) {
         const std::uint64_t retained =
             prefilter_workspace_allocation_bytes_locked();
@@ -9666,11 +9673,13 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
     buf_info.usage = usage;
     buf_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkBuffer buffer = VK_NULL_HANDLE;
-    check_vk(vkCreateBuffer(device_, &buf_info, nullptr, &buffer), "vkCreateBuffer(device)");
+    VkBuffer buffer_handle = VK_NULL_HANDLE;
+    check_vk(
+        vkCreateBuffer(device_, &buf_info, nullptr, &buffer_handle),
+        "vkCreateBuffer(device)");
 
     VkMemoryRequirements reqs{};
-    vkGetBufferMemoryRequirements(device_, buffer, &reqs);
+    vkGetBufferMemoryRequirements(device_, buffer_handle, &reqs);
 
     // Vulkan chaining targets unified memory: prefer device-local that is ALSO
     // host-visible+coherent so the round-trip can write/read it directly.
@@ -9706,12 +9715,12 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
 
     VkDeviceMemory memory = VK_NULL_HANDLE;
     if (vkAllocateMemory(device_, &alloc, nullptr, &memory) != VK_SUCCESS) {
-        vkDestroyBuffer(device_, buffer, nullptr);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkAllocateMemory(device)");
     }
-    if (vkBindBufferMemory(device_, buffer, memory, 0) != VK_SUCCESS) {
+    if (vkBindBufferMemory(device_, buffer_handle, memory, 0) != VK_SUCCESS) {
         vkFreeMemory(device_, memory, nullptr);
-        vkDestroyBuffer(device_, buffer, nullptr);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkBindBufferMemory(device)");
     }
     // Map persistently — on unified memory the device-local buffer is
@@ -9731,20 +9740,20 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
 #else
         false;
 #endif
-    return buffer{this, buffer, memory, bytes, reqs.size,
+    return buffer{this, buffer_handle, memory, bytes, reqs.size,
                   selected_properties, footprint_reflected, mapped};
 }
 
-void runtime::destroy_buffer(buffer& buffer) noexcept {
+void runtime::destroy_buffer(buffer& allocation) noexcept {
     if (device_ == VK_NULL_HANDLE) return;
-    if (buffer.mapped != nullptr && buffer.memory != VK_NULL_HANDLE) {
-        vkUnmapMemory(device_, buffer.memory);
+    if (allocation.mapped != nullptr && allocation.memory != VK_NULL_HANDLE) {
+        vkUnmapMemory(device_, allocation.memory);
     }
-    if (buffer.buffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device_, buffer.buffer, nullptr);
+    if (allocation.buffer_handle != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, allocation.buffer_handle, nullptr);
     }
-    if (buffer.memory != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, buffer.memory, nullptr);
+    if (allocation.memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, allocation.memory, nullptr);
     }
 }
 
@@ -10131,10 +10140,10 @@ void runtime::run_chaining_tiled_dp_roundtrip(
 
     // Point the reusable descriptor set at this call's four buffers.
     const std::array<VkDescriptorBufferInfo, 4> buffer_infos{{
-        {anchors.buffer, 0, VK_WHOLE_SIZE},
-        {ranges.buffer, 0, VK_WHOLE_SIZE},
-        {best_scores.buffer, 0, VK_WHOLE_SIZE},
-        {predecessors.buffer, 0, VK_WHOLE_SIZE},
+        {anchors.buffer_handle, 0, VK_WHOLE_SIZE},
+        {ranges.buffer_handle, 0, VK_WHOLE_SIZE},
+        {best_scores.buffer_handle, 0, VK_WHOLE_SIZE},
+        {predecessors.buffer_handle, 0, VK_WHOLE_SIZE},
     }};
     std::array<VkWriteDescriptorSet, 4> writes{};
     for (std::uint32_t b = 0; b < 4; ++b) {
@@ -10272,10 +10281,10 @@ gpu_coordinate_chain_trace_result runtime::run_chaining_coordinate_trace_roundtr
     std::memset(result_buf.mapped, 0, static_cast<std::size_t>(result_buf.bytes));
 
     const std::array<VkDescriptorBufferInfo, 4> chain_infos{{
-        {anchors.buffer, 0, VK_WHOLE_SIZE},
-        {ranges.buffer, 0, VK_WHOLE_SIZE},
-        {best_scores.buffer, 0, VK_WHOLE_SIZE},
-        {predecessors.buffer, 0, VK_WHOLE_SIZE},
+        {anchors.buffer_handle, 0, VK_WHOLE_SIZE},
+        {ranges.buffer_handle, 0, VK_WHOLE_SIZE},
+        {best_scores.buffer_handle, 0, VK_WHOLE_SIZE},
+        {predecessors.buffer_handle, 0, VK_WHOLE_SIZE},
     }};
     std::array<VkWriteDescriptorSet, 4> writes{};
     for (std::uint32_t b = 0; b < 4; ++b) {
@@ -10348,12 +10357,12 @@ gpu_coordinate_chain_trace_result runtime::run_chaining_coordinate_trace_roundtr
         nullptr);
 
     const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
-        {anchors.buffer, 0, VK_WHOLE_SIZE},
-        {best_scores.buffer, 0, VK_WHOLE_SIZE},
-        {predecessors.buffer, 0, VK_WHOLE_SIZE},
-        {visited.buffer, 0, visited.bytes},
-        {trace.buffer, 0, trace.bytes},
-        {result_buf.buffer, 0, result_buf.bytes},
+        {anchors.buffer_handle, 0, VK_WHOLE_SIZE},
+        {best_scores.buffer_handle, 0, VK_WHOLE_SIZE},
+        {predecessors.buffer_handle, 0, VK_WHOLE_SIZE},
+        {visited.buffer_handle, 0, visited.bytes},
+        {trace.buffer_handle, 0, trace.bytes},
+        {result_buf.buffer_handle, 0, result_buf.bytes},
     }};
     gpu_coordinate_reduce_push coord_push{
         .anchor_count = anchor_count,
@@ -10397,7 +10406,7 @@ gpu_coordinate_chain_trace_result runtime::run_chaining_coordinate_trace_roundtr
     check_vk(vkResetFences(device_, 1, &fence_), "reset_fence(chain_coord)");
 
     std::memcpy(&out.result, result_buf.mapped, sizeof(out.result));
-    if (out.result.valid != 0u) {
+    if (out.result.is_valid != 0u) {
         if (out.result.seed_count < 0
             || static_cast<std::uint64_t>(out.result.seed_count) > anchor_count) {
             throw vulkan_runtime_error("coordinate-only chaining produced invalid trace length");
@@ -11461,11 +11470,11 @@ seed_lookup_result runtime::run_seed_lookup_roundtrip(
 
     {
         const std::array<VkBuffer, 6> seed_bufs{
-            min_words->buffer, inputs.slots->buffer, inputs.positions->buffer,
-            prefix_buf.buffer, anchors_buf.buffer, anchor_keys_buf.buffer};
+            min_words->buffer_handle, inputs.slots->buffer_handle, inputs.positions->buffer_handle,
+            prefix_buf.buffer_handle, anchors_buf.buffer_handle, anchor_keys_buf.buffer_handle};
         bind_compute_pipeline_descriptors_locked(seed_pipe, seed_bufs);
         if (sort_plan.backend == seed_anchor_sort_backend::bitonic) {
-            const std::array<VkBuffer, 2> sort_bufs{anchors_buf.buffer, ranges_buf.buffer};
+            const std::array<VkBuffer, 2> sort_bufs{anchors_buf.buffer_handle, ranges_buf.buffer_handle};
             bind_compute_pipeline_descriptors_locked(*sort_pipe, sort_bufs);
         }
     }
@@ -11866,7 +11875,7 @@ buffer runtime::run_generate_units_roundtrip(
     buffer scratch = create_host_buffer(4u, k_compute_buffer_usage);
     upload_locked(scratch, cdf_buf, std::as_bytes(cdf), VK_ACCESS_SHADER_READ_BIT);
 
-    const std::array<VkBuffer, 2> buffers{out.buffer, cdf_buf.buffer};
+    const std::array<VkBuffer, 2> buffers{out.buffer_handle, cdf_buf.buffer_handle};
     bind_compute_pipeline_descriptors_locked(pipe, buffers);
 
     const std::uint64_t max_groups = features_.max_workgroup_count_x;
@@ -12025,7 +12034,7 @@ void gpu_arena::bind_storage_slice(
     VkWriteDescriptorSet& write, VkDescriptorBufferInfo& info,
     std::uint32_t binding, VkDescriptorSet dst_set, const gpu_arena_slice& slice) const noexcept
 {
-    info = VkDescriptorBufferInfo{slice.buffer->buffer, slice.offset, slice.size};
+    info = VkDescriptorBufferInfo{slice.buffer->buffer_handle, slice.offset, slice.size};
     write = VkWriteDescriptorSet{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = dst_set;
@@ -12163,11 +12172,11 @@ void runtime::record_radix_sort_locked(
             pass * plan.radix_bits, num_workgroups, elems_per_wg, value_words};
 
         const std::array<VkDescriptorBufferInfo, 5> infos{{
-            {cur_keys.buffer->buffer, cur_keys.offset, cur_keys.size},
-            {cur_vals.buffer->buffer, cur_vals.offset, cur_vals.size},
-            {out_keys.buffer->buffer, out_keys.offset, out_keys.size},
-            {out_vals.buffer->buffer, out_vals.offset, out_vals.size},
-            {histogram.buffer->buffer, histogram.offset, histogram.size},
+            {cur_keys.buffer->buffer_handle, cur_keys.offset, cur_keys.size},
+            {cur_vals.buffer->buffer_handle, cur_vals.offset, cur_vals.size},
+            {out_keys.buffer->buffer_handle, out_keys.offset, out_keys.size},
+            {out_vals.buffer->buffer_handle, out_vals.offset, out_vals.size},
+            {histogram.buffer->buffer_handle, histogram.offset, histogram.size},
         }};
         record_compute_dispatch_locked(
             cmd, hist_pipe, infos, &push, sizeof(push), num_workgroups,
@@ -12339,7 +12348,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(
         w,
         params.letters_per_unit,
         features_.max_workgroup_count_x);
-    if (!memory_plan.valid) {
+    if (!memory_plan.is_valid) {
         throw vulkan_runtime_error(fmt::format(
             "gpu sketch memory plan invalid (bp={}, max_min={}, lpu={})",
             bp,
@@ -12381,7 +12390,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(
     }
     const gpu_arena_mark mark = arena.mark();
 
-    const gpu_arena_slice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const gpu_arena_slice seq_s =
+        arena.allocate_device(memory_plan.sequence_bytes, 16u);
     const gpu_arena_slice lut_s = arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
     const gpu_arena_slice tiles_s = arena.allocate_device(memory_plan.tile_bytes, 16u);
     const gpu_arena_slice counts_s =
@@ -12431,7 +12441,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(
                   static_cast<std::size_t>(out_words.bytes));
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::sketch_tile, k_sketch_local_size,
+        shader_kind::ordered_sketch_tile, k_sketch_local_size,
         std::max<std::uint32_t>(w, 1u));
     const compute_pipeline scan_block_pipe = get_compute_pipeline_locked(
         shader_kind::prefix_scan_block, 1u, 1u);
@@ -12442,21 +12452,21 @@ runtime_sketch_result runtime::run_sketch_roundtrip(
     const gpu_arena_slice &gate_binding_s =
         query_gate_bytes == 0u ? counters_s : query_gate_s;
     const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
-        {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-        {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-        {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-        {out_words.buffer, 0, VK_WHOLE_SIZE},
-        {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
-        {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
-        {gate_binding_s.buffer->buffer, gate_binding_s.offset,
+        {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+        {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+        {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+        {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+        {out_words.buffer_handle, 0, VK_WHOLE_SIZE},
+        {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+        {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
+        {pairvals_s.buffer->buffer_handle, pairvals_s.offset, pairvals_s.size},
+        {gate_binding_s.buffer->buffer_handle, gate_binding_s.offset,
          gate_binding_s.size},
     }};
     const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
-        {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
+        {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+        {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
+        {blocks_s.buffer->buffer_handle, blocks_s.offset, blocks_s.size},
     }};
 
     sketch_push_constants push{0u,
@@ -12722,7 +12732,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             next_operation_identity_locked());
     }
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::sketch_tile,
+        shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
         std::max<std::uint32_t>(w, 1u));
     const compute_pipeline scan_block_pipe = get_compute_pipeline_locked(
@@ -12753,26 +12763,26 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     const VkDescriptorBufferInfo initial_output_info =
         materialization == vulkan_sketch_host_materialization::host_and_device
         ? VkDescriptorBufferInfo{
-            host_materialized_out_words.buffer, 0, VK_WHOLE_SIZE}
+            host_materialized_out_words.buffer_handle, 0, VK_WHOLE_SIZE}
         : VkDescriptorBufferInfo{
-            counters_s.buffer->buffer,
+            counters_s.buffer->buffer_handle,
             counters_s.offset,
             counters_s.size};
     const std::array<VkDescriptorBufferInfo, 9> count_sketch_infos{{
-        {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-        {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-        {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
+        {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+        {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+        {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+        {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
         initial_output_info,
-        {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
-        {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
-        {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+        {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+        {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
+        {pairvals_s.buffer->buffer_handle, pairvals_s.offset, pairvals_s.size},
+        {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
     }};
     const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-        {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-        {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
-        {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
+        {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+        {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
+        {blocks_s.buffer->buffer_handle, blocks_s.offset, blocks_s.size},
     }};
 
     sketch_push_constants push{
@@ -12923,15 +12933,15 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         }
 
         const std::array<VkDescriptorBufferInfo, 9> emit_sketch_infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-            {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {out_words.buffer, 0, VK_WHOLE_SIZE},
-            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-            {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
-            {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
-            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+            {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {out_words.buffer_handle, 0, VK_WHOLE_SIZE},
+            {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+            {offsets_s.buffer->buffer_handle, offsets_s.offset, offsets_s.size},
+            {pairvals_s.buffer->buffer_handle, pairvals_s.offset, pairvals_s.size},
+            {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
         }};
 
         // The first queue submission is complete, so its descriptor sets may
@@ -12993,7 +13003,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         result.query_authority.identity_ =
             next_operation_identity_locked();
         result.query_authority.runtime_ = this;
-        result.query_authority.buffer_ = result.minimizer_words.buffer;
+        result.query_authority.buffer_ = result.minimizer_words.buffer_handle;
         result.query_authority.memory_identity_ = vulkan_handle_identity(
             result.minimizer_words.memory);
         result.query_authority.buffer_bytes_ = result.minimizer_words.bytes;
@@ -13109,7 +13119,7 @@ void runtime::prepare_target_index_pipelines_locked(
     // later getters in count, radix, mark, and bucket stages are cache hits
     // under the operation's transient allocation permit.
     (void)get_compute_pipeline_locked(
-        shader_kind::sketch_tile,
+        shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
         std::max<std::uint32_t>(params.window_size, 1u));
     (void)get_compute_pipeline_locked(
@@ -13123,9 +13133,9 @@ void runtime::prepare_target_index_pipelines_locked(
     (void)get_compute_pipeline_locked(
         shader_kind::radix_sort_scatter, 1u, 1u);
     (void)get_compute_pipeline_locked(
-        shader_kind::index_mark_runs, 128u, 1u);
+        shader_kind::target_index_mark_runs, 128u, 1u);
     (void)get_compute_pipeline_locked(
-        shader_kind::index_emit_buckets, 128u, 1u);
+        shader_kind::target_index_emit_buckets, 128u, 1u);
 }
 
 void runtime::prepare_target_index_pipelines(
@@ -13240,14 +13250,14 @@ gpu_built_index runtime::build_target_index(
         w,
         params.letters_per_unit,
         features_.max_workgroup_count_x);
-    if (!memory_plan.valid) {
+    if (!memory_plan.is_valid) {
         out.failure_reason = gpu_index_build_failure::memory_plan_invalid;
         return out;
     }
     const gpu_target_index_host_scratch_plan host_scratch_plan =
         make_gpu_target_index_host_scratch_plan(
             memory_plan, owned_sequence_staging_bytes);
-    if (!host_scratch_plan.valid
+    if (!host_scratch_plan.is_valid
         || (owned_sequence_staging_bytes != 0u
             && !release_owned_sequence_staging)) {
         out.failure_reason = gpu_index_build_failure::memory_plan_invalid;
@@ -13315,7 +13325,8 @@ gpu_built_index runtime::build_target_index(
             arena_bytes));
     }
     const gpu_arena_mark mark = arena.mark();
-    const gpu_arena_slice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const gpu_arena_slice seq_s =
+        arena.allocate_device(memory_plan.sequence_bytes, 16u);
     const gpu_arena_slice lut_s =
         arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
     const gpu_arena_slice tiles_s =
@@ -13412,7 +13423,7 @@ gpu_built_index runtime::build_target_index(
     }
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::sketch_tile,
+        shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
         std::max<std::uint32_t>(w, 1u));
     const compute_pipeline scan_block_pipe = get_compute_pipeline_locked(
@@ -13441,20 +13452,20 @@ gpu_built_index runtime::build_target_index(
             auto _rs = bioseq::instrumentation::region(_rd);
             reset_dispatch_descriptor_pool_locked();
             const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
-                {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-                {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-                {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-                {tcounts_s.buffer->buffer, tcounts_s.offset, tcounts_s.size},
-                {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-                {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-                {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
-                {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-                {gate_binding_s.buffer->buffer, gate_binding_s.offset, gate_binding_s.size},
+                {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+                {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+                {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+                {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
+                {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+                {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+                {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
+                {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+                {gate_binding_s.buffer->buffer_handle, gate_binding_s.offset, gate_binding_s.size},
             }};
             const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-                {tcounts_s.buffer->buffer, tcounts_s.offset, tcounts_s.size},
-                {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
-                {tblocks_s.buffer->buffer, tblocks_s.offset, tblocks_s.size},
+                {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
+                {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
+                {tblocks_s.buffer->buffer_handle, tblocks_s.offset, tblocks_s.size},
             }};
             sketch_push_constants push{0u, w, k, params.hash_bits, params.hash_shift, params.pos_bits,
                 params.minimizer_word_kind, params.minimizer_words32, k, params.alphabet_kind,
@@ -13682,7 +13693,7 @@ gpu_built_index runtime::build_target_index(
     const std::uint64_t exact_execution_admission = bioseq::common::saturating_add(
         exact_device_peak,
         exact_main_plan.execution_submit_host_transient_bytes);
-    if (peak_permit == nullptr || !exact_main_plan.valid
+    if (peak_permit == nullptr || !exact_main_plan.is_valid
         || exact_execution_admission == (std::numeric_limits<std::uint64_t>::max)()) {
         out.failure_reason =
             gpu_index_build_failure::peak_allocation_exceeds_admission;
@@ -13739,15 +13750,15 @@ gpu_built_index runtime::build_target_index(
         auto _rs = bioseq::instrumentation::region(_rd);
         reset_dispatch_descriptor_pool_locked();
         const std::array<VkDescriptorBufferInfo, 9> infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-            {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-            {tcounts_s.buffer->buffer, tcounts_s.offset, tcounts_s.size},
-            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},             // out_words
-            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-            {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
-            {vals_s.buffer->buffer, vals_s.offset, vals_s.size},             // out_pair_vals
-            {gate_binding_s.buffer->buffer, gate_binding_s.offset, gate_binding_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+            {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+            {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
+            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size},             // out_words
+            {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+            {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
+            {vals_s.buffer->buffer_handle, vals_s.offset, vals_s.size},             // out_pair_vals
+            {gate_binding_s.buffer->buffer_handle, gate_binding_s.offset, gate_binding_s.size},
         }};
         sketch_push_constants push{1u, w, k, params.hash_bits, params.hash_shift, params.pos_bits,
             params.minimizer_word_kind, params.minimizer_words32, k, params.alphabet_kind,
@@ -13920,7 +13931,7 @@ gpu_built_index runtime::build_target_index(
                 0u, nullptr, 0u, nullptr);
             const VkBufferCopy copy{0u, 0u, tm * 8u};
             vkCmdCopyBuffer(
-                command_buffer_, vals.buffer, vals_scr.buffer, 1u, &copy);
+                command_buffer_, vals.buffer_handle, vals_scr.buffer_handle, 1u, &copy);
             VkMemoryBarrier copy_to_host{};
             copy_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             copy_to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -14003,7 +14014,7 @@ gpu_built_index runtime::build_target_index(
         return out;
     }
     const VkDescriptorBufferInfo dummy{
-        counters_s.buffer->buffer, counters_s.offset, counters_s.size};
+        counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size};
 
     // --- Submit 2b: mark runs and scan flags after sort scratch is released. ---
     {
@@ -14019,11 +14030,11 @@ gpu_built_index runtime::build_target_index(
         record_host_to_shader(command_buffer_);
         record_compute_barrier(command_buffer_);
         const compute_pipeline mark_pipe = get_compute_pipeline_locked(
-            shader_kind::index_mark_runs, 128u, 1u);
+            shader_kind::target_index_mark_runs, 128u, 1u);
         const std::array<VkDescriptorBufferInfo, 7> idx_infos{{
-            {sorted_keys_s.buffer->buffer, sorted_keys_s.offset, sorted_keys_s.size},
-            {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
-            {scanned_s.buffer->buffer, scanned_s.offset, scanned_s.size},
+            {sorted_keys_s.buffer->buffer_handle, sorted_keys_s.offset, sorted_keys_s.size},
+            {flags_s.buffer->buffer_handle, flags_s.offset, flags_s.size},
+            {scanned_s.buffer->buffer_handle, scanned_s.offset, scanned_s.size},
             dummy, dummy, dummy, dummy,
         }};
         index_push_constants ipush{static_cast<std::uint32_t>(tm), 0u, 0u, 0u, 0u, 0u};
@@ -14040,9 +14051,9 @@ gpu_built_index runtime::build_target_index(
             shader_kind::prefix_scan_add, 128u, 1u);
         const std::uint32_t inb = bioseq::common::ceil_div(tm, k_prefix_scan_block_size);
         const std::array<VkDescriptorBufferInfo, 3> iscan{{
-            {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
-            {scanned_s.buffer->buffer, scanned_s.offset, scanned_s.size},
-            {iblocks_s.buffer->buffer, iblocks_s.offset, iblocks_s.size},
+            {flags_s.buffer->buffer_handle, flags_s.offset, flags_s.size},
+            {scanned_s.buffer->buffer_handle, scanned_s.offset, scanned_s.size},
+            {iblocks_s.buffer->buffer_handle, iblocks_s.offset, iblocks_s.size},
         }};
         scan_push_constants is0{static_cast<std::uint32_t>(tm), k_prefix_scan_block_size, inb, 0u};
         scan_push_constants is1{static_cast<std::uint32_t>(tm), k_prefix_scan_block_size, inb, 1u};
@@ -14138,15 +14149,16 @@ gpu_built_index runtime::build_target_index(
         auto _rs = bioseq::instrumentation::region(_rd);
         const gpu_arena_slice& sorted_keys = sorted_in_scratch ? keys_scr_s : keys_s;
         const std::array<VkDescriptorBufferInfo, 7> idx_infos{{
-            {sorted_keys.buffer->buffer, sorted_keys.offset, sorted_keys.size},
-            {flags_s.buffer->buffer, flags_s.offset, flags_s.size},
-            {scanned_s.buffer->buffer, scanned_s.offset, scanned_s.size},
-            {buckets_s.buffer->buffer, buckets_s.offset, buckets_s.size},
+            {sorted_keys.buffer->buffer_handle, sorted_keys.offset, sorted_keys.size},
+            {flags_s.buffer->buffer_handle, flags_s.offset, flags_s.size},
+            {scanned_s.buffer->buffer_handle, scanned_s.offset, scanned_s.size},
+            {buckets_s.buffer->buffer_handle, buckets_s.offset, buckets_s.size},
             dummy, dummy, dummy,
         }};
         index_push_constants ipush{static_cast<std::uint32_t>(tm), 0u, 0u, num_buckets, 0u, 0u};
         reset_dispatch_descriptor_pool_locked();
-        const compute_pipeline emit_b = get_compute_pipeline_locked(shader_kind::index_emit_buckets, 128u, 1u);
+        const compute_pipeline emit_b = get_compute_pipeline_locked(
+            shader_kind::target_index_emit_buckets, 128u, 1u);
         VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx3)");
@@ -14233,7 +14245,7 @@ gpu_sorted_pair_result runtime::run_sketch_sort_pairs_roundtrip(
         window_size,
         params.letters_per_unit,
         features_.max_workgroup_count_x);
-    if (!memory_plan.valid) {
+    if (!memory_plan.is_valid) {
         return out;
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
@@ -14270,7 +14282,8 @@ gpu_sorted_pair_result runtime::run_sketch_sort_pairs_roundtrip(
     }
 
     const gpu_arena_mark mark = arena.mark();
-    const gpu_arena_slice seq_s = arena.allocate_device(memory_plan.seq_bytes, 16u);
+    const gpu_arena_slice seq_s =
+        arena.allocate_device(memory_plan.sequence_bytes, 16u);
     const gpu_arena_slice lut_s =
         arena.allocate_device(memory_plan.rank_lut_bytes, 16u);
     const gpu_arena_slice tiles_s =
@@ -14299,7 +14312,7 @@ gpu_sorted_pair_result runtime::run_sketch_sort_pairs_roundtrip(
     std::memset(base + tcounts_s.offset, 0, static_cast<std::size_t>(tcounts_s.size));
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::sketch_tile,
+        shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
         std::max<std::uint32_t>(window_size, 1u));
 
@@ -14328,15 +14341,15 @@ gpu_sorted_pair_result runtime::run_sketch_sort_pairs_roundtrip(
         auto _sketch_s = bioseq::instrumentation::region(_sketch_d);
         reset_dispatch_descriptor_pool_locked();
         const std::array<VkDescriptorBufferInfo, 9> infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
-            {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
-            {tcounts_s.buffer->buffer, tcounts_s.offset, tcounts_s.size},
-            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},
-            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
-            {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
-            {values_s.buffer->buffer, values_s.offset, values_s.size},
-            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {lut_s.buffer->buffer_handle, lut_s.offset, lut_s.size},
+            {tiles_s.buffer->buffer_handle, tiles_s.offset, tiles_s.size},
+            {tcounts_s.buffer->buffer_handle, tcounts_s.offset, tcounts_s.size},
+            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size},
+            {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
+            {toffsets_s.buffer->buffer_handle, toffsets_s.offset, toffsets_s.size},
+            {values_s.buffer->buffer_handle, values_s.offset, values_s.size},
+            {counters_s.buffer->buffer_handle, counters_s.offset, counters_s.size},
         }};
         sketch_push_constants push{
             2u,
@@ -14652,10 +14665,10 @@ std::vector<std::uint32_t> runtime::run_sequence_sort_roundtrip(
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort-dense)");
         record_host_to_shader(command_buffer_);
         const std::array<VkDescriptorBufferInfo, 4> dense_infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
-            {index_s.buffer->buffer, index_s.offset, index_s.size},
-            {dense_status_s.buffer->buffer, dense_status_s.offset, dense_status_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer_handle, descs_s.offset, descs_s.size},
+            {index_s.buffer->buffer_handle, index_s.offset, index_s.size},
+            {dense_status_s.buffer->buffer_handle, dense_status_s.offset, dense_status_s.size},
         }};
         if (key_offset != 0u) {
             record_compute_dispatch_locked(
@@ -14692,10 +14705,10 @@ std::vector<std::uint32_t> runtime::run_sequence_sort_roundtrip(
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort1)");
         record_host_to_shader(command_buffer_);
         const std::array<VkDescriptorBufferInfo, 4> key_infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
-            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},
-            {vals_s.buffer->buffer, vals_s.offset, vals_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer_handle, descs_s.offset, descs_s.size},
+            {keys_s.buffer->buffer_handle, keys_s.offset, keys_s.size},
+            {vals_s.buffer->buffer_handle, vals_s.offset, vals_s.size},
         }};
         record_compute_dispatch_locked(command_buffer_, key_pipe, key_infos,
                                        &key_push, sizeof(key_push), bioseq::common::ceil_div(n, k_sequence_sort_local_size));
@@ -14762,20 +14775,20 @@ std::vector<std::uint32_t> runtime::run_sequence_sort_roundtrip(
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(seqsort2)");
         record_host_to_shader(command_buffer_);
         const std::array<VkDescriptorBufferInfo, 4> tb_infos{{
-            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-            {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
-            {index_s.buffer->buffer, index_s.offset, index_s.size},
-            {ranges_s.buffer->buffer, ranges_s.offset, ranges_s.size},
+            {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+            {descs_s.buffer->buffer_handle, descs_s.offset, descs_s.size},
+            {index_s.buffer->buffer_handle, index_s.offset, index_s.size},
+            {ranges_s.buffer->buffer_handle, ranges_s.offset, ranges_s.size},
         }};
         record_compute_dispatch_locked(command_buffer_, tb_pipe, tb_infos,
                                        &tb_push, sizeof(tb_push),
                                        static_cast<std::uint32_t>(ranges.size()));
         if (has_oversized_run) {
             const std::array<VkDescriptorBufferInfo, 4> gc_infos{{
-                {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
-                {descs_s.buffer->buffer, descs_s.offset, descs_s.size},
-                {index_s.buffer->buffer, index_s.offset, index_s.size},
-                {ranges_s.buffer->buffer, ranges_s.offset, ranges_s.size},
+                {seq_s.buffer->buffer_handle, seq_s.offset, seq_s.size},
+                {descs_s.buffer->buffer_handle, descs_s.offset, descs_s.size},
+                {index_s.buffer->buffer_handle, index_s.offset, index_s.size},
+                {ranges_s.buffer->buffer_handle, ranges_s.offset, ranges_s.size},
             }};
             for (std::uint32_t sort_size = 2u; sort_size <= padded_n; ) {
                 for (std::uint32_t stride = sort_size >> 1u; stride > 0u; stride >>= 1u) {
@@ -14862,10 +14875,10 @@ std::vector<gpu_alignment_extension_result_wire> runtime::run_alignment_extensio
     std::memset(results_buf.mapped, 0, static_cast<std::size_t>(result_bytes));
 
     const std::array<VkDescriptorBufferInfo, 4> infos{{
-        {query_buf.buffer, 0, query_buf.bytes},
-        {target_buf.buffer, 0, target_buf.bytes},
-        {jobs_buf.buffer, 0, jobs_buf.bytes},
-        {results_buf.buffer, 0, results_buf.bytes},
+        {query_buf.buffer_handle, 0, query_buf.bytes},
+        {target_buf.buffer_handle, 0, target_buf.bytes},
+        {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
+        {results_buf.buffer_handle, 0, results_buf.bytes},
     }};
     const alignment_extension_push_constants push = alignment_extension_push(
         static_cast<std::uint32_t>(jobs.size()), params);
@@ -15125,10 +15138,10 @@ runtime::run_rank_prefilter_batch_roundtrip_locked(
             * sizeof(bioseq::prefilter::prefilter_job));
 
     const std::array<VkBuffer, 4> descriptor_buffers{{
-        prefilter_query_buffer_.buffer,
-        prefilter_target_buffer_.buffer,
-        prefilter_jobs_buffer_.buffer,
-        prefilter_results_buffer_.buffer,
+        prefilter_query_buffer_.buffer_handle,
+        prefilter_target_buffer_.buffer_handle,
+        prefilter_jobs_buffer_.buffer_handle,
+        prefilter_results_buffer_.buffer_handle,
     }};
     prefilter_descriptor_binding_cache& descriptor_binding_cache =
         prefilter_descriptor_binding_cache_[gatekeeper ? 1u : 0u];
@@ -15334,12 +15347,12 @@ alignment_cigar_batch_result runtime::run_alignment_simple_cigar_roundtrip(
     std::memset(cigar_buf.mapped, 0, static_cast<std::size_t>(cigar_bytes));
 
     const std::array<VkDescriptorBufferInfo, 6> infos{{
-        {query_buf.buffer, 0, query_buf.bytes},
-        {target_buf.buffer, 0, target_buf.bytes},
-        {jobs_buf.buffer, 0, jobs_buf.bytes},
-        {results_buf.buffer, 0, results_buf.bytes},
-        {cigar_buf.buffer, 0, cigar_buf.bytes},
-        {traceback_buf.buffer, 0, traceback_buf.bytes},
+        {query_buf.buffer_handle, 0, query_buf.bytes},
+        {target_buf.buffer_handle, 0, target_buf.bytes},
+        {jobs_buf.buffer_handle, 0, jobs_buf.bytes},
+        {results_buf.buffer_handle, 0, results_buf.bytes},
+        {cigar_buf.buffer_handle, 0, cigar_buf.bytes},
+        {traceback_buf.buffer_handle, 0, traceback_buf.bytes},
     }};
     const alignment_cigar_push_constants push = alignment_cigar_push(
         static_cast<std::uint32_t>(jobs.size()), params);
@@ -15620,12 +15633,12 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
             throw vulkan_runtime_error(
                 "gpu grouped-SoA resident buffers are invalid, foreign, or not coherent");
         }
-        if (common_shape_view->descriptors->buffer
-                == common_shape_view->controls->buffer
-            || common_shape_view->descriptors->buffer
-                == common_shape_view->positions->buffer
-            || common_shape_view->controls->buffer
-                == common_shape_view->positions->buffer) {
+        if (common_shape_view->descriptors->buffer_handle
+                == common_shape_view->controls->buffer_handle
+            || common_shape_view->descriptors->buffer_handle
+                == common_shape_view->positions->buffer_handle
+            || common_shape_view->controls->buffer_handle
+                == common_shape_view->positions->buffer_handle) {
             throw vulkan_runtime_error(
                 "gpu grouped-SoA resident buffers must not alias");
         }
@@ -15815,7 +15828,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
         if (!query_authority.is_valid()
             || query_authority.runtime_ != this
             || query_authority.buffer_
-                != query_inputs.device_minimizer_words->buffer
+                != query_inputs.device_minimizer_words->buffer_handle
             || query_authority.memory_identity_
                 != vulkan_handle_identity(
                     query_inputs.device_minimizer_words->memory)
@@ -15838,11 +15851,11 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                 "gpu grouped-SoA direct route lacks matching one-shot query authority");
         }
         if (query_authority.buffer_
-                == common_shape_view->descriptors->buffer
+                == common_shape_view->descriptors->buffer_handle
             || query_authority.buffer_
-                == common_shape_view->controls->buffer
+                == common_shape_view->controls->buffer_handle
             || query_authority.buffer_
-                == common_shape_view->positions->buffer) {
+                == common_shape_view->positions->buffer_handle) {
             throw vulkan_runtime_error(
                 "gpu grouped-SoA query image aliases resident target storage");
         }
@@ -15977,8 +15990,8 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
             }
 
             const VkBuffer min_words_buffer = query_inputs.device_minimizer_words != nullptr
-                ? query_inputs.device_minimizer_words->buffer
-                : minw_s.buffer->buffer;
+                ? query_inputs.device_minimizer_words->buffer_handle
+                : minw_s.buffer->buffer_handle;
             const std::uint64_t min_words_offset =
                 query_inputs.device_minimizer_words != nullptr ? 0u : minw_s.offset;
             const std::uint64_t min_words_range =
@@ -16254,18 +16267,18 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     batch_seed_push.emit_mode = 0u;
                     const std::array<VkDescriptorBufferInfo, 8> count_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {first_active->job.slots->buffer, 0, VK_WHOLE_SIZE},
-                        {first_active->job.positions->buffer, 0, VK_WHOLE_SIZE},
-                        {batch_qrec_buf.buffer, 0, batch_qrec_buf.bytes},
-                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
-                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
-                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
-                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
+                        {first_active->job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {first_active->job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {batch_qrec_buf.buffer_handle, 0, batch_qrec_buf.bytes},
+                        {batch_counts_buf.buffer_handle, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer_handle, 0, batch_prefix_buf.bytes},
+                        {batch_counts_buf.buffer_handle, 0, batch_counts_buf.bytes},
+                        {batch_counts_buf.buffer_handle, 0, batch_counts_buf.bytes},
                     }};
                     const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
-                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
-                        {batch_blocks_buf.buffer, 0, batch_blocks_buf.bytes},
+                        {batch_counts_buf.buffer_handle, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer_handle, 0, batch_prefix_buf.bytes},
+                        {batch_blocks_buf.buffer_handle, 0, batch_blocks_buf.bytes},
                     }};
                     scan_push_constants scan{
                         total_mc, k_prefix_scan_block_size, total_blocks, 0u};
@@ -16459,13 +16472,13 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     batch_seed_push.emit_mode = 1u;
                     const std::array<VkDescriptorBufferInfo, 8> emit_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {first_active->job.slots->buffer, 0, VK_WHOLE_SIZE},
-                        {first_active->job.positions->buffer, 0, VK_WHOLE_SIZE},
-                        {batch_qrec_buf.buffer, 0, batch_qrec_buf.bytes},
-                        {batch_counts_buf.buffer, 0, batch_counts_buf.bytes},
-                        {batch_prefix_buf.buffer, 0, batch_prefix_buf.bytes},
-                        {batch_anchors_buf.buffer, 0, batch_anchors_buf.bytes},
-                        {batch_anchor_keys_buf.buffer, 0, batch_anchor_keys_buf.bytes},
+                        {first_active->job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {first_active->job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {batch_qrec_buf.buffer_handle, 0, batch_qrec_buf.bytes},
+                        {batch_counts_buf.buffer_handle, 0, batch_counts_buf.bytes},
+                        {batch_prefix_buf.buffer_handle, 0, batch_prefix_buf.bytes},
+                        {batch_anchors_buf.buffer_handle, 0, batch_anchors_buf.bytes},
+                        {batch_anchor_keys_buf.buffer_handle, 0, batch_anchor_keys_buf.bytes},
                     }};
                     record_compute_dispatch_locked(
                         command_buffer_, emit_pipe, emit_infos,
@@ -16474,12 +16487,12 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     run.stats.seed_emit_dispatches += 1u;
                     record_compute_barrier(command_buffer_);
                     const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
-                        {batch_anchors_buf.buffer, 0, batch_anchors_buf.bytes},
-                        {vote_jobs_buf.buffer, 0, vote_jobs_buf.bytes},
-                        {batch_anchor_keys_buf.buffer, 0, batch_anchor_keys_buf.bytes},
-                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
-                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
-                        {vote_results_buf.buffer, 0, vote_results_buf.bytes},
+                        {batch_anchors_buf.buffer_handle, 0, batch_anchors_buf.bytes},
+                        {vote_jobs_buf.buffer_handle, 0, vote_jobs_buf.bytes},
+                        {batch_anchor_keys_buf.buffer_handle, 0, batch_anchor_keys_buf.bytes},
+                        {vote_results_buf.buffer_handle, 0, vote_results_buf.bytes},
+                        {vote_results_buf.buffer_handle, 0, vote_results_buf.bytes},
+                        {vote_results_buf.buffer_handle, 0, vote_results_buf.bytes},
                     }};
                     gpu_coordinate_reduce_push coord_push{
                         .anchor_count = static_cast<std::uint32_t>(vote_jobs.size()),
@@ -16542,23 +16555,23 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                         *state.job.grouped_soa;
                     const std::array<VkDescriptorBufferInfo, 9> seed_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {view.descriptors->buffer, 0, view.descriptor_bytes},
-                        {view.controls->buffer, 0, shape_control_padded_bytes},
-                        {view.positions->buffer, 0, shape_position_padded_bytes},
-                        {qrec_s.buffer->buffer,
+                        {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
+                        {view.controls->buffer_handle, 0, shape_control_padded_bytes},
+                        {view.positions->buffer_handle, 0, shape_position_padded_bytes},
+                        {qrec_s.buffer->buffer_handle,
                          qrec_s.offset + std::uint64_t{state.job.query_index}
                              * qrec_stride,
                          sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.prefix_s.buffer->buffer,
+                        {state.prefix_s.buffer->buffer_handle,
                          state.prefix_s.offset,
                          state.prefix_s.size},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
                     }};
@@ -16573,22 +16586,22 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                 } else {
                     const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
-                        {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                        {qrec_s.buffer->buffer,
+                        {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {qrec_s.buffer->buffer_handle,
                          qrec_s.offset + std::uint64_t{state.job.query_index}
                              * qrec_stride,
                          sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.prefix_s.buffer->buffer,
+                        {state.prefix_s.buffer->buffer_handle,
                          state.prefix_s.offset,
                          state.prefix_s.size},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
                     }};
@@ -16605,9 +16618,9 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     continue;
                 }
                 const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
-                    {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
+                    {state.counts_s.buffer->buffer_handle, state.counts_s.offset, state.counts_s.size},
+                    {state.prefix_s.buffer->buffer_handle, state.prefix_s.offset, state.prefix_s.size},
+                    {state.blocks_s.buffer->buffer_handle, state.blocks_s.offset, state.blocks_s.size},
                 }};
                 scan_push_constants scan{
                     state.minimizer_count, k_prefix_scan_block_size, state.num_blocks, 0u};
@@ -16625,9 +16638,9 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     continue;
                 }
                 const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
-                    {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
+                    {state.counts_s.buffer->buffer_handle, state.counts_s.offset, state.counts_s.size},
+                    {state.prefix_s.buffer->buffer_handle, state.prefix_s.offset, state.prefix_s.size},
+                    {state.blocks_s.buffer->buffer_handle, state.blocks_s.offset, state.blocks_s.size},
                 }};
                 scan_push_constants scan{
                     state.minimizer_count, k_prefix_scan_block_size, state.num_blocks, 0u};
@@ -16644,9 +16657,9 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     continue;
                 }
                 const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-                    {state.counts_s.buffer->buffer, state.counts_s.offset, state.counts_s.size},
-                    {state.prefix_s.buffer->buffer, state.prefix_s.offset, state.prefix_s.size},
-                    {state.blocks_s.buffer->buffer, state.blocks_s.offset, state.blocks_s.size},
+                    {state.counts_s.buffer->buffer_handle, state.counts_s.offset, state.counts_s.size},
+                    {state.prefix_s.buffer->buffer_handle, state.prefix_s.offset, state.prefix_s.size},
+                    {state.blocks_s.buffer->buffer_handle, state.blocks_s.offset, state.blocks_s.size},
                 }};
                 scan_push_constants scan{
                     state.minimizer_count, k_prefix_scan_block_size, state.num_blocks, 1u};
@@ -16827,23 +16840,23 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                         *state.job.grouped_soa;
                     const std::array<VkDescriptorBufferInfo, 9> seed_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {view.descriptors->buffer, 0, view.descriptor_bytes},
-                        {view.controls->buffer, 0, shape_control_padded_bytes},
-                        {view.positions->buffer, 0, shape_position_padded_bytes},
-                        {qrec_s.buffer->buffer,
+                        {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
+                        {view.controls->buffer_handle, 0, shape_control_padded_bytes},
+                        {view.positions->buffer_handle, 0, shape_position_padded_bytes},
+                        {qrec_s.buffer->buffer_handle,
                          qrec_s.offset + std::uint64_t{state.job.query_index}
                              * qrec_stride,
                          sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.prefix_s.buffer->buffer,
+                        {state.prefix_s.buffer->buffer_handle,
                          state.prefix_s.offset,
                          state.prefix_s.size},
-                        {anchors_s.buffer->buffer,
+                        {anchors_s.buffer->buffer_handle,
                          anchors_s.offset,
                          anchors_s.size},
-                        {anchor_keys_s.buffer->buffer,
+                        {anchor_keys_s.buffer->buffer_handle,
                          anchor_keys_s.offset,
                          anchor_keys_s.size},
                     }};
@@ -16858,22 +16871,22 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     emit_push.emit_mode = 1u;
                     const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
                         {min_words_buffer, min_words_offset, min_words_range},
-                        {state.job.slots->buffer, 0, VK_WHOLE_SIZE},
-                        {state.job.positions->buffer, 0, VK_WHOLE_SIZE},
-                        {qrec_s.buffer->buffer,
+                        {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                        {qrec_s.buffer->buffer_handle,
                          qrec_s.offset + std::uint64_t{state.job.query_index}
                              * qrec_stride,
                          sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer,
+                        {state.counts_s.buffer->buffer_handle,
                          state.counts_s.offset,
                          state.counts_s.size},
-                        {state.prefix_s.buffer->buffer,
+                        {state.prefix_s.buffer->buffer_handle,
                          state.prefix_s.offset,
                          state.prefix_s.size},
-                        {anchors_s.buffer->buffer,
+                        {anchors_s.buffer->buffer_handle,
                          anchors_s.offset,
                          anchors_s.size},
-                        {anchor_keys_s.buffer->buffer,
+                        {anchor_keys_s.buffer->buffer_handle,
                          anchor_keys_s.offset,
                          anchor_keys_s.size},
                     }};
@@ -16938,12 +16951,12 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     gpu_arena_slice anchors_s = state.anchors_slice();
                     gpu_arena_slice anchor_keys_s = state.anchor_keys_slice();
                     const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
-                        {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
-                        {anchor_keys_s.buffer->buffer, anchor_keys_s.offset, anchor_keys_s.size},
-                        {anchor_keys_s.buffer->buffer, anchor_keys_s.offset, anchor_keys_s.size},
-                        {state.result_buf.buffer, 0, state.result_buf.bytes},
-                        {state.result_buf.buffer, 0, state.result_buf.bytes},
-                        {state.result_buf.buffer, 0, state.result_buf.bytes},
+                        {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
+                        {anchor_keys_s.buffer->buffer_handle, anchor_keys_s.offset, anchor_keys_s.size},
+                        {anchor_keys_s.buffer->buffer_handle, anchor_keys_s.offset, anchor_keys_s.size},
+                        {state.result_buf.buffer_handle, 0, state.result_buf.bytes},
+                        {state.result_buf.buffer_handle, 0, state.result_buf.bytes},
+                        {state.result_buf.buffer_handle, 0, state.result_buf.bytes},
                     }};
                     gpu_coordinate_reduce_push coord_push{
                         .anchor_count = state.total_anchors_u32,
@@ -17017,13 +17030,13 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     state.sorted_in_scratch ? anchors_scratch_s : anchors_s;
                 const gpu_arena_slice compacted_anchors_s = state.compacted_anchors_slice();
                 const std::array<VkDescriptorBufferInfo, 6> range_infos{{
-                    {sorted_anchors.buffer->buffer, sorted_anchors.offset, sorted_anchors.size},
-                    {state.range_count_buf.buffer, 0, state.range_count_buf.bytes},
-                    {state.ranges_buf.buffer, 0, state.ranges_buf.bytes},
-                    {state.range_count_buf.buffer, 0, state.range_count_buf.bytes},
-                    {compacted_anchors_s.buffer->buffer, compacted_anchors_s.offset,
+                    {sorted_anchors.buffer->buffer_handle, sorted_anchors.offset, sorted_anchors.size},
+                    {state.range_count_buf.buffer_handle, 0, state.range_count_buf.bytes},
+                    {state.ranges_buf.buffer_handle, 0, state.ranges_buf.bytes},
+                    {state.range_count_buf.buffer_handle, 0, state.range_count_buf.bytes},
+                    {compacted_anchors_s.buffer->buffer_handle, compacted_anchors_s.offset,
                      compacted_anchors_s.size},
-                    {state.span_buf.buffer, 0, state.span_buf.bytes},
+                    {state.span_buf.buffer_handle, 0, state.span_buf.bytes},
                 }};
                 chain_range_push_constants range_push{
                     .query_count = 1u,
@@ -17167,10 +17180,10 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     ? compacted_anchors_s
                     : (state.sorted_in_scratch ? anchors_scratch_s : anchors_s);
                 const std::array<VkDescriptorBufferInfo, 4> chain_infos{{
-                    {active_anchors.buffer->buffer, active_anchors.offset, active_anchors.size},
-                    {state.ranges_buf.buffer, 0, state.ranges_buf.bytes},
-                    {state.score_buf.buffer, 0, state.score_buf.bytes},
-                    {state.predecessor_buf.buffer, 0, state.predecessor_buf.bytes},
+                    {active_anchors.buffer->buffer_handle, active_anchors.offset, active_anchors.size},
+                    {state.ranges_buf.buffer_handle, 0, state.ranges_buf.bytes},
+                    {state.score_buf.buffer_handle, 0, state.score_buf.bytes},
+                    {state.predecessor_buf.buffer_handle, 0, state.predecessor_buf.bytes},
                 }};
                 VkDescriptorSet chain_set = allocate_dispatch_descriptor_set_locked(descriptor_set_layout_);
                 std::array<VkWriteDescriptorSet, 4> writes{};
@@ -17235,12 +17248,12 @@ runtime::run_seed_to_coordinate_batch_roundtrip(
                     ? compacted_anchors_s
                     : (state.sorted_in_scratch ? anchors_scratch_s : anchors_s);
                 const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
-                    {active_anchors.buffer->buffer, active_anchors.offset, active_anchors.size},
-                    {state.score_buf.buffer, 0, state.score_buf.bytes},
-                    {state.predecessor_buf.buffer, 0, state.predecessor_buf.bytes},
-                    {state.visited_buf.buffer, 0, state.visited_buf.bytes},
-                    {state.trace_buf.buffer, 0, state.trace_buf.bytes},
-                    {state.result_buf.buffer, 0, state.result_buf.bytes},
+                    {active_anchors.buffer->buffer_handle, active_anchors.offset, active_anchors.size},
+                    {state.score_buf.buffer_handle, 0, state.score_buf.bytes},
+                    {state.predecessor_buf.buffer_handle, 0, state.predecessor_buf.bytes},
+                    {state.visited_buf.buffer_handle, 0, state.visited_buf.bytes},
+                    {state.trace_buf.buffer_handle, 0, state.trace_buf.bytes},
+                    {state.result_buf.buffer_handle, 0, state.result_buf.bytes},
                 }};
                 gpu_coordinate_reduce_push coord_push{
                     .anchor_count = state.active_anchor_count,
@@ -17450,7 +17463,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     }
     const std::array<shader_variant_key, 11> keys{
         make_shader_key(
-            shader_kind::sketch_tile, 384u, 64u, 10u),
+            shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(
             shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(
@@ -17841,7 +17854,7 @@ bool runtime::self_test_gpu_cache_partial_delta_contract(
     }
     const std::array<shader_variant_key, 3> keys{
         make_shader_key(
-            shader_kind::sketch_tile, 384u, 64u, 10u),
+            shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(
             shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(
@@ -18130,8 +18143,8 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
 
     auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
     const VkBuffer min_words_buffer = inputs.device_minimizer_words != nullptr
-        ? inputs.device_minimizer_words->buffer
-        : minw_s.buffer->buffer;
+        ? inputs.device_minimizer_words->buffer_handle
+        : minw_s.buffer->buffer_handle;
     const std::uint64_t min_words_offset =
         inputs.device_minimizer_words != nullptr ? 0u : minw_s.offset;
     const std::uint64_t min_words_range =
@@ -18182,18 +18195,18 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
         reset_dispatch_descriptor_pool_locked();
         const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
             {min_words_buffer, min_words_offset, min_words_range},
-            {inputs.slots->buffer, 0, VK_WHOLE_SIZE},
-            {inputs.positions->buffer, 0, VK_WHOLE_SIZE},
-            {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
+            {inputs.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+            {inputs.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+            {qrec_s.buffer->buffer_handle, qrec_s.offset, qrec_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
         }};
         const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {blocks_s.buffer->buffer_handle, blocks_s.offset, blocks_s.size},
         }};
         scan_push_constants s0{mc, k_prefix_scan_block_size, num_blocks, 0u};
         scan_push_constants s1{mc, k_prefix_scan_block_size, num_blocks, 1u};
@@ -18276,13 +18289,13 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
         epush.emit_mode = 1u;
         const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
             {min_words_buffer, min_words_offset, min_words_range},
-            {inputs.slots->buffer, 0, VK_WHOLE_SIZE},
-            {inputs.positions->buffer, 0, VK_WHOLE_SIZE},
-            {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
-            {akeys_s.buffer->buffer, akeys_s.offset, akeys_s.size},
+            {inputs.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+            {inputs.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+            {qrec_s.buffer->buffer_handle, qrec_s.offset, qrec_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
+            {akeys_s.buffer->buffer_handle, akeys_s.offset, akeys_s.size},
         }};
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed_coord2)");
         VkCommandBufferBeginInfo begin{};
@@ -18299,13 +18312,13 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
             sort_plan, awg.num_workgroups, awg.elems_per_wg, 3u, sorted_in_scratch);
         const gpu_arena_slice& sorted_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
         const std::array<VkDescriptorBufferInfo, 6> range_infos{{
-            {sorted_anchors.buffer->buffer, sorted_anchors.offset, sorted_anchors.size},
-            {range_count_buf.buffer, 0, range_count_buf.bytes},
-            {ranges_buf.buffer, 0, ranges_buf.bytes},
-            {range_count_buf.buffer, 0, range_count_buf.bytes},
-            {compacted_anchors_s.buffer->buffer, compacted_anchors_s.offset,
+            {sorted_anchors.buffer->buffer_handle, sorted_anchors.offset, sorted_anchors.size},
+            {range_count_buf.buffer_handle, 0, range_count_buf.bytes},
+            {ranges_buf.buffer_handle, 0, ranges_buf.bytes},
+            {range_count_buf.buffer_handle, 0, range_count_buf.bytes},
+            {compacted_anchors_s.buffer->buffer_handle, compacted_anchors_s.offset,
              compacted_anchors_s.size},
-            {span_buf.buffer, 0, span_buf.bytes},
+            {span_buf.buffer_handle, 0, span_buf.bytes},
         }};
         chain_range_push_constants rpush{
             .query_count = 1u,
@@ -18362,10 +18375,10 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
         record_host_to_shader(command_buffer_);
 
         const std::array<VkDescriptorBufferInfo, 4> chain_infos{{
-            {active_anchors.buffer->buffer, active_anchors.offset, active_anchors.size},
-            {ranges_buf.buffer, 0, ranges_buf.bytes},
-            {score_buf.buffer, 0, score_buf.bytes},
-            {pred_buf.buffer, 0, pred_buf.bytes},
+            {active_anchors.buffer->buffer_handle, active_anchors.offset, active_anchors.size},
+            {ranges_buf.buffer_handle, 0, ranges_buf.bytes},
+            {score_buf.buffer_handle, 0, score_buf.bytes},
+            {pred_buf.buffer_handle, 0, pred_buf.bytes},
         }};
         VkDescriptorSet chain_set = allocate_dispatch_descriptor_set_locked(descriptor_set_layout_);
         std::array<VkWriteDescriptorSet, 4> writes{};
@@ -18402,12 +18415,12 @@ gpu_coordinate_result_wire runtime::run_seed_to_coordinate_roundtrip(
         record_compute_barrier(command_buffer_);
 
         const std::array<VkDescriptorBufferInfo, 6> coord_infos{{
-            {active_anchors.buffer->buffer, active_anchors.offset, active_anchors.size},
-            {score_buf.buffer, 0, score_buf.bytes},
-            {pred_buf.buffer, 0, pred_buf.bytes},
-            {visited_buf.buffer, 0, visited_buf.bytes},
-            {trace_buf.buffer, 0, trace_buf.bytes},
-            {result_buf.buffer, 0, result_buf.bytes},
+            {active_anchors.buffer->buffer_handle, active_anchors.offset, active_anchors.size},
+            {score_buf.buffer_handle, 0, score_buf.bytes},
+            {pred_buf.buffer_handle, 0, pred_buf.bytes},
+            {visited_buf.buffer_handle, 0, visited_buf.bytes},
+            {trace_buf.buffer_handle, 0, trace_buf.bytes},
+            {result_buf.buffer_handle, 0, result_buf.bytes},
         }};
         gpu_coordinate_reduce_push coord_push{
             .anchor_count = active_anchor_count,
@@ -18460,10 +18473,9 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(
         : 0u;
     // Each allocate_device call rounds the offset up to k_gpu_buffer_offset_alignment
     // (256), so the five sub-allocations below can need up to 5*256 bytes of
-    // alignment padding on top of their byte footprint. Reserve enough slack for
-    // that — a flat +256 (the old value) overflowed the arena on a cold call
-    // (the last allocation, minw_s, came back invalid and minw_s.buffer->buffer
-    // null-dereferenced), masked only because a warmer arena had grown larger.
+    // alignment padding on top of their byte footprint. Reserve one alignment
+    // unit per boundary plus initial cursor slack so cold and reused arenas obey
+    // the same capacity invariant.
     std::uint64_t dt = std::uint64_t{mc} * 4u * 2u + std::uint64_t{num_blocks} * 4u + 16u
         + min_words_bytes + 6u * std::uint64_t{k_gpu_buffer_offset_alignment};
     if (!arena.ensure_capacity(dt, 0, 0)) {
@@ -18515,8 +18527,8 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(
     }
     auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
     const VkBuffer min_words_buffer = inputs.device_minimizer_words != nullptr
-        ? inputs.device_minimizer_words->buffer
-        : minw_s.buffer->buffer;
+        ? inputs.device_minimizer_words->buffer_handle
+        : minw_s.buffer->buffer_handle;
     const std::uint64_t min_words_offset = inputs.device_minimizer_words != nullptr ? 0u : minw_s.offset;
     const std::uint64_t min_words_range = inputs.device_minimizer_words != nullptr ? VK_WHOLE_SIZE : minw_s.size;
     if (inputs.device_minimizer_words == nullptr) {
@@ -18554,18 +18566,18 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(
         reset_dispatch_descriptor_pool_locked();
         const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
             {min_words_buffer, min_words_offset, min_words_range},
-            {inputs.slots->buffer, 0, VK_WHOLE_SIZE},
-            {inputs.positions->buffer, 0, VK_WHOLE_SIZE},
-            {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},  // anchors (unused in count)
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},  // anchor_keys (unused in count)
+            {inputs.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+            {inputs.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+            {qrec_s.buffer->buffer_handle, qrec_s.offset, qrec_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},  // anchors (unused in count)
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},  // anchor_keys (unused in count)
         }};
         const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {blocks_s.buffer->buffer_handle, blocks_s.offset, blocks_s.size},
         }};
         scan_push_constants s0{mc, k_prefix_scan_block_size, num_blocks, 0u};
         scan_push_constants s1{mc, k_prefix_scan_block_size, num_blocks, 1u};
@@ -18651,13 +18663,13 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(
         seed_push_constants epush = cpush; epush.emit_mode = 1u;
         const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
             {min_words_buffer, min_words_offset, min_words_range},
-            {inputs.slots->buffer, 0, VK_WHOLE_SIZE},
-            {inputs.positions->buffer, 0, VK_WHOLE_SIZE},
-            {qrec_s.buffer->buffer, qrec_s.offset, qrec_s.size},
-            {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
-            {prefix_s.buffer->buffer, prefix_s.offset, prefix_s.size},
-            {anchors_s.buffer->buffer, anchors_s.offset, anchors_s.size},
-            {akeys_s.buffer->buffer, akeys_s.offset, akeys_s.size},
+            {inputs.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+            {inputs.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+            {qrec_s.buffer->buffer_handle, qrec_s.offset, qrec_s.size},
+            {counts_s.buffer->buffer_handle, counts_s.offset, counts_s.size},
+            {prefix_s.buffer->buffer_handle, prefix_s.offset, prefix_s.size},
+            {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
+            {akeys_s.buffer->buffer_handle, akeys_s.offset, akeys_s.size},
         }};
         check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed2)");
         VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

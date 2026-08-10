@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import contextlib
-import csv
 import io
 import json
 import multiprocessing
+import os
+import platform as host_platform
 import queue
 import re
+import secrets
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,8 +23,13 @@ BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUILD_MCP_DIR.parent
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
+import cache_modes  # noqa: E402
+import integrity  # noqa: E402
 import inspect_tool  # noqa: E402
-import server  # noqa: E402
+import process_state  # noqa: E402
+import protocol  # noqa: E402
 
 
 LOCAL = ("bench-opt", "bench-opt-debug")
@@ -54,10 +63,6 @@ EXPECTED_CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "bioseq_install_sql",
     "bioseq_dso",
     "provider_peer_test_dso",
-    "migration_ledger",
-    "legacy_inventory",
-    "migration_catch_cases",
-    "legacy_retirement_gate",
 })
 
 
@@ -124,13 +129,23 @@ class CachePresetContractTest(unittest.TestCase):
 
 
 class CacheModeResolutionTest(unittest.TestCase):
+    def test_benchmark_filter_rejects_unknown_axes(self) -> None:
+        arguments, error = build_presets._filter_to_cli_args({
+            "unknown_axis": ["silently-dropping-this-is-unsafe"],
+        })
+        self.assertEqual(arguments, [])
+        self.assertEqual(
+            error,
+            "filter contains unknown field(s): unknown_axis",
+        )
+
     def _patch_toolchain(self, fast: str, debug: str):
         return mock.patch.multiple(
-            server,
+            build_presets,
             DEFAULT_BUILD_PRESET=fast,
             DEBUG_BUILD_PRESET=debug,
-            TEST_BUILD_PRESET=server._default_test_preset(fast),
-            TEST_DEBUG_BUILD_PRESET=server._default_test_preset(debug),
+            TEST_BUILD_PRESET=build_presets._default_test_preset(fast),
+            TEST_DEBUG_BUILD_PRESET=build_presets._default_test_preset(debug),
             CACHE_BUILD_PRESET_OVERRIDE=None,
             CACHE_DEBUG_BUILD_PRESET_OVERRIDE=None,
             CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE=None,
@@ -141,7 +156,7 @@ class CacheModeResolutionTest(unittest.TestCase):
         for fast, debug_preset in (LOCAL, AWS_CLANG, AWS_GCC):
             with self.subTest(toolchain=fast), self._patch_toolchain(
                     fast, debug_preset):
-                for mode, details in server.MODES.items():
+                for mode, details in build_presets.MODES.items():
                     for debug in (False, True):
                         with self.subTest(mode=mode, debug=debug):
                             core_preset = debug_preset if debug else fast
@@ -150,118 +165,253 @@ class CacheModeResolutionTest(unittest.TestCase):
                             elif details.preset_family == "core":
                                 expected = core_preset
                             elif details.preset_family == "test":
-                                expected = server._default_test_preset(core_preset)
+                                expected = (
+                                    build_presets._default_test_preset(
+                                        core_preset)
+                                )
                             elif details.preset_family == "cache":
-                                expected = server._default_cache_preset(
+                                expected = build_presets._default_cache_preset(
                                     core_preset, combined=False)
                             elif details.preset_family == "cache-bioseq":
-                                expected = server._default_cache_preset(
+                                expected = build_presets._default_cache_preset(
                                     core_preset, combined=True)
                             elif details.preset_family == "website":
                                 expected = (
-                                    server.WEBSITE_DEBUG_BUILD_PRESET
-                                    if debug else server.WEBSITE_BUILD_PRESET)
+                                    build_presets.WEBSITE_DEBUG_BUILD_PRESET
+                                    if debug else build_presets.WEBSITE_BUILD_PRESET)
                             else:
                                 self.fail(
                                     "unhandled preset family "
                                     f"{details.preset_family!r}")
 
                             self.assertEqual(
-                                server.preset_for(mode, debug), expected)
+                                build_presets.preset_for(mode, debug), expected)
                             self.assertEqual(
-                                server.build_dir_for(mode, debug),
-                                server.REPOSITORY_ROOT / "build" / expected,
+                                build_presets.build_dir_for(mode, debug),
+                                build_presets.REPOSITORY_ROOT / "build" / expected,
                             )
                             self.assertEqual(
-                                server.bin_dir_for(mode, debug),
-                                server.REPOSITORY_ROOT / "build" / expected
+                                build_presets.bin_dir_for(mode, debug),
+                                build_presets.REPOSITORY_ROOT / "build" / expected
                                 / details.binary_subdir,
                             )
 
     def test_cache_specific_environment_overrides_win(self) -> None:
         with mock.patch.multiple(
-            server,
+            build_presets,
             CACHE_BUILD_PRESET_OVERRIDE="custom-cache-fast",
             CACHE_DEBUG_BUILD_PRESET_OVERRIDE="custom-cache-debug",
             CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE="custom-combined-fast",
             CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE="custom-combined-debug",
         ):
             self.assertEqual(
-                server.preset_for("cache-unit", False), "custom-cache-fast")
+                build_presets.preset_for("cache-unit", False), "custom-cache-fast")
             self.assertEqual(
-                server.preset_for("cache-unit", True), "custom-cache-debug")
+                build_presets.preset_for("cache-unit", True), "custom-cache-debug")
             self.assertEqual(
-                server.preset_for("cache-bioseq-integration", False),
+                build_presets.preset_for("cache-bioseq-integration", False),
                 "custom-combined-fast",
             )
             self.assertEqual(
-                server.preset_for("cache-bioseq-integration", True),
+                build_presets.preset_for("cache-bioseq-integration", True),
                 "custom-combined-debug",
             )
 
     def test_custom_preset_fallback_keeps_debug_suffix_last(self) -> None:
         self.assertEqual(
-            server._default_cache_preset("toolchain-debug", combined=False),
+            build_presets._default_cache_preset("toolchain-debug", combined=False),
             "toolchain-cache-debug",
         )
         self.assertEqual(
-            server._default_cache_preset("toolchain-debug", combined=True),
+            build_presets._default_cache_preset("toolchain-debug", combined=True),
             "toolchain-cache-bioseq-debug",
         )
 
 
 class CacheModeRoutingTest(unittest.TestCase):
-    def test_legacy_python_benchmark_inventory_is_complete_and_checked(
-            self) -> None:
-        inventory_path = (
+
+    def test_cache_integration_reports_pin_the_cache_schema(self) -> None:
+        runner = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "bench"
-            / "legacy_python_behavior_inventory.tsv"
-        )
-        with inventory_path.open(encoding="utf-8", newline="") as stream:
-            rows = list(csv.DictReader(stream, delimiter="\t"))
-        self.assertGreaterEqual(len(rows), 100)
+            / "tests"
+            / "support"
+            / "cache_catch_runner.cpp"
+        ).read_text(encoding="utf-8")
         self.assertEqual(
-            set(rows[0]),
-            {
-                "legacy_asset_sha256",
-                "legacy_symbol",
-                "legacy_behavior",
-                "disposition",
-                "native_evidence",
-            },
+            runner.count(".schema_revision = 2"),
+            2,
         )
-        expected_hashes = {
-            "b7f8378f3f3cdfa4a0ef88b20ba34273587f1a7ddced698ce7ef9cc8c19e659b",
-            "2f255c8f83d7782d3c1aaf8d7d4025eeb8b5c35ff1b4ce50b855b0b9b3627585",
-            "1d3045a0b41a5b42f851a3db9fe0f7518aef2f8d6325da648a92a096e714b472",
+        report_model = (
+            REPOSITORY_ROOT
+            / "common"
+            / "postgres"
+            / "test_support"
+            / "report.cppm"
+        ).read_text(encoding="utf-8")
+        self.assertIn("std::uint32_t schema_revision{1}", report_model)
+        self.assertIn('key(output, "schema_revision")', report_model)
+        self.assertNotIn("schema_version", report_model)
+        for key in cache_modes._CACHE_INTEGRATION_REPORT_KEYS:
+            with self.subTest(integration_report_key=key):
+                self.assertIn(f'"{key}"', report_model)
+
+    def test_native_report_contract_rejects_aliases_and_unknown_keys(
+            self) -> None:
+        payload = {
+            key: None
+            for key in cache_modes._CACHE_INTEGRATION_REPORT_KEYS
         }
-        self.assertEqual(
-            {row["legacy_asset_sha256"] for row in rows},
-            expected_hashes,
-        )
-        identities = [
-            (row["legacy_asset_sha256"], row["legacy_symbol"])
-            for row in rows
-        ]
-        self.assertEqual(len(identities), len(set(identities)))
-        for row in rows:
-            with self.subTest(symbol=row["legacy_symbol"]):
-                self.assertTrue(row["legacy_behavior"])
-                self.assertRegex(
-                    row["disposition"],
-                    r"^(native|shared|retired)_[a-z0-9_]+$",
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            for invalid_revision in (True, "2"):
+                with self.subTest(revision=invalid_revision):
+                    payload["schema_revision"] = invalid_revision
+                    report.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                            RuntimeError, "schema_revision"):
+                        cache_modes._cache_native_report_contract(report)
+
+            payload["schema_revision"] = 2
+            payload["schema_version"] = "retired-authored-identity"
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    RuntimeError, "unknown=.*schema_version"):
+                cache_modes._cache_native_report_contract(report)
+
+    def test_integration_case_contract_pins_unfiltered_cardinalities(
+            self) -> None:
+        expected_counts = {
+            "bioseq_cache_integration_tests": 50,
+            "bioseq_cache_bioseq_support_integration_tests": 8,
+            "bioseq_cache_bioseq_large_input_e2e_tests": 1,
+        }
+        for executable, expected_count in expected_counts.items():
+            cases = [
+                {
+                    "test_case": f"case-{index}",
+                    "section": "",
+                    "status": "passed",
+                }
+                for index in range(expected_count)
+            ]
+            with self.subTest(executable=executable):
+                self.assertEqual(
+                    cache_modes._cache_integration_case_contract(
+                        cases, executable, focused=False),
+                    expected_count,
                 )
-                evidence_paths = row["native_evidence"].split(";")
-                self.assertTrue(evidence_paths)
-                for relative_path in evidence_paths:
-                    self.assertTrue(
-                        (REPOSITORY_ROOT / relative_path).is_file(),
-                        relative_path,
+                with self.assertRaisesRegex(
+                        RuntimeError, "unfiltered contract requires exactly"):
+                    cache_modes._cache_integration_case_contract(
+                        cases[:-1], executable, focused=False)
+                self.assertEqual(
+                    cache_modes._cache_integration_case_contract(
+                        [], executable, focused=True),
+                    0,
+                )
+                with self.assertRaisesRegex(
+                        RuntimeError, "exceeds.*unfiltered closure"):
+                    cache_modes._cache_integration_case_contract(
+                        [
+                            *cases,
+                            {
+                                "test_case": "unexpected-extra-case",
+                                "section": "",
+                                "status": "passed",
+                            },
+                        ],
+                        executable,
+                        focused=True,
                     )
 
-    def test_native_benchmark_declares_v2_report_and_2gbp_contract(
+    def test_integration_case_contract_rejects_duplicate_or_failed_cases(
+            self) -> None:
+        duplicate = {
+            "test_case": "duplicate",
+            "section": "",
+            "status": "passed",
+        }
+        with self.assertRaisesRegex(RuntimeError, "repeats a top-level"):
+            cache_modes._cache_integration_case_contract(
+                [dict(duplicate), dict(duplicate)],
+                "bioseq_cache_integration_tests",
+                focused=True,
+            )
+        with self.assertRaisesRegex(RuntimeError, "non-passing"):
+            cache_modes._cache_integration_case_contract(
+                [{**duplicate, "status": "failed"}],
+                "bioseq_cache_integration_tests",
+                focused=True,
+            )
+
+    def test_integration_argv_contract_requires_exact_focused_suffix(
+            self) -> None:
+        runner_argv = [
+            "/tmp/bioseq_cache_integration_tests",
+            "--report", "/tmp/report.json",
+            "--case-timeout-seconds", "480",
+            "--reporter", "console::out=-::colour-mode=ansi",
+        ]
+        focused_flags = ["--allow-running-no-tests", "[cache-correctness]"]
+        options = cache_modes._cache_integration_argv_contract(
+            [*runner_argv, *focused_flags], focused_flags)
+        self.assertEqual(options["--case-timeout-seconds"], "480")
+        with self.assertRaisesRegex(RuntimeError, "exact focused"):
+            cache_modes._cache_integration_argv_contract(
+                [*runner_argv, "--allow-running-no-tests", "[other]"],
+                focused_flags,
+            )
+        with self.assertRaisesRegex(
+                RuntimeError, "missing option value|unrequested Catch2 filter"):
+            cache_modes._cache_integration_argv_contract(
+                [*runner_argv, "[unrequested]"], [])
+
+    def test_focused_zero_match_report_is_a_valid_sibling_receipt(
+            self) -> None:
+        executable = "/tmp/bioseq_cache_integration_tests"
+        focused_flags = ["--allow-running-no-tests", "[sibling-only]"]
+        argv = [
+            executable,
+            "--report", "/tmp/report.json",
+            "--case-timeout-seconds", "480",
+            "--reporter", "console::out=-::colour-mode=ansi",
+            *focused_flags,
+        ]
+        payload = {
+            "schema_revision": 2,
+            "executable": executable,
+            "build_identity": "a" * 64,
+            "arguments": [
+                {
+                    "name": f"argv[{index}]",
+                    "value": argument,
+                    "redacted": False,
+                }
+                for index, argument in enumerate(argv)
+            ],
+            "cluster_configuration": {
+                "retained-supervision-state": "none",
+            },
+            "cases": [],
+            "stage_timings": [],
+            "host_qualifications": [],
+            "sql_transcripts": [],
+            "artifacts": [],
+            "cleanup_observations": [],
+            "resources": {},
+            "cleanup": {"succeeded": True},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            report = Path(temporary) / "focused-empty.json"
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            contract = cache_modes._cache_native_report_contract(
+                report, test_flags=focused_flags)
+        self.assertEqual(contract["selected_case_count"], 0)
+        self.assertEqual(contract["arguments"], argv)
+        self.assertEqual(contract["artifacts"], [])
+
+    def test_native_benchmark_declares_revision_2_report_and_2gbp_contract(
             self) -> None:
         source = (
             REPOSITORY_ROOT
@@ -270,7 +420,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             / "cache_benchmark.cppm"
         ).read_text(encoding="utf-8")
         for required in (
-            "bioseq-cache-benchmark-v2",
+            "schema_revision",
             "metadata",
             "scenario",
             "fixture",
@@ -316,11 +466,14 @@ class CacheModeRoutingTest(unittest.TestCase):
             bench_dir / "cache_benchmark.cppm"
         ).read_text(encoding="utf-8")
         contract = json.loads(
-            (bench_dir / "report_schema_v2.json").read_text(
+            (bench_dir / "cache_benchmark_report.schema.json").read_text(
                 encoding="utf-8"))
 
         self.assertEqual(
-            contract["schema_version"], "bioseq-cache-benchmark-v2")
+            contract["$id"],
+            "https://bioseq.dev/schemas/cache-benchmark-report.schema.json",
+        )
+        self.assertEqual(contract["schema_revision"], 2)
         self.assertEqual(
             contract["$schema"],
             "https://json-schema.org/draft/2020-12/schema",
@@ -330,6 +483,10 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertEqual(
             set(contract["required"]),
             set(contract["required_fields"]["top_level"]),
+        )
+        self.assertEqual(
+            set(contract["required"]),
+            cache_modes._CACHE_BENCHMARK_REPORT_KEYS,
         )
         self.assertIn(
             "at least three",
@@ -481,10 +638,10 @@ class CacheModeRoutingTest(unittest.TestCase):
             cmake,
         )
         self.assertEqual(
-            server._CACHE_NATIVE_ARTIFACT_KEYS,
+            cache_modes._CACHE_NATIVE_ARTIFACT_KEYS,
             EXPECTED_CACHE_NATIVE_ARTIFACT_KEYS,
         )
-        for key in server._CACHE_NATIVE_ARTIFACT_KEYS:
+        for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS:
             with self.subTest(native_artifact_key=key):
                 self.assertIn(f'\\"{key}\\"', cmake)
         for stage_target in (
@@ -508,13 +665,12 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertNotIn('\\"postgres_bin_dir\\"', cmake)
         self.assertIn(
             "$<TARGET_FILE:bioseq_cache_provider_peer_test>", cmake)
-        self.assertIn("../test/legacy_migration_ledger.tsv", cmake)
         self.assertIn("Threads::Threads", cmake)
         self.assertIn(
             "bioseq_cache_benchmark_report_contract_tests", cmake)
-        self.assertIn("cache_benchmark_report_tests.cpp", cmake)
+        self.assertIn("cache_benchmark_report_test.cpp", cmake)
         self.assertNotIn("run_private_cluster_bench.py", cmake)
-        cache_unit = server.MODES["cache-unit"]
+        cache_unit = build_presets.MODES["cache-unit"]
         self.assertIn(
             "bioseq_postgres_test_support_contract_tests",
             cache_unit.targets,
@@ -554,7 +710,7 @@ class CacheModeRoutingTest(unittest.TestCase):
     def test_combined_mode_owns_host_native_dso_qualification(self) -> None:
         root_cmake = (REPOSITORY_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
         helper = (
-            REPOSITORY_ROOT / "cmake" / "BioseqProductionDsoQualification.cmake"
+            REPOSITORY_ROOT / "cmake" / "bioseq_production_dso_qualification.cmake"
         ).read_text(encoding="utf-8")
         qualifier = (
             REPOSITORY_ROOT / "cmake" / "qualify_production_extension_dsos.py"
@@ -569,15 +725,16 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("BIOSEQ_TARGET postgresql_bioseq", root_cmake)
         self.assertIn("CACHE_TARGET postgresql_bioseq_cache", root_cmake)
         self.assertIn(
-            "test_production_dso_qualification.py", root_cmake)
+            "cmake/tests/contract/test_production_dso_qualification.py",
+            root_cmake)
         self.assertIn("LANGUAGES C CXX", root_cmake)
         self.assertIn(
             'set(CMAKE_C_COMPILER "${CMAKE_C_COMPILER}"', root_cmake)
         self.assertIn(
             'set(CMAKE_CXX_COMPILER "${CMAKE_CXX_COMPILER}"', root_cmake)
-        for mode in ("cache-bioseq-integration", "cache-bioseq-bench"):
+        for mode in ("cache-bioseq-integration", "cache-bioseq-benchmark"):
             with self.subTest(mode=mode):
-                self.assertIn(target, server.MODES[mode].targets)
+                self.assertIn(target, build_presets.MODES[mode].targets)
         for expression in (
             "$<TARGET_FILE:${BIOSEQ_DSO_QUALIFY_BIOSEQ_TARGET}>",
             "$<TARGET_FILE:${BIOSEQ_DSO_QUALIFY_CACHE_TARGET}>",
@@ -620,14 +777,15 @@ class CacheModeRoutingTest(unittest.TestCase):
         integration_cmake = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
             / "integration"
             / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
         combined_cmake = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
+            / "integration"
             / "bioseq"
             / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
@@ -640,7 +798,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         helper_cmake = (
             REPOSITORY_ROOT
             / "cmake"
-            / "BioseqPrivatePostgresStage.cmake"
+            / "bioseq_private_postgres_stage.cmake"
         ).read_text(encoding="utf-8")
 
         keywords = {
@@ -880,7 +1038,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         support_dir = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
             / "support"
         )
         context = (support_dir / "cache_test_context.cppm").read_text(
@@ -890,23 +1048,26 @@ class CacheModeRoutingTest(unittest.TestCase):
         peer = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
+            / "integration"
             / "bioseq"
-            / "test_provider_peer_failopen.cpp"
+            / "provider_peer_failopen_test.cpp"
         ).read_text(encoding="utf-8")
         coexistence = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
+            / "integration"
             / "bioseq"
-            / "test_coexistence.cpp"
+            / "coexistence_test.cpp"
         ).read_text(encoding="utf-8")
         acceptance = (
             REPOSITORY_ROOT
             / "bioseq_caching"
-            / "test"
+            / "tests"
+            / "integration"
             / "bioseq"
-            / "test_coexistence_acceptance.cpp"
+            / "coexistence_acceptance_test.cpp"
         ).read_text(encoding="utf-8")
 
         for source_name, source in (
@@ -916,8 +1077,6 @@ class CacheModeRoutingTest(unittest.TestCase):
                 self.assertIn("postgres_stage_manifest", source)
         self.assertIn("--postgres-stage-root", runner)
         self.assertIn("--postgres-stage-manifest", runner)
-        self.assertIn(
-            "executable_allows_migration_role", runner)
         for executable_seal in (
             "executed_executable_sha256",
             "sha256_file(",
@@ -932,26 +1091,6 @@ class CacheModeRoutingTest(unittest.TestCase):
         ):
             with self.subTest(executable_seal=executable_seal):
                 self.assertIn(executable_seal, runner)
-        for executable, role in (
-            (
-                "bioseq_cache_integration_tests",
-                "cache_integration",
-            ),
-            (
-                "bioseq_cache_bioseq_support_integration_tests",
-                "cache_bioseq_support_integration",
-            ),
-            (
-                "bioseq_cache_bioseq_production_integration_tests",
-                "cache_bioseq_production_integration",
-            ),
-        ):
-            with self.subTest(
-                    migration_executable=executable,
-                    migration_role=role):
-                self.assertIn(f'"{executable}"', runner)
-                self.assertIn(
-                    f"evidence_role::{role}", runner)
         for option in (
             "--bioseq-only-postgres-bin-dir",
             "--bioseq-only-postgres-stage-root",
@@ -1010,7 +1149,14 @@ class CacheModeRoutingTest(unittest.TestCase):
         cmake = (
             REPOSITORY_ROOT
             / "common"
-            / "postgres_test_support"
+            / "postgres"
+            / "test_support"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        checked_arithmetic_cmake = (
+            REPOSITORY_ROOT
+            / "common"
+            / "checked_arithmetic"
             / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
         runtime_directory = (
@@ -1026,32 +1172,39 @@ class CacheModeRoutingTest(unittest.TestCase):
             "add_executable(bioseq_postgres_test_support_contract_tests",
             cmake,
         )
+        self.assertIn(
+            "add_executable(\n"
+            "    bioseq_checked_arithmetic_contract_tests",
+            checked_arithmetic_cmake,
+        )
+        self.assertEqual(
+            checked_arithmetic_cmake.count(runtime_directory), 1)
 
-    def test_cache_runtime_modes_have_no_legacy_post_build_targets(
+    def test_cache_runtime_modes_have_no_post_build_targets(
             self) -> None:
         for mode in (
             "cache-integration",
-            "cache-bench",
+            "cache-benchmark",
             "cache-bioseq-integration",
-            "cache-bioseq-bench",
+            "cache-bioseq-benchmark",
         ):
             with self.subTest(mode=mode):
-                self.assertEqual(server.post_build_targets_for(mode, False), ())
-                self.assertEqual(server.post_build_targets_for(mode, True), ())
+                self.assertEqual(build_presets.post_build_targets_for(mode, False), ())
+                self.assertEqual(build_presets.post_build_targets_for(mode, True), ())
 
     def test_existing_install_modes_remain_unchanged(self) -> None:
         install_modes = {
-            name for name, details in server.MODES.items()
+            name for name, details in build_presets.MODES.items()
             if details.install_extension
         }
         self.assertEqual(
-            install_modes, {"unit+integration", "bench-e2e"})
+            install_modes, {"unit-integration", "benchmark-e2e"})
         for name in install_modes:
             with self.subTest(mode=name):
                 self.assertIn(
-                    "postgresql_bioseq_cache", server.MODES[name].targets)
-                self.assertIn("postgresql_bioseq", server.MODES[name].targets)
-        for name, details in server.MODES.items():
+                    "postgresql_bioseq_cache", build_presets.MODES[name].targets)
+                self.assertIn("postgresql_bioseq", build_presets.MODES[name].targets)
+        for name, details in build_presets.MODES.items():
             if name.startswith("cache-"):
                 self.assertFalse(details.install_extension, name)
                 if details.uses_private_cluster:
@@ -1059,7 +1212,7 @@ class CacheModeRoutingTest(unittest.TestCase):
 
     def test_private_cluster_mode_cannot_install_shared_extension(self) -> None:
         with self.assertRaisesRegex(ValueError, "private-cluster modes"):
-            server.ModeDefinition(
+            build_presets.ModeDefinition(
                 lock_group="invalid",
                 expected_duration_min=1.0,
                 build_only_expected_duration_min=1.0,
@@ -1073,22 +1226,22 @@ class CacheModeRoutingTest(unittest.TestCase):
             )
 
     def test_native_cache_bench_rejects_unimplemented_cli_filters(self) -> None:
-        result = server.tool_start_build(
-            "cache-bench", bench_filter={"tags": ["cache"]})
+        result = build_worker.tool_start_build(
+            "cache-benchmark", bench_filter={"tags": ["cache"]})
         self.assertIn("require a benchmark CLI", result)
-        self.assertIn("cache-bench", result)
+        self.assertIn("cache-benchmark", result)
 
     def test_native_cache_mode_commands_and_timeouts(self) -> None:
         primary_postgres_bin_dir_key_by_executable = {
             "bioseq_cache_integration_tests":
                 "cache_test_support_postgres_bin_dir",
-            "bioseq_cache_bench":
+            "bioseq_cache_benchmark":
                 "cache_production_postgres_bin_dir",
             "bioseq_cache_bioseq_support_integration_tests":
                 "cache_bioseq_support_postgres_bin_dir",
-            "bioseq_cache_bioseq_production_integration_tests":
+            "bioseq_cache_bioseq_large_input_e2e_tests":
                 "cache_bioseq_production_postgres_bin_dir",
-            "bioseq_cache_bioseq_bench":
+            "bioseq_cache_bioseq_benchmark":
                 "cache_bioseq_production_postgres_bin_dir",
         }
         all_stage_prefixes = {
@@ -1098,46 +1251,49 @@ class CacheModeRoutingTest(unittest.TestCase):
             "cache_bioseq_only_postgres",
             "cache_bioseq_production_postgres",
         }
+        case_timeout_by_executable = {
+            "bioseq_cache_integration_tests": "480",
+            "bioseq_cache_bioseq_support_integration_tests": "480",
+            "bioseq_cache_bioseq_large_input_e2e_tests": "6300",
+        }
+        scenario_by_executable = {
+            "bioseq_cache_benchmark": "standalone",
+            "bioseq_cache_bioseq_benchmark": "bioseq-2gbp",
+        }
         expected = {
             "cache-integration": (
                 ("bioseq_cache_integration_tests",),
                 8.0,
-                "480",
-                None,
             ),
-            "cache-bench": (
-                ("bioseq_cache_bench",),
+            "cache-benchmark": (
+                ("bioseq_cache_benchmark",),
                 20.0,
-                None,
-                "standalone",
             ),
             "cache-bioseq-integration": (
                 (
                     "bioseq_cache_bioseq_support_integration_tests",
-                    "bioseq_cache_bioseq_production_integration_tests",
+                    "bioseq_cache_bioseq_large_input_e2e_tests",
                 ),
-                120.0,
-                "480",
-                None,
+                140.0,
             ),
-            "cache-bioseq-bench": (
-                ("bioseq_cache_bioseq_bench",),
+            "cache-bioseq-benchmark": (
+                ("bioseq_cache_bioseq_benchmark",),
                 180.0,
-                None,
-                "bioseq-2gbp",
             ),
         }
-        for mode, (executables, timeout, case_timeout, scenario) in (
-                expected.items()):
+        for mode, (executables, timeout) in expected.items():
             with self.subTest(mode=mode):
-                details = server.MODES[mode]
+                details = build_presets.MODES[mode]
                 self.assertEqual(details.expected_duration_min, timeout)
+                if mode == "cache-bioseq-integration":
+                    self.assertEqual(details.hard_timeout_min, 140.0)
                 self.assertEqual(
                     tuple(command[0] for command in details.commands),
                     executables,
                 )
                 self.assertTrue(details.reporting_subdir_name)
                 for command in details.commands:
+                    executable = command[0]
                     primary_bin_key = (
                         primary_postgres_bin_dir_key_by_executable[
                             command[0]])
@@ -1216,11 +1372,15 @@ class CacheModeRoutingTest(unittest.TestCase):
                     self.assertIn("--cache-dso", command)
                     self.assertIn("--report", command)
                     self.assertEqual(command.count("{report}"), 1)
+                    case_timeout = case_timeout_by_executable.get(executable)
                     if case_timeout is not None:
                         timeout_index = command.index(
                             "--case-timeout-seconds")
                         self.assertEqual(
                             command[timeout_index + 1], case_timeout)
+                    else:
+                        self.assertNotIn("--case-timeout-seconds", command)
+                    scenario = scenario_by_executable.get(executable)
                     if scenario is not None:
                         scenario_index = command.index("--scenario")
                         self.assertEqual(
@@ -1231,23 +1391,13 @@ class CacheModeRoutingTest(unittest.TestCase):
                         self.assertIn("--bioseq-control", command)
                         self.assertIn("--bioseq-install-sql", command)
                         self.assertIn("--bioseq-dso", command)
-                if mode == "cache-bioseq-integration":
-                    support_command, production_command = details.commands
-                    self.assertNotIn(
-                        "--large-case-timeout-seconds",
-                        support_command,
-                    )
-                    timeout_index = production_command.index(
-                        "--large-case-timeout-seconds")
-                    self.assertEqual(
-                        production_command[timeout_index + 1], "6300")
 
     def test_cache_integration_resolves_exact_cmake_parity_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             binary_dir = Path(tmp)
             manifest = {
                 key: str(binary_dir / key)
-                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+                for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
             }
             manifest["provider_peer_test_dso"] = ""
             for key, value in manifest.items():
@@ -1263,10 +1413,10 @@ class CacheModeRoutingTest(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8")
             report = binary_dir / "reports" / "report_0.json"
 
-            resolved = server._run_command_argv(
+            resolved = build_worker._run_command_argv(
                 "cache-integration",
                 binary_dir,
-                server.MODES["cache-integration"].commands[0],
+                build_presets.MODES["cache-integration"].commands[0],
                 report_path=report,
             )
 
@@ -1283,9 +1433,6 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "--cache-control", manifest["cache_test_control"],
                 "--cache-install-sql", manifest["cache_test_install_sql"],
                 "--cache-dso", manifest["cache_test_dso"],
-                "--migration-ledger", manifest["migration_ledger"],
-                "--migration-harness", "cache-integration",
-                "--migration-report-role", "cache-integration",
                 "--report", str(report),
                 "--case-timeout-seconds", "480",
                 "--reporter", "console::out=-::colour-mode=ansi",
@@ -1298,7 +1445,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             binary_dir = Path(tmp)
             manifest = {
                 key: str(binary_dir / key)
-                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+                for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
             }
             for key, value in manifest.items():
                 path = Path(value)
@@ -1314,16 +1461,16 @@ class CacheModeRoutingTest(unittest.TestCase):
             production_report = (
                 binary_dir / "reports" / "report_1.json")
 
-            support_resolved = server._run_command_argv(
+            support_resolved = build_worker._run_command_argv(
                 "cache-bioseq-integration",
                 binary_dir,
-                server.MODES["cache-bioseq-integration"].commands[0],
+                build_presets.MODES["cache-bioseq-integration"].commands[0],
                 report_path=support_report,
             )
-            production_resolved = server._run_command_argv(
+            production_resolved = build_worker._run_command_argv(
                 "cache-bioseq-integration",
                 binary_dir,
-                server.MODES["cache-bioseq-integration"].commands[1],
+                build_presets.MODES["cache-bioseq-integration"].commands[1],
                 report_path=production_report,
             )
 
@@ -1356,10 +1503,6 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "--bioseq-dso", manifest["bioseq_dso"],
                 "--provider-peer-test-dso",
                 manifest["provider_peer_test_dso"],
-                "--migration-ledger", manifest["migration_ledger"],
-                "--migration-harness", "cache-bioseq-integration",
-                "--migration-report-role",
-                "cache-bioseq-support-integration",
                 "--report", str(support_report),
                 "--case-timeout-seconds", "480",
                 "--reporter", "console::out=-::colour-mode=ansi",
@@ -1370,7 +1513,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             [
                 str(
                     binary_dir
-                    / "bioseq_cache_bioseq_production_integration_tests"
+                    / "bioseq_cache_bioseq_large_input_e2e_tests"
                 ),
                 "--postgres-bin-dir",
                 manifest["cache_bioseq_production_postgres_bin_dir"],
@@ -1385,20 +1528,15 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "--bioseq-control", manifest["bioseq_control"],
                 "--bioseq-install-sql", manifest["bioseq_install_sql"],
                 "--bioseq-dso", manifest["bioseq_dso"],
-                "--migration-ledger", manifest["migration_ledger"],
-                "--migration-harness", "cache-bioseq-integration",
-                "--migration-report-role",
-                "cache-bioseq-production-integration",
                 "--report", str(production_report),
-                "--case-timeout-seconds", "480",
-                "--large-case-timeout-seconds", "6300",
+                "--case-timeout-seconds", "6300",
                 "--reporter", "console::out=-::colour-mode=ansi",
             ],
         )
 
     def test_cache_modes_contain_no_script_runner_invocations(self) -> None:
         forbidden = (".py", ".pl", ".pm", "python", "perl")
-        for mode, details in server.MODES.items():
+        for mode, details in build_presets.MODES.items():
             if not mode.startswith("cache-"):
                 continue
             for command in details.commands:
@@ -1413,7 +1551,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             binary_dir = Path(tmp)
             manifest = {
                 key: str(binary_dir / key)
-                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+                for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
             }
             for key, value in manifest.items():
                 path = Path(value)
@@ -1425,15 +1563,15 @@ class CacheModeRoutingTest(unittest.TestCase):
             (binary_dir / "cache_native_artifacts.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
             report = binary_dir / "reports" / "report_0.json"
-            command = server.MODES["cache-bioseq-bench"].commands[0]
-            resolved = server._run_command_argv(
-                "cache-bioseq-bench",
+            command = build_presets.MODES["cache-bioseq-benchmark"].commands[0]
+            resolved = build_worker._run_command_argv(
+                "cache-bioseq-benchmark",
                 binary_dir,
                 command,
                 report_path=report,
             )
         self.assertEqual(
-            resolved[0], str(binary_dir / "bioseq_cache_bioseq_bench"))
+            resolved[0], str(binary_dir / "bioseq_cache_bioseq_benchmark"))
         self.assertIn(
             str(binary_dir / "cache_bioseq_production_postgres_bin_dir"),
             resolved,
@@ -1454,7 +1592,6 @@ class CacheModeRoutingTest(unittest.TestCase):
         )
         self.assertIn(str(binary_dir / "cache_control"), resolved)
         self.assertIn(str(binary_dir / "bioseq_dso"), resolved)
-        self.assertIn(str(binary_dir / "migration_ledger"), resolved)
         self.assertIn(str(report), resolved)
         self.assertNotIn("{report}", resolved)
 
@@ -1464,7 +1601,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             binary_dir = Path(tmp)
             manifest = {
                 key: str(binary_dir / key)
-                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+                for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
             }
             manifest["bioseq_dso"] = ""
             for key, value in manifest.items():
@@ -1480,10 +1617,10 @@ class CacheModeRoutingTest(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(
                     RuntimeError, "bioseq_dso.*unavailable"):
-                server._run_command_argv(
-                    "cache-bioseq-bench",
+                build_worker._run_command_argv(
+                    "cache-bioseq-benchmark",
                     binary_dir,
-                    server.MODES["cache-bioseq-bench"].commands[0],
+                    build_presets.MODES["cache-bioseq-benchmark"].commands[0],
                     report_path=binary_dir / "report_0.json",
                 )
 
@@ -1492,18 +1629,18 @@ class CacheModeRoutingTest(unittest.TestCase):
             document: dict[str, object]) -> dict[str, object]:
         result = dict(document)
         result.pop("content_sha256", None)
-        result["content_sha256"] = server._canonical_json_sha256(result)
+        result["content_sha256"] = integrity.canonical_json_sha256(result)
         return result
 
     @classmethod
     def _production_dso_fixture(
             cls, root: Path) -> dict[str, object]:
         root = root.resolve(strict=True)
-        system = server.host_platform.system()
+        system = host_platform.system()
         if system not in {"Darwin", "Linux"}:
             raise unittest.SkipTest("DSO qualification supports Darwin/Linux")
-        machine = server._qualification_architecture(
-            server.host_platform.machine(), "fixture host architecture")
+        machine = cache_modes._qualification_architecture(
+            host_platform.machine(), "fixture host architecture")
         suffix = ".dylib" if system == "Darwin" else ".so"
         binary_format = "Mach-O" if system == "Darwin" else "ELF"
         build_dir = root / "cache-bioseq-fixture"
@@ -1571,13 +1708,13 @@ class CacheModeRoutingTest(unittest.TestCase):
             encoding="utf-8",
         )
         configure_inputs = {"preset": "cache-bioseq-fixture"}
-        configure_stamp = build_dir / server._CMAKE_CONFIGURE_STAMP_NAME
+        configure_stamp = build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME
         configure_stamp.write_text(json.dumps({
-            "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-            "schema_version": 1,
+            "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+            "schema_revision": 1,
             "inputs": configure_inputs,
             "inputs_sha256":
-                server._canonical_json_sha256(configure_inputs),
+                integrity.canonical_json_sha256(configure_inputs),
         }), encoding="utf-8")
 
         def identity(path: Path) -> dict[str, object]:
@@ -1585,7 +1722,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "lexical_path": str(path),
                 "resolved_path": str(path.resolve(strict=True)),
                 "size_bytes": path.stat().st_size,
-                "sha256": server._sha256_path(path),
+                "sha256": integrity.sha256_file(path),
             }
 
         compiler_context = {
@@ -1654,9 +1791,9 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "path": str(dsos[key]),
                 "basename": dsos[key].name,
                 "size_bytes": dsos[key].stat().st_size,
-                "sha256": server._sha256_path(dsos[key]),
+                "sha256": integrity.sha256_file(dsos[key]),
                 "binary": dict(binary),
-                "header_listing_sha256": server._sha256_bytes(
+                "header_listing_sha256": integrity.sha256_bytes(
                     header_listing.encode("utf-8")),
                 "build_identity": {
                     "kind": (
@@ -1667,20 +1804,20 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "direct_load_dependencies": [
                     "/usr/lib/libSystem.B.dylib"
                     if system == "Darwin" else "libc.so.6"],
-                "dependency_listing_sha256": server._sha256_bytes(
+                "dependency_listing_sha256": integrity.sha256_bytes(
                     dependency_listing.encode("utf-8")),
-                "build_identity_listing_sha256": server._sha256_bytes(
+                "build_identity_listing_sha256": integrity.sha256_bytes(
                     identity_listing.encode("utf-8")),
                 "sibling_extension": sibling,
                 "sibling_basename": f"{sibling}{suffix}",
                 "sibling_dependency_absent": True,
             })
         document = cls._seal_dso_document({
-            "schema_version": 1,
+            "schema_revision": 1,
             "artifact_kind": "bioseq-production-dso-load-qualification",
             "platform": {
                 "system_name": system,
-                "system_release": server.host_platform.release(),
+                "system_release": host_platform.release(),
                 "machine": machine,
                 "binary_format": binary_format,
                 "dso_suffix": suffix,
@@ -1702,14 +1839,14 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "cmake_cache": {
                     "path": str(cmake_cache),
                     "size_bytes": cmake_cache.stat().st_size,
-                    "sha256": server._sha256_path(cmake_cache),
+                    "sha256": integrity.sha256_file(cmake_cache),
                 },
                 "configure_input": {
                     "path": str(configure_stamp),
                     "size_bytes": configure_stamp.stat().st_size,
-                    "sha256": server._sha256_path(configure_stamp),
+                    "sha256": integrity.sha256_file(configure_stamp),
                     "inputs_sha256":
-                        server._canonical_json_sha256(configure_inputs),
+                        integrity.canonical_json_sha256(configure_inputs),
                 },
                 "compilers": compiler_context,
             },
@@ -1719,7 +1856,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         receipt.write_text(json.dumps(document), encoding="utf-8")
         manifest = {
             key: str(binary_dir / key)
-            for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+            for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
         }
         manifest.update({key: str(path) for key, path in dsos.items()})
         manifest["production_dso_qualification_receipt"] = str(receipt)
@@ -1736,52 +1873,26 @@ class CacheModeRoutingTest(unittest.TestCase):
             "dsos": dsos,
         }
 
-    def test_builder_validates_and_binds_production_dso_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._production_dso_fixture(Path(tmp))
-            evidence = server._cache_bioseq_dso_qualification_evidence(
-                fixture["binary_dir"],
-                expected_build_dir=fixture["build_dir"],
-                expected_preset="cache-bioseq-fixture",
-            )
-            self.assertEqual(
-                evidence["production_dso_qualification_receipt"],
-                str(fixture["receipt"]),
-            )
-            self.assertEqual(
-                evidence["production_dso_qualification_content_sha256"],
-                fixture["document"]["content_sha256"],
-            )
-            self.assertEqual(
-                set(evidence),
-                set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS),
-            )
-
-    def test_report_binding_snapshots_mutable_cmake_dso_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve(strict=True)
-            fixture = self._production_dso_fixture(root)
-            report = root / "report_17.json"
-            report.write_text("{}", encoding="utf-8")
-            evidence = server._cache_bioseq_dso_qualification_evidence(
-                fixture["binary_dir"],
-                expected_build_dir=fixture["build_dir"],
-                expected_preset="cache-bioseq-fixture",
-                snapshot_for_report=report,
-            )
-            snapshot = Path(
-                evidence["production_dso_qualification_receipt"])
-            self.assertEqual(
-                snapshot, root / "production_dso_qualification_17.json")
-            self.assertNotEqual(snapshot, fixture["receipt"])
-            fixture["receipt"].write_text("{}", encoding="utf-8")
-            server._validate_cache_evidence_dso_binding({
-                "report_role": "cache-bioseq-bench",
-                **evidence,
-            })
-
     def test_builder_rejects_dso_receipt_and_live_context_tampering(
             self) -> None:
+        def mutate_schema(
+                fixture: dict[str, object], mutation: str) -> None:
+            document = dict(fixture["document"])
+            document.pop("content_sha256", None)
+            if mutation == "legacy":
+                document["schema_version"] = document.pop("schema_revision")
+            elif mutation == "legacy-kind":
+                document["artifact_kind"] = (
+                    "bioseq-production-dso-load-qualification-v1")
+            elif mutation == "wrong":
+                document["schema_revision"] = 2
+            elif mutation == "boolean":
+                document["schema_revision"] = True
+            else:
+                document["unexpected"] = True
+            fixture["receipt"].write_text(
+                json.dumps(self._seal_dso_document(document)), encoding="utf-8")
+
         mutations = {
             "receipt seal": lambda fixture: fixture["receipt"].write_text(
                 json.dumps({**fixture["document"], "content_sha256": "0" * 64}),
@@ -1794,13 +1905,20 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "configure_stamp"].write_text("{}", encoding="utf-8"),
             "production DSO": lambda fixture: fixture["dsos"][
                 "bioseq_dso"].write_bytes(b"tampered DSO\n"),
+            "legacy schema key": lambda fixture: mutate_schema(fixture, "legacy"),
+            "legacy artifact kind": lambda fixture: mutate_schema(
+                fixture, "legacy-kind"),
+            "wrong schema revision": lambda fixture: mutate_schema(fixture, "wrong"),
+            "boolean schema revision": lambda fixture: mutate_schema(
+                fixture, "boolean"),
+            "unknown receipt key": lambda fixture: mutate_schema(fixture, "unknown"),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 fixture = self._production_dso_fixture(Path(tmp))
                 mutate(fixture)
                 with self.assertRaises(RuntimeError):
-                    server._cache_bioseq_dso_qualification_evidence(
+                    cache_modes._cache_bioseq_dso_qualification_evidence(
                         fixture["binary_dir"],
                         expected_build_dir=fixture["build_dir"],
                         expected_preset="cache-bioseq-fixture",
@@ -1820,7 +1938,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 document = fixture["document"]
                 document["build_context"]["cmake_cache"].update({
                     "size_bytes": cache.stat().st_size,
-                    "sha256": server._sha256_path(cache),
+                    "sha256": integrity.sha256_file(cache),
                 })
                 sealed = self._seal_dso_document(document)
                 fixture["receipt"].write_text(
@@ -1828,7 +1946,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 with self.assertRaisesRegex(
                         RuntimeError,
                         "current CMake cache context differs"):
-                    server._cache_bioseq_dso_qualification_evidence(
+                    cache_modes._cache_bioseq_dso_qualification_evidence(
                         fixture["binary_dir"],
                         expected_build_dir=fixture["build_dir"],
                         expected_preset="cache-bioseq-fixture",
@@ -1855,7 +1973,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 fixture["receipt"].write_text(
                     json.dumps(sealed), encoding="utf-8")
                 with self.assertRaises(RuntimeError):
-                    server._cache_bioseq_dso_qualification_evidence(
+                    cache_modes._cache_bioseq_dso_qualification_evidence(
                         fixture["binary_dir"],
                         expected_build_dir=fixture["build_dir"],
                         expected_preset="cache-bioseq-fixture",
@@ -1869,7 +1987,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             assert isinstance(document, dict)
             document["dsos"][0]["direct_load_dependencies"] = [
                 "/usr/lib/libz.1.dylib"
-                if server.host_platform.system() == "Darwin"
+                if host_platform.system() == "Darwin"
                 else "libm.so.6"
             ]
             sealed = self._seal_dso_document(document)
@@ -1877,7 +1995,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 json.dumps(sealed), encoding="utf-8")
             with self.assertRaisesRegex(
                     RuntimeError, "direct_load_dependencies differs"):
-                server._cache_bioseq_dso_qualification_evidence(
+                cache_modes._cache_bioseq_dso_qualification_evidence(
                     fixture["binary_dir"],
                     expected_build_dir=fixture["build_dir"],
                     expected_preset="cache-bioseq-fixture",
@@ -1892,8 +2010,24 @@ class CacheModeRoutingTest(unittest.TestCase):
             (reporting_dir / "report_debug_9.jsonl").write_text(
                 "{}", encoding="utf-8")
             self.assertEqual(
-                server._next_report_path(reporting_dir),
+                build_worker._next_report_path(reporting_dir),
                 reporting_dir / "report_1.json",
+            )
+            self.assertEqual(
+                cache_modes._report_index("report_build_2.json"),
+                -1,
+            )
+
+    def test_split_cache_module_publishes_atomic_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "nested" / "evidence.json"
+            cache_modes._write_json_atomic(
+                destination,
+                {"z-last": 2, "a-first": 1},
+            )
+            self.assertEqual(
+                destination.read_bytes(),
+                b'{\n  "a-first": 1,\n  "z-last": 2\n}\n',
             )
 
     def test_concurrent_worker_state_updates_are_lossless_and_collision_safe(
@@ -1908,27 +2042,27 @@ class CacheModeRoutingTest(unittest.TestCase):
             start_barrier = context.Barrier(3)
             results = context.Queue()
             real_named_temporary_file = (
-                server.tempfile.NamedTemporaryFile)
+                tempfile.NamedTemporaryFile)
 
             def update_from_worker(
                     mode: str, fields: dict[str, object],
                     nested_lock: bool) -> None:
-                server.STATE_FILE = state_path
-                server.LOCK_FILE = lock_path
+                process_state.STATE_FILE = state_path
+                process_state.LOCK_FILE = lock_path
 
                 def tracked_temporary_file(*args, **kwargs):
                     handle = real_named_temporary_file(*args, **kwargs)
                     results.put(("temporary", handle.name))
                     return handle
 
-                server.tempfile.NamedTemporaryFile = tracked_temporary_file
+                tempfile.NamedTemporaryFile = tracked_temporary_file
                 try:
                     start_barrier.wait(timeout=5.0)
                     if nested_lock:
-                        with server._global_lock():
-                            server._update_entry(mode, **fields)
+                        with process_state._global_lock():
+                            process_state._update_entry(mode, **fields)
                     else:
-                        server._update_entry(mode, **fields)
+                        process_state._update_entry(mode, **fields)
                     results.put(("completed", mode))
                 except BaseException as exc:
                     results.put(
@@ -1949,10 +2083,10 @@ class CacheModeRoutingTest(unittest.TestCase):
                 context.Process(
                     target=update_from_worker,
                     args=(
-                        "cache-bioseq-bench",
+                        "cache-bioseq-benchmark",
                         {
                             "notes": "production-benchmark-ready",
-                            "report_file": "/reports/report_1.json",
+                            "report_files": ["/reports/report_1.json"],
                         },
                         False,
                     ),
@@ -1996,7 +2130,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                     for kind, detail in messages
                     if kind == "completed"
                 },
-                {"cache-integration", "cache-bioseq-bench"},
+                {"cache-integration", "cache-bioseq-benchmark"},
             )
             temporary_paths = [
                 Path(detail)
@@ -2023,12 +2157,12 @@ class CacheModeRoutingTest(unittest.TestCase):
                 ["/reports/report_0.json"],
             )
             self.assertEqual(
-                state["cache-bioseq-bench"]["notes"],
+                state["cache-bioseq-benchmark"]["notes"],
                 "production-benchmark-ready",
             )
             self.assertEqual(
-                state["cache-bioseq-bench"]["report_file"],
-                "/reports/report_1.json",
+                state["cache-bioseq-benchmark"]["report_files"],
+                ["/reports/report_1.json"],
             )
 
     def test_combined_commands_persist_two_ordered_report_receipts(
@@ -2037,48 +2171,58 @@ class CacheModeRoutingTest(unittest.TestCase):
             reporting_root = Path(tmp) / "reporting"
             command_receipts: list[tuple[str, Path]] = []
             state_updates: list[dict[str, object]] = []
+            focused_flags = [
+                "--allow-running-no-tests",
+                "[cache-correctness]",
+            ]
 
             def resolve_command(
                     _mode, _active_bin_dir, command, *,
                     bench_flags=None, test_flags=None,
                     report_path=None):
                 self.assertIsNone(bench_flags)
-                self.assertIsNone(test_flags)
+                self.assertEqual(test_flags, focused_flags)
                 self.assertIsNotNone(report_path)
                 command_receipts.append((command[0], report_path))
-                return [command[0], str(report_path)]
+                return [command[0], str(report_path), *test_flags]
 
             def publish_report(argv, *_args, **_kwargs):
-                Path(argv[-1]).write_text("{}", encoding="utf-8")
+                Path(argv[1]).write_text("{}", encoding="utf-8")
                 return 0
 
             def record_update(_mode, **fields):
                 state_updates.append(fields)
 
             with (
-                mock.patch.object(server, "REPORTING_DIR", reporting_root),
                 mock.patch.object(
-                    server,
+                    build_presets, "REPORTING_DIR", reporting_root),
+                mock.patch.object(
+                    build_worker,
                     "_run_command_argv",
                     side_effect=resolve_command,
                 ),
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_stream_subprocess",
                     side_effect=publish_report,
                 ),
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_update_entry",
                     side_effect=record_update,
                 ),
+                mock.patch.object(
+                    build_worker,
+                    "_cache_native_report_contract",
+                    return_value={"cleanup_roots": []},
+                ) as validate_report,
             ):
                 (
                     report_file,
                     report_files,
                     report_invocations,
                     unit_command_records,
-                ) = server._run_mode_commands(
+                ) = build_worker._run_mode_commands(
                     "cache-bioseq-integration",
                     Path(tmp) / "bin",
                     Path(tmp) / "build",
@@ -2086,6 +2230,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                     io.StringIO(),
                     float("inf"),
                     set(),
+                    test_flags=focused_flags,
                 )
 
             report_dir = (
@@ -2097,14 +2242,20 @@ class CacheModeRoutingTest(unittest.TestCase):
             self.assertEqual(report_files, expected_reports)
             self.assertEqual(report_file, expected_reports[-1])
             self.assertEqual(unit_command_records, [])
+            self.assertEqual(validate_report.call_count, 2)
+            for call in validate_report.call_args_list:
+                self.assertEqual(
+                    call.kwargs["test_flags"], focused_flags)
             self.assertEqual(
                 [Path(invocation[0]).name
                  for invocation in report_invocations],
                 [
                     "bioseq_cache_bioseq_support_integration_tests",
-                    "bioseq_cache_bioseq_production_integration_tests",
+                    "bioseq_cache_bioseq_large_input_e2e_tests",
                 ],
             )
+            for invocation in report_invocations:
+                self.assertEqual(invocation[-2:], focused_flags)
             self.assertEqual(
                 command_receipts,
                 [
@@ -2113,7 +2264,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                         expected_reports[0],
                     ),
                     (
-                        "bioseq_cache_bioseq_production_integration_tests",
+                        "bioseq_cache_bioseq_large_input_e2e_tests",
                         expected_reports[1],
                     ),
                 ],
@@ -2122,11 +2273,9 @@ class CacheModeRoutingTest(unittest.TestCase):
                 state_updates,
                 [
                     {
-                        "report_file": str(expected_reports[0]),
                         "report_files": [str(expected_reports[0])],
                     },
                     {
-                        "report_file": str(expected_reports[1]),
                         "report_files": [
                             str(expected_reports[0]),
                             str(expected_reports[1]),
@@ -2152,24 +2301,26 @@ class CacheModeRoutingTest(unittest.TestCase):
                 return [command[0], str(report_path)]
 
             with (
-                mock.patch.object(server, "REPORTING_DIR", reporting_root),
                 mock.patch.object(
-                    server,
+                    build_presets, "REPORTING_DIR", reporting_root),
+                mock.patch.object(
+                    build_worker,
                     "_run_command_argv",
                     side_effect=resolve_command,
                 ),
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_stream_subprocess",
                     return_value=0,
                 ) as stream,
-                mock.patch.object(server, "_update_entry") as update,
+                mock.patch.object(
+                    build_worker, "_update_entry") as update,
             ):
                 with self.assertRaisesRegex(
                         RuntimeError,
                         "support_integration_tests.*allocated regular "
                         "JSON report"):
-                    server._run_mode_commands(
+                    build_worker._run_mode_commands(
                         "cache-bioseq-integration",
                         Path(tmp) / "bin",
                         Path(tmp) / "build",
@@ -2200,7 +2351,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             reporting_root = root / "reporting"
             unsafe_cleanup_root = (
                 Path(tempfile.gettempdir()).resolve(strict=True)
-                / f"ordinary-timeout-root-{server.secrets.token_hex(8)}"
+                / f"ordinary-timeout-root-{secrets.token_hex(8)}"
             )
 
             def resolve_command(
@@ -2213,7 +2364,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             def publish_unsafe_terminal_report(
                     argv, *_args, **_kwargs):
                 Path(argv[-1]).write_text(json.dumps({
-                    "schema_version": "bioseq-cache-test-v2",
+                    "schema_revision": 2,
                     "cleanup": {"succeeded": True},
                     "cleanup_observations": [{
                         "succeeded": True,
@@ -2227,32 +2378,32 @@ class CacheModeRoutingTest(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    server, "REPORTING_DIR", reporting_root),
+                    build_presets, "REPORTING_DIR", reporting_root),
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_run_command_argv",
                     side_effect=resolve_command,
                 ),
                 mock.patch.object(
-                    server,
+                    build_worker,
                     "_stream_subprocess",
                     side_effect=publish_unsafe_terminal_report,
                 ),
-                mock.patch.object(server, "_update_entry"),
+                mock.patch.object(build_worker, "_update_entry"),
                 self.assertRaisesRegex(
                     RuntimeError, "not marker-owned"),
             ):
-                server._run_mode_commands(
+                build_worker._run_mode_commands(
                     "cache-bioseq-integration",
                     root / "bin",
                     root / "build",
                     {},
                     io.StringIO(),
-                    server.time.time() + 10,
+                    time.time() + 10,
                     set(),
                 )
 
-    def test_status_exposes_ordered_reports_and_legacy_singular_fallback(
+    def test_status_exposes_only_ordered_reports(
             self) -> None:
         now = 1_000_000.0
         support = "/reports/report_0.json"
@@ -2267,10 +2418,9 @@ class CacheModeRoutingTest(unittest.TestCase):
             "uses_private_cluster": True,
             "focused_test_args": [],
             "log_file": "/logs/cache.log",
-            "report_file": production,
         }
         with mock.patch.object(
-                server,
+                build_worker,
                 "_load_state",
                 return_value={
                     "cache-bioseq-integration": {
@@ -2278,25 +2428,29 @@ class CacheModeRoutingTest(unittest.TestCase):
                         "report_files": [support, production],
                     },
                 }):
-            status = server.tool_status("cache-bioseq-integration")
+            status = build_worker.tool_status("cache-bioseq-integration")
         self.assertIn(f"Reports: {support}, {production}", status)
         self.assertLess(status.index(support), status.index(production))
 
         with mock.patch.object(
-                server,
+                build_worker,
                 "_load_state",
                 return_value={
-                    "cache-bioseq-integration": base_entry,
+                    "cache-bioseq-integration": {
+                        **base_entry,
+                        "report_file": production,
+                    },
                 }):
-            legacy_status = server.tool_status(
+            legacy_status = build_worker.tool_status(
                 "cache-bioseq-integration")
-        self.assertIn(f"Report: {production}", legacy_status)
+        self.assertNotIn(production, legacy_status)
+        self.assertNotIn("Report:", legacy_status)
         self.assertNotIn("Reports:", legacy_status)
 
     def test_mcp_schemas_expose_cache_modes_and_inspect_targets(self) -> None:
         definitions = {
             definition["name"]: definition
-            for definition in server.TOOL_DEFINITIONS
+            for definition in protocol.TOOL_DEFINITIONS
         }
         modes = definitions["start_build"]["inputSchema"]["properties"][
             "mode"]["enum"]
@@ -2308,14 +2462,14 @@ class CacheModeRoutingTest(unittest.TestCase):
         for mode in (
             "cache-unit",
             "cache-integration",
-            "cache-bench",
+            "cache-benchmark",
             "cache-bioseq-integration",
-            "cache-bioseq-bench",
+            "cache-bioseq-benchmark",
         ):
             self.assertIn(mode, modes)
             self.assertIn(mode, remote_modes)
-        self.assertEqual(inspect_targets, sorted(server.INSPECT_TARGETS))
-        self.assertEqual(remote_targets, sorted(server.INSPECT_TARGETS))
+        self.assertEqual(inspect_targets, sorted(build_worker.INSPECT_TARGETS))
+        self.assertEqual(remote_targets, sorted(build_worker.INSPECT_TARGETS))
 
     def test_inspect_missing_artifact_uses_cache_subdirectory_and_candidates(
             self) -> None:
@@ -2335,7 +2489,7 @@ class CacheModeRoutingTest(unittest.TestCase):
 
     def test_inspect_cache_dso_candidates_follow_configuration_and_platform(
             self) -> None:
-        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        definition = build_worker.INSPECT_TARGETS["postgresql_bioseq_cache"]
         self.assertEqual(
             definition.profiled_artifact_directory,
             "artifacts/cache_production",
@@ -2353,7 +2507,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 ("Windows", ".dll"),
             ):
                 with self.subTest(system_name=system_name):
-                    candidates = server._inspect_artifact_candidates(
+                    candidates = build_worker._inspect_artifact_candidates(
                         definition,
                         build_dir,
                         debug=True,
@@ -2372,7 +2526,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo\n",
                 encoding="utf-8",
             )
-            candidates = server._inspect_artifact_candidates(
+            candidates = build_worker._inspect_artifact_candidates(
                 definition,
                 build_dir,
                 debug=False,
@@ -2389,8 +2543,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.dict(
-                    server.os.environ, {"CMAKE_BUILD_TYPE": "Release"}):
-                candidates = server._inspect_artifact_candidates(
+                    os.environ, {"CMAKE_BUILD_TYPE": "Release"}):
+                candidates = build_worker._inspect_artifact_candidates(
                     definition,
                     build_dir,
                     debug=True,
@@ -2406,7 +2560,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RuntimeError, "invalid CMake"):
-                server._inspect_artifact_candidates(
+                build_worker._inspect_artifact_candidates(
                     definition,
                     build_dir,
                     debug=False,
@@ -2415,7 +2569,7 @@ class CacheModeRoutingTest(unittest.TestCase):
 
     def test_inspect_cache_dso_resolution_rejects_wrong_config_and_directory(
             self) -> None:
-        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        definition = build_worker.INSPECT_TARGETS["postgresql_bioseq_cache"]
         with tempfile.TemporaryDirectory() as tmp:
             build_dir = Path(tmp)
             binary_root = build_dir / "bioseq_caching"
@@ -2423,7 +2577,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "CMAKE_BUILD_TYPE:STRING=Release\n",
                 encoding="utf-8",
             )
-            artifact_names = server._inspect_artifact_candidates(
+            artifact_names = build_worker._inspect_artifact_candidates(
                 definition,
                 build_dir,
                 debug=False,
@@ -2434,11 +2588,11 @@ class CacheModeRoutingTest(unittest.TestCase):
                 binary_root
                 / "artifacts/cache_production/Debug/bioseq_cache.so"
             )
-            legacy = binary_root / artifact_names[1]
-            for path in (requested, stale_debug, legacy):
+            fallback = binary_root / artifact_names[1]
+            for path in (requested, stale_debug, fallback):
                 path.parent.mkdir(parents=True, exist_ok=True)
             stale_debug.touch()
-            legacy.touch()
+            fallback.touch()
             requested.mkdir()
 
             binary, candidates = inspect_tool.resolve_binary_candidate(
@@ -2446,8 +2600,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "postgresql_bioseq_cache",
                 artifact_names,
             )
-            self.assertEqual(binary, legacy)
-            self.assertEqual(candidates, (requested, legacy))
+            self.assertEqual(binary, fallback)
+            self.assertEqual(candidates, (requested, fallback))
 
             requested.rmdir()
             requested.touch()
@@ -2458,14 +2612,14 @@ class CacheModeRoutingTest(unittest.TestCase):
             )
 
         self.assertEqual(binary, requested)
-        self.assertEqual(candidates, (requested, legacy))
+        self.assertEqual(candidates, (requested, fallback))
 
     def test_inspect_cache_dso_missing_diagnostic_lists_profile_and_fallback(
             self) -> None:
-        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        definition = build_worker.INSPECT_TARGETS["postgresql_bioseq_cache"]
         with tempfile.TemporaryDirectory() as tmp:
             build_dir = Path(tmp)
-            artifact_names = server._inspect_artifact_candidates(
+            artifact_names = build_worker._inspect_artifact_candidates(
                 definition,
                 build_dir,
                 debug=True,
@@ -2491,10 +2645,10 @@ class CacheModeRoutingTest(unittest.TestCase):
             result["error"],
         )
 
-    def test_postgresql_bioseq_inspect_mapping_uses_bench_e2e_dso_candidates(
+    def test_postgresql_bioseq_inspect_mapping_uses_benchmark_e2e_dso_candidates(
             self) -> None:
-        definition = server.INSPECT_TARGETS["postgresql_bioseq"]
-        self.assertEqual(definition.mode, "bench-e2e")
+        definition = build_worker.INSPECT_TARGETS["postgresql_bioseq"]
+        self.assertEqual(definition.mode, "benchmark-e2e")
         self.assertEqual(
             definition.artifact_names,
             ("bioseq.dylib", "bioseq.so", "bioseq.dll"),
@@ -2746,8 +2900,8 @@ class InspectAssemblyStreamingTest(unittest.TestCase):
             result["matches"][0]["assembly_listing_file"], str(listing))
         self.assertEqual(result["summary"]["asm_listings_discovered"], 1)
         self.assertEqual(result["summary"]["asm_listings_candidates"], 1)
-        self.assertEqual(result["summary"]["asm_listings_scanned"], 1)
         self.assertEqual(result["summary"]["asm_listings_parsed"], 1)
+        self.assertNotIn("asm_listings_scanned", result["summary"])
         self.assertFalse(result["summary"]["asm_listing_scan_incomplete"])
 
     def test_sparse_listing_read_and_retained_state_are_bounded(self) -> None:
@@ -3098,7 +3252,7 @@ class InspectAssemblyStreamingTest(unittest.TestCase):
             self) -> None:
         definitions = {
             definition["name"]: definition
-            for definition in server.TOOL_DEFINITIONS
+            for definition in protocol.TOOL_DEFINITIONS
         }
         local = definitions["inspect"]
         local_properties = local["inputSchema"]["properties"]
@@ -3114,7 +3268,9 @@ class InspectAssemblyStreamingTest(unittest.TestCase):
             "When omitted", local_properties["source_basename"]["description"])
         self.assertIn("build tree", local["description"])
         self.assertIn("build_metadata.tools.rg", local["description"])
+        self.assertIn("asm_listings_discovered", local["description"])
         self.assertIn("asm_listings_parsed", local["description"])
+        self.assertNotIn("asm_listings_scanned", local["description"])
         self.assertIn("asm_listing_scan_incomplete", local["description"])
         self.assertIn("entries-cleared", local["description"])
 
@@ -3136,857 +3292,7 @@ class InspectAssemblyStreamingTest(unittest.TestCase):
             "remote-run"]["description"])
 
 
-class CacheRetirementProvenanceTest(unittest.TestCase):
-    _ROLES = (
-        "cache-integration",
-        "cache-bioseq-support-integration",
-        "cache-bioseq-production-integration",
-        "cache-bench",
-        "cache-bioseq-bench",
-    )
-
-    @staticmethod
-    def _provenance(phase: str = "passing") -> dict[str, object]:
-        return {
-            "source_revision": "a" * 40,
-            "source_scope_sha256": "b" * 64,
-            "source_scoped_clean": True,
-            "migration_ledger_sha256": "c" * 64,
-            "evidence_contract_sha256": "d" * 64,
-            "migration_phase": phase,
-        }
-
-    @staticmethod
-    def _write_json(path: Path, value: object) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(value, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-
-    @classmethod
-    def _dso_binding(cls, root: Path) -> dict[str, str]:
-        receipt = root / "qualification" / "production-dso.json"
-        build = Path("/fixed/cache-bioseq-build")
-        file_identity = {
-            "lexical_path": "/fixed/otool",
-            "resolved_path": "/fixed/otool",
-            "size_bytes": 1,
-            "sha256": "1" * 64,
-        }
-        document = CacheModeRoutingTest._seal_dso_document({
-            "schema_version": 1,
-            "artifact_kind": "bioseq-production-dso-load-qualification",
-            "platform": {
-                "system_name": "Darwin",
-                "system_release": "historical-release",
-                "machine": "arm64",
-                "binary_format": "Mach-O",
-                "dso_suffix": ".dylib",
-            },
-            "inspection_tool": {
-                **file_identity,
-                "identity_kind": "executable-sha256",
-                "header_arguments": ["-hv"],
-                "dependency_arguments": ["-L"],
-                "build_identity_arguments": ["-l"],
-            },
-            "build_context": {
-                "preset": "historical-cache-bioseq",
-                "configuration": "Release",
-                "build_type": "Release",
-                "generator": "Ninja",
-                "build_directory": str(build),
-                "cmake_system": {"name": "Darwin", "processor": "arm64"},
-                "cmake_cache": {
-                    "path": str(build / "CMakeCache.txt"),
-                    "size_bytes": 1,
-                    "sha256": "2" * 64,
-                },
-                "configure_input": {
-                    "path": str(build / server._CMAKE_CONFIGURE_STAMP_NAME),
-                    "size_bytes": 1,
-                    "sha256": "3" * 64,
-                    "inputs_sha256": "4" * 64,
-                },
-                "compilers": {
-                    language: {
-                        **file_identity,
-                        "compiler_id": "HistoricalCompiler",
-                        "compiler_version": "1.0",
-                    }
-                    for language in ("c", "cxx")
-                },
-            },
-            "dsos": [
-                {
-                    "extension": extension,
-                    "path": str(build / f"{extension}.dylib"),
-                    "basename": f"{extension}.dylib",
-                    "size_bytes": 1,
-                    "sha256": dso_sha,
-                    "binary": {
-                        "format": "Mach-O",
-                        "architectures": ["arm64"],
-                    },
-                    "header_listing_sha256": "5" * 64,
-                    "build_identity": {
-                        "kind": "mach-o-lc-uuid",
-                        "values": [uuid],
-                    },
-                    "direct_load_dependencies": [
-                        "/usr/lib/libSystem.B.dylib"],
-                    "dependency_listing_sha256": "6" * 64,
-                    "build_identity_listing_sha256": "7" * 64,
-                    "sibling_extension": sibling,
-                    "sibling_basename": f"{sibling}.dylib",
-                    "sibling_dependency_absent": True,
-                }
-                for extension, sibling, dso_sha, uuid in (
-                    (
-                        "bioseq", "bioseq_cache", "8" * 64,
-                        "11111111-1111-1111-1111-111111111111"),
-                    (
-                        "bioseq_cache", "bioseq", "9" * 64,
-                        "22222222-2222-2222-2222-222222222222"),
-                )
-            ],
-        })
-        cls._write_json(receipt, document)
-        return {
-            "production_dso_qualification_receipt":
-                str(receipt.resolve(strict=True)),
-            "production_dso_qualification_receipt_sha256":
-                server._sha256_path(receipt),
-            "production_dso_qualification_content_sha256":
-                str(document["content_sha256"]),
-        }
-
-    @classmethod
-    def _historical_chain(
-            cls, root: Path) -> dict[str, object]:
-        unit_dir = root / "unit"
-        evidence_dir = root / "evidence"
-        native_dir = root / "native"
-        historical = cls._provenance("passing")
-        historical["source_revision"] = "1" * 40
-        historical["source_scope_sha256"] = "2" * 64
-        historical["migration_ledger_sha256"] = "3" * 64
-        dso_binding = cls._dso_binding(root)
-
-        unit_receipt = unit_dir / "receipt_historical.json"
-        cls._write_json(unit_receipt, {
-            "schema_version": "bioseq-cache-mcp-unit-receipt-v1",
-            "mode": "cache-unit",
-            "status": "passed",
-            **historical,
-            "commands": [],
-        })
-
-        evidence_receipts: dict[str, Path] = {}
-        native_reports: dict[str, Path] = {}
-        report_seals: list[dict[str, str]] = []
-        for ordinal, role in enumerate(cls._ROLES):
-            native_report = native_dir / f"report_{ordinal}.json"
-            cls._write_json(native_report, {
-                "schema_version": "historical-native-probe-v1",
-                "report_role": role,
-                "status": "passed",
-            })
-            receipt = evidence_dir / f"receipt_historical_{ordinal}.json"
-            receipt_value = {
-                "schema_version":
-                    "bioseq-cache-mcp-evidence-receipt-v1",
-                "mode": server._CACHE_EVIDENCE_MODE_BY_ROLE[role],
-                "report_role": role,
-                "native_report": str(native_report),
-                "native_report_sha256":
-                    server._sha256_path(native_report),
-                "executable": str(
-                    Path("/fixed")
-                    / server._CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]),
-                "executable_sha256": "4" * 64,
-                "scenario":
-                    server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
-                **historical,
-            }
-            if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
-                receipt_value.update(dso_binding)
-            cls._write_json(receipt, receipt_value)
-            evidence_receipts[role] = receipt
-            native_reports[role] = native_report
-            report_seals.append({
-                "report_role": role,
-                "receipt_sha256": server._sha256_path(receipt),
-            })
-
-        proof = {
-            "schema_version": "bioseq-cache-retirement-proof-v1",
-            "proof_source_revision": historical["source_revision"],
-            "proof_source_scope_sha256":
-                historical["source_scope_sha256"],
-            "evidence_contract_sha256":
-                historical["evidence_contract_sha256"],
-            "unit_receipt_sha256": server._sha256_path(unit_receipt),
-            "reports": report_seals,
-        }
-        return {
-            "unit_dir": unit_dir,
-            "evidence_dir": evidence_dir,
-            "historical": historical,
-            "unit_receipt": unit_receipt,
-            "evidence_receipts": evidence_receipts,
-            "native_reports": native_reports,
-            "proof": proof,
-            "dso_binding": dso_binding,
-        }
-
-    @classmethod
-    def _add_current_chain(
-            cls, fixture: dict[str, object],
-            provenance: dict[str, object]) -> tuple[Path, list[Path]]:
-        unit_dir = fixture["unit_dir"]
-        evidence_dir = fixture["evidence_dir"]
-        assert isinstance(unit_dir, Path)
-        assert isinstance(evidence_dir, Path)
-        dso_binding = fixture["dso_binding"]
-        assert isinstance(dso_binding, dict)
-        unit_receipt = unit_dir / "receipt_current.json"
-        cls._write_json(unit_receipt, {
-            "schema_version": "bioseq-cache-mcp-unit-receipt-v1",
-            "mode": "cache-unit",
-            "status": "passed",
-            **provenance,
-            "commands": [],
-        })
-        receipts = []
-        for ordinal, role in enumerate(cls._ROLES):
-            path = evidence_dir / f"receipt_current_{ordinal}.json"
-            receipt_value = {
-                "schema_version":
-                    "bioseq-cache-mcp-evidence-receipt-v1",
-                "mode": server._CACHE_EVIDENCE_MODE_BY_ROLE[role],
-                "report_role": role,
-                "executable": str(
-                    Path("/fixed")
-                    / server._CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]),
-                "executable_sha256": "e" * 64,
-                "scenario":
-                    server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
-                **provenance,
-            }
-            if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
-                receipt_value.update(dso_binding)
-            cls._write_json(path, receipt_value)
-            receipts.append(path)
-        return unit_receipt, receipts
-
-    @classmethod
-    def _retired_lifecycle_fixture(
-            cls, root: Path) -> dict[str, object]:
-        fixture = cls._historical_chain(root)
-        current = cls._provenance("retired_with_proof")
-        current_unit, current_receipts = cls._add_current_chain(
-            fixture, current)
-        legacy_root = root / "legacy-root"
-        active_bin_dir = root / "bin"
-        active_build_dir = root / "build"
-        retirement_dir = root / "retirement"
-        legacy_root.mkdir()
-        active_bin_dir.mkdir()
-        active_build_dir.mkdir()
-        retirement_dir.mkdir()
-        ledger = root / "legacy_migration_ledger.tsv"
-        inventory = root / "legacy_asset_inventory.txt"
-        catch_cases = root / "migration_catch_cases.tsv"
-        gate = active_bin_dir / "bioseq_cache_legacy_retirement_gate"
-        proof_path = root / "legacy_retirement_receipt.json"
-        ledger.write_text("fixture ledger\n", encoding="utf-8")
-        inventory.write_text("fixture inventory\n", encoding="utf-8")
-        catch_cases.write_text("fixture catch cases\n", encoding="utf-8")
-        gate.write_bytes(b"fixture gate")
-        cls._write_json(proof_path, fixture["proof"])
-        fixture.update({
-            "current": current,
-            "current_unit": current_unit,
-            "current_receipts": current_receipts,
-            "legacy_root": legacy_root,
-            "ledger": ledger,
-            "inventory": inventory,
-            "catch_cases": catch_cases,
-            "gate": gate,
-            "proof_path": proof_path,
-            "active_bin_dir": active_bin_dir,
-            "active_build_dir": active_build_dir,
-            "retirement_dir": retirement_dir,
-        })
-        return fixture
-
-    @staticmethod
-    def _patch_retired_lifecycle(
-            stack: contextlib.ExitStack,
-            fixture: dict[str, object],
-            transition_sha256: str,
-            stream_side_effect) -> mock.Mock:
-        def patch(name: str, value: object):
-            return stack.enter_context(
-                mock.patch.object(server, name, value))
-
-        patch("_CACHE_UNIT_REPORTING_DIR", fixture["unit_dir"])
-        patch(
-            "_CACHE_EVIDENCE_REPORTING_DIRS",
-            (fixture["evidence_dir"],),
-        )
-        patch("_CACHE_MIGRATION_LEDGER", fixture["ledger"])
-        patch("_CACHE_LEGACY_ROOT", fixture["legacy_root"])
-        patch("_CACHE_LEGACY_INVENTORY", fixture["inventory"])
-        patch("_CACHE_RETIREMENT_PROOF", fixture["proof_path"])
-        patch(
-            "_CACHE_RETIREMENT_REPORTING_DIR",
-            fixture["retirement_dir"],
-        )
-        stack.enter_context(mock.patch.object(
-            server,
-            "_cache_native_artifacts",
-            return_value={
-                "migration_catch_cases": str(
-                    fixture["catch_cases"]),
-                "legacy_retirement_gate": str(fixture["gate"]),
-            },
-        ))
-        stack.enter_context(mock.patch.object(
-            server,
-            "_cache_retirement_transition_sha256",
-            return_value=transition_sha256,
-        ))
-        stream_patch = (
-            {"side_effect": stream_side_effect}
-            if callable(stream_side_effect)
-            else {"return_value": stream_side_effect}
-        )
-        stream = stack.enter_context(mock.patch.object(
-            server, "_stream_subprocess", **stream_patch))
-        stack.enter_context(mock.patch.object(server, "_update_entry"))
-        return stream
-
-    def test_status_only_ledger_transition_preserves_evidence_digest(
-            self) -> None:
-        header = (
-            "legacy_path\tlegacy_line_or_assertion\tstable_id\t"
-            "evidence_harness\tevidence_role\tsource_kind\t"
-            "scenario_or_permutation\texpected_sqlstate_or_result\t"
-            "expected_state_invariant\tcatch2_case\tcatch2_section\t"
-            "catch2_tags\tmigration_status\n"
-        )
-        semantic_fields = (
-            "test/regress/a.sql\tSELECT 1\tlegacy-a\t"
-            "cache-integration\tcache-integration\tsql\tdefault\t"
-            "1\tunchanged\tcase a\tsection a\t[cache]"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            passing = Path(tmp) / "passing.tsv"
-            retired = Path(tmp) / "retired.tsv"
-            changed = Path(tmp) / "changed.tsv"
-            passing.write_text(
-                header + semantic_fields + "\tpassing\n",
-                encoding="utf-8",
-            )
-            retired.write_text(
-                header + semantic_fields + "\tretired_with_proof\n",
-                encoding="utf-8",
-            )
-            changed.write_text(
-                header
-                + semantic_fields.replace(
-                    "cache-integration\tcache-integration",
-                    "cache-bench\tcache-bench",
-                )
-                + "\tretired_with_proof\n",
-                encoding="utf-8",
-            )
-
-            passing_contract = server._cache_migration_contract(passing)
-            retired_contract = server._cache_migration_contract(retired)
-            changed_contract = server._cache_migration_contract(changed)
-
-        self.assertNotEqual(
-            passing_contract["migration_ledger_sha256"],
-            retired_contract["migration_ledger_sha256"],
-        )
-        self.assertEqual(
-            passing_contract["evidence_contract_sha256"],
-            retired_contract["evidence_contract_sha256"],
-        )
-        self.assertNotEqual(
-            retired_contract["evidence_contract_sha256"],
-            changed_contract["evidence_contract_sha256"],
-        )
-        self.assertEqual(
-            retired_contract["migration_phase"],
-            "retired_with_proof",
-        )
-
-    def test_current_passing_receipt_roster_is_exact_and_ordered(
-            self) -> None:
-        provenance = self._provenance()
-        roles = (
-            "cache-integration",
-            "cache-bioseq-support-integration",
-            "cache-bioseq-production-integration",
-            "cache-bench",
-            "cache-bioseq-bench",
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            reporting = Path(tmp) / "receipts"
-            reporting.mkdir()
-            dso_binding = self._dso_binding(Path(tmp))
-            for ordinal, role in enumerate(reversed(roles)):
-                receipt = {
-                    "schema_version":
-                        "bioseq-cache-mcp-evidence-receipt-v1",
-                    "mode": server._CACHE_EVIDENCE_MODE_BY_ROLE[role],
-                    "report_role": role,
-                    "executable": str(
-                        Path("/fixed")
-                        / server._CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[
-                            role]),
-                    "executable_sha256": "f" * 64,
-                    "scenario":
-                        server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
-                    **provenance,
-                }
-                if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
-                    receipt.update(dso_binding)
-                (reporting / f"receipt_{ordinal}.json").write_text(
-                    json.dumps(receipt), encoding="utf-8")
-            with mock.patch.object(
-                    server,
-                    "_CACHE_EVIDENCE_REPORTING_DIRS",
-                    (reporting,)):
-                selected = (
-                    server._find_current_cache_evidence_receipts(
-                        provenance)
-                )
-                observed = [
-                    json.loads(path.read_text(encoding="utf-8"))[
-                        "report_role"]
-                    for path in selected
-                ]
-                self.assertEqual(observed, list(roles))
-
-                stale = json.loads(
-                    selected[0].read_text(encoding="utf-8"))
-                stale["migration_ledger_sha256"] = "e" * 64
-                selected[0].write_text(
-                    json.dumps(stale), encoding="utf-8")
-                with self.assertRaisesRegex(
-                        RuntimeError, "missing=.*cache-integration"):
-                    server._find_current_cache_evidence_receipts(
-                        provenance)
-
-    def test_current_roster_rejects_missing_or_tampered_dso_binding(
-            self) -> None:
-        provenance = self._provenance()
-        for mutation in ("missing", "tampered"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
-                fixture = self._historical_chain(Path(tmp))
-                _, receipts = self._add_current_chain(fixture, provenance)
-                combined = next(
-                    path for path in receipts
-                    if json.loads(path.read_text(encoding="utf-8"))[
-                        "report_role"] in server._CACHE_COMBINED_EVIDENCE_ROLES)
-                value = json.loads(combined.read_text(encoding="utf-8"))
-                if mutation == "missing":
-                    del value["production_dso_qualification_receipt_sha256"]
-                    combined.write_text(json.dumps(value), encoding="utf-8")
-                else:
-                    dso_receipt = Path(
-                        value["production_dso_qualification_receipt"])
-                    dso_receipt.write_text("{}", encoding="utf-8")
-                with mock.patch.object(
-                        server,
-                        "_CACHE_EVIDENCE_REPORTING_DIRS",
-                        (fixture["evidence_dir"],)):
-                    with self.assertRaisesRegex(
-                            RuntimeError, "DSO|qualification"):
-                        server._find_current_cache_evidence_receipts(provenance)
-
-    def test_retained_proof_rejects_missing_dso_binding(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._historical_chain(Path(tmp))
-            receipts = fixture["evidence_receipts"]
-            proof = fixture["proof"]
-            assert isinstance(receipts, dict)
-            assert isinstance(proof, dict)
-            role = "cache-bioseq-bench"
-            receipt = receipts[role]
-            value = json.loads(receipt.read_text(encoding="utf-8"))
-            del value["production_dso_qualification_content_sha256"]
-            receipt.write_text(json.dumps(value), encoding="utf-8")
-            for record in proof["reports"]:
-                if record["report_role"] == role:
-                    record["receipt_sha256"] = server._sha256_path(receipt)
-            with (
-                mock.patch.object(
-                    server, "_CACHE_EVIDENCE_REPORTING_DIRS",
-                    (fixture["evidence_dir"],)),
-                mock.patch.object(
-                    server, "_CACHE_UNIT_REPORTING_DIR",
-                    fixture["unit_dir"]),
-            ):
-                with self.assertRaisesRegex(
-                        RuntimeError, "incomplete production DSO"):
-                    server._find_proof_cache_receipts(proof)
-
-    def test_current_only_roster_cannot_satisfy_historical_proof(
-            self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._historical_chain(Path(tmp))
-            current = self._provenance("retired_with_proof")
-            self._add_current_chain(fixture, current)
-            unit_receipt = fixture["unit_receipt"]
-            evidence_receipts = fixture["evidence_receipts"]
-            assert isinstance(unit_receipt, Path)
-            assert isinstance(evidence_receipts, dict)
-            unit_receipt.unlink()
-            for receipt in evidence_receipts.values():
-                assert isinstance(receipt, Path)
-                receipt.unlink()
-
-            with (
-                mock.patch.object(
-                    server,
-                    "_CACHE_UNIT_REPORTING_DIR",
-                    fixture["unit_dir"],
-                ),
-                mock.patch.object(
-                    server,
-                    "_CACHE_EVIDENCE_REPORTING_DIRS",
-                    (fixture["evidence_dir"],),
-                ),
-                self.assertRaisesRegex(
-                    RuntimeError,
-                    "proof-ready native report receipts are incomplete",
-                ),
-            ):
-                server._find_proof_cache_receipts(fixture["proof"])
-
-    def test_historical_unit_receipt_is_hash_sealed(
-            self) -> None:
-        for mutation in ("missing", "altered"):
-            with self.subTest(mutation=mutation), \
-                    tempfile.TemporaryDirectory() as tmp:
-                fixture = self._historical_chain(Path(tmp))
-                unit_receipt = fixture["unit_receipt"]
-                assert isinstance(unit_receipt, Path)
-                if mutation == "missing":
-                    unit_receipt.unlink()
-                else:
-                    unit_receipt.write_text(
-                        unit_receipt.read_text(encoding="utf-8")
-                        + " ",
-                        encoding="utf-8",
-                    )
-                with (
-                    mock.patch.object(
-                        server,
-                        "_CACHE_UNIT_REPORTING_DIR",
-                        fixture["unit_dir"],
-                    ),
-                    mock.patch.object(
-                        server,
-                        "_CACHE_EVIDENCE_REPORTING_DIRS",
-                        (fixture["evidence_dir"],),
-                    ),
-                    self.assertRaisesRegex(
-                        RuntimeError,
-                        "cache-unit receipt is unavailable or ambiguous",
-                    ),
-                ):
-                    server._find_proof_cache_receipts(
-                        fixture["proof"])
-
-    def test_each_historical_role_receipt_is_hash_sealed(
-            self) -> None:
-        for role in self._ROLES:
-            for mutation in ("missing", "altered"):
-                with self.subTest(role=role, mutation=mutation), \
-                        tempfile.TemporaryDirectory() as tmp:
-                    fixture = self._historical_chain(Path(tmp))
-                    receipts = fixture["evidence_receipts"]
-                    assert isinstance(receipts, dict)
-                    receipt = receipts[role]
-                    assert isinstance(receipt, Path)
-                    if mutation == "missing":
-                        receipt.unlink()
-                    else:
-                        receipt.write_text(
-                            receipt.read_text(encoding="utf-8")
-                            + " ",
-                            encoding="utf-8",
-                        )
-                    with (
-                        mock.patch.object(
-                            server,
-                            "_CACHE_UNIT_REPORTING_DIR",
-                            fixture["unit_dir"],
-                        ),
-                        mock.patch.object(
-                            server,
-                            "_CACHE_EVIDENCE_REPORTING_DIRS",
-                            (fixture["evidence_dir"],),
-                        ),
-                        self.assertRaisesRegex(
-                            RuntimeError,
-                            "proof-ready native report receipts "
-                            "are incomplete",
-                        ),
-                    ):
-                        server._find_proof_cache_receipts(
-                            fixture["proof"])
-
-    def test_retired_final_bundle_contains_current_and_historical_rosters(
-            self) -> None:
-        transition_sha256 = "7" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = self._retired_lifecycle_fixture(Path(tmp))
-            current = fixture["current"]
-            assert isinstance(current, dict)
-            transition = (
-                fixture["retirement_dir"]
-                / f"transition_{current['source_revision']}.json"
-            )
-            self._write_json(transition, {
-                "schema_version":
-                    "bioseq-cache-retirement-transition-v1",
-                "retired_source_revision":
-                    current["source_revision"],
-                "retirement_transition_sha256": transition_sha256,
-            })
-            with contextlib.ExitStack() as stack:
-                stream = self._patch_retired_lifecycle(
-                    stack, fixture, transition_sha256, 0)
-                result = server._run_cache_retirement_lifecycle_gate(
-                    "cache-bioseq-bench",
-                    fixture["active_bin_dir"],
-                    fixture["active_build_dir"],
-                    {},
-                    current,
-                    io.StringIO(),
-                    float("inf"),
-                )
-
-            assert result is not None
-            bundle = json.loads(
-                Path(result["bundle"]).read_text(encoding="utf-8"))
-            current_receipts = fixture["current_receipts"]
-            historical_receipts = fixture["evidence_receipts"]
-            assert isinstance(current_receipts, list)
-            assert isinstance(historical_receipts, dict)
-            self.assertEqual(bundle["phase"], "retired-final")
-            self.assertEqual(
-                bundle["unit_receipt"],
-                str(fixture["current_unit"].resolve(strict=True)),
-            )
-            self.assertEqual(
-                bundle["evidence_receipts"],
-                [
-                    str(path.resolve(strict=True))
-                    for path in current_receipts
-                ],
-            )
-            self.assertEqual(
-                bundle["proof_unit_receipt"],
-                str(fixture["unit_receipt"].resolve(strict=True)),
-            )
-            self.assertEqual(
-                bundle["proof_evidence_receipts"],
-                [
-                    str(
-                        historical_receipts[role].resolve(
-                            strict=True))
-                    for role in self._ROLES
-                ],
-            )
-            self.assertEqual(
-                bundle["transition_receipt"],
-                str(transition.resolve(strict=True)),
-            )
-            self.assertEqual(
-                bundle["retirement_transition_sha256"],
-                transition_sha256,
-            )
-            gate_command = stream.call_args.args[0]
-            gate_snapshot = stream.call_args.kwargs[
-                "verified_executable"]
-            self.assertEqual(
-                gate_command[0], str(fixture["gate"]))
-            self.assertEqual(
-                gate_snapshot.parent,
-                fixture["gate"].parent.resolve(strict=True),
-            )
-            self.assertNotEqual(
-                gate_snapshot,
-                fixture["gate"].resolve(strict=True),
-            )
-            self.assertFalse(gate_snapshot.exists())
-
-    def test_retired_final_requires_revision_pinned_transition_receipt(
-            self) -> None:
-        transition_sha256 = "7" * 64
-        for mutation in ("missing", "wrong-revision-name"):
-            with self.subTest(mutation=mutation), \
-                    tempfile.TemporaryDirectory() as tmp:
-                fixture = self._retired_lifecycle_fixture(Path(tmp))
-                current = fixture["current"]
-                assert isinstance(current, dict)
-                if mutation == "wrong-revision-name":
-                    wrong = (
-                        fixture["retirement_dir"]
-                        / f"transition_{'9' * 40}.json"
-                    )
-                    self._write_json(wrong, {
-                        "schema_version":
-                            "bioseq-cache-retirement-transition-v1",
-                    })
-                with contextlib.ExitStack() as stack:
-                    stream = self._patch_retired_lifecycle(
-                        stack, fixture, transition_sha256, 0)
-                    with self.assertRaises(FileNotFoundError):
-                        server._run_cache_retirement_lifecycle_gate(
-                            "cache-bioseq-bench",
-                            fixture["active_bin_dir"],
-                            fixture["active_build_dir"],
-                            {},
-                            current,
-                            io.StringIO(),
-                            float("inf"),
-                        )
-                    stream.assert_not_called()
-
-    def test_retired_final_propagates_transition_semantic_rejection(
-            self) -> None:
-        transition_sha256 = "7" * 64
-        mutations = {
-            "missing-revision": (
-                "retired_source_revision", None),
-            "altered-revision": (
-                "retired_source_revision", "9" * 40),
-            "missing-digest": (
-                "retirement_transition_sha256", None),
-            "altered-digest": (
-                "retirement_transition_sha256", "8" * 64),
-        }
-        for mutation, (field, replacement) in mutations.items():
-            with self.subTest(mutation=mutation), \
-                    tempfile.TemporaryDirectory() as tmp:
-                fixture = self._retired_lifecycle_fixture(Path(tmp))
-                current = fixture["current"]
-                assert isinstance(current, dict)
-                transition = (
-                    fixture["retirement_dir"]
-                    / f"transition_{current['source_revision']}.json"
-                )
-                receipt = {
-                    "schema_version":
-                        "bioseq-cache-retirement-transition-v1",
-                    "retired_source_revision":
-                        current["source_revision"],
-                    "retirement_transition_sha256":
-                        transition_sha256,
-                }
-                if replacement is None:
-                    receipt.pop(field)
-                else:
-                    receipt[field] = replacement
-                self._write_json(transition, receipt)
-
-                def native_gate(
-                        argv, *_args, **_kwargs) -> int:
-                    bundle = json.loads(
-                        Path(argv[2]).read_text(encoding="utf-8"))
-                    observed = json.loads(
-                        Path(bundle["transition_receipt"]).read_text(
-                            encoding="utf-8"))
-                    if (
-                        observed.get("retired_source_revision")
-                            != current["source_revision"]
-                        or observed.get(
-                            "retirement_transition_sha256")
-                            != transition_sha256
-                    ):
-                        return 73
-                    return 0
-
-                with contextlib.ExitStack() as stack:
-                    self._patch_retired_lifecycle(
-                        stack, fixture, transition_sha256, native_gate)
-                    with self.assertRaisesRegex(
-                            RuntimeError, "exited with code 73"):
-                        server._run_cache_retirement_lifecycle_gate(
-                            "cache-bioseq-bench",
-                            fixture["active_bin_dir"],
-                            fixture["active_build_dir"],
-                            {},
-                            current,
-                            io.StringIO(),
-                            float("inf"),
-                        )
-
-    def test_cache_unit_receipt_seals_five_executables_and_exact_argv(
-            self) -> None:
-        provenance = self._provenance()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            reporting = root / "reporting"
-            bin_dir.mkdir()
-            resolved_commands: list[list[str]] = []
-            for command in server.MODES["cache-unit"].commands:
-                executable = bin_dir / command[0]
-                executable.write_bytes(command[0].encode("utf-8"))
-                arguments = [
-                    argument.replace(
-                        "{legacy_inventory}",
-                        str(root / "legacy_asset_inventory.txt"),
-                    )
-                    for argument in command[1:]
-                ]
-                resolved_commands.append(
-                    [str(executable), *arguments])
-
-            with (
-                mock.patch.object(
-                    server, "_CACHE_UNIT_REPORTING_DIR", reporting),
-                mock.patch.object(
-                    server,
-                    "_run_command_argv",
-                    side_effect=resolved_commands,
-                ),
-            ):
-                command_records = [
-                    server._stable_native_command_identity(command)
-                    for command in resolved_commands
-                ]
-                receipt_path = server._seal_cache_unit_receipt(
-                    bin_dir, provenance, command_records)
-
-            receipt = json.loads(
-                receipt_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(receipt["commands"]), 4)
-        self.assertEqual(
-            {
-                Path(command["executable"]).name
-                for command in receipt["commands"]
-            },
-            {
-                "bioseq_cache_unit_tests",
-                "bioseq_postgres_test_support_contract_tests",
-                "bioseq_cache_benchmark_report_contract_tests",
-                "bioseq_durable_file_io_contract_tests",
-            },
-        )
-
+class CacheRuntimeIntegrityTest(unittest.TestCase):
     def test_cache_unit_rejects_executable_replacement_during_command(
             self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4001,22 +3307,22 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             def replace_executable(*_args, **_kwargs):
                 replacement = root / "replacement"
                 replacement.write_bytes(b"after")
-                server.os.replace(replacement, executable)
+                os.replace(replacement, executable)
                 return 0
 
             with (
                 mock.patch.object(
-                    server, "_run_command_argv",
+                    build_worker, "_run_command_argv",
                     side_effect=resolve_command),
                 mock.patch.object(
-                    server, "_stream_subprocess",
+                    build_worker, "_stream_subprocess",
                     side_effect=replace_executable),
-                mock.patch.object(server, "_update_entry"),
+                mock.patch.object(build_worker, "_update_entry"),
             ):
                 with self.assertRaisesRegex(
                         RuntimeError,
                         "verified handle|identity changed during"):
-                    server._run_mode_commands(
+                    build_worker._run_mode_commands(
                         "cache-unit",
                         root,
                         root,
@@ -4035,7 +3341,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             displaced = root / "displaced"
             marker = root / "executed"
             observer = root / "observe_argv0.py"
-            server.shutil.copyfile(sys.executable, logical)
+            shutil.copyfile(sys.executable, logical)
             observer.write_text(
                 "import ctypes\n"
                 "import sys\n"
@@ -4056,7 +3362,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             )
             replacement.write_text(
                 "#!/bin/sh\n"
-                f"printf B > {server.shlex.quote(str(marker))}\n",
+                f"printf B > {shlex.quote(str(marker))}\n",
                 encoding="utf-8",
             )
             logical.chmod(0o700)
@@ -4069,7 +3375,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                     RuntimeError, "verified handle"):
-                with server._verified_native_command_execution(
+                with cache_modes._verified_native_command_execution(
                         invocation) as (record, snapshot):
                     self.assertEqual(
                         record["executable"],
@@ -4081,19 +3387,19 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                     )
                     self.assertNotEqual(
                         snapshot, logical.resolve(strict=True))
-                    server.os.replace(logical, displaced)
-                    server.os.replace(replacement, logical)
+                    os.replace(logical, displaced)
+                    os.replace(replacement, logical)
                     try:
-                        rc = server._stream_subprocess(
+                        rc = process_state._stream_subprocess(
                             invocation,
                             io.StringIO(),
-                            server.time.time() + 10,
+                            time.time() + 10,
                             cwd=root,
                             verified_executable=snapshot,
                         )
                     finally:
-                        server.os.replace(logical, replacement)
-                        server.os.replace(displaced, logical)
+                        os.replace(logical, replacement)
+                        os.replace(displaced, logical)
 
             self.assertEqual(rc, 0)
             marker_lines = marker.read_text(
@@ -4101,7 +3407,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             self.assertEqual(marker_lines, ["A", invocation[0]])
             self.assertFalse(snapshot.exists())
             self.assertEqual(
-                server._stable_native_command_identity(invocation)[
+                cache_modes._stable_native_command_identity(invocation)[
                     "executable_sha256"],
                 record["executable_sha256"],
             )
@@ -4111,13 +3417,13 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             logical = root / "native-command"
-            server.shutil.copyfile(sys.executable, logical)
+            shutil.copyfile(sys.executable, logical)
             logical.chmod(0o700)
             invocation = [str(logical), "-c", "pass"]
 
             with self.assertRaisesRegex(
                     RuntimeError, "verified handle"):
-                with server._verified_native_command_execution(
+                with cache_modes._verified_native_command_execution(
                         invocation) as (_record, snapshot):
                     snapshot.chmod(0o700)
                     snapshot.write_bytes(b"tampered")
@@ -4134,7 +3440,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                     tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 logical = root / "native-command"
-                server.shutil.copyfile(sys.executable, logical)
+                shutil.copyfile(sys.executable, logical)
                 logical.chmod(0o700)
                 invocation = [str(logical), "-c", "pass"]
                 snapshot: Path | None = None
@@ -4160,7 +3466,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                         ),
                     ):
                         with (
-                            server._verified_native_command_execution(
+                            cache_modes._verified_native_command_execution(
                                 invocation)
                         ) as (_record, snapshot):
                             pass
@@ -4173,7 +3479,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             logical = root / "native-command"
-            server.shutil.copyfile(sys.executable, logical)
+            shutil.copyfile(sys.executable, logical)
             logical.chmod(0o700)
             invocation = [
                 str(logical),
@@ -4185,12 +3491,12 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(
                     TimeoutError, "hard timeout"):
-                with server._verified_native_command_execution(
+                with cache_modes._verified_native_command_execution(
                         invocation) as (_record, snapshot):
-                    server._stream_subprocess(
+                    process_state._stream_subprocess(
                         invocation,
                         output,
-                        server.time.time() + 0.25,
+                        time.time() + 0.25,
                         cwd=root,
                         verified_executable=snapshot,
                     )
@@ -4205,19 +3511,19 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 tempfile.gettempdir()).resolve(strict=True)
             unmarked = (
                 canonical_temp
-                / f"ordinary-temp-root-{server.secrets.token_hex(8)}"
+                / f"ordinary-temp-root-{secrets.token_hex(8)}"
             )
             with self.assertRaisesRegex(
                     RuntimeError, "not marker-owned"):
-                server._cache_cleanup_root_contracts(
+                cache_modes._cache_cleanup_root_contracts(
                     [{"root": str(unmarked)}])
             wrong_parent = (
                 Path(tmp).resolve(strict=True)
-                / f"bioseq-pg-test-{server.secrets.token_hex(8)}"
+                / f"bioseq-pg-test-{secrets.token_hex(8)}"
             )
             with self.assertRaisesRegex(
                     RuntimeError, "canonical temporary directory"):
-                server._cache_cleanup_root_contracts(
+                cache_modes._cache_cleanup_root_contracts(
                     [{"root": str(wrong_parent)}])
 
     def test_cleanup_absence_rejects_existing_and_symlinked_paths(
@@ -4228,7 +3534,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             existing.mkdir()
             with self.assertRaisesRegex(
                     RuntimeError, "still exists"):
-                server._require_absent_nofollow_path(
+                cache_modes._require_absent_nofollow_path(
                     existing, "cleanup root")
 
             target = root / "target"
@@ -4239,7 +3545,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 linked_parent / "bioseq-pg-test-absent")
             with self.assertRaisesRegex(
                     RuntimeError, "traverses a symlink"):
-                server._require_absent_nofollow_path(
+                cache_modes._require_absent_nofollow_path(
                     through_symlink, "cleanup root")
 
             provider_root = root / "bioseq-pg-test-provider"
@@ -4249,7 +3555,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             provider_dso.write_bytes(b"reappeared")
             with self.assertRaisesRegex(
                     RuntimeError, "still exists"):
-                server._require_absent_nofollow_path(
+                cache_modes._require_absent_nofollow_path(
                     provider_dso, "provider staged DSO")
 
     def test_failed_terminal_report_rejects_unsafe_cleanup_roots(
@@ -4262,7 +3568,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             mutations = ("existing", "symlink", "unmarked", "wrong-parent")
             for mutation in mutations:
                 with self.subTest(mutation=mutation):
-                    nonce = server.secrets.token_hex(8)
+                    nonce = secrets.token_hex(8)
                     if mutation == "unmarked":
                         cleanup_root = (
                             canonical_temp / f"ordinary-{nonce}")
@@ -4282,7 +3588,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                             target_is_directory=True,
                         )
                     report.write_text(json.dumps({
-                        "schema_version": "bioseq-cache-test-v2",
+                        "schema_revision": 2,
                         "cleanup": {"succeeded": True},
                         "cleanup_observations": [{
                             "succeeded": True,
@@ -4294,7 +3600,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                     }), encoding="utf-8")
                     try:
                         with self.assertRaises(RuntimeError):
-                            server._validate_failed_cache_terminal_report(
+                            cache_modes._validate_failed_cache_terminal_report(
                                 report)
                     finally:
                         if cleanup_root.is_symlink():
@@ -4310,13 +3616,13 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             canonical_temp
             / (
                 "bioseq-pg-test-terminal-window-"
-                + server.secrets.token_hex(8)
+                + secrets.token_hex(8)
             )
         )
         with tempfile.TemporaryDirectory() as tmp:
             report = Path(tmp) / "report.json"
             report.write_text(json.dumps({
-                "schema_version": "bioseq-cache-test-v2",
+                "schema_revision": 2,
                 "cleanup": {"succeeded": True},
                 "cleanup_observations": [{
                     "succeeded": True,
@@ -4327,7 +3633,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 },
             }), encoding="utf-8")
             real_check = (
-                server._require_cache_cleanup_roots_absent)
+                cache_modes._require_cache_cleanup_roots_absent)
             calls = 0
 
             def mutate_after_first_check(
@@ -4341,589 +3647,108 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             try:
                 with (
                     mock.patch.object(
-                        server,
+                        cache_modes,
                         "_require_cache_cleanup_roots_absent",
                         side_effect=mutate_after_first_check,
                     ),
                     self.assertRaisesRegex(
                         RuntimeError, "still exists"),
                 ):
-                    server._validate_failed_cache_terminal_report(
+                    cache_modes._validate_failed_cache_terminal_report(
                         report)
             finally:
                 if cleanup_root.exists():
                     cleanup_root.rmdir()
             self.assertEqual(calls, 2)
 
-    def test_retired_cache_unit_gate_failure_precedes_receipt_publication(
+
+    def test_combined_runtime_budget_is_exact_and_never_shortens_watchdogs(
             self) -> None:
-        provenance = self._provenance("retired_with_proof")
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            build_dir = root / "build"
-            bin_dir = build_dir / "bioseq_caching"
-            build_dir.mkdir()
-            bin_dir.mkdir()
-            (build_dir / "build.ninja").write_text(
-                "# test fixture\n", encoding="utf-8")
-            state = {
-                "cache-unit": {
-                    "started_at": server.time.time(),
-                    "log_file": str(root / "worker.log"),
-                    "rt_priority": None,
-                },
-            }
-            gate_failure = RuntimeError(
-                "historical transition proof rejected")
-
-            with contextlib.ExitStack() as stack:
-                def patch(
-                        name: str, **kwargs: object) -> object:
-                    return stack.enter_context(
-                        mock.patch.object(server, name, **kwargs))
-
-                patch(
-                    "_refuse_root_build_identity", return_value=None)
-                patch("_ensure_build_worker_timesharing_policy")
-                patch("_load_state", return_value=state)
-                patch("preset_for", return_value="cache-opt")
-                patch("build_dir_for", return_value=build_dir)
-                patch("bin_dir_for", return_value=bin_dir)
-                patch(
-                    "_cache_qualification_provenance",
-                    return_value=provenance)
-                patch(
-                    "_build_worker_descendant_environment",
-                    return_value={})
-                patch("_ensure_local_toolchain_environment")
-                patch("_is_aws_clang_preset", return_value=False)
-                patch("_is_aws_gcc_preset", return_value=False)
-                patch("_is_aws_preset", return_value=False)
-                patch(
-                    "_configured_local_build_rt_priority",
-                    return_value=None)
-                patch(
-                    "_local_clang_rt_is_enabled",
-                    return_value=False)
-                patch("_preflight_local_clang_rt_launcher")
-                patch(
-                    "_cmake_preset_cache_contract", return_value={})
-                patch(
-                    "_initial_clang_rt_cmake_args", return_value=[])
-                patch(
-                    "_cmake_executable_identity",
-                    return_value={"sha256": "1" * 64})
-                configure_stamp = {
-                    "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
-                    "schema_version": 1,
-                    "inputs": {},
-                    "inputs_sha256": "a" * 64,
-                }
-                patch(
-                    "_cmake_configure_stamp_document",
-                    return_value=configure_stamp)
-                configure_freshness = patch(
-                    "_ensure_cmake_preset_tree_fresh",
-                    return_value=True)
-                finalize_configure = patch(
-                    "_finalize_cmake_configure_stamp",
-                    return_value="a" * 64)
-                patch("_cmake_cache_bool", return_value=False)
-                patch(
-                    "_cmake_preset_cache_repairs", return_value={})
-                patch(
-                    "_postgresql_discovery_cache_reset_args",
-                    return_value=[])
-                patch(
-                    "_clang_rt_cmake_cache_repairs",
-                    return_value=({}, []))
-                patch("_stream_subprocess", return_value=0)
-                patch(
-                    "_run_mode_commands",
-                    return_value=(None, [], [], []))
-                patch(
-                    "_cache_run_provenance", return_value=provenance)
-                lifecycle_gate = patch(
-                    "_run_cache_retirement_lifecycle_gate",
-                    side_effect=gate_failure)
-                seal_mode = patch("_seal_cache_mode_receipts")
-                seal_unit = patch("_seal_cache_unit_receipt")
-                patch("_update_entry")
-                result = server._run_build_worker("cache-unit")
-
-        self.assertEqual(result, 1)
-        configure_freshness.assert_called_once()
-        finalize_configure.assert_called_once_with(
-            build_dir,
-            configure_stamp,
-            configure_stamp,
-            context="preset 'cache-opt'",
-        )
-        lifecycle_gate.assert_called_once()
-        seal_mode.assert_not_called()
-        seal_unit.assert_not_called()
-
-    def test_receipt_sealing_rejects_captured_benchmark_policy_override(
-            self) -> None:
-        provenance = self._provenance()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            executable = bin_dir / "bioseq_cache_bench"
-            executable.write_bytes(b"bench")
-            report = root / "report_0.json"
-            report.write_text("{}", encoding="utf-8")
-            policy = [
-                str(executable),
-                "--scenario", "standalone",
-                "--samples", "7",
-            ]
-            captured = [*policy, "--samples", "1"]
-            with (
-                mock.patch.object(
-                    server, "_run_command_argv", return_value=policy),
-                mock.patch.object(
-                    server, "_seal_cache_native_report") as seal,
-            ):
-                with self.assertRaisesRegex(
-                        RuntimeError, "fixed mode policy"):
-                    server._seal_cache_mode_receipts(
-                        "cache-bench",
-                        bin_dir,
-                        [report],
-                        [captured],
-                        [],
-                        provenance,
-                    )
-                seal.assert_not_called()
-
-    def test_native_report_must_match_frozen_concrete_invocation(
-            self) -> None:
-        provenance = self._provenance()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            bin_dir.mkdir()
-            executable = bin_dir / "bioseq_cache_integration_tests"
-            executable.write_bytes(b"integration")
-            report = root / "report_0.json"
-            report.write_text("{}", encoding="utf-8")
-            invocation = [
-                str(executable),
-                "--migration-harness", "cache-integration",
-                "--migration-report-role", "cache-integration",
-                "--report", str(report),
-            ]
-            native = {
-                "report_role": "cache-integration",
-                "scenario": "cache-integration",
-                "arguments": [
-                    *invocation[:-1],
-                    str(root / "wrong-report.json"),
-                ],
-                "executable": str(executable),
-                "executable_sha256":
-                    server._sha256_path(executable),
-                "migration_ledger_sha256":
-                    provenance["migration_ledger_sha256"],
-                "evidence_contract_sha256":
-                    provenance["evidence_contract_sha256"],
-                "migration_phase": provenance["migration_phase"],
-            }
-            with mock.patch.object(
-                    server,
-                    "_cache_native_report_contract",
-                    return_value=native):
-                with self.assertRaisesRegex(
-                        RuntimeError, "exact MCP command"):
-                    server._seal_cache_native_report(
-                        "cache-integration",
-                        bin_dir,
-                        invocation,
-                        report,
-                        provenance,
-                    )
-
-    def test_support_report_seal_requires_exact_five_artifact_roster(
-            self) -> None:
-        provenance = self._provenance()
-
-        def seal(mutation: str | None) -> dict[str, object]:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp).resolve(strict=True)
-                bin_dir = root / "bin"
-                source_dir = root / "source"
-                primary_stage = root / "primary-stage"
-                bioseq_only_stage = root / "bioseq-only-stage"
-                for directory in (
-                        bin_dir,
-                        source_dir,
-                        primary_stage,
-                        bioseq_only_stage):
-                    directory.mkdir()
-
-                def write(
-                        path: Path, contents: bytes) -> Path:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(contents)
-                    return path.resolve(strict=True)
-
-                executable = write(
-                    bin_dir
-                    / "bioseq_cache_bioseq_support_integration_tests",
-                    b"support executable",
-                )
-                report = write(root / "report_0.json", b"{}\n")
-                primary_manifest = write(
-                    primary_stage / "stage-manifest.json",
-                    b"primary manifest",
-                )
-                bioseq_only_manifest = write(
-                    bioseq_only_stage / "stage-manifest.json",
-                    b"bioseq-only manifest",
-                )
-                cache_control = write(
-                    source_dir / "bioseq_cache.control",
-                    b"cache control source",
-                )
-                cache_sql = write(
-                    source_dir / "bioseq_cache--1.0.sql",
-                    b"cache install sql",
-                )
-                cache_dso = write(
-                    source_dir / "bioseq_cache.dylib",
-                    b"cache dso",
-                )
-                bioseq_control = write(
-                    source_dir / "bioseq.control",
-                    b"bioseq control source",
-                )
-                bioseq_sql = write(
-                    source_dir / "bioseq--1.0.sql",
-                    b"bioseq install sql",
-                )
-                bioseq_dso = write(
-                    source_dir / "bioseq.dylib",
-                    b"bioseq dso",
-                )
-                provider_dso = write(
-                    source_dir / "provider-peer.dylib",
-                    b"provider peer dso",
-                )
-                cache_staged_control = write(
-                    primary_stage
-                    / "share/extension/bioseq_cache.control",
-                    b"cache staged control",
-                )
-                cache_staged_sql = write(
-                    primary_stage
-                    / "share/extension/bioseq_cache--1.0.sql",
-                    cache_sql.read_bytes(),
-                )
-                cache_staged_dso = write(
-                    primary_stage / "lib/bioseq_cache.dylib",
-                    cache_dso.read_bytes(),
-                )
-                bioseq_staged_control = write(
-                    primary_stage / "share/extension/bioseq.control",
-                    b"bioseq staged control",
-                )
-                bioseq_staged_sql = write(
-                    primary_stage
-                    / "share/extension/bioseq--1.0.sql",
-                    bioseq_sql.read_bytes(),
-                )
-                bioseq_staged_dso = write(
-                    primary_stage / "lib/bioseq.dylib",
-                    bioseq_dso.read_bytes(),
-                )
-                bioseq_only_staged_control = write(
-                    bioseq_only_stage
-                    / "share/extension/bioseq.control",
-                    b"bioseq-only staged control",
-                )
-                bioseq_only_staged_sql = write(
-                    bioseq_only_stage
-                    / "share/extension/bioseq--1.0.sql",
-                    bioseq_sql.read_bytes(),
-                )
-                bioseq_only_staged_dso = write(
-                    bioseq_only_stage / "lib/bioseq.dylib",
-                    bioseq_dso.read_bytes(),
-                )
-                canonical_temp = Path(
-                    tempfile.gettempdir()).resolve(strict=True)
-                cleanup_roots = [
-                    canonical_temp
-                    / (
-                        "bioseq-pg-test-provider-"
-                        + server.secrets.token_hex(8)
-                    )
-                    for _ in range(2)
-                ]
-                provider_staged_dsos = [
-                    cleanup_root
-                    / "runtime-library"
-                    / cache_staged_dso.name
-                    for cleanup_root in cleanup_roots
-                ]
-
-                def artifact(
-                        name: str,
-                        stage_root: Path,
-                        stage_manifest: Path,
-                        control: Path,
-                        install_sql: Path,
-                        dso: Path,
-                        staged_control: Path,
-                        staged_install_sql: Path,
-                        staged_dso: Path,
-                ) -> dict[str, object]:
-                    return {
-                        "name": name,
-                        "preinstalled_stage_root":
-                            str(stage_root.resolve(strict=True)),
-                        "stage_manifest": str(stage_manifest),
-                        "stage_manifest_sha256":
-                            server._sha256_path(stage_manifest),
-                        "control_file": str(control),
-                        "install_sql": str(install_sql),
-                        "dso": str(dso),
-                        "staged_control_file": str(staged_control),
-                        "staged_install_sql":
-                            str(staged_install_sql),
-                        "staged_dso": str(staged_dso),
-                        "control_sha256":
-                            server._sha256_path(control),
-                        "install_sql_sha256":
-                            server._sha256_path(install_sql),
-                        "dso_sha256": server._sha256_path(dso),
-                        "staged_control_sha256":
-                            server._sha256_path(staged_control),
-                    }
-
-                canonical_cache = artifact(
-                    "bioseq_cache",
-                    primary_stage,
-                    primary_manifest,
-                    cache_control,
-                    cache_sql,
-                    cache_dso,
-                    cache_staged_control,
-                    cache_staged_sql,
-                    cache_staged_dso,
-                )
-                artifacts = [
-                    canonical_cache,
-                    artifact(
-                        "bioseq",
-                        primary_stage,
-                        primary_manifest,
-                        bioseq_control,
-                        bioseq_sql,
-                        bioseq_dso,
-                        bioseq_staged_control,
-                        bioseq_staged_sql,
-                        bioseq_staged_dso,
-                    ),
-                    artifact(
-                        "bioseq",
-                        bioseq_only_stage,
-                        bioseq_only_manifest,
-                        bioseq_control,
-                        bioseq_sql,
-                        bioseq_dso,
-                        bioseq_only_staged_control,
-                        bioseq_only_staged_sql,
-                        bioseq_only_staged_dso,
-                    ),
-                    *[
-                        artifact(
-                            "bioseq_cache",
-                            primary_stage,
-                            primary_manifest,
-                            cache_control,
-                            cache_sql,
-                            provider_dso,
-                            cache_staged_control,
-                            cache_staged_sql,
-                            staged_dso,
-                        )
-                        for staged_dso in provider_staged_dsos
-                    ],
-                ]
-                if mutation == "missing-provider":
-                    artifacts.pop()
-                elif mutation == "duplicate-provider-runtime":
-                    artifacts[-1]["staged_dso"] = artifacts[-2][
-                        "staged_dso"]
-                elif mutation == "wrong-provider-shared-path":
-                    alternate = write(
-                        primary_stage
-                        / "alternate/bioseq_cache.control",
-                        b"alternate staged control",
-                    )
-                    artifacts[-1]["staged_control_file"] = str(
-                        alternate)
-                    artifacts[-1]["staged_control_sha256"] = (
-                        server._sha256_path(alternate)
-                    )
-                elif mutation == "wrong-provider-hash":
-                    artifacts[-1]["dso_sha256"] = "0" * 64
-                artifacts = server._cache_native_artifact_contracts(
-                    artifacts)
-
-                invocation = [
-                    str(executable),
-                    "--postgres-stage-root", str(primary_stage),
-                    "--postgres-stage-manifest",
-                    str(primary_manifest),
-                    "--bioseq-only-postgres-stage-root",
-                    str(bioseq_only_stage),
-                    "--bioseq-only-postgres-stage-manifest",
-                    str(bioseq_only_manifest),
-                    "--cache-control", str(cache_control),
-                    "--cache-install-sql", str(cache_sql),
-                    "--cache-dso", str(cache_dso),
-                    "--bioseq-control", str(bioseq_control),
-                    "--bioseq-install-sql", str(bioseq_sql),
-                    "--bioseq-dso", str(bioseq_dso),
-                    "--provider-peer-test-dso", str(provider_dso),
-                    "--migration-harness",
-                    "cache-bioseq-integration",
-                    "--migration-report-role",
-                    "cache-bioseq-support-integration",
-                    "--report", str(report),
-                ]
-                native = {
-                    "report_role":
-                        "cache-bioseq-support-integration",
-                    "scenario": "cache-bioseq-support",
-                    "arguments": invocation,
-                    "executable": str(executable),
-                    "executable_sha256":
-                        server._sha256_path(executable),
-                    "migration_ledger_sha256":
-                        provenance["migration_ledger_sha256"],
-                    "evidence_contract_sha256":
-                        provenance["evidence_contract_sha256"],
-                    "migration_phase":
-                        provenance["migration_phase"],
-                    "artifacts": artifacts,
-                    "cleanup_roots": [
-                        str(path) for path in cleanup_roots
-                    ],
-                }
-                original_receipt_path = (
-                    server._cache_report_receipt_path)
-
-                def recreate_cleanup_root(report_path: Path) -> Path:
-                    output = original_receipt_path(report_path)
-                    cleanup_roots[0].mkdir()
-                    return output
-
-                try:
-                    with contextlib.ExitStack() as stack:
-                        stack.enter_context(mock.patch.object(
-                            server,
-                            "_cache_native_report_contract",
-                            return_value=native,
-                        ))
-                        stack.enter_context(mock.patch.object(
-                            server,
-                            "_cache_bioseq_dso_qualification_evidence",
-                            return_value=self._dso_binding(root),
-                        ))
-                        if (
-                            mutation
-                            == "recreate-cleanup-before-publication"
-                        ):
-                            stack.enter_context(mock.patch.object(
-                                server,
-                                "_cache_report_receipt_path",
-                                side_effect=recreate_cleanup_root,
-                            ))
-                        receipt_path = (
-                            server._seal_cache_native_report(
-                                "cache-bioseq-integration",
-                                bin_dir,
-                                invocation,
-                                report,
-                                provenance,
-                            )
-                        )
-                    return json.loads(
-                        receipt_path.read_text(encoding="utf-8"))
-                finally:
-                    if cleanup_roots[0].exists():
-                        cleanup_roots[0].rmdir()
-
-        receipt = seal(None)
-        self.assertEqual(
-            receipt["report_role"],
-            "cache-bioseq-support-integration",
-        )
-        self.assertEqual(
-            set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS)
-            & set(receipt),
-            set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS),
-        )
-        for mutation in (
-                "missing-provider",
-                "duplicate-provider-runtime",
-                "wrong-provider-shared-path",
-                "wrong-provider-hash",
-                "recreate-cleanup-before-publication"):
-            with self.subTest(mutation=mutation), \
-                    self.assertRaises(RuntimeError):
-                seal(mutation)
-
-    def test_exact_2gbp_runtime_budget_reserves_finalization_window(
-            self) -> None:
-        argv = [
-            "/bin/bioseq_cache_bioseq_production_integration_tests",
-            "--large-case-timeout-seconds",
+        large_argv = [
+            "/bin/bioseq_cache_bioseq_large_input_e2e_tests",
+            "--case-timeout-seconds",
             "6300",
         ]
-        bounded = server._cache_apply_runtime_budget(
+        self.assertEqual(
+            cache_modes.CACHE_BIOSEQ_RUNTIME_TOTAL_SEC,
+            cache_modes.CACHE_BIOSEQ_ORCHESTRATION_BUDGET_SEC
+            + cache_modes.CACHE_BIOSEQ_SUPPORT_AGGREGATE_TIMEOUT_SEC
+            + cache_modes.CACHE_BIOSEQ_LARGE_INPUT_TIMEOUT_SEC
+            + cache_modes.CACHE_LARGE_INPUT_FINALIZATION_RESERVE_SEC,
+        )
+        self.assertEqual(cache_modes.CACHE_BIOSEQ_RUNTIME_TOTAL_SEC, 8400)
+        self.assertEqual(
+            cache_modes.CACHE_BIOSEQ_SUPPORT_AGGREGATE_TIMEOUT_SEC, 900)
+        self.assertEqual(cache_modes.CACHE_BIOSEQ_LARGE_INPUT_TIMEOUT_SEC, 6300)
+        self.assertEqual(
+            cache_modes.CACHE_BIOSEQ_LARGE_LAUNCH_MIN_REMAINING_SEC, 6900)
+        self.assertEqual(
+            cache_modes.CACHE_LARGE_INPUT_FINALIZATION_RESERVE_SEC, 600)
+
+        bounded = cache_modes._cache_apply_runtime_budget(
             "cache-bioseq-integration",
-            argv,
-            deadline=2_000.0,
-            now=1_000.0,
+            large_argv,
+            deadline=8_400.0,
+            now=1_500.0,
         )
+        self.assertEqual(bounded, large_argv)
         self.assertEqual(
-            bounded[-1],
-            str(int(
-                1_000
-                - server.CACHE_EXACT2G_FINALIZATION_RESERVE_SEC)),
-        )
-        self.assertEqual(
-            server._cache_apply_runtime_budget(
+            cache_modes._cache_apply_runtime_budget(
                 "cache-bioseq-integration",
-                argv,
+                large_argv,
                 deadline=float("inf"),
                 now=1_000.0,
             ),
-            argv,
+            large_argv,
         )
         with self.assertRaisesRegex(
-                TimeoutError, "cleanup/report reserve"):
-            server._cache_apply_runtime_budget(
+                TimeoutError, "fewer than 6900 seconds"):
+            cache_modes._cache_apply_runtime_budget(
                 "cache-bioseq-integration",
-                argv,
-                deadline=1_500.0,
+                large_argv,
+                deadline=8_400.0,
+                now=1_500.001,
+            )
+        with self.assertRaisesRegex(
+                RuntimeError, "watchdog must remain exactly 6300"):
+            cache_modes._cache_apply_runtime_budget(
+                "cache-bioseq-integration",
+                [*large_argv[:-1], "6299"],
+                deadline=float("inf"),
                 now=1_000.0,
             )
 
-    def test_failed_exact_2gbp_report_must_prove_zero_retained_state(
+        support_argv = [
+            "/bin/bioseq_cache_bioseq_support_integration_tests",
+            "--case-timeout-seconds",
+            "480",
+        ]
+        self.assertEqual(
+            cache_modes._cache_command_deadline(
+                "cache-bioseq-integration",
+                support_argv,
+                deadline=8_400.0,
+                now=600.0,
+            ),
+            1_500.0,
+        )
+        with self.assertRaisesRegex(
+                TimeoutError, "orchestration budget"):
+            cache_modes._cache_command_deadline(
+                "cache-bioseq-integration",
+                support_argv,
+                deadline=8_400.0,
+                now=600.001,
+            )
+
+    def test_failed_large_input_report_must_prove_zero_retained_state(
             self) -> None:
         cleanup_root = (
             Path(tempfile.gettempdir()).resolve(strict=True)
-            / f"bioseq-pg-test-{server.secrets.token_hex(8)}"
+            / f"bioseq-pg-test-{secrets.token_hex(8)}"
         )
         report = {
-            "schema_version": "bioseq-cache-test-v2",
+            "schema_revision": 2,
             "cleanup": {"succeeded": True},
             "cleanup_observations": [{
                 "succeeded": True,
@@ -4935,84 +3760,19 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "report.json"
             path.write_text(json.dumps(report), encoding="utf-8")
-            server._validate_failed_cache_terminal_report(path)
+            cache_modes._validate_failed_cache_terminal_report(path)
+            report["schema_version"] = "retired-authored-identity"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    RuntimeError, "revision-2 terminal report"):
+                cache_modes._validate_failed_cache_terminal_report(path)
+            del report["schema_version"]
             report["cluster_configuration"][
                 "retained-supervision-state"] = "watchdog.json"
             path.write_text(json.dumps(report), encoding="utf-8")
             with self.assertRaisesRegex(
                     RuntimeError, "zero retained supervision state"):
-                server._validate_failed_cache_terminal_report(path)
-
-    def test_combined_integration_has_two_hour_mode_wide_timeout(
-            self) -> None:
-        self.assertEqual(
-            server.MODES[
-                "cache-bioseq-integration"].hard_timeout_min,
-            120.0,
-        )
-        self.assertIn("bioseq", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("bioseq_caching", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("build_mcp", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("common", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("cmake", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("codegen", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("overlays", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("vendor", server._CACHE_SOURCE_SCOPES)
-        self.assertIn("vcpkg.json", server._CACHE_SOURCE_SCOPES)
-        self.assertIn(
-            "vcpkg-configuration.json",
-            server._CACHE_SOURCE_SCOPES,
-        )
-        self.assertIn(
-            ":(top,exclude,glob)cmake/**/__pycache__/**",
-            server._CACHE_SOURCE_SCOPES,
-        )
-        self.assertNotIn(".codex/config.toml", server._CACHE_SOURCE_SCOPES)
-        self.assertNotIn(
-            "cmake/__pycache__/sanitizer_runtime.cpython-310.pyc",
-            server._CACHE_SOURCE_SCOPES,
-        )
-
-    def test_only_release_phases_start_clean_source_qualification(
-            self) -> None:
-        with (
-            mock.patch.object(
-                server,
-                "_cache_migration_contract",
-                return_value={"migration_phase": "mapped"},
-            ) as contract,
-            mock.patch.object(
-                server, "_cache_run_provenance") as provenance,
-        ):
-            self.assertIsNone(
-                server._cache_qualification_provenance(
-                    "cache-unit", False))
-            provenance.assert_not_called()
-            self.assertIsNone(
-                server._cache_qualification_provenance(
-                    "cache-unit", True))
-            self.assertEqual(contract.call_count, 1)
-
-        expected = self._provenance()
-        with (
-            mock.patch.object(
-                server,
-                "_cache_migration_contract",
-                return_value={"migration_phase": "passing"},
-            ),
-            mock.patch.object(
-                server,
-                "_cache_run_provenance",
-                return_value=expected,
-            ) as provenance,
-        ):
-            self.assertEqual(
-                server._cache_qualification_provenance(
-                    "cache-bioseq-bench", False),
-                expected,
-            )
-            provenance.assert_called_once_with()
-
+                cache_modes._validate_failed_cache_terminal_report(path)
 
 if __name__ == "__main__":
     unittest.main()

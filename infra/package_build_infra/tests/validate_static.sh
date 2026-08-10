@@ -58,9 +58,9 @@ assert_literal "$VARIABLES_TF" 'root_volume_size_gb >= 500'
 assert_literal "$VARIABLES_TF" 'can(regex("/32$", var.ssh_ingress_cidr))'
 assert_literal "$VARIABLES_TF" 'var.ssh_ingress_cidr != "0.0.0.0/0"'
 if ! rg --multiline --quiet \
-    'variable "ami_schema_version" \{[^}]*default[[:space:]]*=[[:space:]]*"2"' \
+    'variable "ami_schema_revision" \{[^}]*default[[:space:]]*=[[:space:]]*2' \
     "$VARIABLES_TF"; then
-  fail "$VARIABLES_TF must default ami_schema_version to schema 2"
+  fail "$VARIABLES_TF must default ami_schema_revision to revision 2"
 fi
 
 for output_name in \
@@ -87,7 +87,7 @@ assert_literal "$BOOTSTRAP" 'python3-venv rpm rpm2cpio rsync'
 assert_literal "$BOOTSTRAP" 'caches/poetry-venvs'
 assert_literal "$BOOTSTRAP" 'python3 -m venv'
 assert_literal "$BOOTSTRAP" 'python3 --version && poetry --version'
-assert_literal "$BOOTSTRAP" '[[ $BIOSEQ_AMI_SCHEMA_VERSION == 2 ]]'
+assert_literal "$BOOTSTRAP" '[[ $BIOSEQ_AMI_SCHEMA_REVISION == 2 ]]'
 
 if rg --quiet --ignore-case 'rustup|rustc --version|cargo --version|\.cargo/bin' "$BOOTSTRAP"; then
   fail "$BOOTSTRAP must not install, expose, or verify the retired Rust/Cargo toolchain"

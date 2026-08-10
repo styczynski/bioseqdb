@@ -39,9 +39,9 @@ struct minimizer_hashmap_table_allocation_state {
     std::uint64_t peak_bytes = 0u;
 };
 
-template <class T>
+template <class p_value>
 struct minimizer_hashmap_table_allocator {
-    using value_type = T;
+    using value_type = p_value;
     using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::false_type;
     using propagate_on_container_swap = std::false_type;
@@ -54,19 +54,19 @@ struct minimizer_hashmap_table_allocator {
             minimizer_hashmap_table_allocation_state* state_) noexcept
         : state(state_) {}
 
-    template <class U>
+    template <class p_other_value>
     minimizer_hashmap_table_allocator(
-            const minimizer_hashmap_table_allocator<U>& other) noexcept
+            const minimizer_hashmap_table_allocator<p_other_value>& other) noexcept
         : state(other.state) {}
 
-    [[nodiscard]] T* allocate(std::size_t count) {
+    [[nodiscard]] p_value* allocate(std::size_t count) {
         if (state == nullptr
             || count > (std::numeric_limits<std::uint64_t>::max)()
-                    / sizeof(T)) {
+                    / sizeof(p_value)) {
             throw std::bad_alloc{};
         }
         const std::uint64_t bytes =
-            static_cast<std::uint64_t>(count) * sizeof(T);
+            static_cast<std::uint64_t>(count) * sizeof(p_value);
         if (state->live_bytes
             > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
             throw std::bad_alloc{};
@@ -75,29 +75,29 @@ struct minimizer_hashmap_table_allocator {
         state->peak_bytes = std::max(
             state->peak_bytes, state->live_bytes);
         try {
-            return std::allocator<T>{}.allocate(count);
+            return std::allocator<p_value>{}.allocate(count);
         } catch (...) {
             state->live_bytes -= bytes;
             throw;
         }
     }
 
-    void deallocate(T* allocation, std::size_t count) noexcept {
+    void deallocate(p_value* allocation, std::size_t count) noexcept {
         const std::uint64_t bytes =
-            static_cast<std::uint64_t>(count) * sizeof(T);
+            static_cast<std::uint64_t>(count) * sizeof(p_value);
         DEBUG_ASSERT(state != nullptr && state->live_bytes >= bytes);
-        std::allocator<T>{}.deallocate(allocation, count);
+        std::allocator<p_value>{}.deallocate(allocation, count);
         if (state != nullptr && state->live_bytes >= bytes) {
             state->live_bytes -= bytes;
         }
     }
 
-    template <class U>
+    template <class p_other_value>
     friend struct minimizer_hashmap_table_allocator;
 
-    template <class U>
+    template <class p_other_value>
     [[nodiscard]] bool operator==(
-            const minimizer_hashmap_table_allocator<U>& other) const noexcept {
+            const minimizer_hashmap_table_allocator<p_other_value>& other) const noexcept {
         return state == other.state;
     }
 };
@@ -957,7 +957,7 @@ void minimizer_hashmap_fragment_index::serialize_to_binary(char* output) const {
     const std::uint64_t total_positions =
         static_cast<std::uint64_t>(positions.size());
     const encoded_header header{
-        k_encoded_magic, k_encoded_format_revision, target_len, bucket_count, 0u,
+        k_encoded_magic, k_encoded_layout_revision, target_len, bucket_count, 0u,
         total_positions,
     };
     std::memcpy(output, &header, sizeof(header));
@@ -991,9 +991,9 @@ minimizer_hashmap_fragment_index::deserialize_from_binary(
         index_corruption_panic(
             "minimizer_hashmap_fragment_index deserialize: magic mismatch");
     }
-    if (header.revision != k_encoded_format_revision) {
+    if (header.layout_revision != k_encoded_layout_revision) {
         index_corruption_panic(
-            "minimizer_hashmap_fragment_index deserialize: format revision mismatch");
+            "minimizer_hashmap_fragment_index deserialize: layout revision mismatch");
     }
     const std::size_t expected_size =
         k_encoded_header_bytes

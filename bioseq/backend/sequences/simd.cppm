@@ -68,16 +68,16 @@ enum class unknown_byte_policy {
 };
 
 /// Per-record encoder state. The encoder writes packed words directly
-/// into `*output_storage` (a caller-owned `std::vector<storage_unit_t>`,
+/// into `*output_storage` (a caller-owned `std::vector<p_storage_unit>`,
 /// typically the IO batch's shared sequence buffer or a per-call vector
 /// for the SQL one-shot adapter). Across records the partial-word
 /// state (`partial_word`, `partial_letters`) is reset by `reset()` while
 /// the output pointer is preserved.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 struct encode_state {
-    using base_container = std::vector<storage_unit_t>;
+    using base_container = std::vector<p_storage_unit>;
 
     /// Pointer to the destination vector. Set by the caller before
     /// every record (or batch). The encoder appends to `*output_storage`.
@@ -88,8 +88,8 @@ struct encode_state {
     std::size_t record_start_offset = 0;
     /// Bits accumulated for the partial word that has not yet been
     /// pushed into `*output_storage`.
-    storage_unit_t partial_word = 0;
-    /// Number of letters in `partial_word`. Always `< LettersPerUnit`
+    p_storage_unit partial_word = 0;
+    /// Number of letters in `partial_word`. Always `< p_letters_per_unit`
     /// on call-boundary entry / exit.
     std::size_t partial_letters = 0;
     /// Total letters consumed across the current record (used by FASTQ
@@ -147,19 +147,19 @@ void decode_dna5_uint8_words_to_ascii_impl(
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t total_letters) noexcept;
 
-void ascii_to_rank_lutsimd_dna4_drop_impl(
+void ascii_to_rank_lut_simd_dna4_drop_impl(
     const std::uint8_t* HWY_RESTRICT src,
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t size) noexcept;
-void ascii_to_rank_lutsimd_dna4_map_to_default_impl(
+void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT src,
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t size) noexcept;
-void ascii_to_rank_lutsimd_dna5_drop_impl(
+void ascii_to_rank_lut_simd_dna5_drop_impl(
     const std::uint8_t* HWY_RESTRICT src,
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t size) noexcept;
-void ascii_to_rank_lutsimd_dna5_map_to_default_impl(
+void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT src,
     std::uint8_t* HWY_RESTRICT dst,
     std::size_t size) noexcept;
@@ -167,7 +167,7 @@ void ascii_to_rank_lutsimd_dna5_map_to_default_impl(
 }  // namespace detail
 
 
-/// Build the 256-entry ASCII → rank LUT for `alphabet_t`. Two policies
+/// Build the 256-entry ASCII → rank LUT for `p_alphabet`. Two policies
 /// for unknown bytes:
 ///
 /// * `drop`            — unknown bytes map to `0xFF` skip-sentinel; the
@@ -179,27 +179,31 @@ void ascii_to_rank_lutsimd_dna5_map_to_default_impl(
 /// Case folding (`A`↔`a`, `C`↔`c`, …) is applied via the bit-5 case
 /// flip. RNA `U` / `u` is mapped to T's rank so RNA literals decode
 /// correctly under both alphabets.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy = unknown_byte_policy::drop>
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy = unknown_byte_policy::drop>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
 build_letter_to_rank_lut() {
     std::array<std::uint8_t, 256> lut{};
-    constexpr std::size_t alphabet_card =
-        static_cast<std::size_t>(seqan3::alphabet_size<alphabet_t>);
+    constexpr std::size_t k_alphabet_cardinality =
+        static_cast<std::size_t>(seqan3::alphabet_size<p_alphabet>);
 
-    if constexpr (Policy == unknown_byte_policy::drop) {
-        for (std::size_t i = 0; i < 256; ++i) lut[i] = std::uint8_t{0xFF};
+    if constexpr (p_policy == unknown_byte_policy::drop) {
+        for (std::size_t byte_value = 0; byte_value < 256; ++byte_value) {
+            lut[byte_value] = std::uint8_t{0xFF};
+        }
     } else {
         std::uint8_t default_rank = 0;
-        if constexpr (std::is_same_v<alphabet_t, seq::dna5>) {
+        if constexpr (std::is_same_v<p_alphabet, seq::dna5>) {
             default_rank = 3;  // N
         }
-        for (std::size_t i = 0; i < 256; ++i) lut[i] = default_rank;
+        for (std::size_t byte_value = 0; byte_value < 256; ++byte_value) {
+            lut[byte_value] = default_rank;
+        }
     }
 
-    for (std::size_t rank = 0; rank < alphabet_card; ++rank) {
+    for (std::size_t rank = 0; rank < k_alphabet_cardinality; ++rank) {
         const char canonical_char =
-            seqan3::to_char(seqan3::assign_rank_to(rank, alphabet_t{}));
+            seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}));
         const std::uint8_t upper_byte = static_cast<std::uint8_t>(canonical_char);
         lut[upper_byte] = static_cast<std::uint8_t>(rank);
         if (canonical_char >= 'A' && canonical_char <= 'Z') {
@@ -209,18 +213,18 @@ build_letter_to_rank_lut() {
             lut[upper_byte & 0x5F] = static_cast<std::uint8_t>(rank);
         }
     }
-    if constexpr (std::is_same_v<alphabet_t, seq::dna4>
-               || std::is_same_v<alphabet_t, seq::dna5>) {
-        const auto t_rank = lut[static_cast<std::uint8_t>('T')];
-        lut[static_cast<std::uint8_t>('U')] = t_rank;
-        lut[static_cast<std::uint8_t>('u')] = t_rank;
+    if constexpr (std::is_same_v<p_alphabet, seq::dna4>
+               || std::is_same_v<p_alphabet, seq::dna5>) {
+        const auto thymine_rank = lut[static_cast<std::uint8_t>('T')];
+        lut[static_cast<std::uint8_t>('U')] = thymine_rank;
+        lut[static_cast<std::uint8_t>('u')] = thymine_rank;
     }
     return lut;
 }
 
 /// Build the two 16-byte halves of a `c & 0x1F`-indexed 32-byte rank
-/// LUT for `alphabet_t` under `Policy`. Returns `{lo, hi}` where
-/// `lo[i] = lut32[i]` and `hi[i] = lut32[i + 16]`. Indexed by 5 low
+/// LUT for `p_alphabet` under `p_policy`. Returns `{low, high}` where
+/// `low[i] = lut32[i]` and `high[i] = lut32[i + 16]`. Indexed by 5 low
 /// bits of the input ASCII byte; case folding is automatic because
 /// bit 5 is the case bit.
 ///
@@ -228,52 +232,59 @@ build_letter_to_rank_lut() {
 /// it lets the runtime path execute as two 16-byte `TableLookupBytes`
 /// + a select on bit 4 (~4-5 SIMD ops total), enabling fully-SIMD
 /// `map_to_default` lookups on dna4 and dna5.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy>
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy>
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 2>
 build_letter_to_rank_lut_32() {
     std::array<std::uint8_t, 32> lut{};
 
-    constexpr std::uint8_t default_byte =
-        (Policy == unknown_byte_policy::drop)
+    constexpr std::uint8_t k_default_byte =
+        (p_policy == unknown_byte_policy::drop)
             ? std::uint8_t{0xFF}
-            : (std::is_same_v<alphabet_t, seq::dna5>
+            : (std::is_same_v<p_alphabet, seq::dna5>
                 ? std::uint8_t{3}    // N
                 : std::uint8_t{0});  // A
-    for (std::size_t i = 0; i < 32; ++i) lut[i] = default_byte;
-
-    constexpr std::size_t alphabet_card =
-        static_cast<std::size_t>(seqan3::alphabet_size<alphabet_t>);
-    for (std::size_t rank = 0; rank < alphabet_card; ++rank) {
-        const char ch =
-            seqan3::to_char(seqan3::assign_rank_to(rank, alphabet_t{}));
-        const std::uint8_t idx5 = static_cast<std::uint8_t>(ch) & 0x1F;
-        lut[idx5] = static_cast<std::uint8_t>(rank);
+    for (std::size_t lut_index = 0; lut_index < 32; ++lut_index) {
+        lut[lut_index] = k_default_byte;
     }
-    if constexpr (std::is_same_v<alphabet_t, seq::dna4>
-               || std::is_same_v<alphabet_t, seq::dna5>) {
+
+    constexpr std::size_t k_alphabet_cardinality =
+        static_cast<std::size_t>(seqan3::alphabet_size<p_alphabet>);
+    for (std::size_t rank = 0; rank < k_alphabet_cardinality; ++rank) {
+        const char canonical_char =
+            seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}));
+        const std::uint8_t low_five_bits =
+            static_cast<std::uint8_t>(canonical_char) & 0x1F;
+        lut[low_five_bits] = static_cast<std::uint8_t>(rank);
+    }
+    if constexpr (std::is_same_v<p_alphabet, seq::dna4>
+               || std::is_same_v<p_alphabet, seq::dna5>) {
         lut[static_cast<std::uint8_t>('U') & 0x1F] =
             lut[static_cast<std::uint8_t>('T') & 0x1F];
     }
 
     std::array<std::array<std::uint8_t, 16>, 2> halves{};
-    for (std::size_t i = 0; i < 16; ++i) halves[0][i] = lut[i];
-    for (std::size_t i = 0; i < 16; ++i) halves[1][i] = lut[i + 16];
+    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
+        halves[0][lut_index] = lut[lut_index];
+    }
+    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
+        halves[1][lut_index] = lut[lut_index + 16];
+    }
     return halves;
 }
 
-/// Build the 256-entry rank → ASCII LUT for `alphabet_t`. Indexed by
+/// Build the 256-entry rank → ASCII LUT for `p_alphabet`. Indexed by
 /// rank values; entries past the alphabet's cardinality are 0 and
 /// unreachable when the input is well-formed.
-template <sequence_alphabet alphabet_t>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
 build_rank_to_letter_lut() {
     std::array<std::uint8_t, 256> lut{};
-    constexpr std::size_t alphabet_card =
-        static_cast<std::size_t>(seqan3::alphabet_size<alphabet_t>);
-    for (std::size_t rank = 0; rank < alphabet_card; ++rank) {
+    constexpr std::size_t k_alphabet_cardinality =
+        static_cast<std::size_t>(seqan3::alphabet_size<p_alphabet>);
+    for (std::size_t rank = 0; rank < k_alphabet_cardinality; ++rank) {
         const char canonical_char =
-            seqan3::to_char(seqan3::assign_rank_to(rank, alphabet_t{}));
+            seqan3::to_char(seqan3::assign_rank_to(rank, p_alphabet{}));
         lut[rank] = static_cast<std::uint8_t>(canonical_char);
     }
     return lut;
@@ -286,7 +297,9 @@ build_rank_to_letter_lut() {
 [[nodiscard]] consteval std::array<std::uint8_t, 16>
 build_dna4_low_nibble_lut() {
     std::array<std::uint8_t, 16> lut{};
-    for (std::size_t i = 0; i < 16; ++i) lut[i] = std::uint8_t{0xFF};
+    for (std::size_t lut_index = 0; lut_index < 16; ++lut_index) {
+        lut[lut_index] = std::uint8_t{0xFF};
+    }
     lut[0x01] = 0;  // 'A' & 0x0F == 'a' & 0x0F
     lut[0x03] = 1;  // 'C'
     lut[0x07] = 2;  // 'G'
@@ -321,11 +334,11 @@ build_dna5_rank_to_ascii_lut() {
 
 // ---------------------------------------------------------------------
 // Lane-compaction tables for the dna4 multi-line SIMD encoder. Each
-// entry of `kCompactLowTable` (256 × 16 bytes) is a `TableLookupBytes`
+// entry of `k_compact_low_table` (256 × 16 bytes) is a `TableLookupBytes`
 // shuffle pattern that gathers the valid bytes from the low half of a
-// 16-byte rank vector to the front. `kCompactHighTable` does the same
-// for the high half. `kShiftLeftByteTable[N]` shifts the high half
-// left by `N` bytes so it slots into the low half's tail.
+// 16-byte rank vector to the front. `k_compact_high_table` does the same
+// for the high half. `k_shift_left_byte_table[shift]` shifts the high half
+// left by `shift` bytes so it slots into the low half's tail.
 // ---------------------------------------------------------------------
 
 [[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
@@ -384,9 +397,9 @@ build_shift_left_byte_table() {
     return table;
 }
 
-inline constexpr auto kCompactLowTable = build_compact_low_table();
-inline constexpr auto kCompactHighTable = build_compact_high_table();
-inline constexpr auto kShiftLeftByteTable = build_shift_left_byte_table();
+inline constexpr auto k_compact_low_table = build_compact_low_table();
+inline constexpr auto k_compact_high_table = build_compact_high_table();
+inline constexpr auto k_shift_left_byte_table = build_shift_left_byte_table();
 
 // ---------------------------------------------------------------------
 // Streaming primitives — scalar, no Highway dependency. Used as the
@@ -395,32 +408,32 @@ inline constexpr auto kShiftLeftByteTable = build_shift_left_byte_table();
 // ---------------------------------------------------------------------
 
 /// Append `count` ranks to the encoder state, packing them into
-/// `partial_word` and pushing completed `storage_unit_t`s into
+/// `partial_word` and pushing completed `p_storage_unit`s into
 /// `*output_storage`. Skip-sentinel `0xFF` bytes are silently dropped.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 inline void append_ranks(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* __restrict__ ranks,
     std::size_t count) noexcept {
     DEBUG_ASSERT(state.output_storage != nullptr,
                  "encode_state::output_storage must be configured before append_ranks");
-    DEBUG_ASSERT(state.partial_letters < LettersPerUnit,
-                 "encode_state::partial_letters must be < LettersPerUnit on entry");
+    DEBUG_ASSERT(state.partial_letters < p_letters_per_unit,
+                 "encode_state::partial_letters must be < p_letters_per_unit on entry");
     auto* output = state.output_storage;
-    auto write_unit = [output](storage_unit_t value) {
+    auto write_unit = [output](p_storage_unit value) {
         output->push_back(value);
         return true;
     };
     for (std::size_t rank_index = 0; rank_index < count; ++rank_index) {
         const std::uint8_t letter_rank = ranks[rank_index];
         if (letter_rank == 0xFF) continue;
-        DEBUG_ASSERT(letter_rank < (1u << BitsPerChar),
-                     "letter rank exceeds BitsPerChar range");
+        DEBUG_ASSERT(letter_rank < (1u << p_bits_per_character),
+                     "letter rank exceeds p_bits_per_character range");
         const bool appended =
             bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
-                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                p_storage_unit, p_bits_per_character, p_letters_per_unit>(
                     state.partial_word,
                     state.partial_letters,
                     state.total_letters,
@@ -431,11 +444,11 @@ inline void append_ranks(
     }
 }
 
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 inline void reset_encode_state(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state) noexcept {
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state) noexcept {
     state.reset();
 }
 
@@ -444,67 +457,67 @@ inline void reset_encode_state(
 /// `(word_count, padding)` pair the FSM needs to record this record's
 /// slice. Padding is the number of empty letter slots in the trailing
 /// unit (or 0 if the record fills its last unit exactly).
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 [[nodiscard]] inline std::pair<std::size_t, std::size_t>
 finalize_encode_state(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state) noexcept {
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state) noexcept {
     DEBUG_ASSERT(state.output_storage != nullptr,
                  "encode_state::output_storage must be configured before finalize");
     auto* output = state.output_storage;
-    auto write_unit = [output](storage_unit_t value) {
+    auto write_unit = [output](p_storage_unit value) {
         output->push_back(value);
         return true;
     };
     const auto finished =
         bioseq::sequences::rank_pack_detail::finish_lsb<
-            storage_unit_t, BitsPerChar, LettersPerUnit>(
+            p_storage_unit, p_bits_per_character, p_letters_per_unit>(
                 state.partial_word, state.partial_letters, write_unit);
     DEBUG_ASSERT(finished.capacity_ok,
                  "growing SIMD rank pack unexpectedly overflowed");
-    const std::size_t n_words = output->size() - state.record_start_offset;
+    const std::size_t word_count = output->size() - state.record_start_offset;
     state.total_letters = 0;
-    return {n_words, finished.padding_letters};
+    return {word_count, finished.padding_letters};
 }
 
 /// Convert `size` ASCII bytes to ranks via the alphabet's 256-entry
 /// LUT. Generic scalar implementation; correct for every alphabet.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy = unknown_byte_policy::drop>
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy = unknown_byte_policy::drop>
 inline void ascii_to_rank_scalar(
     const std::uint8_t* __restrict__ src,
     std::uint8_t* __restrict__ dst,
     std::size_t size) noexcept {
-    static constexpr auto alphabet_lut =
-        build_letter_to_rank_lut<alphabet_t, Policy>();
+    static constexpr auto k_alphabet_lut =
+        build_letter_to_rank_lut<p_alphabet, p_policy>();
     for (std::size_t byte_offset = 0; byte_offset < size; ++byte_offset) {
-        dst[byte_offset] = alphabet_lut[src[byte_offset]];
+        dst[byte_offset] = k_alphabet_lut[src[byte_offset]];
     }
 }
 
 /// Generic scalar `body_bytes → rank → append_ranks` pipeline. Used by
 /// every alphabet shape that doesn't have a dedicated SIMD path.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 inline void encode_body_chunk_scalar(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* __restrict__ body_bytes,
     std::size_t body_size) {
-    constexpr std::size_t scratch_capacity = 1024;
-    std::array<std::uint8_t, scratch_capacity> rank_scratch{};
+    constexpr std::size_t k_scratch_capacity = 1024;
+    std::array<std::uint8_t, k_scratch_capacity> rank_scratch{};
     std::size_t read_cursor = 0;
     while (read_cursor < body_size) {
         const std::size_t chunk_size =
-            std::min(scratch_capacity, body_size - read_cursor);
-        ascii_to_rank_scalar<alphabet_t, Policy>(
+            std::min(k_scratch_capacity, body_size - read_cursor);
+        ascii_to_rank_scalar<p_alphabet, p_policy>(
             body_bytes + read_cursor,
             rank_scratch.data(),
             chunk_size);
-        append_ranks<storage_unit_t, BitsPerChar, LettersPerUnit>(
+        append_ranks<p_storage_unit, p_bits_per_character, p_letters_per_unit>(
             state, rank_scratch.data(), chunk_size);
         read_cursor += chunk_size;
     }
@@ -513,36 +526,37 @@ inline void encode_body_chunk_scalar(
 /// Generic scalar decoder. Walks `total_letters` ranks across the
 /// packed storage units and writes ASCII bytes to `dst`. Works for any
 /// alphabet and any storage shape.
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 inline void decode_words_to_ascii_scalar(
-    const storage_unit_t* __restrict__ words,
+    const p_storage_unit* __restrict__ words,
     std::uint8_t* __restrict__ dst,
     std::size_t total_letters) noexcept {
-    static constexpr auto rank_to_letter_lut =
-        build_rank_to_letter_lut<alphabet_t>();
-    constexpr storage_unit_t char_mask =
-        static_cast<storage_unit_t>(
-            (storage_unit_t{1} << BitsPerChar) - 1);
+    static constexpr auto k_rank_to_letter_lut =
+        build_rank_to_letter_lut<p_alphabet>();
+    constexpr p_storage_unit k_character_mask =
+        static_cast<p_storage_unit>(
+            (p_storage_unit{1} << p_bits_per_character) - 1);
 
     std::size_t letters_emitted = 0;
     while (letters_emitted < total_letters) {
-        const std::size_t word_index = letters_emitted / LettersPerUnit;
-        const storage_unit_t word = words[word_index];
+        const std::size_t word_index = letters_emitted / p_letters_per_unit;
+        const p_storage_unit word = words[word_index];
         const std::size_t letters_left_in_word = std::min(
-            LettersPerUnit - (letters_emitted % LettersPerUnit),
+            p_letters_per_unit - (letters_emitted % p_letters_per_unit),
             total_letters - letters_emitted);
         const std::size_t letter_in_word_start =
-            letters_emitted % LettersPerUnit;
+            letters_emitted % p_letters_per_unit;
         for (std::size_t letter_offset = 0;
              letter_offset < letters_left_in_word; ++letter_offset) {
             const std::size_t letter_in_word =
                 letter_in_word_start + letter_offset;
             const std::uint8_t rank = static_cast<std::uint8_t>(
-                (word >> (BitsPerChar * letter_in_word)) & char_mask);
-            dst[letters_emitted + letter_offset] = rank_to_letter_lut[rank];
+                (word >> (p_bits_per_character * letter_in_word))
+                & k_character_mask);
+            dst[letters_emitted + letter_offset] = k_rank_to_letter_lut[rank];
         }
         letters_emitted += letters_left_in_word;
     }
@@ -551,32 +565,34 @@ inline void decode_words_to_ascii_scalar(
 /// Same as `decode_words_to_ascii_scalar` but injects `\n` every
 /// `wrap_width` letters. Returns the new in-line letter counter so
 /// callers can resume mid-line across multiple decode batches.
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 [[nodiscard]] inline std::size_t decode_words_to_ascii_scalar_wrapped(
-    const storage_unit_t* __restrict__ words,
+    const p_storage_unit* __restrict__ words,
     std::size_t total_letters,
     std::size_t wrap_width,
     std::size_t letters_in_current_line,
     std::uint8_t* __restrict__ dst) noexcept {
-    static constexpr auto rank_to_letter_lut =
-        build_rank_to_letter_lut<alphabet_t>();
-    constexpr storage_unit_t char_mask =
-        static_cast<storage_unit_t>(
-            (storage_unit_t{1} << BitsPerChar) - 1);
+    static constexpr auto k_rank_to_letter_lut =
+        build_rank_to_letter_lut<p_alphabet>();
+    constexpr p_storage_unit k_character_mask =
+        static_cast<p_storage_unit>(
+            (p_storage_unit{1} << p_bits_per_character) - 1);
 
     std::size_t letters_emitted = 0;
     std::size_t out_cursor = 0;
     std::size_t line_position = letters_in_current_line;
     while (letters_emitted < total_letters) {
-        const std::size_t word_index = letters_emitted / LettersPerUnit;
-        const std::size_t letter_in_word = letters_emitted % LettersPerUnit;
-        const storage_unit_t word = words[word_index];
+        const std::size_t word_index = letters_emitted / p_letters_per_unit;
+        const std::size_t letter_in_word =
+            letters_emitted % p_letters_per_unit;
+        const p_storage_unit word = words[word_index];
         const std::uint8_t rank = static_cast<std::uint8_t>(
-            (word >> (BitsPerChar * letter_in_word)) & char_mask);
-        dst[out_cursor++] = rank_to_letter_lut[rank];
+            (word >> (p_bits_per_character * letter_in_word))
+            & k_character_mask);
+        dst[out_cursor++] = k_rank_to_letter_lut[rank];
         ++letters_emitted;
         ++line_position;
         if (line_position == wrap_width &&
@@ -590,41 +606,45 @@ template <sequence_alphabet alphabet_t,
 
 /// Constexpr predicate: does `(alphabet, storage, BPC, LPU)` match the
 /// canonical dna4 SIMD-decode shape `(dna4, uint64_t, 2, 32)`?
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 constexpr bool is_dna4_simd_decode_shape() noexcept {
-    return std::is_same_v<alphabet_t, seq::dna4>
-        && std::is_same_v<storage_unit_t, std::uint64_t>
-        && BitsPerChar == 2
-        && LettersPerUnit == 32;
+    return std::is_same_v<p_alphabet, seq::dna4>
+        && std::is_same_v<p_storage_unit, std::uint64_t>
+        && p_bits_per_character == 2
+        && p_letters_per_unit == 32;
 }
 
 /// Constexpr predicate: does `(alphabet, storage, BPC, LPU)` match the
 /// canonical dna5+uint8 SIMD-decode shape `(dna5, uint8_t, 3, 2)`?
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 constexpr bool is_dna5_uint8_simd_decode_shape() noexcept {
-    return std::is_same_v<alphabet_t, seq::dna5>
-        && std::is_same_v<storage_unit_t, std::uint8_t>
-        && BitsPerChar == 3
-        && LettersPerUnit == 2;
+    return std::is_same_v<p_alphabet, seq::dna5>
+        && std::is_same_v<p_storage_unit, std::uint8_t>
+        && p_bits_per_character == 3
+        && p_letters_per_unit == 2;
 }
 
 namespace detail {
-	template<typename T, typename F, std::size_t... Is>
-	constexpr auto generate_array(F& f, std::index_sequence<Is...>)
-		-> std::array<T, sizeof...(Is)> {
-		return {{f(std::integral_constant<std::size_t, Is>{})...}};
+	template<typename p_element, typename p_generator, std::size_t... p_indices>
+	constexpr auto generate_array(
+		p_generator& generator,
+		std::index_sequence<p_indices...>)
+		-> std::array<p_element, sizeof...(p_indices)> {
+		return {{generator(
+			std::integral_constant<std::size_t, p_indices>{})...}};
 	}
 }
 
-template<typename T, std::size_t N, typename F>
-constexpr auto generate_array(F f) {
-return detail::generate_array<T>(f, std::make_index_sequence<N>{});
+template<typename p_element, std::size_t p_size, typename p_generator>
+constexpr auto generate_array(p_generator generator) {
+    return detail::generate_array<p_element>(
+        generator, std::make_index_sequence<p_size>{});
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE
@@ -642,7 +662,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 // SIMD primitives — char→rank lookup, dna4 pack, dna5 pack, decode spreads.
 // ============================================================================
 
-/// SIMD 32-byte LUT lookup. `lut_lo` / `lut_hi` are 128-bit-broadcast
+/// SIMD 32-byte LUT lookup. `lut_low` / `lut_high` are 128-bit-broadcast
 /// vectors holding the two halves of a 32-byte table indexed by
 /// `chunk[i] & 0x1F`. Result: `lut[chunk & 0x1F]` per lane. Used by
 /// the dna4/dna5 SIMD encoders for both `drop` (with 0xFF sentinels)
@@ -655,31 +675,37 @@ namespace bioseq::simd::HWY_NAMESPACE {
 /// slot as `'T'` and be silently miscategorised as T — diverging
 /// from the 256-entry scalar LUT, which would map `0xD4` to the
 /// alphabet's default rank.
-template <class D>
-HWY_INLINE hn::Vec<D> lookup_ranks_via_32byte_lut(
-    D d, hn::Vec<D> lut_lo, hn::Vec<D> lut_hi, hn::Vec<D> chunk) noexcept {
-    const auto high_bit = hn::And(chunk, hn::Set(d, std::uint8_t{0x80}));
-    const auto is_non_ascii = hn::Ne(high_bit, hn::Zero(d));
+template <class p_simd_tag>
+HWY_INLINE hn::Vec<p_simd_tag> lookup_ranks_via_32byte_lut(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> lut_low,
+    hn::Vec<p_simd_tag> lut_high,
+    hn::Vec<p_simd_tag> chunk) noexcept {
+    const auto high_bit =
+        hn::And(chunk, hn::Set(simd_tag, std::uint8_t{0x80}));
+    const auto is_non_ascii = hn::Ne(high_bit, hn::Zero(simd_tag));
     const auto safe = hn::IfThenZeroElse(is_non_ascii, chunk);
 
-    const auto idx_low_4 = hn::And(safe, hn::Set(d, std::uint8_t{0x0F}));
-    const auto lo_result = hn::TableLookupBytes(lut_lo, idx_low_4);
-    const auto hi_result = hn::TableLookupBytes(lut_hi, idx_low_4);
-    const auto bit_4 = hn::And(safe, hn::Set(d, std::uint8_t{0x10}));
-    const auto is_high = hn::Ne(bit_4, hn::Zero(d));
-    return hn::IfThenElse(is_high, hi_result, lo_result);
+    const auto low_four_bits =
+        hn::And(safe, hn::Set(simd_tag, std::uint8_t{0x0F}));
+    const auto low_result = hn::TableLookupBytes(lut_low, low_four_bits);
+    const auto high_result = hn::TableLookupBytes(lut_high, low_four_bits);
+    const auto fifth_bit =
+        hn::And(safe, hn::Set(simd_tag, std::uint8_t{0x10}));
+    const auto is_high = hn::Ne(fifth_bit, hn::Zero(simd_tag));
+    return hn::IfThenElse(is_high, high_result, low_result);
 }
 
 /// Vector LUT lookup using the 16-entry low-nibble dna4 LUT. Faster
 /// than the 32-byte path (1 op vs 5) and used only for `drop` semantics
 /// (the LUT maps newlines / unknowns to the `0xFF` sentinel, which the
 /// caller's compaction / fallback path then strips).
-template <class D>
-HWY_INLINE hn::Vec<D> dna4_lookup_ranks(
-    D /* tag, deduction-only */,
-    hn::Vec<D> letter_to_rank_table_vec,
-    hn::Vec<D> low_nibble_mask,
-    hn::Vec<D> chunk_bytes) noexcept {
+template <class p_simd_tag>
+HWY_INLINE hn::Vec<p_simd_tag> dna4_lookup_ranks(
+    p_simd_tag /* tag, deduction-only */,
+    hn::Vec<p_simd_tag> letter_to_rank_table_vec,
+    hn::Vec<p_simd_tag> low_nibble_mask,
+    hn::Vec<p_simd_tag> chunk_bytes) noexcept {
     const auto letter_index = hn::And(chunk_bytes, low_nibble_mask);
     return hn::TableLookupBytes(letter_to_rank_table_vec, letter_index);
 }
@@ -692,65 +718,68 @@ HWY_INLINE hn::Vec<D> dna4_lookup_ranks(
 /// slot; `SumsOf4` reduces every 4 adjacent shifted bytes into one
 /// packed byte (since the slots are disjoint, sum == OR); `Mul +
 /// ReduceSum` collapses the 4 packed bytes into one `uint32_t`.
-template <class D>
+template <class p_simd_tag>
 HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
-    D d_byte,
-    hn::Vec<D> ranks) noexcept {
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> ranks) noexcept {
 #if BIOSEQ_SIMD_X86_PRE_AVX3_FIXED128
     HWY_ALIGN std::uint8_t scratch[16];
-    hn::Store(ranks, d_byte, scratch);
+    hn::Store(ranks, simd_tag, scratch);
     std::uint32_t packed = 0;
-    for (std::size_t i = 0; i < 16; ++i) {
-        packed |= static_cast<std::uint32_t>(scratch[i] & 0x03u)
-                  << (2 * i);
+    for (std::size_t lane_index = 0; lane_index < 16; ++lane_index) {
+        packed |= static_cast<std::uint32_t>(scratch[lane_index] & 0x03u)
+                  << (2 * lane_index);
     }
     return packed;
 #else
-    HWY_ALIGN constexpr std::uint8_t shift_pattern[16] = {
+    HWY_ALIGN constexpr std::uint8_t k_shift_pattern[16] = {
         0, 2, 4, 6, 0, 2, 4, 6,
         0, 2, 4, 6, 0, 2, 4, 6};
-    const auto shift_pattern_v = hn::LoadU(d_byte, shift_pattern);
-    const auto shifted = hn::Shl(ranks, shift_pattern_v);
+    const auto shift_pattern_vector = hn::LoadU(simd_tag, k_shift_pattern);
+    const auto shifted = hn::Shl(ranks, shift_pattern_vector);
 
-    using d_u32_t = hn::Repartition<std::uint32_t, D>;
-    d_u32_t d_u32;
+    using uint32_simd_tag_type =
+        hn::Repartition<std::uint32_t, p_simd_tag>;
+    uint32_simd_tag_type uint32_simd_tag;
     const auto sums = hn::SumsOf4(shifted);
 
-    HWY_ALIGN constexpr std::uint32_t multiplier_pattern[4] = {
+    HWY_ALIGN constexpr std::uint32_t k_multiplier_pattern[4] = {
         1u, 1u << 8, 1u << 16, 1u << 24};
-    const auto multipliers = hn::LoadU(d_u32, multiplier_pattern);
+    const auto multipliers =
+        hn::LoadU(uint32_simd_tag, k_multiplier_pattern);
     const auto multiplied = hn::Mul(sums, multipliers);
-    return hn::ReduceSum(d_u32, multiplied);
+    return hn::ReduceSum(uint32_simd_tag, multiplied);
 #endif
 }
 
 /// Detect whether any rank in the 16-byte vector equals the skip
 /// sentinel (`0xFF`). Returns `true` if the slow scalar fallback path
 /// must run for this chunk.
-template <class D>
+template <class p_simd_tag>
 HWY_INLINE bool has_skip_sentinel(
-    D d_byte,
-    hn::Vec<D> ranks) noexcept {
-    const auto sentinel_mask = hn::Eq(ranks, hn::Set(d_byte, std::uint8_t{0xFF}));
-    return !hn::AllFalse(d_byte, sentinel_mask);
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> ranks) noexcept {
+    const auto sentinel_mask =
+        hn::Eq(ranks, hn::Set(simd_tag, std::uint8_t{0xFF}));
+    return !hn::AllFalse(simd_tag, sentinel_mask);
 }
 
 /// Merge a freshly-packed 32-bit chunk into the partial-word
 /// accumulator. `local_partial_letters` MUST be in `[0, 32)`.
-template <typename storage_unit_t>
+template <typename p_storage_unit>
 HWY_INLINE void merge_packed_chunk_into_partial(
-    storage_unit_t& local_partial_word,
+    p_storage_unit& local_partial_word,
     std::size_t& local_partial_letters,
-    std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
+    std::vector<p_storage_unit>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk) noexcept {
     std::size_t appended_letters = 0u;
-    auto write_unit = [packed_words](storage_unit_t value) {
+    auto write_unit = [packed_words](p_storage_unit value) {
         packed_words->push_back(value);
         return true;
     };
     const bool appended =
         bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
-            storage_unit_t, 2u, 32u>(
+            p_storage_unit, 2u, 32u>(
                 local_partial_word,
                 local_partial_letters,
                 appended_letters,
@@ -765,21 +794,21 @@ HWY_INLINE void merge_packed_chunk_into_partial(
 /// accumulator. `count` is the number of valid 2-bit letter slots in
 /// `packed_chunk`. Used by the multi-line dna4 encoder (0..16 letters
 /// per chunk after compaction).
-template <typename storage_unit_t>
+template <typename p_storage_unit>
 HWY_INLINE void merge_variable_chunk_into_partial(
-    storage_unit_t& local_partial_word,
+    p_storage_unit& local_partial_word,
     std::size_t& local_partial_letters,
-    std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
+    std::vector<p_storage_unit>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk,
     std::size_t count) noexcept {
     std::size_t appended_letters = 0u;
-    auto write_unit = [packed_words](storage_unit_t value) {
+    auto write_unit = [packed_words](p_storage_unit value) {
         packed_words->push_back(value);
         return true;
     };
     const bool appended =
         bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
-            storage_unit_t, 2u, 32u>(
+            p_storage_unit, 2u, 32u>(
                 local_partial_word,
                 local_partial_letters,
                 appended_letters,
@@ -791,7 +820,7 @@ HWY_INLINE void merge_variable_chunk_into_partial(
 }
 
 // ============================================================================
-// dna4 SIMD encoder — single-line variant (`Policy`-templated).
+// dna4 SIMD encoder — single-line variant (`p_policy`-templated).
 // ============================================================================
 
 /// Encode a dna4 body span into the encoder state via the SIMD LUT +
@@ -799,26 +828,26 @@ HWY_INLINE void merge_variable_chunk_into_partial(
 /// newlines / CR before passing the span (or use the multiline
 /// variant below).
 ///
-/// `Policy == drop`            — uses the 16-entry low-nibble LUT;
+/// `p_policy == drop`          — uses the 16-entry low-nibble LUT;
 ///                               sentinel-detect + scalar fallback for
 ///                               chunks containing `0xFF`. 2×-unrolled.
-/// `Policy == map_to_default`  — uses the 32-byte LUT split across two
+/// `p_policy == map_to_default` — uses the 32-byte LUT split across two
 ///                               16-byte halves; no sentinels can
 ///                               appear, so no compaction or fallback
 ///                               is needed.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit,
-          unknown_byte_policy Policy = unknown_byte_policy::drop>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit,
+          unknown_byte_policy p_policy = unknown_byte_policy::drop>
 HWY_INLINE void encode_body_chunk_dna4_simd(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
-                  std::is_same_v<storage_unit_t, std::uint64_t>,
+    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
+                  std::is_same_v<p_storage_unit, std::uint64_t>,
                   "encode_body_chunk_dna4_simd is specialised for "
                   "(dna4, uint64_t, 2, 32)");
-    if constexpr (Policy == unknown_byte_policy::drop) {
+    if constexpr (p_policy == unknown_byte_policy::drop) {
         detail::encode_body_chunk_dna4_simd_drop_impl(
             state, body_bytes, body_size);
     } else {
@@ -833,15 +862,15 @@ HWY_INLINE void encode_body_chunk_dna4_simd(
 /// Multi-line dna4 SIMD encoder. Encodes a body span that may contain
 /// `\n` and `\r` — the LUT maps these to `0xFF` and the SIMD compaction
 /// branch strips them lane-wise without falling back to scalar.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 HWY_INLINE void encode_body_chunk_dna4_simd_multiline(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
-                  std::is_same_v<storage_unit_t, std::uint64_t>,
+    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
+                  std::is_same_v<p_storage_unit, std::uint64_t>,
                   "encode_body_chunk_dna4_simd_multiline is specialised for "
                   "(dna4, uint64_t, 2, 32)");
     detail::encode_body_chunk_dna4_simd_multiline_impl(
@@ -849,26 +878,27 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline(
 }
 /// Fused multiline encode + record-end detection. Encodes from
 /// `body_bytes` up to (but not including) the first byte equal to
-/// `BoundaryChar`. Returns the number of bytes consumed.
+/// `p_boundary_character`. Returns the number of bytes consumed.
 ///
 /// `newline_count_out` (if non-null) accumulates the count of `\n`
 /// and `\r` bytes encountered.
-template <std::uint8_t BoundaryChar,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <std::uint8_t p_boundary_character,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 [[nodiscard]] HWY_INLINE std::size_t
 encode_body_chunk_dna4_simd_multiline_until_byte(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size,
     std::size_t* HWY_RESTRICT newline_count_out) {
-    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
-                  std::is_same_v<storage_unit_t, std::uint64_t>,
+    static_assert(p_bits_per_character == 2 && p_letters_per_unit == 32 &&
+                  std::is_same_v<p_storage_unit, std::uint64_t>,
                   "encode_body_chunk_dna4_simd_multiline_until_byte is "
                   "specialised for (dna4, uint64_t, 2, 32)");
     return detail::encode_body_chunk_dna4_simd_multiline_until_byte_impl(
-        state, body_bytes, body_size, newline_count_out, BoundaryChar);
+        state, body_bytes, body_size, newline_count_out,
+        p_boundary_character);
 }
 // ============================================================================
 // dna4 SIMD decoder — packed uint64 → ASCII bytes.
@@ -921,12 +951,12 @@ HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
 /// uint8 storage unit (3 bits per letter, 2 leftover bits). Pipeline:
 /// 32-byte LUT lookup (handles both policies), then
 /// SIMD pack of even/odd lane pairs.
-template <unknown_byte_policy Policy>
+template <unknown_byte_policy p_policy>
 HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    if constexpr (Policy == unknown_byte_policy::drop) {
+    if constexpr (p_policy == unknown_byte_policy::drop) {
         detail::encode_body_chunk_dna5_uint8_simd_drop_impl(
             state, body_bytes, body_size);
     } else {
@@ -954,43 +984,43 @@ HWY_INLINE void decode_dna5_uint8_words_to_ascii(
 /// lookup is the expensive part of the encode pipeline, so this gives
 /// a real speedup over the fully-scalar fallback even though the pack
 /// stays scalar.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
-HWY_INLINE void encode_body_chunk_lutsimd_packscalar(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
+HWY_INLINE void encode_body_chunk_lut_simd_pack_scalar(
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    static_assert(std::is_same_v<alphabet_t, seq::dna4>
-               || std::is_same_v<alphabet_t, seq::dna5>,
-                  "SIMD LUT packscalar path is implemented for dna4/dna5");
+    static_assert(std::is_same_v<p_alphabet, seq::dna4>
+               || std::is_same_v<p_alphabet, seq::dna5>,
+                  "SIMD LUT pack_scalar path is implemented for dna4/dna5");
 
-    constexpr std::size_t scratch_capacity = 1024;
-    std::array<std::uint8_t, scratch_capacity> rank_scratch{};
+    constexpr std::size_t k_scratch_capacity = 1024;
+    std::array<std::uint8_t, k_scratch_capacity> rank_scratch{};
     std::size_t read_cursor = 0;
     while (read_cursor < body_size) {
         const std::size_t chunk_size =
-            std::min(scratch_capacity, body_size - read_cursor);
-        if constexpr (std::is_same_v<alphabet_t, seq::dna4>) {
-            if constexpr (Policy == unknown_byte_policy::drop) {
-                detail::ascii_to_rank_lutsimd_dna4_drop_impl(
+            std::min(k_scratch_capacity, body_size - read_cursor);
+        if constexpr (std::is_same_v<p_alphabet, seq::dna4>) {
+            if constexpr (p_policy == unknown_byte_policy::drop) {
+                detail::ascii_to_rank_lut_simd_dna4_drop_impl(
                     body_bytes + read_cursor, rank_scratch.data(), chunk_size);
             } else {
-                detail::ascii_to_rank_lutsimd_dna4_map_to_default_impl(
+                detail::ascii_to_rank_lut_simd_dna4_map_to_default_impl(
                     body_bytes + read_cursor, rank_scratch.data(), chunk_size);
             }
         } else {
-            if constexpr (Policy == unknown_byte_policy::drop) {
-                detail::ascii_to_rank_lutsimd_dna5_drop_impl(
+            if constexpr (p_policy == unknown_byte_policy::drop) {
+                detail::ascii_to_rank_lut_simd_dna5_drop_impl(
                     body_bytes + read_cursor, rank_scratch.data(), chunk_size);
             } else {
-                detail::ascii_to_rank_lutsimd_dna5_map_to_default_impl(
+                detail::ascii_to_rank_lut_simd_dna5_map_to_default_impl(
                     body_bytes + read_cursor, rank_scratch.data(), chunk_size);
             }
         }
-        append_ranks<storage_unit_t, BitsPerChar, LettersPerUnit>(
+        append_ranks<p_storage_unit, p_bits_per_character, p_letters_per_unit>(
             state, rank_scratch.data(), chunk_size);
         read_cursor += chunk_size;
     }
@@ -1002,103 +1032,108 @@ HWY_INLINE void encode_body_chunk_lutsimd_packscalar(
 /// Generic streaming encode entry point. The dispatch tree:
 ///
 ///   - `(dna4, uint64, 2, 32)`           — full SIMD pipeline
-///                                         (Policy-templated).
+///                                         (`p_policy`-templated).
 ///   - `(dna5, uint8, 3, 2)`             — full SIMD pipeline
-///                                         (Policy-templated).
+///                                         (`p_policy`-templated).
 ///   - other dna4/dna5 shapes             — SIMD lookup + scalar pack.
 ///   - everything else                    — fully scalar.
-template <sequence_alphabet alphabet_t,
-          unknown_byte_policy Policy = unknown_byte_policy::drop,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          unknown_byte_policy p_policy = unknown_byte_policy::drop,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 HWY_INLINE void encode_body_chunk(
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    encode_state<p_storage_unit, p_bits_per_character, p_letters_per_unit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    constexpr bool dna4_uint64_shape =
-        std::is_same_v<alphabet_t, seq::dna4>
-        && std::is_same_v<storage_unit_t, std::uint64_t>
-        && BitsPerChar == 2
-        && LettersPerUnit == 32;
-    constexpr bool dna5_uint8_shape =
-        std::is_same_v<alphabet_t, seq::dna5>
-        && std::is_same_v<storage_unit_t, std::uint8_t>
-        && BitsPerChar == 3
-        && LettersPerUnit == 2;
-    constexpr bool simd_lut_alphabet =
-        std::is_same_v<alphabet_t, seq::dna4>
-        || std::is_same_v<alphabet_t, seq::dna5>;
+    constexpr bool k_is_dna4_uint64_shape =
+        std::is_same_v<p_alphabet, seq::dna4>
+        && std::is_same_v<p_storage_unit, std::uint64_t>
+        && p_bits_per_character == 2
+        && p_letters_per_unit == 32;
+    constexpr bool k_is_dna5_uint8_shape =
+        std::is_same_v<p_alphabet, seq::dna5>
+        && std::is_same_v<p_storage_unit, std::uint8_t>
+        && p_bits_per_character == 3
+        && p_letters_per_unit == 2;
+    constexpr bool k_is_simd_lut_alphabet =
+        std::is_same_v<p_alphabet, seq::dna4>
+        || std::is_same_v<p_alphabet, seq::dna5>;
 
-    if constexpr (dna4_uint64_shape) {
-        encode_body_chunk_dna4_simd<storage_unit_t, BitsPerChar,
-                                       LettersPerUnit, Policy>(
+    if constexpr (k_is_dna4_uint64_shape) {
+        encode_body_chunk_dna4_simd<p_storage_unit, p_bits_per_character,
+                                    p_letters_per_unit, p_policy>(
             state, body_bytes, body_size);
-    } else if constexpr (dna5_uint8_shape) {
-        encode_body_chunk_dna5_uint8_simd<Policy>(
+    } else if constexpr (k_is_dna5_uint8_shape) {
+        encode_body_chunk_dna5_uint8_simd<p_policy>(
             state, body_bytes, body_size);
-    } else if constexpr (simd_lut_alphabet) {
-        encode_body_chunk_lutsimd_packscalar<alphabet_t, Policy,
-                                                storage_unit_t,
-                                                BitsPerChar,
-                                                LettersPerUnit>(
+    } else if constexpr (k_is_simd_lut_alphabet) {
+        encode_body_chunk_lut_simd_pack_scalar<p_alphabet, p_policy,
+                                               p_storage_unit,
+                                               p_bits_per_character,
+                                               p_letters_per_unit>(
             state, body_bytes, body_size);
     } else {
-        encode_body_chunk_scalar<alphabet_t, Policy,
-                                  storage_unit_t, BitsPerChar,
-                                  LettersPerUnit>(
+        encode_body_chunk_scalar<p_alphabet, p_policy,
+                                 p_storage_unit, p_bits_per_character,
+                                 p_letters_per_unit>(
             state, body_bytes, body_size);
     }
 }
 
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 HWY_INLINE void decode_words_to_ascii(
-    const storage_unit_t* words,
+    const p_storage_unit* words,
     std::uint8_t* dst,
     std::size_t total_letters) {
-    if constexpr (is_dna4_simd_decode_shape<alphabet_t, storage_unit_t,
-                                              BitsPerChar, LettersPerUnit>()) {
+    if constexpr (is_dna4_simd_decode_shape<p_alphabet, p_storage_unit,
+                                             p_bits_per_character,
+                                             p_letters_per_unit>()) {
         decode_dna4_words_to_ascii(
             reinterpret_cast<const std::uint64_t*>(words),
             dst, total_letters);
-    } else if constexpr (is_dna5_uint8_simd_decode_shape<alphabet_t,
-                                                            storage_unit_t,
-                                                            BitsPerChar,
-                                                            LettersPerUnit>()) {
+    } else if constexpr (is_dna5_uint8_simd_decode_shape<
+                             p_alphabet,
+                             p_storage_unit,
+                             p_bits_per_character,
+                             p_letters_per_unit>()) {
         decode_dna5_uint8_words_to_ascii(
             reinterpret_cast<const std::uint8_t*>(words),
             dst, total_letters);
     } else {
-        decode_words_to_ascii_scalar<alphabet_t, storage_unit_t,
-                                       BitsPerChar, LettersPerUnit>(
+        decode_words_to_ascii_scalar<p_alphabet, p_storage_unit,
+                                     p_bits_per_character,
+                                     p_letters_per_unit>(
             words, dst, total_letters);
     }
 }
 
-template <sequence_alphabet alphabet_t,
-          typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          std::size_t p_bits_per_character,
+          std::size_t p_letters_per_unit>
 [[nodiscard]] HWY_INLINE std::size_t decode_words_to_ascii_wrapped(
-    const storage_unit_t* words,
+    const p_storage_unit* words,
     std::size_t total_letters,
     std::size_t wrap_width,
     std::size_t letters_in_current_line,
     std::uint8_t* scratch,
     std::uint8_t* dst) {
-    if constexpr (is_dna4_simd_decode_shape<alphabet_t, storage_unit_t,
-                                              BitsPerChar, LettersPerUnit>()) {
+    if constexpr (is_dna4_simd_decode_shape<p_alphabet, p_storage_unit,
+                                             p_bits_per_character,
+                                             p_letters_per_unit>()) {
         return decode_dna4_words_to_ascii_wrapped(
             reinterpret_cast<const std::uint64_t*>(words),
             total_letters, wrap_width,
             letters_in_current_line, scratch, dst);
-    } else if constexpr (is_dna5_uint8_simd_decode_shape<alphabet_t,
-                                                            storage_unit_t,
-                                                            BitsPerChar,
-                                                            LettersPerUnit>()) {
+    } else if constexpr (is_dna5_uint8_simd_decode_shape<
+                             p_alphabet,
+                             p_storage_unit,
+                             p_bits_per_character,
+                             p_letters_per_unit>()) {
         // Decode to scratch via SIMD then memcpy with newline injection
         // — same shape as the dna4 wrapped path.
         if (total_letters == 0) return letters_in_current_line;
@@ -1124,8 +1159,11 @@ template <sequence_alphabet alphabet_t,
         return line_position;
     } else {
         (void)scratch;
-        return decode_words_to_ascii_scalar_wrapped<alphabet_t, storage_unit_t,
-                                                       BitsPerChar, LettersPerUnit>(
+        return decode_words_to_ascii_scalar_wrapped<
+            p_alphabet,
+            p_storage_unit,
+            p_bits_per_character,
+            p_letters_per_unit>(
             words, total_letters, wrap_width,
             letters_in_current_line, dst);
     }
@@ -1138,79 +1176,91 @@ template <sequence_alphabet alphabet_t,
 /// One-shot scalar encoder. Adapter around `encode_body_chunk_scalar`.
 /// The default maps unknown bytes to the alphabet's default rank, matching
 /// the permissive SQL literal parser.
-template <class destination_configuration,
-          unknown_byte_policy policy = unknown_byte_policy::map_to_default>
-requires is_sequence_custom_alphabet<destination_configuration>
-[[nodiscard]] compact_sequence_range<destination_configuration>
+template <class p_destination_configuration,
+          unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
+requires is_sequence_custom_alphabet<p_destination_configuration>
+[[nodiscard]] compact_sequence_range<p_destination_configuration>
 encode_sequence_scalar(
     const char* input, std::size_t length) {
-    using sequence_type = compact_sequence_range<destination_configuration>;
+    using sequence_type =
+        compact_sequence_range<p_destination_configuration>;
     using storage_unit_type = typename sequence_type::traits::storage_unit;
     using alphabet_type = typename sequence_type::traits::alphabet_type;
-    constexpr std::size_t bits_per_character =
+    constexpr std::size_t k_bits_per_character =
         sequence_type::traits::bits_per_char;
-    constexpr std::size_t letters_per_unit =
+    constexpr std::size_t k_letters_per_unit =
         sequence_type::traits::letters_per_unit;
 
     std::vector<storage_unit_type> packed;
-    packed.reserve((length + letters_per_unit - 1) / letters_per_unit);
+    packed.reserve(
+        (length + k_letters_per_unit - 1) / k_letters_per_unit);
 
     encode_state<
-        storage_unit_type, bits_per_character, letters_per_unit> state{};
+        storage_unit_type,
+        k_bits_per_character,
+        k_letters_per_unit> state{};
     state.output_storage = &packed;
     state.reset();
     encode_body_chunk_scalar<
         alphabet_type,
-        policy,
+        p_policy,
         storage_unit_type,
-        bits_per_character,
-        letters_per_unit>(
+        k_bits_per_character,
+        k_letters_per_unit>(
         state,
         reinterpret_cast<const std::uint8_t*>(input),
         length);
-    const auto [n_words, padding] =
+    const auto [word_count, padding] =
         finalize_encode_state<
-            storage_unit_type, bits_per_character, letters_per_unit>(state);
-    (void)n_words;
+            storage_unit_type,
+            k_bits_per_character,
+            k_letters_per_unit>(state);
+    (void)word_count;
     return sequence_type::from_packed(std::move(packed), padding);
 }
 
 /// One-shot SIMD encoder. Adapter around `encode_body_chunk` —
 /// dispatches to the dna4/dna5 SIMD pipeline when applicable.
-template <class destination_configuration,
-          unknown_byte_policy policy = unknown_byte_policy::map_to_default>
-requires is_sequence_custom_alphabet<destination_configuration>
-[[nodiscard]] compact_sequence_range<destination_configuration>
+template <class p_destination_configuration,
+          unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
+requires is_sequence_custom_alphabet<p_destination_configuration>
+[[nodiscard]] compact_sequence_range<p_destination_configuration>
 encode_sequence_simd(
     const char* input, std::size_t length) {
-    using sequence_type = compact_sequence_range<destination_configuration>;
+    using sequence_type =
+        compact_sequence_range<p_destination_configuration>;
     using storage_unit_type = typename sequence_type::traits::storage_unit;
     using alphabet_type = typename sequence_type::traits::alphabet_type;
-    constexpr std::size_t bits_per_character =
+    constexpr std::size_t k_bits_per_character =
         sequence_type::traits::bits_per_char;
-    constexpr std::size_t letters_per_unit =
+    constexpr std::size_t k_letters_per_unit =
         sequence_type::traits::letters_per_unit;
 
     std::vector<storage_unit_type> packed;
-    packed.reserve((length + letters_per_unit - 1) / letters_per_unit);
+    packed.reserve(
+        (length + k_letters_per_unit - 1) / k_letters_per_unit);
 
     encode_state<
-        storage_unit_type, bits_per_character, letters_per_unit> state{};
+        storage_unit_type,
+        k_bits_per_character,
+        k_letters_per_unit> state{};
     state.output_storage = &packed;
     state.reset();
     encode_body_chunk<
         alphabet_type,
-        policy,
+        p_policy,
         storage_unit_type,
-        bits_per_character,
-        letters_per_unit>(
+        k_bits_per_character,
+        k_letters_per_unit>(
         state,
         reinterpret_cast<const std::uint8_t*>(input),
         length);
-    const auto [n_words, padding] =
+    const auto [word_count, padding] =
         finalize_encode_state<
-            storage_unit_type, bits_per_character, letters_per_unit>(state);
-    (void)n_words;
+            storage_unit_type,
+            k_bits_per_character,
+            k_letters_per_unit>(state);
+    (void)word_count;
     return sequence_type::from_packed(std::move(packed), padding);
 }
 
@@ -1220,37 +1270,37 @@ encode_sequence_simd(
 /// For other `supports_compact_sequence_range` shapes (e.g.
 /// `compact_sequence_range<std::vector<seq::dna4>>`), falls back to
 /// the iterator-based path so the function works for every range.
-template <class source_configuration>
-requires supports_compact_sequence_range<source_configuration>
+template <class p_source_configuration>
+requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_scalar(
-    const compact_sequence_range<source_configuration>& sequence) {
+    const compact_sequence_range<p_source_configuration>& sequence) {
     using sequence_traits =
-        typename compact_sequence_range<source_configuration>::traits;
-    const std::size_t bp_count = sequence.bp_size();
-    if (bp_count == 0) return std::string{};
+        typename compact_sequence_range<p_source_configuration>::traits;
+    const std::size_t base_pair_count = sequence.bp_size();
+    if (base_pair_count == 0) return std::string{};
 
     if constexpr (
-        is_sequence_custom_alphabet<source_configuration>
-        || is_compact_sequence_stdc_instance<source_configuration>) {
+        is_sequence_custom_alphabet<p_source_configuration>
+        || is_compact_sequence_stdc_instance<p_source_configuration>) {
         using storage_unit_type = typename sequence_traits::storage_unit;
         using alphabet_type = typename sequence_traits::alphabet_type;
-        constexpr std::size_t bits_per_character =
+        constexpr std::size_t k_bits_per_character =
             sequence_traits::bits_per_char;
-        constexpr std::size_t letters_per_unit =
+        constexpr std::size_t k_letters_per_unit =
             sequence_traits::letters_per_unit;
-        std::string output(bp_count, '\0');
+        std::string output(base_pair_count, '\0');
         decode_words_to_ascii_scalar<
             alphabet_type,
             storage_unit_type,
-            bits_per_character,
-            letters_per_unit>(
+            k_bits_per_character,
+            k_letters_per_unit>(
             sequence.read_cptr(sequence.cbegin()),
             reinterpret_cast<std::uint8_t*>(output.data()),
-            bp_count);
+            base_pair_count);
         return output;
     } else {
         std::string output;
-        output.reserve(bp_count);
+        output.reserve(base_pair_count);
         for (const auto& rank :
              sequence.template iterable<logical_rank>()) {
             output.push_back(sequence_traits::letter_to_char(
@@ -1265,37 +1315,37 @@ requires supports_compact_sequence_range<source_configuration>
 /// `(dna5, uint8, 3, 2)`; everything else uses the scalar bit-walk.
 /// Falls back to the iterator-based scalar path for non-custom-alphabet
 /// ranges.
-template <class source_configuration>
-requires supports_compact_sequence_range<source_configuration>
+template <class p_source_configuration>
+requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_simd(
-    const compact_sequence_range<source_configuration>& sequence) {
+    const compact_sequence_range<p_source_configuration>& sequence) {
     using sequence_traits =
-        typename compact_sequence_range<source_configuration>::traits;
-    const std::size_t bp_count = sequence.bp_size();
-    if (bp_count == 0) return std::string{};
+        typename compact_sequence_range<p_source_configuration>::traits;
+    const std::size_t base_pair_count = sequence.bp_size();
+    if (base_pair_count == 0) return std::string{};
 
     if constexpr (
-        is_sequence_custom_alphabet<source_configuration>
-        || is_compact_sequence_stdc_instance<source_configuration>) {
+        is_sequence_custom_alphabet<p_source_configuration>
+        || is_compact_sequence_stdc_instance<p_source_configuration>) {
         using storage_unit_type = typename sequence_traits::storage_unit;
         using alphabet_type = typename sequence_traits::alphabet_type;
-        constexpr std::size_t bits_per_character =
+        constexpr std::size_t k_bits_per_character =
             sequence_traits::bits_per_char;
-        constexpr std::size_t letters_per_unit =
+        constexpr std::size_t k_letters_per_unit =
             sequence_traits::letters_per_unit;
-        std::string output(bp_count, '\0');
+        std::string output(base_pair_count, '\0');
         decode_words_to_ascii<
             alphabet_type,
             storage_unit_type,
-            bits_per_character,
-            letters_per_unit>(
+            k_bits_per_character,
+            k_letters_per_unit>(
             sequence.read_cptr(sequence.cbegin()),
             reinterpret_cast<std::uint8_t*>(output.data()),
-            bp_count);
+            base_pair_count);
         return output;
     } else {
         std::string output;
-        output.reserve(bp_count);
+        output.reserve(base_pair_count);
         for (const auto& rank :
              sequence.template iterable<logical_rank>()) {
             output.push_back(sequence_traits::letter_to_char(
@@ -1309,27 +1359,27 @@ requires supports_compact_sequence_range<source_configuration>
 // Lexicographic scalar comparator. Both sequences must share the same
 // alphabet and storage-unit type.
 //
-// Constrained against `supports_compact_sequence_bitcast_view<V>` so the
-// caller can pass either a raw `compact_sequence_range<R>` or a
+// Constrained against `supports_compact_sequence_bitcast_view<p_view>` so the
+// caller can pass either a raw `compact_sequence_range<p_range>` or a
 // `bit_casted_view<base, output>`.
 // ============================================================================
-template<class left_view_type, class right_view_type>
-requires supports_compact_sequence_bitcast_view<left_view_type>
-      && supports_compact_sequence_bitcast_view<right_view_type>
-      && std::is_same_v<typename left_view_type::traits::alphabet_type,
-                        typename right_view_type::traits::alphabet_type>
-      && std::is_same_v<typename left_view_type::traits::storage_unit,
-                        typename right_view_type::traits::storage_unit>
+template<class p_left_view, class p_right_view>
+requires supports_compact_sequence_bitcast_view<p_left_view>
+      && supports_compact_sequence_bitcast_view<p_right_view>
+      && std::is_same_v<typename p_left_view::traits::alphabet_type,
+                        typename p_right_view::traits::alphabet_type>
+      && std::is_same_v<typename p_left_view::traits::storage_unit,
+                        typename p_right_view::traits::storage_unit>
 [[nodiscard]] std::strong_ordering compare_sequences_scalar(
-	const left_view_type& lhs,
-	const right_view_type& rhs)
+	const p_left_view& lhs,
+	const p_right_view& rhs)
 {
-	using sequence_traits = typename left_view_type::traits;
+	using sequence_traits = typename p_left_view::traits;
 	using storage_unit_type = typename sequence_traits::storage_unit;
-	constexpr size_t bits_per_char = sequence_traits::bits_per_char;
-	constexpr size_t letters_per_unit = sequence_traits::letters_per_unit;
-	constexpr storage_unit_type char_mask = sequence_traits::char_mask;
-	constexpr storage_unit_type used_mask =
+	constexpr size_t k_bits_per_character = sequence_traits::bits_per_char;
+	constexpr size_t k_letters_per_unit = sequence_traits::letters_per_unit;
+	constexpr storage_unit_type k_character_mask = sequence_traits::char_mask;
+	constexpr storage_unit_type k_used_storage_mask =
 		sequence_traits::used_storage_mask;
 
 	const size_t lhs_size = lhs.bp_size();
@@ -1343,37 +1393,43 @@ requires supports_compact_sequence_bitcast_view<left_view_type>
 	const storage_unit_type* rhs_data = rhs.read_cptr(rhs.cbegin());
 
 	size_t symbol_index = 0;
-	while (symbol_index + letters_per_unit <= common_size) {
-		const size_t unit_index = symbol_index / letters_per_unit;
+	while (symbol_index + k_letters_per_unit <= common_size) {
+		const size_t unit_index = symbol_index / k_letters_per_unit;
 		storage_unit_type lhs_unit = static_cast<storage_unit_type>(
-			lhs_data[unit_index] & used_mask);
+			lhs_data[unit_index] & k_used_storage_mask);
 		storage_unit_type rhs_unit = static_cast<storage_unit_type>(
-			rhs_data[unit_index] & used_mask);
+			rhs_data[unit_index] & k_used_storage_mask);
 		if (lhs_unit != rhs_unit) {
-			for (size_t k = 0; k < letters_per_unit; ++k) {
-				const storage_unit_type lhs_rank = lhs_unit & char_mask;
-				const storage_unit_type rhs_rank = rhs_unit & char_mask;
+			for (size_t letter_index = 0;
+			     letter_index < k_letters_per_unit;
+			     ++letter_index) {
+				const storage_unit_type lhs_rank =
+					lhs_unit & k_character_mask;
+				const storage_unit_type rhs_rank =
+					rhs_unit & k_character_mask;
 				if (lhs_rank != rhs_rank) return lhs_rank <=> rhs_rank;
 				lhs_unit = static_cast<storage_unit_type>(
-					lhs_unit >> bits_per_char);
+					lhs_unit >> k_bits_per_character);
 				rhs_unit = static_cast<storage_unit_type>(
-					rhs_unit >> bits_per_char);
+					rhs_unit >> k_bits_per_character);
 			}
 		}
-		symbol_index += letters_per_unit;
+		symbol_index += k_letters_per_unit;
 	}
 	if (symbol_index < common_size) {
-		const size_t unit_index = symbol_index / letters_per_unit;
+		const size_t unit_index = symbol_index / k_letters_per_unit;
 		storage_unit_type lhs_unit = lhs_data[unit_index];
 		storage_unit_type rhs_unit = rhs_data[unit_index];
-		for (size_t k = 0; k < common_size - symbol_index; ++k) {
-			const storage_unit_type lhs_rank = lhs_unit & char_mask;
-			const storage_unit_type rhs_rank = rhs_unit & char_mask;
+		for (size_t letter_index = 0;
+		     letter_index < common_size - symbol_index;
+		     ++letter_index) {
+			const storage_unit_type lhs_rank = lhs_unit & k_character_mask;
+			const storage_unit_type rhs_rank = rhs_unit & k_character_mask;
 			if (lhs_rank != rhs_rank) return lhs_rank <=> rhs_rank;
 			lhs_unit = static_cast<storage_unit_type>(
-				lhs_unit >> bits_per_char);
+				lhs_unit >> k_bits_per_character);
 			rhs_unit = static_cast<storage_unit_type>(
-				rhs_unit >> bits_per_char);
+				rhs_unit >> k_bits_per_character);
 		}
 	}
 	return lhs_size <=> rhs_size;
@@ -1388,9 +1444,9 @@ requires supports_compact_sequence_bitcast_view<left_view_type>
 
 /**
  * @brief Encode text directly into an allocated standard-layout sequence.
- * @tparam stdc_type Destination header type.
- * @tparam alphabet Alphabet used to interpret input symbols.
- * @tparam allocator_type Byte allocator returning `stdc_type*`.
+ * @tparam p_sequence_header Destination header type.
+ * @tparam p_alphabet Alphabet used to interpret input symbols.
+ * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
  * @param target_storage_byte_width Packed storage-unit width in bytes.
  * @param length Number of input characters.
  * @param input Input characters.
@@ -1398,80 +1454,84 @@ requires supports_compact_sequence_bitcast_view<left_view_type>
  * @return Allocated sequence, or `nullptr` when allocation fails.
  */
 template<
-    class stdc_type,
-    sequence_alphabet alphabet,
-    class allocator_type
+    class p_sequence_header,
+    sequence_alphabet p_alphabet,
+    class p_allocator
 >
 requires (
-    is_compact_sequence_stdc<stdc_type>
+    is_compact_sequence_stdc<p_sequence_header>
     && alphabet_in_supported_set<
-        typename stdc_type::supported_alphabets_type, alphabet>
-    && stdc_allocator<allocator_type, stdc_type>
+        typename p_sequence_header::supported_alphabets_type,
+        p_alphabet>
+    && stdc_allocator<p_allocator, p_sequence_header>
 )
 [[nodiscard]]
-inline stdc_type* stdc_convert_from_cstr(
+inline p_sequence_header* stdc_convert_from_cstr(
     std::uint8_t target_storage_byte_width,
-    typename stdc_type::bp_size_t length,
+    typename p_sequence_header::bp_size_t length,
     const char* input,
-    allocator_type&& allocator)
+    p_allocator&& allocator)
 {
     DEBUG_ASSERT(
-        stdc_type::supported_storage_unit_byte_widths_type::contains_runtime(
-            target_storage_byte_width),
+        p_sequence_header::supported_storage_unit_byte_widths_type::
+            contains_runtime(target_storage_byte_width),
         fmt::format(
             "stdc_convert_from_cstr: storage_unit_byte_width {} is not enabled",
                     static_cast<unsigned>(target_storage_byte_width)));
 
-    stdc_type* result = nullptr;
-    stdc_type::supported_storage_unit_byte_widths_type::dispatch(
+    p_sequence_header* result = nullptr;
+    p_sequence_header::supported_storage_unit_byte_widths_type::dispatch(
         target_storage_byte_width,
-        [&]<std::size_t storage_byte_width>() {
+        [&]<std::size_t p_storage_byte_width>() {
             // Fixed-width standard types give Highway an accepted lane type
             // on every supported LP64 target. Some least-width integer aliases
             // use a different C++ spelling despite an identical bit width.
             using storage_unit_type =
-                std::conditional_t<storage_byte_width == 8, std::uint64_t,
-                std::conditional_t<storage_byte_width == 4, std::uint32_t,
-                std::conditional_t<storage_byte_width == 2, std::uint16_t,
-                                              std::uint8_t>>>;
+                std::conditional_t<p_storage_byte_width == 8, std::uint64_t,
+                std::conditional_t<p_storage_byte_width == 4, std::uint32_t,
+                std::conditional_t<p_storage_byte_width == 2, std::uint16_t,
+                                                   std::uint8_t>>>;
             using sequence_configuration = sequence_custom_alphabet<
-                alphabet,
+                p_alphabet,
                 storage_unit_type,
-                seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet>)>;
+                seqan3::detail::ceil_log2(
+                    seqan3::alphabet_size<p_alphabet>)>;
 
             const auto packed =
                 encode_sequence_simd<sequence_configuration>(
                     input, static_cast<std::size_t>(length));
 
-            const std::size_t unit_count_value  = packed.size();
-            const std::size_t payload_bytes_value =
-                unit_count_value * storage_byte_width;
+            const std::size_t unit_count = packed.size();
+            const std::size_t payload_bytes =
+                unit_count * p_storage_byte_width;
             const std::size_t total_bytes =
-                stdc_type::header_bytes()
-                + round_up_to_uint64(payload_bytes_value);
+                p_sequence_header::header_bytes()
+                + round_up_to_uint64(payload_bytes);
 
-            stdc_type* header =
-                std::forward<allocator_type>(allocator)(total_bytes);
+            p_sequence_header* header =
+                std::forward<p_allocator>(allocator)(total_bytes);
             if (header == nullptr) {
                 result = nullptr;
                 return;
             }
-            header->vl_len_ = stdc_type::encode_varlena_header(total_bytes);
+            header->vl_len_ =
+                p_sequence_header::encode_varlena_header(total_bytes);
             header->alphabet_code =
-                stdc_type::supported_alphabets_type::template index_of<
-                    alphabet>();
+                p_sequence_header::supported_alphabets_type::template
+                    index_of<p_alphabet>();
             header->storage_unit_byte_width =
-                static_cast<std::uint8_t>(storage_byte_width);
+                static_cast<std::uint8_t>(p_storage_byte_width);
             header->padding_letters =
                 static_cast<std::uint16_t>(packed.padding());
             header->bp_size =
-                static_cast<typename stdc_type::bp_size_t>(packed.bp_size());
+                static_cast<typename p_sequence_header::bp_size_t>(
+                    packed.bp_size());
 
-            if (unit_count_value > 0) {
+            if (unit_count > 0) {
                 std::memmove(
                     header->data,
                     packed.packed_units.data(),
-                    payload_bytes_value);
+                    payload_bytes);
             }
             result = header;
         });
@@ -1480,63 +1540,64 @@ inline stdc_type* stdc_convert_from_cstr(
 
 /**
  * @brief Recode a standard-layout sequence into another supported alphabet.
- * @tparam stdc_type Source and destination header type.
- * @tparam target_alphabet Destination alphabet.
- * @tparam allocator_type Byte allocator returning `stdc_type*`.
+ * @tparam p_sequence_header Source and destination header type.
+ * @tparam p_target_alphabet Destination alphabet.
+ * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
  * @param source Sequence to decode and recode.
  * @param target_byte_width Destination packed-unit width in bytes.
  * @param allocator Destination allocator.
  * @return Newly allocated recoded sequence, or `nullptr` on allocation failure.
  */
 template<
-    class stdc_type,
-    sequence_alphabet target_alphabet,
-    class allocator_type
+    class p_sequence_header,
+    sequence_alphabet p_target_alphabet,
+    class p_allocator
 >
 requires (
-    is_compact_sequence_stdc<stdc_type>
+    is_compact_sequence_stdc<p_sequence_header>
     && alphabet_in_supported_set<
-        typename stdc_type::supported_alphabets_type, target_alphabet>
-    && stdc_allocator<allocator_type, stdc_type>
+        typename p_sequence_header::supported_alphabets_type,
+        p_target_alphabet>
+    && stdc_allocator<p_allocator, p_sequence_header>
 )
 [[nodiscard]]
-inline stdc_type* stdc_recode_to(
-    const stdc_type& source,
+inline p_sequence_header* stdc_recode_to(
+    const p_sequence_header& source,
     std::uint8_t target_byte_width,
-    allocator_type&& allocator)
+    p_allocator&& allocator)
 {
     std::string ascii;
-    source.convert_to([&]<class instance_type>(
-                          const compact_sequence_range<instance_type>& view) {
-        ascii = decode_sequence_simd<instance_type>(view);
+    source.convert_to([&]<class p_instance>(
+                          const compact_sequence_range<p_instance>& view) {
+        ascii = decode_sequence_simd<p_instance>(view);
     });
-    return stdc_convert_from_cstr<stdc_type, target_alphabet>(
+    return stdc_convert_from_cstr<p_sequence_header, p_target_alphabet>(
         target_byte_width,
-        static_cast<typename stdc_type::bp_size_t>(ascii.size()),
+        static_cast<typename p_sequence_header::bp_size_t>(ascii.size()),
         ascii.data(),
-        std::forward<allocator_type>(allocator));
+        std::forward<p_allocator>(allocator));
 }
 
 /**
  * @brief Change packed storage width while retaining the logical alphabet.
- * @tparam stdc_type Source and destination header type.
- * @tparam allocator_type Byte allocator returning `stdc_type*`.
+ * @tparam p_sequence_header Source and destination header type.
+ * @tparam p_allocator Byte allocator returning `p_sequence_header*`.
  * @param source Sequence to recast.
  * @param target Destination alphabet code and storage width.
  * @param allocator Destination allocator.
  * @return Newly allocated sequence, or `nullptr` for an alphabet mismatch or
  * allocation failure.
  */
-template<class stdc_type, class allocator_type>
+template<class p_sequence_header, class p_allocator>
 requires (
-    is_compact_sequence_stdc<stdc_type>
-    && stdc_allocator<allocator_type, stdc_type>
+    is_compact_sequence_stdc<p_sequence_header>
+    && stdc_allocator<p_allocator, p_sequence_header>
 )
 [[nodiscard]]
-inline stdc_type* stdc_rewidth_to_type_params(
-    const stdc_type& source,
+inline p_sequence_header* stdc_rewidth_to_type_params(
+    const p_sequence_header& source,
     compact_sequence_stdc_type_params target,
-    allocator_type&& allocator)
+    p_allocator&& allocator)
 {
     // Width coalescing never changes alphabets. Keep this local guard even
     // though SQL callers validate bound alphabets before entering the helper.
@@ -1552,28 +1613,30 @@ inline stdc_type* stdc_rewidth_to_type_params(
     // straddle byte boundaries differently at each width. For non-byte-aligned
     // alphabets use an alphabet-preserving ASCII round-trip below.
     bool byte_aligned = false;
-    stdc_type::supported_alphabets_type::dispatch_alphabet_by_code(
+    p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
         source.alphabet_code,
-        [&byte_aligned]<class alphabet>() {
-            constexpr std::size_t letter_bit_width =
+        [&byte_aligned]<class p_alphabet>() {
+            constexpr std::size_t k_letter_bit_width =
                 seqan3::detail::ceil_log2(
-                    static_cast<std::size_t>(seqan3::alphabet_size<alphabet>));
-            byte_aligned = (letter_bit_width != 0u)
-                && (8u % letter_bit_width == 0u);
+                    static_cast<std::size_t>(
+                        seqan3::alphabet_size<p_alphabet>));
+            byte_aligned = (k_letter_bit_width != 0u)
+                && (8u % k_letter_bit_width == 0u);
         });
     if (byte_aligned) {
         return source.recast_storage_width(
             target.storage_unit_byte_width,
-            std::forward<allocator_type>(allocator));
+            std::forward<p_allocator>(allocator));
     }
-    stdc_type* result = nullptr;
-    stdc_type::supported_alphabets_type::dispatch_alphabet_by_code(
+    p_sequence_header* result = nullptr;
+    p_sequence_header::supported_alphabets_type::dispatch_alphabet_by_code(
         source.alphabet_code,
-        [&result, &source, target, &allocator]<class source_alphabet>() {
-            result = stdc_recode_to<stdc_type, source_alphabet>(
+        [&result, &source, target, &allocator]<class p_source_alphabet>() {
+            result = stdc_recode_to<
+                p_sequence_header, p_source_alphabet>(
                 source,
                 target.storage_unit_byte_width,
-                std::forward<allocator_type>(allocator));
+                std::forward<p_allocator>(allocator));
         });
     return result;
 }
@@ -1583,17 +1646,17 @@ inline stdc_type* stdc_rewidth_to_type_params(
  *
  * Both values must use the same alphabet. Their packed storage widths may
  * differ because lazy views normalize the comparison.
- * @tparam stdc_type Shared standard-layout header type.
+ * @tparam p_sequence_header Shared standard-layout header type.
  * @param lhs Left sequence.
  * @param rhs Right sequence.
  * @return Strong ordering of logical symbol sequences.
  */
-template<class stdc_type>
-requires (is_compact_sequence_stdc<stdc_type>)
+template<class p_sequence_header>
+requires (is_compact_sequence_stdc<p_sequence_header>)
 [[nodiscard]]
 inline std::strong_ordering stdc_compare(
-    const stdc_type& lhs,
-    const stdc_type& rhs)
+    const p_sequence_header& lhs,
+    const p_sequence_header& rhs)
 {
     // Cross-alphabet comparison is outside this function's contract. The
     // PostgreSQL build reports the violation at runtime; standalone builds
@@ -1614,14 +1677,14 @@ inline std::strong_ordering stdc_compare(
                              static_cast<unsigned>(rhs.alphabet_code)));
 #endif
     std::strong_ordering result = std::strong_ordering::equal;
-    lhs.convert_to([&result, &rhs]<class left_instance>(
-                       const compact_sequence_range<left_instance>& left) {
-        rhs.convert_to([&result, &left]<class right_instance>(
-                           const compact_sequence_range<right_instance>& right) {
+    lhs.convert_to([&result, &rhs]<class p_left_instance>(
+                       const compact_sequence_range<p_left_instance>& left) {
+        rhs.convert_to([&result, &left]<class p_right_instance>(
+                           const compact_sequence_range<p_right_instance>& right) {
             using left_traits =
-                typename compact_sequence_range<left_instance>::traits;
+                typename compact_sequence_range<p_left_instance>::traits;
             using right_traits =
-                typename compact_sequence_range<right_instance>::traits;
+                typename compact_sequence_range<p_right_instance>::traits;
             if constexpr (
                 !std::is_same_v<typename left_traits::alphabet_type,
                                 typename right_traits::alphabet_type>
@@ -1655,18 +1718,18 @@ namespace bioseq::simd {
 // a concrete architecture.
 namespace active_target = ::bioseq::simd::HWY_NAMESPACE;
 
-template<class stdc_type, class allocator_type>
+template<class p_sequence_header, class p_allocator>
 requires (
-    is_compact_sequence_stdc<stdc_type>
-    && stdc_allocator<allocator_type, stdc_type>
+    is_compact_sequence_stdc<p_sequence_header>
+    && stdc_allocator<p_allocator, p_sequence_header>
 )
-[[nodiscard]] inline stdc_type* stdc_rewidth_to_type_params(
-    const stdc_type& source,
+[[nodiscard]] inline p_sequence_header* stdc_rewidth_to_type_params(
+    const p_sequence_header& source,
     compact_sequence_stdc_type_params target,
-    allocator_type&& allocator)
+    p_allocator&& allocator)
 {
     return active_target::stdc_rewidth_to_type_params(
-        source, target, std::forward<allocator_type>(allocator));
+        source, target, std::forward<p_allocator>(allocator));
 }
 }
 

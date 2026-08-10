@@ -37,7 +37,7 @@ status BOOTSTRAP_RUNNING
 rm -f "$STATE_DIR/READY"
 printf '[bootstrap] starting %s architecture=%s aws_architecture=%s schema=%s\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BIOSEQ_BUILD_ARCHITECTURE" \
-  "$AWS_ARCHITECTURE" "$BIOSEQ_AMI_SCHEMA_VERSION"
+  "$AWS_ARCHITECTURE" "$BIOSEQ_AMI_SCHEMA_REVISION"
 
 case "$(uname -m):$AWS_ARCHITECTURE" in
   aarch64:arm64) AWSCLI_ARCH=aarch64 ;;
@@ -327,8 +327,8 @@ case "$(uname -m):$AWS_ARCHITECTURE" in
   aarch64:arm64|x86_64:x86_64) ;;
   *) fail "architecture mismatch: kernel=$(uname -m) expected=$AWS_ARCHITECTURE" ;;
 esac
-[[ $BIOSEQ_AMI_SCHEMA_VERSION == 2 ]] || \
-  fail "bootstrap schema mismatch: expected=2 actual=$BIOSEQ_AMI_SCHEMA_VERSION"
+[[ $BIOSEQ_AMI_SCHEMA_REVISION == 2 ]] || \
+  fail "bootstrap schema mismatch: expected=2 actual=$BIOSEQ_AMI_SCHEMA_REVISION"
 
 [[ $(stat -c %U "$BIOSEQ_SOURCE_STAGING_DIR") == "$TARGET_USER" ]] || \
   fail "$BIOSEQ_SOURCE_STAGING_DIR is not owned by $TARGET_USER"
@@ -410,7 +410,7 @@ status=READY
 ready_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 architecture=$BIOSEQ_BUILD_ARCHITECTURE
 aws_architecture=$AWS_ARCHITECTURE
-ami_schema_version=$BIOSEQ_AMI_SCHEMA_VERSION
+ami_schema_revision=$BIOSEQ_AMI_SCHEMA_REVISION
 artifact_bucket=$ARTIFACT_BUCKET
 artifact_prefix=$ARTIFACT_PREFIX
 signing_key_secret_arn=$BIOSEQ_SIGNING_KEY_SECRET_ARN

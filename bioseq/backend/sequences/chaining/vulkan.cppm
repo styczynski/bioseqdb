@@ -641,10 +641,10 @@ struct vulkan_chaining_shape_plan {
     if (anchor_buffer.mapped == nullptr || range_buffer.mapped == nullptr
         || score_buffer.mapped == nullptr
         || predecessor_buffer.mapped == nullptr
-        || !anchor_buffer.host_visible_coherent()
-        || !range_buffer.host_visible_coherent()
-        || !score_buffer.host_visible_coherent()
-        || !predecessor_buffer.host_visible_coherent()) {
+        || !anchor_buffer.is_host_visible_coherent()
+        || !range_buffer.is_host_visible_coherent()
+        || !score_buffer.is_host_visible_coherent()
+        || !predecessor_buffer.is_host_visible_coherent()) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "Vulkan chaining requires host-visible coherent unified-memory buffers");
     }

@@ -26,7 +26,7 @@ export module bioseq.codegen.namespace_materialization;
 
 export import :manifest;
 export import :model;
-import :contract_tests;
+import :tests.contract;
 import :renderer;
 import :validator;
 import bioseq.codegen.structural_analysis;
@@ -1033,7 +1033,8 @@ inline void require_prepare_content(
         depfile,
         "depfile");
     const std::string stamp =
-        "bioseq_template_flatten_prepare_stamp/v1\n"
+        "bioseq_template_flatten_prepare_stamp\n"
+        "revision=1\n"
         "profile=production\n"
         "authority=core\n"
         "compilation_signature=" + prepared.compilation_signature + "\n"
@@ -1174,7 +1175,8 @@ inline void validate_configure_handshake(
         .enabled_ordinals = command.enabled_ordinals,
         .clang_release = structural_analysis::linked_clang_release(),
         .compilation_signature = bioseq::common::sha256_hex(
-            "bioseq_template_flatten_relocatable_prepared_closure/v1\n"
+            "bioseq_template_flatten_relocatable_prepared_closure\n"
+            "revision=1\n"
             + prepared.relocatable_compilation_signature + "\n"),
         .compiler_module_inventory_sha256 =
             command.compiler_module_inventory_sha256,

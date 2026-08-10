@@ -16,7 +16,7 @@ module;
 export module bioseq.codegen.external;
 
 import :builder;
-import :contract_tests;
+import :tests.contract;
 
 export namespace bioseq::codegen::external {
 

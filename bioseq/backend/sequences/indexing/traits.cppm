@@ -25,55 +25,61 @@ export namespace bioseq::indexing {
 /// specialization: `static constexpr sequence_index_layout index_type;`,
 /// `static constexpr std::string_view index_name;`,
 /// `static constexpr bool allows_update_on_insert;`.
-template <template <class> class IndexTmpl>
+template <template <class> class p_index_template>
 struct index_descriptor;   // primary undefined -> using an unregistered index is a hard error
 
 /// Bound-index conformance: a fully-instantiated index I (with storage_type) is
 /// a valid index for layout M.
-template <class T, sequence_index_layout M>
+template <class p_index, sequence_index_layout p_layout>
 concept is_index_for =
-       (T::index_type == M)
-    && is_index_chunked_storage_for<typename T::storage_type, M>
-    && requires { { std::string_view{T::index_name} } -> std::same_as<std::string_view>; };
+       (p_index::index_type == p_layout)
+    && is_index_chunked_storage_for<
+           typename p_index::storage_type, p_layout>
+    && requires {
+        { std::string_view{p_index::index_name} }
+            -> std::same_as<std::string_view>;
+    };
 
-template <class T>
+template <class p_index>
 concept index_for_any =
-       is_index_for<T, sequence_index_layout::fragment_chunks>
-    || is_index_for<T, sequence_index_layout::sequence_inline>
-    || is_index_for<T, sequence_index_layout::table_chunks>;
+       is_index_for<p_index, sequence_index_layout::fragment_chunks>
+    || is_index_for<p_index, sequence_index_layout::sequence_inline>
+    || is_index_for<p_index, sequence_index_layout::table_chunks>;
 
 /// Parametrised build/rebuild checks (used by supported_indexes' methods, and by
 /// the pg-side static_asserts which CAN name a concrete range/scanner).
-template <class T, class Alphabet>
+template <class p_index, class p_alphabet>
 concept index_provides_build_fragmented =
-    sequence_alphabet<Alphabet> && requires (
-    typename T::storage_type& s,
-    bioseq::storage::lazy_sequence_view<Alphabet> seq) {
-    { T::build(s, seq) }   -> std::same_as<void>;
-    { T::rebuild(s, seq) } -> std::same_as<void>;
+    sequence_alphabet<p_alphabet> && requires (
+    typename p_index::storage_type& s,
+    bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
+    { p_index::build(s, seq) }   -> std::same_as<void>;
+    { p_index::rebuild(s, seq) } -> std::same_as<void>;
 };
 // The explicit backend surface also carries the already-selected immutable
 // minimizer table. SIMD index generation must never redispatch in a leaf.
-template <class T, class Alphabet>
+template <class p_index, class p_alphabet>
 concept index_provides_backend_build_fragmented =
-    sequence_alphabet<Alphabet> && requires (
-        typename T::storage_type& storage,
-        bioseq::storage::lazy_sequence_view<Alphabet> seq,
+    sequence_alphabet<p_alphabet> && requires (
+        typename p_index::storage_type& storage,
+        bioseq::storage::lazy_sequence_view<p_alphabet> seq,
         bioseq::minimizers::minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         std::uint8_t alphabet_code) {
-        { T::build(storage, seq, backend, kernels, alphabet_code) }
+        { p_index::build(storage, seq, backend, kernels, alphabet_code) }
             -> std::same_as<void>;
-        { T::rebuild(storage, seq, backend, kernels, alphabet_code) }
+        { p_index::rebuild(storage, seq, backend, kernels, alphabet_code) }
             -> std::same_as<void>;
     };
-template <class T, class Alphabet>
+template <class p_index, class p_alphabet>
 concept index_provides_build_inline =
-    sequence_alphabet<Alphabet>
-    && index_provides_build_fragmented<T, Alphabet>;  // same shape
-template <class T>
-concept index_provides_build_table = requires (typename T::storage_type& s) {
-    { T::build(s) }   -> std::same_as<void>;
-    { T::rebuild(s) } -> std::same_as<void>;
+    sequence_alphabet<p_alphabet>
+    && index_provides_build_fragmented<
+           p_index, p_alphabet>;  // same shape
+template <class p_index>
+concept index_provides_build_table =
+    requires (typename p_index::storage_type& s) {
+    { p_index::build(s) }   -> std::same_as<void>;
+    { p_index::rebuild(s) } -> std::same_as<void>;
 };
 }  // namespace bioseq::indexing

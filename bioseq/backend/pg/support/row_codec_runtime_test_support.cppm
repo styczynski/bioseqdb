@@ -8,7 +8,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "access/detoast.h"
@@ -53,7 +53,7 @@ extern "C" {
 
 export module bioseq.postgres.support.row_codec_runtime_test_support;
 
-import bioseq.postgres.support;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.indexing.sql_rows;
 import bioseq.postgres.storage.io.sql_row_codecs;
@@ -82,7 +82,7 @@ namespace metadata_codecs = bioseq::storage::metadata::sql_row_codecs;
 namespace table_rows = bioseq::table::composite_rows;
 namespace table_codecs = bioseq::table::sql_row_codecs;
 
-constexpr std::string_view kOperationEvidence{
+constexpr std::string_view operation_evidence{
     "descriptor+encode+form+deform+update+null-bits"
     "+required-null-matrix+null-result-context+source-release"
     "+result-context-ownership+context-reset-reuse"
@@ -192,27 +192,27 @@ void reset_context_once(MemoryContext context, std::string_view identity) {
   }
 }
 
-template <class Codec>
+template <class p_codec>
 void expect_descriptor_failure(TupleDesc descriptor,
                                std::string_view mutation) {
   bool rejected = false;
   try {
-    Codec::validate_descriptor(descriptor);
+    p_codec::validate_descriptor(descriptor);
   } catch (const row_codec_error &) {
     rejected = true;
   }
   if (!rejected) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " accepted descriptor mutation " + std::string{mutation});
   }
 }
 
-template <class Codec>
+template <class p_codec>
 void validate_descriptor_mutations(TupleDesc descriptor) {
-  Codec::validate_descriptor(descriptor);
+  p_codec::validate_descriptor(descriptor);
   if (descriptor == nullptr ||
-      descriptor->natts != static_cast<int>(Codec::fields_count)) {
-    contract_failure(std::string{Codec::row_name} +
+      descriptor->natts != static_cast<int>(p_codec::fields_count)) {
+    contract_failure(std::string{p_codec::row_name} +
                      " live descriptor arity mismatch");
   }
 
@@ -221,36 +221,36 @@ void validate_descriptor_mutations(TupleDesc descriptor) {
 
   const int original_natts = mutated->natts;
   mutated->natts = original_natts - 1;
-  expect_descriptor_failure<Codec>(mutated, "wrong-arity");
+  expect_descriptor_failure<p_codec>(mutated, "wrong-arity");
   mutated->natts = original_natts;
 
   Form_pg_attribute first = TupleDescAttr(mutated, 0);
   const Oid original_type = first->atttypid;
   first->atttypid = original_type == INT8OID ? INT4OID : INT8OID;
-  expect_descriptor_failure<Codec>(mutated, "wrong-type");
+  expect_descriptor_failure<p_codec>(mutated, "wrong-type");
   first->atttypid = original_type;
 
   const bool original_not_null = first->attnotnull;
   first->attnotnull = !original_not_null;
-  expect_descriptor_failure<Codec>(mutated, "wrong-nullability");
+  expect_descriptor_failure<p_codec>(mutated, "wrong-nullability");
   first->attnotnull = original_not_null;
 
   const bool original_dropped = first->attisdropped;
   first->attisdropped = true;
-  expect_descriptor_failure<Codec>(mutated, "dropped-field");
+  expect_descriptor_failure<p_codec>(mutated, "dropped-field");
   first->attisdropped = original_dropped;
 
   const NameData original_name = first->attname;
   namestrcpy(&first->attname, "__wrong_row_field__");
-  expect_descriptor_failure<Codec>(mutated, "wrong-name");
+  expect_descriptor_failure<p_codec>(mutated, "wrong-name");
   first->attname = original_name;
 
   std::optional<std::pair<std::size_t, std::size_t>> reorder_pair;
   for (std::size_t left = 0;
-       left < Codec::fields_count && !reorder_pair.has_value(); ++left) {
-    for (std::size_t right = left + 1; right < Codec::fields_count; ++right) {
-      const auto &left_field = Codec::expected_descriptor[left];
-      const auto &right_field = Codec::expected_descriptor[right];
+       left < p_codec::fields_count && !reorder_pair.has_value(); ++left) {
+    for (std::size_t right = left + 1; right < p_codec::fields_count; ++right) {
+      const auto &left_field = p_codec::expected_descriptor[left];
+      const auto &right_field = p_codec::expected_descriptor[right];
       if (left_field.type_oid == right_field.type_oid &&
           left_field.nullable == right_field.nullable) {
         reorder_pair = std::pair{left, right};
@@ -259,7 +259,7 @@ void validate_descriptor_mutations(TupleDesc descriptor) {
     }
   }
   if (!reorder_pair.has_value()) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " has no same-type descriptor reorder pair");
   }
   Form_pg_attribute left_attribute =
@@ -270,34 +270,34 @@ void validate_descriptor_mutations(TupleDesc descriptor) {
   const NameData right_name = right_attribute->attname;
   left_attribute->attname = right_name;
   right_attribute->attname = left_name;
-  expect_descriptor_failure<Codec>(mutated, "same-type-field-reorder");
+  expect_descriptor_failure<p_codec>(mutated, "same-type-field-reorder");
   left_attribute->attname = left_name;
   right_attribute->attname = right_name;
 
   invoke_pg_as_cpp([mutated] { FreeTupleDesc(mutated); });
 }
 
-template <class Codec, auto Member, class Value>
-[[nodiscard]] ScanKeyData verify_equal_scan_key(Value value,
+template <class p_codec, auto p_member, class p_value>
+[[nodiscard]] ScanKeyData verify_equal_scan_key(p_value value,
                                                 Datum expected_argument) {
-  const ScanKeyData key = Codec::template scan_key<Member>(value);
-  using field_type = typename Codec::template field<Member>;
-  if (key.sk_attno != Codec::template attribute_number<Member>() ||
+  const ScanKeyData key = p_codec::template scan_key<p_member>(value);
+  using field_type = typename p_codec::template field<p_member>;
+  if (key.sk_attno != p_codec::template attribute_number<p_member>() ||
       key.sk_strategy != BTEqualStrategyNumber ||
       key.sk_func.fn_oid !=
           field_type::comparison_procedure(scan_comparison::equal) ||
       key.sk_flags != 0 || key.sk_subtype != InvalidOid ||
       key.sk_collation != InvalidOid || key.sk_argument != expected_argument) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " generated equality scan key mismatch");
   }
   return key;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] constexpr std::size_t nullable_field_count() {
   std::size_t result = 0;
-  for (const auto &field : Codec::expected_descriptor) {
+  for (const auto &field : p_codec::expected_descriptor) {
     if (field.nullable) {
       ++result;
     }
@@ -305,10 +305,10 @@ template <class Codec>
   return result;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] constexpr std::size_t by_reference_field_count() {
   std::size_t result = 0;
-  for (const auto &field : Codec::expected_descriptor) {
+  for (const auto &field : p_codec::expected_descriptor) {
     if (field.type_oid == NAMEOID || field.type_oid == TEXTOID ||
         field.type_oid == BYTEAOID) {
       ++result;
@@ -317,10 +317,10 @@ template <class Codec>
   return result;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] constexpr std::size_t toastable_field_count() {
   std::size_t result = 0;
-  for (const auto &field : Codec::expected_descriptor) {
+  for (const auto &field : p_codec::expected_descriptor) {
     if (field.type_oid == TEXTOID || field.type_oid == BYTEAOID) {
       ++result;
     }
@@ -328,9 +328,9 @@ template <class Codec>
   return result;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] consteval std::size_t context_pointer_field_count() {
-  using row = typename Codec::row_type;
+  using row = typename p_codec::row_type;
   if constexpr (std::is_same_v<row, metadata_rows::row_mask>) {
     return 1;
   } else if constexpr (std::is_same_v<row, metadata_rows::chunk>) {
@@ -345,9 +345,9 @@ template <class Codec>
   return 0;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] consteval std::size_t owned_value_byref_field_count() {
-  using row = typename Codec::row_type;
+  using row = typename p_codec::row_type;
   if constexpr (std::is_same_v<row, metadata_rows::options> ||
                 std::is_same_v<
                     row, manager_rows::minimizer_generation_reaper_state>) {
@@ -359,52 +359,52 @@ template <class Codec>
   return 0;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] consteval std::size_t owned_text_string_field_count() {
-  using row = typename Codec::row_type;
+  using row = typename p_codec::row_type;
   return std::is_same_v<row, manager_rows::minimizer_generation_reaper_state>
              ? 1
              : 0;
 }
 
-template <class Codec>
+template <class p_codec>
 void require_encoded_null_pattern(
-    const typename Codec::const_encoded_tuple_data &tuple_data,
+    const typename p_codec::const_encoded_tuple_data &tuple_data,
     bool nullable_fields_are_null) {
-  for (std::size_t index = 0; index < Codec::fields_count; ++index) {
+  for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
     const bool expected =
-        nullable_fields_are_null && Codec::expected_descriptor[index].nullable;
+        nullable_fields_are_null && p_codec::expected_descriptor[index].nullable;
     if (tuple_data.nulls[index] != expected) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " encoded NULL bit mismatch at attribute " +
                        std::to_string(index + 1));
     }
   }
 }
 
-template <class Codec, class ExpectedFactory>
-void verify_row_exact(const typename Codec::row_type &actual,
-                      TupleDesc descriptor, ExpectedFactory make_expected,
+template <class p_codec, class p_expected_factory>
+void verify_row_exact(const typename p_codec::row_type &actual,
+                      TupleDesc descriptor, p_expected_factory make_expected,
                       MemoryContext comparison_context,
                       std::string_view detail) {
   {
-    const typename Codec::row_type expected = make_expected(comparison_context);
-    auto actual_encoded = Codec::encode(actual, comparison_context);
-    auto expected_encoded = Codec::encode(expected, comparison_context);
+    const typename p_codec::row_type expected = make_expected(comparison_context);
+    auto actual_encoded = p_codec::encode(actual, comparison_context);
+    auto expected_encoded = p_codec::encode(expected, comparison_context);
     const auto actual_data =
         std::as_const(actual_encoded).tuple_data(descriptor);
     const auto expected_data =
         std::as_const(expected_encoded).tuple_data(descriptor);
-    for (std::size_t index = 0; index < Codec::fields_count; ++index) {
+    for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
       if (actual_data.nulls[index] != expected_data.nulls[index]) {
-        contract_failure(std::string{Codec::row_name} + " " +
+        contract_failure(std::string{p_codec::row_name} + " " +
                          std::string{detail} + " NULL mismatch at attribute " +
                          std::to_string(index + 1));
       }
       if (actual_data.nulls[index]) {
         continue;
       }
-      const Oid type_oid = Codec::expected_descriptor[index].type_oid;
+      const Oid type_oid = p_codec::expected_descriptor[index].type_oid;
       const auto [type_length, type_by_value] = invoke_pg_as_cpp([type_oid] {
         int16 length = 0;
         bool by_value = false;
@@ -418,7 +418,7 @@ void verify_row_exact(const typename Codec::row_type &actual,
             return datumIsEqual(left, right, type_by_value, type_length);
           });
       if (!equal) {
-        contract_failure(std::string{Codec::row_name} + " " +
+        contract_failure(std::string{p_codec::row_name} + " " +
                          std::string{detail} + " value mismatch at attribute " +
                          std::to_string(index + 1));
       }
@@ -442,10 +442,10 @@ void require_pointer_in_context(const void *pointer,
   }
 }
 
-template <class Codec>
-void verify_result_context_ownership(const typename Codec::row_type &value,
+template <class p_codec>
+void verify_result_context_ownership(const typename p_codec::row_type &value,
                                      MemoryContext result_context) {
-  using row = typename Codec::row_type;
+  using row = typename p_codec::row_type;
   if constexpr (std::is_same_v<row, metadata_rows::row_mask>) {
     if (value.mask.has_value()) {
       require_pointer_in_context(*value.mask, result_context, "row_mask.mask");
@@ -480,9 +480,9 @@ void verify_result_context_ownership(const typename Codec::row_type &value,
   }
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] consteval bool row_survives_result_context_reset() {
-  using row = typename Codec::row_type;
+  using row = typename p_codec::row_type;
   return !std::is_same_v<row, metadata_rows::row_mask> &&
          !std::is_same_v<row, metadata_rows::chunk> &&
          !std::is_same_v<row, indexing_rows::index_policy> &&
@@ -491,18 +491,18 @@ template <class Codec>
          !std::is_same_v<row, load_rows::column_mapping>;
 }
 
-template <class Codec, class ExpectedFactory>
+template <class p_codec, class p_expected_factory>
 [[nodiscard]] bool
-verify_decoded_result(const typename Codec::row_type &decoded,
-                      TupleDesc descriptor, ExpectedFactory make_expected,
+verify_decoded_result(const typename p_codec::row_type &decoded,
+                      TupleDesc descriptor, p_expected_factory make_expected,
                       MemoryContext comparison_context,
                       MemoryContext result_context, std::string_view detail) {
-  verify_row_exact<Codec>(decoded, descriptor, make_expected,
+  verify_row_exact<p_codec>(decoded, descriptor, make_expected,
                           comparison_context, detail);
-  verify_result_context_ownership<Codec>(decoded, result_context);
-  if constexpr (row_survives_result_context_reset<Codec>()) {
+  verify_result_context_ownership<p_codec>(decoded, result_context);
+  if constexpr (row_survives_result_context_reset<p_codec>()) {
     reset_context_once(result_context, detail);
-    verify_row_exact<Codec>(decoded, descriptor, make_expected,
+    verify_row_exact<p_codec>(decoded, descriptor, make_expected,
                             comparison_context,
                             std::string{detail} + " after result reset");
     return true;
@@ -510,28 +510,28 @@ verify_decoded_result(const typename Codec::row_type &decoded,
   return false;
 }
 
-template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
-          class ApplyUpdate>
+template <class p_codec, class p_live_row_factory, class p_live_updated_row_factory,
+          class p_apply_update>
 [[nodiscard]] std::size_t exercise_external_toast_lifecycle(
-    Relation relation, TupleDesc descriptor, LiveRowFactory make_live_row,
-    LiveUpdatedRowFactory make_live_updated_row, ApplyUpdate apply_update,
+    Relation relation, TupleDesc descriptor, p_live_row_factory make_live_row,
+    p_live_updated_row_factory make_live_updated_row, p_apply_update apply_update,
     MemoryContext value_context, MemoryContext result_context,
     MemoryContext comparison_context) {
-  constexpr std::size_t expected_toastable = toastable_field_count<Codec>();
+  constexpr std::size_t expected_toastable = toastable_field_count<p_codec>();
   if constexpr (expected_toastable == 0) {
     static_cast<void>(relation);
     static_cast<void>(descriptor);
     return 0;
   }
 
-  Codec::validate_descriptor(descriptor);
+  p_codec::validate_descriptor(descriptor);
   if (!OidIsValid(relation->rd_rel->reltoastrelid)) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " external carrier has no TOAST relation");
   }
-  using row_type = typename Codec::row_type;
+  using row_type = typename p_codec::row_type;
   const row_type row = make_live_row(value_context);
-  auto encoded = Codec::encode(row, value_context);
+  auto encoded = p_codec::encode(row, value_context);
   HeapTuple inserted = encoded.form_tuple(descriptor);
   invoke_pg_as_cpp(
       [relation, inserted] { CatalogTupleInsert(relation, inserted); });
@@ -557,12 +557,12 @@ template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
 
   auto [read_scan, read_tuple] = find_by_tid(inserted_id);
   if (!HeapTupleIsValid(read_tuple)) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " external carrier tuple was not readable");
   }
   std::size_t verified = 0;
-  for (std::size_t index = 0; index < Codec::fields_count; ++index) {
-    const Oid type_oid = Codec::expected_descriptor[index].type_oid;
+  for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
+    const Oid type_oid = p_codec::expected_descriptor[index].type_oid;
     if (type_oid != TEXTOID && type_oid != BYTEAOID) {
       continue;
     }
@@ -574,7 +574,7 @@ template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
     });
     if (is_null || !VARATT_IS_EXTERNAL_ONDISK(DatumGetPointer(raw))) {
       contract_failure(
-          std::string{Codec::row_name} + " external carrier attribute " +
+          std::string{p_codec::row_name} + " external carrier attribute " +
           std::to_string(index + 1) + " was not stored out of line");
     }
     ++verified;
@@ -584,8 +584,8 @@ template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
   bool result_was_reset = false;
   {
     const row_type read_row =
-        Codec::deform(read_tuple, descriptor, result_context);
-    typename Codec::update changes{};
+        p_codec::deform(read_tuple, descriptor, result_context);
+    typename p_codec::update changes{};
     apply_update(changes, value_context);
     HeapTuple changed = changes.modify(read_tuple, descriptor);
     invoke_pg_as_cpp([relation, read_tuple, changed] {
@@ -596,36 +596,36 @@ template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
     invoke_pg_as_cpp([read_scan] { systable_endscan(read_scan); });
     invoke_pg_as_cpp([] { CommandCounterIncrement(); });
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
-    result_was_reset = verify_decoded_result<Codec>(
+    result_was_reset = verify_decoded_result<p_codec>(
         read_row, descriptor, make_live_row, comparison_context, result_context,
-        std::string{Codec::row_name} + " external carrier read");
+        std::string{p_codec::row_name} + " external carrier read");
   }
   if (!result_was_reset) {
     reset_context_once(result_context,
-                       std::string{Codec::row_name} + " external carrier read");
+                       std::string{p_codec::row_name} + " external carrier read");
   }
 
   auto [updated_scan, updated_tuple] = find_by_tid(changed_id);
   if (!HeapTupleIsValid(updated_tuple)) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " external carrier update was not readable");
   }
   ItemPointerData deleted_id = updated_tuple->t_self;
   result_was_reset = false;
   {
     const row_type updated_row =
-        Codec::deform(updated_tuple, descriptor, result_context);
+        p_codec::deform(updated_tuple, descriptor, result_context);
     invoke_pg_as_cpp([updated_scan] { systable_endscan(updated_scan); });
     invoke_pg_as_cpp(
         [relation, &deleted_id] { CatalogTupleDelete(relation, &deleted_id); });
     invoke_pg_as_cpp([] { CommandCounterIncrement(); });
-    result_was_reset = verify_decoded_result<Codec>(
+    result_was_reset = verify_decoded_result<p_codec>(
         updated_row, descriptor, make_live_updated_row, comparison_context,
         result_context,
-        std::string{Codec::row_name} + " external carrier update");
+        std::string{p_codec::row_name} + " external carrier update");
   }
   if (!result_was_reset) {
-    reset_context_once(result_context, std::string{Codec::row_name} +
+    reset_context_once(result_context, std::string{p_codec::row_name} +
                                            " external carrier update");
   }
 
@@ -633,25 +633,25 @@ template <class Codec, class LiveRowFactory, class LiveUpdatedRowFactory,
   const bool deleted = !HeapTupleIsValid(deleted_tuple);
   invoke_pg_as_cpp([deleted_scan] { systable_endscan(deleted_scan); });
   if (!deleted) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " external carrier delete remained visible");
   }
   return verified;
 }
 
-template <class Codec>
+template <class p_codec>
 [[nodiscard]] Relation
 create_unindexed_toast_carrier(Relation source_relation) {
   ++toast_carrier_sequence;
   const std::string carrier_name =
-      fmt::format("doc0388_row_codec_toast_{}_{}", probe_invocation,
+      fmt::format("row_codec_toast_{}_{}", probe_invocation,
                   toast_carrier_sequence);
   const Oid source_namespace_oid = RelationGetNamespace(source_relation);
   const char *source_namespace = invoke_pg_as_cpp([source_namespace_oid] {
     return get_namespace_name(source_namespace_oid);
   });
   if (source_namespace == nullptr) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " source namespace is missing");
   }
   const std::string command = fmt::format(
@@ -690,26 +690,26 @@ create_unindexed_toast_carrier(Relation source_relation) {
       [relation_oid] { return table_open(relation_oid, RowExclusiveLock); });
 }
 
-template <class Codec, class NullRowFactory, class FullRowFactory,
-          class LiveRowFactory, class UpdatedRowFactory,
-          class LiveUpdatedRowFactory, class ApplyUpdate, class VerifyScan>
+template <class p_codec, class p_null_row_factory, class p_full_row_factory,
+          class p_live_row_factory, class p_updated_row_factory,
+          class p_live_updated_row_factory, class p_apply_update, class p_verify_scan>
 [[nodiscard]] runtime_receipt_entry exercise_codec_with_external(
     TupleDesc descriptor, Relation live_relation, Relation external_relation,
     TupleDesc external_descriptor, std::string_view entity_kind,
-    std::string_view owner, NullRowFactory make_null_row,
-    FullRowFactory make_full_row, LiveRowFactory make_live_row,
-    UpdatedRowFactory make_updated_row,
-    LiveUpdatedRowFactory make_live_updated_row, ApplyUpdate apply_update,
-    VerifyScan verify_scan) {
-  using row_type = typename Codec::row_type;
-  static_assert(Codec::fields_count == Codec::expected_descriptor.size());
-  static_assert(by_reference_field_count<Codec>() ==
-                context_pointer_field_count<Codec>() +
-                    owned_value_byref_field_count<Codec>());
-  static_assert(toastable_field_count<Codec>() ==
-                context_pointer_field_count<Codec>() +
-                    owned_text_string_field_count<Codec>());
-  validate_descriptor_mutations<Codec>(descriptor);
+    std::string_view owner, p_null_row_factory make_null_row,
+    p_full_row_factory make_full_row, p_live_row_factory make_live_row,
+    p_updated_row_factory make_updated_row,
+    p_live_updated_row_factory make_live_updated_row, p_apply_update apply_update,
+    p_verify_scan verify_scan) {
+  using row_type = typename p_codec::row_type;
+  static_assert(p_codec::fields_count == p_codec::expected_descriptor.size());
+  static_assert(by_reference_field_count<p_codec>() ==
+                context_pointer_field_count<p_codec>() +
+                    owned_value_byref_field_count<p_codec>());
+  static_assert(toastable_field_count<p_codec>() ==
+                context_pointer_field_count<p_codec>() +
+                    owned_text_string_field_count<p_codec>());
+  validate_descriptor_mutations<p_codec>(descriptor);
 
   MemoryContext value_context = make_context();
   MemoryContext result_context = make_context();
@@ -718,75 +718,75 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
   bool result_was_reset = false;
   {
     const row_type row = make_null_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     const auto tuple_data = std::as_const(encoded).tuple_data(descriptor);
-    require_encoded_null_pattern<Codec>(tuple_data, true);
+    require_encoded_null_pattern<p_codec>(tuple_data, true);
     HeapTuple tuple = encoded.form_tuple(descriptor);
-    const row_type decoded = Codec::deform(tuple, descriptor, result_context);
+    const row_type decoded = p_codec::deform(tuple, descriptor, result_context);
     invoke_pg_as_cpp([tuple] { heap_freetuple(tuple); });
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
-    result_was_reset = verify_decoded_result<Codec>(
+    result_was_reset = verify_decoded_result<p_codec>(
         decoded, descriptor, make_null_row, comparison_context, result_context,
-        std::string{Codec::row_name} + " NULL result");
+        std::string{p_codec::row_name} + " NULL result");
   }
   if (!result_was_reset) {
-    reset_context_once(result_context, Codec::row_name);
+    reset_context_once(result_context, p_codec::row_name);
   }
 
   result_was_reset = false;
   {
     const row_type row = make_full_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     const auto tuple_data = std::as_const(encoded).tuple_data(descriptor);
-    require_encoded_null_pattern<Codec>(tuple_data, false);
+    require_encoded_null_pattern<p_codec>(tuple_data, false);
     HeapTuple tuple = encoded.form_tuple(descriptor);
-    const row_type decoded = Codec::deform(tuple, descriptor, result_context);
+    const row_type decoded = p_codec::deform(tuple, descriptor, result_context);
     invoke_pg_as_cpp([tuple] { heap_freetuple(tuple); });
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
-    result_was_reset = verify_decoded_result<Codec>(
+    result_was_reset = verify_decoded_result<p_codec>(
         decoded, descriptor, make_full_row, comparison_context, result_context,
-        std::string{Codec::row_name} + " inline result");
+        std::string{p_codec::row_name} + " inline result");
   }
   if (!result_was_reset) {
-    reset_context_once(result_context, Codec::row_name);
+    reset_context_once(result_context, p_codec::row_name);
   }
 
   result_was_reset = false;
   {
     const row_type row = make_full_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     HeapTuple old_tuple = encoded.form_tuple(descriptor);
-    typename Codec::update changes{};
+    typename p_codec::update changes{};
     apply_update(changes, value_context);
     HeapTuple changed_tuple = changes.modify(old_tuple, descriptor);
     const row_type decoded =
-        Codec::deform(changed_tuple, descriptor, result_context);
+        p_codec::deform(changed_tuple, descriptor, result_context);
     invoke_pg_as_cpp([old_tuple] { heap_freetuple(old_tuple); });
     invoke_pg_as_cpp([changed_tuple] { heap_freetuple(changed_tuple); });
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
-    result_was_reset = verify_decoded_result<Codec>(
+    result_was_reset = verify_decoded_result<p_codec>(
         decoded, descriptor, make_updated_row, comparison_context,
-        result_context, std::string{Codec::row_name} + " inline update");
+        result_context, std::string{p_codec::row_name} + " inline update");
   }
   if (!result_was_reset) {
-    reset_context_once(result_context, Codec::row_name);
+    reset_context_once(result_context, p_codec::row_name);
   }
 
-  constexpr std::size_t nullable_count = nullable_field_count<Codec>();
-  constexpr std::size_t required_count = Codec::fields_count - nullable_count;
-  for (std::size_t required_index = 0; required_index < Codec::fields_count;
+  constexpr std::size_t nullable_count = nullable_field_count<p_codec>();
+  constexpr std::size_t required_count = p_codec::fields_count - nullable_count;
+  for (std::size_t required_index = 0; required_index < p_codec::fields_count;
        ++required_index) {
-    if (Codec::expected_descriptor[required_index].nullable) {
+    if (p_codec::expected_descriptor[required_index].nullable) {
       continue;
     }
     const row_type row = make_full_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     auto tuple_data = encoded.tuple_data(descriptor);
     tuple_data.nulls[required_index] = true;
     HeapTuple tuple = encoded.form_tuple(descriptor);
     bool rejected = false;
     try {
-      static_cast<void>(Codec::deform(tuple, descriptor, result_context));
+      static_cast<void>(p_codec::deform(tuple, descriptor, result_context));
     } catch (const row_codec_error &) {
       rejected = true;
     }
@@ -794,7 +794,7 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
     invoke_pg_as_cpp([result_context] { MemoryContextReset(result_context); });
     if (!rejected) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " accepted NULL for required attribute " +
                        std::to_string(required_index + 1));
     }
@@ -802,18 +802,18 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
 
   {
     const row_type row = make_full_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     HeapTuple tuple = encoded.form_tuple(descriptor);
     bool rejected = false;
     try {
-      static_cast<void>(Codec::deform(tuple, descriptor, nullptr));
+      static_cast<void>(p_codec::deform(tuple, descriptor, nullptr));
     } catch (const row_codec_error &) {
       rejected = true;
     }
     invoke_pg_as_cpp([tuple] { heap_freetuple(tuple); });
     invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
     if (!rejected) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " accepted a null deformation result context");
     }
   }
@@ -824,7 +824,7 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
 
   if (live_relation != nullptr) {
     if (entity_kind == "sql:table" && !identity_key.has_value()) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " live table has no collision-check scan key");
     }
     if (identity_key.has_value()) {
@@ -838,13 +838,13 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
       const bool absent = !HeapTupleIsValid(collision);
       invoke_pg_as_cpp([collision_scan] { systable_endscan(collision_scan); });
       if (!absent) {
-        contract_failure(std::string{Codec::row_name} +
+        contract_failure(std::string{p_codec::row_name} +
                          " live probe identity already exists");
       }
     }
 
     const row_type row = make_full_row(value_context);
-    auto encoded = Codec::encode(row, value_context);
+    auto encoded = p_codec::encode(row, value_context);
     HeapTuple inserted = encoded.form_tuple(descriptor);
     invoke_pg_as_cpp([live_relation, inserted] {
       CatalogTupleInsert(live_relation, inserted);
@@ -871,7 +871,7 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
 
     auto [read_scan, read_tuple] = find_by_tid(inserted_id);
     if (!HeapTupleIsValid(read_tuple)) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " inserted tuple was not readable");
     }
 
@@ -879,8 +879,8 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
     result_was_reset = false;
     {
       const row_type read_row =
-          Codec::deform(read_tuple, descriptor, result_context);
-      typename Codec::update live_changes{};
+          p_codec::deform(read_tuple, descriptor, result_context);
+      typename p_codec::update live_changes{};
       apply_update(live_changes, value_context);
       HeapTuple changed = live_changes.modify(read_tuple, descriptor);
       invoke_pg_as_cpp([live_relation, read_tuple, changed] {
@@ -891,65 +891,65 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
       invoke_pg_as_cpp([read_scan] { systable_endscan(read_scan); });
       invoke_pg_as_cpp([] { CommandCounterIncrement(); });
       invoke_pg_as_cpp([value_context] { MemoryContextReset(value_context); });
-      result_was_reset = verify_decoded_result<Codec>(
+      result_was_reset = verify_decoded_result<p_codec>(
           read_row, descriptor, make_full_row, comparison_context,
-          result_context, std::string{Codec::row_name} + " catalog read");
+          result_context, std::string{p_codec::row_name} + " catalog read");
     }
     if (!result_was_reset) {
       reset_context_once(result_context,
-                         std::string{Codec::row_name} + " catalog read");
+                         std::string{p_codec::row_name} + " catalog read");
     }
 
     auto [updated_scan, updated_tuple] = find_by_tid(changed_id);
     if (!HeapTupleIsValid(updated_tuple)) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " updated tuple was not readable");
     }
     ItemPointerData deleted_id = updated_tuple->t_self;
     result_was_reset = false;
     {
       const row_type updated_row =
-          Codec::deform(updated_tuple, descriptor, result_context);
+          p_codec::deform(updated_tuple, descriptor, result_context);
       invoke_pg_as_cpp([updated_scan] { systable_endscan(updated_scan); });
       invoke_pg_as_cpp([live_relation, &deleted_id] {
         CatalogTupleDelete(live_relation, &deleted_id);
       });
       invoke_pg_as_cpp([] { CommandCounterIncrement(); });
-      result_was_reset = verify_decoded_result<Codec>(
+      result_was_reset = verify_decoded_result<p_codec>(
           updated_row, descriptor, make_updated_row, comparison_context,
-          result_context, std::string{Codec::row_name} + " catalog update");
+          result_context, std::string{p_codec::row_name} + " catalog update");
     }
     if (!result_was_reset) {
       reset_context_once(result_context,
-                         std::string{Codec::row_name} + " catalog update");
+                         std::string{p_codec::row_name} + " catalog update");
     }
 
     auto [deleted_scan, deleted_tuple] = find_by_tid(deleted_id);
     const bool deleted = !HeapTupleIsValid(deleted_tuple);
     invoke_pg_as_cpp([deleted_scan] { systable_endscan(deleted_scan); });
     if (!deleted) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " deleted tuple remained visible");
     }
     catalog_crud_completed = true;
   }
 
-  constexpr std::size_t toastable_count = toastable_field_count<Codec>();
+  constexpr std::size_t toastable_count = toastable_field_count<p_codec>();
   if constexpr (toastable_count != 0) {
     Relation toast_relation = external_relation;
     TupleDesc toast_descriptor = external_descriptor;
     bool owns_toast_relation = false;
     if (toast_relation == nullptr && entity_kind == "sql:table" &&
         live_relation != nullptr) {
-      toast_relation = create_unindexed_toast_carrier<Codec>(live_relation);
+      toast_relation = create_unindexed_toast_carrier<p_codec>(live_relation);
       toast_descriptor = RelationGetDescr(toast_relation);
       owns_toast_relation = true;
     }
     if (toast_relation == nullptr || toast_descriptor == nullptr) {
-      contract_failure(std::string{Codec::row_name} +
+      contract_failure(std::string{p_codec::row_name} +
                        " has no external-TOAST carrier");
     }
-    external_toast_verified = exercise_external_toast_lifecycle<Codec>(
+    external_toast_verified = exercise_external_toast_lifecycle<p_codec>(
         toast_relation, toast_descriptor, make_live_row, make_live_updated_row,
         apply_update, value_context, result_context, comparison_context);
     if (owns_toast_relation) {
@@ -958,11 +958,11 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
     }
   }
   if (external_toast_verified != toastable_count) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " external-TOAST evidence count mismatch");
   }
   if (entity_kind == "sql:table" && !catalog_crud_completed) {
-    contract_failure(std::string{Codec::row_name} +
+    contract_failure(std::string{p_codec::row_name} +
                      " did not complete live catalog CRUD");
   }
 
@@ -972,11 +972,11 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
   invoke_pg_as_cpp([value_context] { MemoryContextDelete(value_context); });
 
   return runtime_receipt_entry{
-      .identity = std::string{entity_kind} + ":" + std::string{Codec::row_name},
+      .identity = std::string{entity_kind} + ":" + std::string{p_codec::row_name},
       .owner = std::string{owner},
-      .fields = Codec::fields_count,
+      .fields = p_codec::fields_count,
       .nullable_fields = nullable_count,
-      .by_reference_fields = by_reference_field_count<Codec>(),
+      .by_reference_fields = by_reference_field_count<p_codec>(),
       .toastable_fields = toastable_count,
       .required_null_checks = required_count,
       .scan_policy_verified = identity_key.has_value(),
@@ -984,26 +984,26 @@ template <class Codec, class NullRowFactory, class FullRowFactory,
   };
 }
 
-template <class Codec, class NullRowFactory, class FullRowFactory,
-          class LiveRowFactory, class UpdatedRowFactory,
-          class LiveUpdatedRowFactory, class ApplyUpdate, class VerifyScan>
+template <class p_codec, class p_null_row_factory, class p_full_row_factory,
+          class p_live_row_factory, class p_updated_row_factory,
+          class p_live_updated_row_factory, class p_apply_update, class p_verify_scan>
 [[nodiscard]] runtime_receipt_entry
 exercise_codec(TupleDesc descriptor, Relation live_relation,
                std::string_view entity_kind, std::string_view owner,
-               NullRowFactory make_null_row, FullRowFactory make_full_row,
-               LiveRowFactory make_live_row, UpdatedRowFactory make_updated_row,
-               LiveUpdatedRowFactory make_live_updated_row,
-               ApplyUpdate apply_update, VerifyScan verify_scan) {
-  return exercise_codec_with_external<Codec>(
+               p_null_row_factory make_null_row, p_full_row_factory make_full_row,
+               p_live_row_factory make_live_row, p_updated_row_factory make_updated_row,
+               p_live_updated_row_factory make_live_updated_row,
+               p_apply_update apply_update, p_verify_scan verify_scan) {
+  return exercise_codec_with_external<p_codec>(
       descriptor, live_relation, nullptr, nullptr, entity_kind, owner,
       make_null_row, make_full_row, make_live_row, make_updated_row,
       make_live_updated_row, apply_update, verify_scan);
 }
 
-template <class Codec, class Exercise>
+template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
 with_relation_descriptor(const char *schema_name, const char *relation_name,
-                         Exercise exercise) {
+                         p_exercise exercise) {
   const Oid relation_oid = invoke_pg_as_cpp([schema_name, relation_name] {
     const Oid namespace_oid = get_namespace_oid(schema_name, false);
     const Oid resolved_relation_oid =
@@ -1024,10 +1024,10 @@ with_relation_descriptor(const char *schema_name, const char *relation_name,
   return result;
 }
 
-template <class Codec, class Exercise>
+template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
 with_composite_descriptor(const char *schema_name, const char *type_name,
-                          Exercise exercise) {
+                          p_exercise exercise) {
   const Oid type_oid = invoke_pg_as_cpp([schema_name, type_name] {
     Oid namespace_oid = InvalidOid;
     if (std::string_view{schema_name} == "$extension") {
@@ -1094,16 +1094,16 @@ render_receipt(std::vector<runtime_receipt_entry> entries) {
       result += "not-applicable";
     }
     result += "|ops=";
-    result += kOperationEvidence;
+    result += operation_evidence;
     result += "|lifetime=verified";
   }
   return result;
 }
 
-[[noreturn]] void rethrow_after_rollback(sql_subtransaction &subtransaction) {
+[[noreturn]] void rethrow_after_rollback(subtransaction &transaction) {
   const std::exception_ptr original = std::current_exception();
   try {
-    subtransaction.rollback();
+    transaction.rollback();
   } catch (...) {
     /*
      * rollback() repairs the outer backend state before throwing.
@@ -1147,11 +1147,11 @@ render_receipt(std::vector<runtime_receipt_entry> entries) {
   return make_incompressible_text(65536, seed);
 }
 
-template <class Codec, class Exercise>
+template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
 with_column_mapping_toast_carrier(TupleDesc installed_descriptor,
-                                  Exercise exercise) {
-  validate_descriptor_mutations<Codec>(installed_descriptor);
+                                  p_exercise exercise) {
+  validate_descriptor_mutations<p_codec>(installed_descriptor);
   invoke_pg_as_cpp([] {
     const int connected = SPI_connect();
     if (connected != SPI_OK_CONNECT) {
@@ -1160,7 +1160,7 @@ with_column_mapping_toast_carrier(TupleDesc installed_descriptor,
                                       "column-mapping TOAST carrier")));
     }
     const int created = SPI_execute("CREATE TEMP TABLE "
-                                    "doc0388_column_mapping_codec_carrier ("
+                                    "column_mapping_codec_carrier ("
                                     "column_name text, data_source text"
                                     ") ON COMMIT DROP",
                                     false, 0);
@@ -1176,7 +1176,7 @@ with_column_mapping_toast_carrier(TupleDesc installed_descriptor,
     Oid temp_toast_namespace = InvalidOid;
     GetTempNamespaceState(&temp_namespace, &temp_toast_namespace);
     const Oid resolved = get_relname_relid(
-        "doc0388_column_mapping_codec_carrier", temp_namespace);
+        "column_mapping_codec_carrier", temp_namespace);
     if (!OidIsValid(resolved)) {
       ereport(ERROR, (errcode(ERRCODE_UNDEFINED_TABLE),
                       errmsg_internal("column-mapping TOAST carrier "
@@ -1416,11 +1416,11 @@ void exercise_reaper_text_bridge_error_impl() {
         .destructions = &destructor_count,
     };
     static_cast<void>(codec::deform(tuple, descriptor, result_context));
-  } catch (PostgresErrorAsCpp &error) {
+  } catch (postgres_error &error) {
     if (destructor_count != 1) {
       contract_failure("reaper text leaf did not unwind exactly once");
     }
-    if (error.sqlerrcode() != ERRCODE_INTERNAL_ERROR ||
+    if (error.get_sql_state_code() != ERRCODE_INTERNAL_ERROR ||
         std::string_view{error.what()}.find(
             "could not open relation with OID") == std::string_view::npos) {
       contract_failure("reaper text leaf did not preserve the "
@@ -1472,10 +1472,6 @@ void exercise_reaper_text_bridge_error_impl() {
   };
 }
 
-/**
- * Dedicated no-production-consumer lifecycle retained as a named ledger
- * anchor while the same generic machinery exercises the other 13 codecs.
- */
 [[nodiscard]] runtime_receipt_entry exercise_index_table_shard() {
   using row = indexing_rows::index_table_shard;
   using codec = indexing_codecs::index_table_shard_codec;
@@ -1954,6 +1950,7 @@ void exercise_reaper_text_bridge_error_impl() {
         using row = manager_rows::minimizer_generation_storage;
         using codec = manager_codecs::minimizer_generation_storage_codec;
         static_assert(codec::fields_count == 18);
+        static_assert(nullable_field_count<codec>() == 1);
         const auto null_row = [](MemoryContext) {
           return row{
               .database_oid = probe_oid(91),
@@ -1964,12 +1961,12 @@ void exercise_reaper_text_bridge_error_impl() {
               .index_name = make_name("minimizers_per_fragment"),
               .query_key = 16,
               .generation_id = 17,
-              .provider = 1,
-              .payload_relation_oid = std::nullopt,
-              .payload_database_oid = std::nullopt,
-              .payload_tablespace_oid = std::nullopt,
-              .payload_relfilenode = std::nullopt,
-              .payload_relation_name = std::nullopt,
+              .provider = 0,
+              .payload_relation_oid = probe_oid(95),
+              .payload_database_oid = probe_oid(91),
+              .payload_tablespace_oid = probe_oid(92),
+              .payload_relfilenode = probe_oid(96),
+              .payload_relation_name = make_name("payload_relation"),
               .image_bytes = 4096,
               .header_checksum = 18,
               .retire_full_xid = std::nullopt,
@@ -2262,20 +2259,20 @@ export namespace bioseq::postgres::support::row_codec_runtime_test_support {
 #if defined(BIOSEQ_TEST_INDEXES)
 
 /**
- * Exercise all generated row codecs and compare their exact evidence receipt
- * with the manifest/ledger projection supplied by the integration harness.
+ * Exercises all generated row codecs and compares their exact evidence receipt
+ * with the generated manifest projection supplied by the integration harness.
  */
 void exercise_all(std::string_view expected_receipt) {
-  auto subtransaction = sql_subtransaction::begin();
+  auto transaction = subtransaction::begin();
   try {
     const std::string actual = render_receipt(exercise_all_codecs());
     if (actual != expected_receipt) {
       contract_failure("manifest-joined receipt mismatch; expected=" +
                        std::string{expected_receipt} + " actual=" + actual);
     }
-    subtransaction.rollback();
+    transaction.rollback();
   } catch (...) {
-    rethrow_after_rollback(subtransaction);
+    rethrow_after_rollback(transaction);
   }
 }
 
@@ -2284,12 +2281,12 @@ void exercise_all(std::string_view expected_receipt) {
  * valid external pointer whose referenced TOAST relation does not exist.
  */
 void exercise_reaper_text_bridge_error() {
-  auto subtransaction = sql_subtransaction::begin();
+  auto transaction = subtransaction::begin();
   try {
     exercise_reaper_text_bridge_error_impl();
-    subtransaction.rollback();
+    transaction.rollback();
   } catch (...) {
-    rethrow_after_rollback(subtransaction);
+    rethrow_after_rollback(transaction);
   }
 }
 

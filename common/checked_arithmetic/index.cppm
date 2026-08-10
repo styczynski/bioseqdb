@@ -27,18 +27,18 @@ enum class checked_arithmetic_error : std::uint8_t {
 };
 
 /** Add two unsigned integers without wrapping. */
-template <class Left, class Right>
+template <class p_left_type, class p_right_type>
     requires(
-        std::is_unsigned_v<Left>
-        && std::is_unsigned_v<Right>)
+        std::is_unsigned_v<p_left_type>
+        && std::is_unsigned_v<p_right_type>)
 [[nodiscard]] constexpr
-std::optional<std::common_type_t<Left, Right>> checked_add(
-    Left left,
-    Right right) noexcept {
-    using Integer = std::common_type_t<Left, Right>;
-    const Integer converted_left = static_cast<Integer>(left);
-    const Integer converted_right = static_cast<Integer>(right);
-    const Integer maximum = (std::numeric_limits<Integer>::max)();
+std::optional<std::common_type_t<p_left_type, p_right_type>> checked_add(
+    p_left_type left,
+    p_right_type right) noexcept {
+    using integer_type = std::common_type_t<p_left_type, p_right_type>;
+    const integer_type converted_left = static_cast<integer_type>(left);
+    const integer_type converted_right = static_cast<integer_type>(right);
+    const integer_type maximum = (std::numeric_limits<integer_type>::max)();
     if (converted_left > maximum - converted_right) {
         return std::nullopt;
     }
@@ -46,21 +46,22 @@ std::optional<std::common_type_t<Left, Right>> checked_add(
 }
 
 /** Multiply two unsigned integers without wrapping. */
-template <class Left, class Right>
+template <class p_left_type, class p_right_type>
     requires(
-        std::is_unsigned_v<Left>
-        && std::is_unsigned_v<Right>)
+        std::is_unsigned_v<p_left_type>
+        && std::is_unsigned_v<p_right_type>)
 [[nodiscard]] constexpr
-std::optional<std::common_type_t<Left, Right>> checked_mul(
-    Left left,
-    Right right) noexcept {
-    using Integer = std::common_type_t<Left, Right>;
-    const Integer converted_left = static_cast<Integer>(left);
-    const Integer converted_right = static_cast<Integer>(right);
+std::optional<std::common_type_t<p_left_type, p_right_type>> checked_mul(
+    p_left_type left,
+    p_right_type right) noexcept {
+    using integer_type = std::common_type_t<p_left_type, p_right_type>;
+    const integer_type converted_left = static_cast<integer_type>(left);
+    const integer_type converted_right = static_cast<integer_type>(right);
     if (converted_left == 0 || converted_right == 0) {
-        return Integer{0};
+        return integer_type{0};
     }
-    const Integer maximum = (std::numeric_limits<Integer>::max)();
+    const integer_type maximum =
+        (std::numeric_limits<integer_type>::max)();
     if (converted_left > maximum / converted_right) {
         return std::nullopt;
     }

@@ -2,7 +2,7 @@
  * @file instrumentation/summary.cppm
  * @brief Percentile estimation, metric summaries, and reset operations.
  *
- * The summary writer takes a profiler_state<configuration_type>& as input. The non-templated
+ * The summary writer takes a profiler_state<p_configuration_type>& as input. The non-templated
  * convenience overload routes to the persistent production profiler state.
  */
 module;
@@ -81,9 +81,9 @@ export namespace bioseq::instrumentation::summary {
 ///   [bioseq] profile <region_name> total=<ns> visits=<n> mean=<ns> p50=<ns> p99=<ns>
 /// Loops add per-iteration fields. ColumnarScan_EndCustomScan calls the
 /// non-templated overload (in detail/summary_writer.cppm) once per scan.
-template<profiling_configuration configuration_type>
-void write_summary_to_log(profiler_state<configuration_type>& profiler) noexcept {
-    if constexpr (!configuration_type::enable_profiling) {
+template<profiling_configuration p_configuration_type>
+void write_summary_to_log(profiler_state<p_configuration_type>& profiler) noexcept {
+    if constexpr (!p_configuration_type::enable_profiling) {
         return;
     } else {
         const auto region_count = registered_descriptor_count();
@@ -150,7 +150,7 @@ void write_summary_to_log(profiler_state<configuration_type>& profiler) noexcept
             }
         }
 
-        if constexpr (configuration_type::enable_arena_tracking) {
+        if constexpr (p_configuration_type::enable_arena_tracking) {
             for (unsigned arena_index = 1; arena_index < arena_kind_count; ++arena_index) {
                 const auto& counter = profiler.arena_counters[arena_index];
                 if (counter.allocation_count == 0) continue;
@@ -176,9 +176,9 @@ void write_summary_to_log(profiler_state<configuration_type>& profiler) noexcept
 }
 
 /// Reset all aggregates on the passed-in profiler block.
-template<profiling_configuration configuration_type>
-void reset_metrics(profiler_state<configuration_type>& profiler) noexcept {
-    if constexpr (!configuration_type::enable_profiling) {
+template<profiling_configuration p_configuration_type>
+void reset_metrics(profiler_state<p_configuration_type>& profiler) noexcept {
+    if constexpr (!p_configuration_type::enable_profiling) {
         return;
     } else {
         const auto descriptor_count = registered_descriptor_count();

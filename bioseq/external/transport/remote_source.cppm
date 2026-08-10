@@ -14,7 +14,7 @@ module;
 
 export module bioseq.external.transport.remote_source;
 
-import bioseq.io.sources;                 // io_source concept, read_result
+import bioseq.io.sources;       // io_source concept, source_read_result
 import bioseq.external.transport.locator; // validated_transfer_request
 
 /// @brief Streaming libcurl pull source.
@@ -92,9 +92,9 @@ public:
 
   // io_source: drive the transfer until destination bytes, EOF, cancellation,
   // or error are available.
-  [[nodiscard]] bioseq::io::read_result read_into(std::uint8_t *destination,
+  [[nodiscard]] bioseq::io::source_read_result read_into(std::uint8_t *destination,
                                                   std::size_t capacity) {
-    bioseq::io::read_result result;
+    bioseq::io::source_read_result result;
     if (has_failed_) {
       result.has_error = true;
       return result;

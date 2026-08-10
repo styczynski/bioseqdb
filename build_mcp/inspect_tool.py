@@ -44,7 +44,7 @@ Standalone CLI usage (kept for unit testing — the MCP server imports
 
     python3 build_mcp/inspect_tool.py \\
         --build-dir build/bench-opt \\
-        --target bioseq_bench \\
+        --target bioseq_benchmark \\
         --function 'collect_minimizers_two_stack_nthash_simd' \\
         --source-basename two_stacks_minimizers.cppm
 """
@@ -1343,8 +1343,7 @@ def run_inspect(
         tools["objdump"], "--disassemble-symbols")
     nm_supports_demangle = tool_supports(tools["nm"], "--demangle")
     if not objdump_supports_filter:
-        # Plan §4.4: legacy binutils (<2.34) lacks --disassemble-symbols=.
-        # Phase B doesn't implement the full-text fallback; surface the
+        # Older binutils (<2.34) lacks --disassemble-symbols=. Surface the
         # capability gap so users know to upgrade binutils or use an LLVM
         # objdump. Calls will likely return empty results.
         warnings.append(
@@ -1364,8 +1363,8 @@ def run_inspect(
 
     stripped_note: Optional[str] = None
     if not syms:
-        # Plan §8 Risk #10: surface a top-level note in summary so the AI
-        # agent can distinguish "stripped binary" from "function not found".
+        # Surface a top-level note so callers can distinguish a stripped
+        # binary from a function that was not found.
         stripped_note = (
             f"binary appears stripped or has no defined text symbols "
             f"({binary}); inspect against the unstripped build artifact")
@@ -1379,8 +1378,8 @@ def run_inspect(
     matches = all_matches[:max_matches]
 
     target_dir = binary_root / "CMakeFiles" / f"{target}.dir"
-    # DOC0269 — Domain N shared modules live in `bioseq_modules_nopg.dir`
-    # (an OBJECT library linked by every non-PG consumer). Code from those
+    # Shared modules live in `bioseq_modules_nopg.dir`, an OBJECT library
+    # linked by every non-PG consumer. Code from those
     # modules ends up in the consumer's binary but the per-TU `.s`/`.bc`
     # artifacts only exist under the lib's build dir. Sweep both.
     shared_names = (shared_target_names if shared_target_names is not None
@@ -1573,10 +1572,6 @@ def run_inspect(
             "listings_discovered"],
         "asm_listings_candidates": assembly_scan_stats[
             "listings_candidates"],
-        # Compatibility: historically this field meant listings discovered,
-        # even though its name said "scanned". Keep that value stable and
-        # expose the actual parser count separately.
-        "asm_listings_scanned": assembly_scan_stats["listings_discovered"],
         "asm_listings_parsed": assembly_scan_stats["listings_scanned"],
         "asm_listing_bytes_streamed": assembly_scan_stats["bytes_streamed"],
         "asm_listing_prefilter_method": assembly_scan_stats[

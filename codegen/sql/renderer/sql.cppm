@@ -737,12 +737,12 @@ sql_dollar_delimiter(
         || contains_token(cpp_leaf(declaration.cpp_qualified_name));
 }
 
-template<class Predicate>
+template<class p_predicate>
 [[nodiscard]] inline const normalized_entity* referenced_entity(
     const normalized_entity& owner,
     const sql_graph& graph,
     std::string_view option_name,
-    Predicate predicate,
+    p_predicate predicate,
     bool required = false) {
     const option_value* option = find_option(owner.source, option_name);
     if (!option) {
@@ -2009,10 +2009,32 @@ parse_numbered_references(
                 && std::ranges::contains(
                     candidate.dependency_identities,
                     root->stable_identity)) {
+                std::string relation_name;
+                if (find_option(candidate.source, "name")) {
+                    relation_name = candidate.source.name;
+                } else if (
+                    candidate.source.kind == entity_kind::primary_key) {
+                    constexpr std::string_view suffix{"_pkey"};
+                    if (root->source.name.size() + suffix.size() > 63) {
+                        throw std::runtime_error(
+                            "derived primary-key relation name for '"
+                            + root_schema + "." + root->source.name
+                            + "' exceeds PostgreSQL's 63-byte identifier "
+                              "limit; specify an explicit .name");
+                    }
+                    relation_name = root->source.name + std::string{suffix};
+                } else {
+                    throw std::runtime_error(
+                        "natural "
+                        + std::string{kind_name(candidate.source.kind)}
+                        + " child for '" + root_schema + "."
+                        + root->source.name
+                        + "' requires an explicit .name before it can be "
+                          "used as a catalog dependency");
+                }
                 relations.emplace_back(
                     root_schema,
-                    relation_child_catalog_name(
-                        candidate.source, root->source));
+                    std::move(relation_name));
             }
         }
     }
@@ -2024,8 +2046,57 @@ parse_numbered_references(
         throw std::runtime_error(
             "AM catalog dependency action resolves no relation roots");
     }
-    return catalog_dependencies_sql(
-        access_method->source.name, std::move(relations));
+    const std::string& schema = relations.front().first;
+    if (std::ranges::any_of(
+            relations,
+            [&schema](const auto& relation) {
+                return relation.first != schema;
+            })) {
+        throw std::runtime_error(
+            "AM catalog dependency roots must share one schema");
+    }
+    std::string result =
+        "INSERT INTO pg_catalog.pg_depend (\n"
+        "    classid, objid, objsubid,\n"
+        "    refclassid, refobjid, refobjsubid, deptype)\n"
+        "WITH desired(relid) AS (\n"
+        "    SELECT c.oid\n"
+        "      FROM pg_catalog.pg_class AS c\n"
+        "      JOIN pg_catalog.pg_namespace AS n\n"
+        "        ON n.oid = c.relnamespace\n"
+        "     WHERE n.nspname = "
+        + (schema == "$extension"
+               ? std::string{"pg_catalog.current_schema()"}
+               : quoted_sql_literal(schema))
+        + "\n"
+          "       AND c.relname IN (\n";
+    for (std::size_t index = 0; index < relations.size(); ++index) {
+        result += "           "
+            + quoted_sql_literal(relations[index].second)
+            + (index + 1 == relations.size() ? ")\n" : ",\n");
+    }
+    result +=
+        "),\n"
+        "edges AS (\n"
+        "    SELECT 'pg_catalog.pg_am'::regclass::oid,\n"
+        "           am.oid,\n"
+        "           0,\n"
+        "           'pg_catalog.pg_class'::regclass::oid,\n"
+        "           desired.relid,\n"
+        "           0,\n"
+        "           'n'::\"char\"\n"
+        "      FROM desired\n"
+        "      CROSS JOIN pg_catalog.pg_am AS am\n"
+        "     WHERE am.amname = "
+        + quoted_sql_literal(access_method->source.name)
+        + "\n"
+          ")\n"
+          "SELECT * FROM edges\n"
+          "EXCEPT\n"
+          "SELECT classid, objid, objsubid,\n"
+          "       refclassid, refobjid, refobjsubid, deptype\n"
+          "  FROM pg_catalog.pg_depend;";
+    return result;
 }
 
 [[nodiscard]] inline std::string sql_function_body_delimiter(
@@ -2636,8 +2707,47 @@ inline void validate_statement_candidates(
             || entity.source.kind == entity_kind::guc_value) {
             continue;
         }
-        if (detail::dependency_only_entity(entity)) {
-            detail::validate_dependency_only_entity(entity, graph);
+        const bool inline_companion =
+            entity.source.kind == entity_kind::column
+            || entity.source.kind == entity_kind::type_role
+            || ((entity.source.kind == entity_kind::primary_key
+                 || entity.source.kind == entity_kind::unique
+                 || entity.source.kind == entity_kind::foreign_key
+                 || entity.source.kind == entity_kind::check)
+                && !detail::option_is(
+                    entity.source, "placement", "alter_table"));
+        if (inline_companion) {
+            bool valid_parent = false;
+            if (entity.source.kind == entity_kind::type_role) {
+                valid_parent = std::ranges::any_of(
+                    detail::type_role_bindings(graph),
+                    [&entity](const detail::type_role_binding& binding) {
+                        return binding.role->stable_identity
+                            == entity.stable_identity;
+                    });
+            } else {
+                const normalized_entity* parent =
+                    detail::primary_parent(entity, graph);
+                valid_parent =
+                    parent
+                    && ((entity.source.kind == entity_kind::column
+                         && (parent->source.kind == entity_kind::table
+                             || parent->source.kind == entity_kind::type))
+                        || ((entity.source.kind
+                                 == entity_kind::primary_key
+                             || entity.source.kind == entity_kind::unique
+                             || entity.source.kind
+                                 == entity_kind::foreign_key
+                             || entity.source.kind == entity_kind::check)
+                            && parent->source.kind
+                                == entity_kind::table));
+            }
+            if (!valid_parent) {
+                throw std::runtime_error(
+                    "dependency-only SQL entity '"
+                    + entity.stable_identity
+                    + "' has no compatible natural parent");
+            }
             continue;
         }
         const std::string remarks = detail::remark_prefix(entity.source);

@@ -58,25 +58,29 @@ export namespace bioseq::io {
  * `if (worker_count > 0) ...` branch.
  */
 template <
-    sequence_alphabet alphabet_t,
-    sequence_file_format file_type,
-    io_source source_t,
-    typename batch_t,
-    typename handler_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    sequence_file_format p_file_format,
+    io_source p_source,
+    typename p_batch,
+    typename p_handler,
+    typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> run_async_pipeline(
-    source_t source,
-    handler_fn_t&& handler_fn,
-    failure_fn_t&& failure_fn,
+    p_source source,
+    p_handler&& handler_fn,
+    p_failure&& failure_fn,
     const reader_options& options) {
 
-    using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using sequence_traits =
-        typename compact_sequence_range<alphabet_config>::traits;
+    using alphabet_config_type =
+        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using sequence_traits_type =
+        typename compact_sequence_range<alphabet_config_type>::traits;
 
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
-    constexpr bool is_fastq_format = (file_type == sequence_file_format::fastq);
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
+    constexpr bool is_fastq_format =
+        p_file_format == sequence_file_format::fastq;
 
     auto& pool = bioseq::parallelism::global_pool::instance();
     if (!pool.is_active()) {
@@ -95,7 +99,7 @@ template <
 
     // ---- Producer/parser side ---- //
     buffer_slab slab(options.io.initial_buffer_size);
-    batch_t current_batch;
+    p_batch current_batch;
     std::size_t records_emitted = 0;
     bool aborted = false;
     std::string captured_error;
@@ -125,16 +129,16 @@ template <
 
     auto dispatch_batch = [&]() {
         if (current_batch.empty()) return;
-        batch_t batch_to_dispatch = std::move(current_batch);
+        p_batch batch_to_dispatch = std::move(current_batch);
         task_group.run(bioseq::parallelism::task_body{
             [&handler_fn, batch = std::move(batch_to_dispatch)]() mutable {
                 handler_fn(std::move(batch));
             }});
-        current_batch = batch_t{};
+        current_batch = p_batch{};
         prepare_fresh_batch();
     };
 
-    if constexpr (file_type == sequence_file_format::fasta) {
+    if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(current_batch.header_storage(),
                                      current_batch.sequence_storage());
@@ -182,7 +186,7 @@ template <
                 parser_state.attach_to_batch(current_batch.header_storage(),
                                              current_batch.sequence_storage());
                 const auto step =
-                    parse_one_fasta_record<alphabet_t, std::uint64_t>(
+                    parse_one_fasta_record<p_alphabet, std::uint64_t>(
                         parser_state,
                         slab.raw(),
                         slab.fill_size,
@@ -267,7 +271,7 @@ template <
                                              current_batch.sequence_storage(),
                                              current_batch.quality_storage());
                 const auto step =
-                    parse_one_fastq_record<alphabet_t, std::uint64_t>(
+                    parse_one_fastq_record<p_alphabet, std::uint64_t>(
                         parser_state,
                         slab.raw(),
                         slab.fill_size,

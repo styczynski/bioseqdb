@@ -25,7 +25,7 @@ import bioseq.external.provider.capabilities;
 import bioseq.external.provider.locator;
 import bioseq.external.transport.locator;
 import bioseq.external.transport.remote_source;
-import bioseq.io.sources; // io_source, read_result
+import bioseq.io.sources; // io_source, source_read_result
 
 /// @brief Provider-neutral sequence streaming and NCBI retrieval.
 // resolver. The PostgreSQL custom scan calls `run_ncbi_sequence_stream` for
@@ -389,7 +389,7 @@ run_ncbi_sequence_stream(std::string_view accession, prov::query_target target,
             prov::external_error_kind::cancelled, ncbi_provider_id(),
             "efetch_nuccore_fasta", "sequence stream cancelled"));
       }
-      const bioseq::io::read_result result =
+      const bioseq::io::source_read_result result =
           source.read_into(buffer.data(), buffer.size());
       if (result.has_error) {
         transport_failed = true;

@@ -36,12 +36,12 @@ namespace {
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-[[nodiscard]] std::string ready_hash_major_minimizer_inspection_json(
+[[nodiscard]] std::string hash_major_minimizer_generation_inspection_json(
 		const bioseq::storage::indexing::
-			ready_hash_major_minimizer_inspection& inspection)
+			hash_major_minimizer_generation_inspection& inspection)
 {
 	std::string result =
-		R"({"schema":"bioseq.ready_hash_major_minimizer_generation","revision":1,"layout":"hash_major")";
+			R"({"schema":"bioseq.hash_major_minimizer_generation_inspection","revision":1,"layout":"hash_major")";
 	result.reserve(4'096);
 	const auto append = [&result](
 			const std::string_view key,
@@ -60,8 +60,8 @@ using bioseq::pg::detail::fixed_hex_u64;
 		result.append(value);
 		result += '"';
 	};
-	const auto bounded_name = []<std::size_t N>(
-			const std::array<char, N>& value) {
+	const auto bounded_name = []<std::size_t p_capacity>(
+			const std::array<char, p_capacity>& value) {
 		const auto end = std::find(value.begin(), value.end(), '\0');
 		return std::string_view{
 			value.data(),
@@ -131,7 +131,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 	result += R"(","source_content_crc64":")";
 	result += fixed_hex_u64(head.source_content_crc64);
 	result += R"(","compatibility_digest":")";
-	result += fixed_hex_bytes(head.compatibility_digest);
+	result += fixed_hex_bytes(head.storage_profile_digest);
 	result += R"(","manifest_address_bound_row_crc64":")";
 	result += fixed_hex_u64(head.manifest_address_bound_row_crc64);
 	result += R"(","manifest_payload_crc64":")";
@@ -143,7 +143,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 	result += '}';
 
 	const auto& manifest = inspection.manifest;
-	const auto& compatibility = manifest.compatibility;
+	const auto& storage_profile = manifest.storage_profile;
 	result += R"(,"manifest":{"generation_id":)";
 	result += std::to_string(manifest.generation_id);
 	result += R"(,"source_epoch":)";
@@ -159,7 +159,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 	result += R"(,"total_posting_count":)";
 	result += std::to_string(manifest.total_posting_count);
 	result += R"(,"compatibility_digest":")";
-	result += fixed_hex_bytes(manifest.compatibility_digest);
+	result += fixed_hex_bytes(manifest.storage_profile_digest);
 	result += R"(","authenticated_directory_crc64":")";
 	result += fixed_hex_u64(manifest.authenticated_directory_crc64);
 	result += R"(","generation_crc64":")";
@@ -171,35 +171,35 @@ using bioseq::pg::detail::fixed_hex_u64;
 	result += R"(,"directory_entry_count":)";
 	result += std::to_string(manifest.directory_entry_count);
 	result += R"(,"compatibility":{"hash_scheme_identity":)";
-	result += std::to_string(compatibility.hash_scheme_identityentity);
+	result += std::to_string(storage_profile.hash_scheme_identity);
 	result += R"(,"hash_scheme_revision":)";
-	result += std::to_string(compatibility.hash_scheme_revision);
+	result += std::to_string(storage_profile.hash_scheme_revision);
 	result += R"(,"alphabet_code":)";
-	result += std::to_string(compatibility.alphabet_code);
+	result += std::to_string(storage_profile.alphabet_code);
 	result += R"(,"kmer_size":)";
-	result += std::to_string(compatibility.kmer_size);
+	result += std::to_string(storage_profile.kmer_size);
 	result += R"(,"window_size":)";
-	result += std::to_string(compatibility.window_size);
+	result += std::to_string(storage_profile.window_size);
 	result += R"(,"hash_width_bytes":)";
-	result += std::to_string(compatibility.hash_width_bytes);
+	result += std::to_string(storage_profile.hash_width_bytes);
 	result += R"(,"stored_posting_width_bytes":)";
 	result += std::to_string(
-		compatibility.stored_posting_width_bytes);
+		storage_profile.stored_posting_width_bytes);
 	result += R"(,"position_encoding_revision":)";
 	result += std::to_string(
-		compatibility.position_encoding_revision);
+		storage_profile.position_encoding_revision);
 	result += R"(,"hash_semantics_revision":)";
-	result += std::to_string(compatibility.hash_semantics_revision);
+	result += std::to_string(storage_profile.hash_semantics_revision);
 	result += R"(,"count_semantics_revision":)";
-	result += std::to_string(compatibility.count_semantics_revision);
+	result += std::to_string(storage_profile.count_semantics_revision);
 	result += R"(,"producer_backend_identity":)";
-	result += std::to_string(compatibility.producer_backend_identityentity);
+	result += std::to_string(storage_profile.producer_backend_identity);
 	result += R"(,"producer_backend_revision":)";
-	result += std::to_string(compatibility.producer_backend_revision);
+	result += std::to_string(storage_profile.producer_backend_revision);
 	result += R"(,"controls_per_block":)";
-	result += std::to_string(compatibility.controls_per_block);
+	result += std::to_string(storage_profile.controls_per_block);
 	result += R"(,"hash_seed":)";
-	result += std::to_string(compatibility.hash_seed);
+	result += std::to_string(storage_profile.hash_seed);
 	result += R"(}})";
 
 	result += R"(,"metadata":{"head_rows":)";
@@ -383,7 +383,7 @@ inspect_ready_minimizer_generation(
 	rows.push_back({
 		sql_bigint(inspection.identity.generation_id, "generation_id"),
 		fixed_hex_u64(inspection.identity.source_identity),
-		fixed_hex_u64(inspection.source.compatibility_checksum),
+		fixed_hex_u64(inspection.source.storage_contract_checksum),
 		fixed_hex_u64(inspection.source_content_checksum),
 		inspection.database_oid,
 		inspection.main_relfilenode,
@@ -436,11 +436,11 @@ inspect_ready_hash_major_minimizer_generation(
 			{.message = "bioseq hash-major inspection query key is negative"});
 	}
 	const auto inspection = bioseq::storage::indexing::
-		inspect_ready_hash_major_minimizer_generation_impl(
+		inspect_hash_major_minimizer_generation(
 			rel, index_name,
 			static_cast<std::uint64_t>(query_key));
 	return bioseq::postgres::support::jsonb_value{
-		ready_hash_major_minimizer_inspection_json(inspection)};
+		hash_major_minimizer_generation_inspection_json(inspection)};
 }
 
 
@@ -473,18 +473,18 @@ bioseq::postgres::support::jsonb_value hash_major_minimizer_parallel_scan_probe(
 } // namespace bioseq::pg::sql_routines
 namespace {
 
-template<class result_type>
-[[nodiscard]] static result_type fixture_sql_integer(
+template<class p_result>
+[[nodiscard]] static p_result fixture_sql_integer(
 		const std::uint64_t value,
 		const std::string_view context,
 		const std::string_view field) {
 	static_assert(
-		std::is_same_v<result_type, std::int32_t>
-		|| std::is_same_v<result_type, std::int64_t>);
+		std::is_same_v<p_result, std::int32_t>
+		|| std::is_same_v<p_result, std::int64_t>);
 	if (value > static_cast<std::uint64_t>(
-			(std::numeric_limits<result_type>::max)())) {
+			(std::numeric_limits<p_result>::max)())) {
 		constexpr std::string_view sql_type =
-			std::is_same_v<result_type, std::int32_t>
+			std::is_same_v<p_result, std::int32_t>
 				? "INTEGER" : "BIGINT";
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -494,7 +494,7 @@ template<class result_type>
 				.detail = fmt::format("field={}", field),
 			});
 	}
-	return static_cast<result_type>(value);
+	return static_cast<p_result>(value);
 }
 
 [[nodiscard]] static auto minimizer_fixture_backend(
@@ -571,7 +571,7 @@ build_minimizer_fixture(
 		fixture_sql_integer<std::int64_t>(fixture.generation_id, context, "generation_id"),
 		fixed_hex_u64(fixture.source_identity),
 		fixed_hex_u64(fixture.source_content_checksum),
-		fixed_hex_u64(fixture.compatibility_checksum),
+		fixed_hex_u64(fixture.storage_contract_checksum),
 		fixture_sql_integer<std::int64_t>(
 			fixture.source_num_fragments, context, "source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
@@ -644,7 +644,7 @@ read_minimizer_fixture(
 		fixture_sql_integer<std::int64_t>(fixture.generation_id, context, "generation_id"),
 		fixed_hex_u64(fixture.source_identity),
 		fixed_hex_u64(fixture.source_content_checksum),
-		fixed_hex_u64(fixture.compatibility_checksum),
+		fixed_hex_u64(fixture.storage_contract_checksum),
 		fixture_sql_integer<std::int64_t>(
 			fixture.source_num_fragments, context, "source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
@@ -719,8 +719,8 @@ read_minimizer_fixture(
  * backend and returns payload and scan counters without decoding payload bytes.
  */
 bioseq::postgres::support::table_rows<
-	bioseq::postgres::sql_rows::scan_minimizer_generation_fixture_row>
-scan_minimizer_generation_fixture(
+	bioseq::postgres::sql_rows::scan_grouped_soa_minimizer_generation_test_row>
+scan_grouped_soa_minimizer_generation_test(
 	Oid source_table,
 	std::string index_name,
 	std::int64_t sequence_rowno,
@@ -745,7 +745,8 @@ scan_minimizer_generation_fixture(
 		"minimizer generation scan fixture";
 	const auto& stats = fixture.read_stats;
 	std::vector<
-		bioseq::postgres::sql_rows::scan_minimizer_generation_fixture_row> rows;
+		bioseq::postgres::sql_rows::scan_grouped_soa_minimizer_generation_test_row>
+		rows;
 	rows.push_back({
 		fixture.table_name,
 		fixture.selected_backend_name,
@@ -775,7 +776,7 @@ scan_minimizer_generation_fixture(
 			stats.full_generation.scan_calls, context, "scan_calls"),
 	});
 	return bioseq::postgres::support::table_rows<
-		bioseq::postgres::sql_rows::scan_minimizer_generation_fixture_row>{
+		bioseq::postgres::sql_rows::scan_grouped_soa_minimizer_generation_test_row>{
 			std::move(rows)};
 }
 
@@ -783,12 +784,12 @@ scan_minimizer_generation_fixture(
 
 
 /**
- * @brief Builds and publishes a ready PostgreSQL-backed MPF generation without
- * changing active routing or metadata age.
+ * @brief Builds and publishes a ready PostgreSQL-backed minimizer-fragment
+ * generation without changing active routing or metadata age.
  */
 bioseq::postgres::support::table_rows<
-	bioseq::postgres::sql_rows::build_ready_mpf_generation_row>
-build_ready_mpf_generation(
+	bioseq::postgres::sql_rows::build_ready_minimizer_fragment_generation_row>
+build_ready_minimizer_fragment_generation(
 	Oid source_table,
 	std::string index_name,
 	std::int64_t sequence_rowno,
@@ -796,14 +797,16 @@ build_ready_mpf_generation(
 	if (sequence_rowno < 0) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
-			{.message = "ready MPF fixture row number is negative"});
+			{.message =
+				"ready minimizer-fragment fixture row number is negative"});
 	}
 	if (index_name
 			!= bioseq::indexing::k_minimizers_per_fragment_index_name) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
 			{.message =
-				"ready MPF fixture requires minimizers_per_fragment"});
+				"ready minimizer-fragment fixture requires "
+				"minimizers_per_fragment"});
 	}
 	const auto fixture = bioseq::storage::indexing::
 		build_ready_minimizer_generation_coordinator_fixture_impl(
@@ -811,14 +814,16 @@ build_ready_mpf_generation(
 			static_cast<std::uint64_t>(sequence_rowno), backend);
 	const auto& publication = fixture.sealed_publication();
 	const auto* execution = std::get_if<
-		bioseq::indexing::mpf_generation_execution_receipt>(
+		bioseq::indexing::minimizer_fragment_generation_execution_receipt>(
 			&publication.execution());
 	if (execution == nullptr) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_DATA_CORRUPTED,
-			{.message = "ready MPF fixture returned a non-MPF execution receipt"});
+			{.message =
+				"ready minimizer-fragment fixture returned a non-fragment "
+				"execution receipt"});
 	}
-	constexpr std::string_view context = "ready MPF fixture";
+	constexpr std::string_view context = "ready minimizer-fragment fixture";
 	const auto are_bounded_stats_consistent =
 		execution->packed_bounded_stats_present
 		&& execution->packed_bounded_status
@@ -826,7 +831,8 @@ build_ready_mpf_generation(
 		&& execution->packed_bounded_stats.is_internally_consistent(
 			/*require_nonempty_vector_work=*/true);
 	std::vector<
-		bioseq::postgres::sql_rows::build_ready_mpf_generation_row> rows;
+		bioseq::postgres::sql_rows::build_ready_minimizer_fragment_generation_row>
+		rows;
 	rows.push_back({
 		fixture.table_name,
 		fixture.column_attno,
@@ -846,7 +852,7 @@ build_ready_mpf_generation(
 			publication.generation_id(), context, "generation_id"),
 		fixed_hex_u64(publication.source_identity()),
 		fixed_hex_u64(publication.source_content_checksum()),
-		fixed_hex_u64(publication.compatibility_checksum()),
+		fixed_hex_u64(publication.storage_contract_checksum()),
 		fixture_sql_integer<std::int64_t>(
 			fixture.manifest.target_length, context,
 			"manifest_target_length"),
@@ -923,18 +929,19 @@ build_ready_mpf_generation(
 			"vulkan_downloaded_minimizers"),
 	});
 	return bioseq::postgres::support::table_rows<
-		bioseq::postgres::sql_rows::build_ready_mpf_generation_row>{
+		bioseq::postgres::sql_rows::build_ready_minimizer_fragment_generation_row>{
 			std::move(rows)};
 }
 
 
 /**
- * @brief Builds and publishes a ready PostgreSQL-backed MPS generation,
- * releases its spill runs, and leaves active routing and metadata age unchanged.
+ * @brief Builds and publishes a ready PostgreSQL-backed minimizer-sequence
+ * generation, releases its spill runs, and leaves active routing and metadata
+ * age unchanged.
  */
 bioseq::postgres::support::table_rows<
-	bioseq::postgres::sql_rows::build_ready_mps_generation_row>
-build_ready_mps_generation(
+	bioseq::postgres::sql_rows::build_ready_minimizer_sequence_generation_row>
+build_ready_minimizer_sequence_generation(
 	Oid source_table,
 	std::string index_name,
 	std::int64_t sequence_rowno,
@@ -942,14 +949,16 @@ build_ready_mps_generation(
 	if (sequence_rowno < 0) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
-			{.message = "ready MPS fixture row number is negative"});
+			{.message =
+				"ready minimizer-sequence fixture row number is negative"});
 	}
 	if (index_name
 			!= bioseq::indexing::k_minimizers_per_sequence_index_name) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
 			{.message =
-				"ready MPS fixture requires minimizers_per_sequence"});
+				"ready minimizer-sequence fixture requires "
+				"minimizers_per_sequence"});
 	}
 	const auto fixture = bioseq::storage::indexing::
 		build_ready_minimizer_generation_coordinator_fixture_impl(
@@ -957,14 +966,16 @@ build_ready_mps_generation(
 			static_cast<std::uint64_t>(sequence_rowno), backend);
 	const auto& publication = fixture.sealed_publication();
 	const auto* execution = std::get_if<
-		bioseq::indexing::mps_generation_execution_receipt>(
+		bioseq::indexing::minimizer_sequence_generation_execution_receipt>(
 			&publication.execution());
 	if (execution == nullptr) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_DATA_CORRUPTED,
-			{.message = "ready MPS fixture returned a non-MPS execution receipt"});
+			{.message =
+				"ready minimizer-sequence fixture returned a non-sequence "
+				"execution receipt"});
 	}
-	constexpr std::string_view context = "ready MPS fixture";
+	constexpr std::string_view context = "ready minimizer-sequence fixture";
 	const auto are_bounded_stats_consistent =
 		execution->packed_bounded_stats_available
 		&& execution->packed_bounded_status
@@ -972,7 +983,8 @@ build_ready_mps_generation(
 		&& execution->packed_bounded_stats.is_internally_consistent(
 			/*require_nonempty_vector_work=*/true);
 	std::vector<
-		bioseq::postgres::sql_rows::build_ready_mps_generation_row> rows;
+		bioseq::postgres::sql_rows::build_ready_minimizer_sequence_generation_row>
+		rows;
 	rows.push_back({
 		fixture.table_name,
 		fixture.column_attno,
@@ -992,7 +1004,7 @@ build_ready_mps_generation(
 			publication.generation_id(), context, "generation_id"),
 		fixed_hex_u64(publication.source_identity()),
 		fixed_hex_u64(publication.source_content_checksum()),
-		fixed_hex_u64(publication.compatibility_checksum()),
+		fixed_hex_u64(publication.storage_contract_checksum()),
 		fixture_sql_integer<std::int64_t>(
 			fixture.manifest.target_length, context,
 			"manifest_target_length"),
@@ -1133,18 +1145,18 @@ build_ready_mps_generation(
 			execution->manifest_position_segment_span_bp, context,
 			"manifest_position_segment_span_bp"),
 		fixture_sql_integer<std::int64_t>(
-			publication.mps_spill_generation_token(), context,
+			publication.minimizer_sequence_spill_generation_token(), context,
 			"release_generation_token"),
 		fixture_sql_integer<std::int64_t>(
-			publication.mps_spill_mutation_before_release(), context,
+			publication.minimizer_sequence_spill_mutation_before_release(), context,
 			"release_mutation_before"),
 		fixture_sql_integer<std::int64_t>(
-			publication.mps_spill_mutation_after_release(), context,
+			publication.minimizer_sequence_spill_mutation_after_release(), context,
 			"release_mutation_after"),
-		publication.mps_spill_resources_released(),
+		publication.minimizer_sequence_spill_resources_released(),
 	});
 	return bioseq::postgres::support::table_rows<
-		bioseq::postgres::sql_rows::build_ready_mps_generation_row>{
+		bioseq::postgres::sql_rows::build_ready_minimizer_sequence_generation_row>{
 			std::move(rows)};
 }
 

@@ -85,11 +85,11 @@ struct borrowed_packed_instance {
     static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
 
-template <sequence_alphabet p_alphabet, class p_storage_unit, class Fn>
+template <sequence_alphabet p_alphabet, class p_storage_unit, class p_function>
 decltype(auto) with_borrowed_compact_range(
         const typename bioseq::storage::lazy_sequence_view<p_alphabet>::
             resident_packed_sequence& descriptor,
-        Fn&& fn) {
+        p_function&& fn) {
     using instance = borrowed_packed_instance<p_alphabet, p_storage_unit>;
     using range_type = compact_sequence_range<instance>;
     borrowed_packed_header header{
@@ -99,7 +99,7 @@ decltype(auto) with_borrowed_compact_range(
         .padding_letters = descriptor.trailing_padding,
     };
     range_type range{header};
-    return std::forward<Fn>(fn)(range);
+    return std::forward<p_function>(fn)(range);
 }
 
 }  // namespace resident_descriptor_detail
@@ -191,13 +191,13 @@ namespace two_stack_internal {
 #endif
 }
 
-template<class p_lane_type, std::size_t N>
-[[nodiscard]] consteval std::array<p_lane_type, N>
+template<class p_lane_type, std::size_t p_size>
+[[nodiscard]] consteval std::array<p_lane_type, p_size>
 make_lane_index_table() noexcept
 {
     static_assert(std::is_unsigned_v<p_lane_type>);
-    std::array<p_lane_type, N> indices{};
-    for (std::size_t lane = 0; lane < N; ++lane) {
+    std::array<p_lane_type, p_size> indices{};
+    for (std::size_t lane = 0; lane < p_size; ++lane) {
         indices[lane] = static_cast<p_lane_type>(lane);
     }
     return indices;
@@ -355,6 +355,7 @@ struct sequence_simd_iteration_state {
     /// anywhere in this body.
     ///
     /// The named member keeps the fixed parameter list visible to the inliner.
+    // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN two_stack_simd_iteration_resident_kernel
     template<bool p_is_full, typename p_offsets_type>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE
     void step_one_bp_vec_stream(
@@ -573,6 +574,7 @@ struct sequence_simd_iteration_state {
             }
         }
     }
+    // BIOSEQ_PRIVATE_PACKED_ACCESS_END two_stack_simd_iteration_resident_kernel
 };
 
 }  // namespace two_stack_internal
@@ -833,14 +835,14 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // capture struct) and remains directly inlineable.
     iterate_sequence_bp_simd<p_stream_count>(
         seq_view, seq_begin, seq_end, k + w - 1,
-        [&]<bool is_full>(
-            std::bool_constant<is_full>,
+        [&]<bool p_is_full>(
+            std::bool_constant<p_is_full>,
             auto const&  offsets_in,
             auto const&  d_in,
             mask_type       live_mask,
             vector_stream_type bp_v
         ) [[gnu::always_inline]] [[gnu::flatten]] {
-            state.template step_one_bp_vec_stream<is_full>(
+            state.template step_one_bp_vec_stream<p_is_full>(
                 d_in, offsets_in, live_mask, bp_v);
         },
         // No-op finish_fn — emits are flushed per-step, so the partial-tail
@@ -918,25 +920,25 @@ inline void collect_minimizers_two_stack_nthash_simd(
     // — but use the lane's own counts to avoid surprise on platforms
     // where `Lanes` differs).
     auto dispatch_with_unit =
-        [&]<typename hash_unit_type, size_t p_static_window_size, size_t p_static_kmer_size>() {
+        [&]<typename p_hash_unit_type, size_t p_static_window_size, size_t p_static_kmer_size>() {
             constexpr size_t lpu_unit =
-                sizeof(hash_unit_type) * 8 / bpc;
+                sizeof(p_hash_unit_type) * 8 / bpc;
             static_assert(lpu_unit > 0u);
             const bool use_dual_unit =
-                two_stack_resident_uses_dual_streams<hash_unit_type>(
+                two_stack_resident_uses_dual_streams<p_hash_unit_type>(
                     seq, w, k);
 
             if (use_dual_unit) {
                 collect_minimizers_two_stack_nthash_simd_impl<
                     p_static_window_size, p_static_kmer_size,
                     /*p_stream_count=*/2, /*p_detect_palindrome=*/false,
-                    p_simd_hasher_template, p_minimizer_type, p_sequence_range, p_iterator, hash_unit_type, p_collector_type>(
+                    p_simd_hasher_template, p_minimizer_type, p_sequence_range, p_iterator, p_hash_unit_type, p_collector_type>(
                         collector, seq, seq_begin, seq_end, w, k);
             } else {
                 collect_minimizers_two_stack_nthash_simd_impl<
                     p_static_window_size, p_static_kmer_size,
                     /*p_stream_count=*/1, /*p_detect_palindrome=*/true,
-                    p_simd_hasher_template, p_minimizer_type, p_sequence_range, p_iterator, hash_unit_type, p_collector_type>(
+                    p_simd_hasher_template, p_minimizer_type, p_sequence_range, p_iterator, p_hash_unit_type, p_collector_type>(
                         collector, seq, seq_begin, seq_end, w, k);
             }
         };
@@ -1187,7 +1189,7 @@ collect_minimizers_two_stack_nthash_resident_descriptor_or_throw(
     return resident_descriptor_detail::with_borrowed_compact_range<
         p_alphabet, std::uint32_t>(
             descriptor,
-            [&collector, w, k]<class Range>(Range& range) {
+            [&collector, w, k]<class p_range>(p_range& range) {
                 return collect_minimizers_two_stack_nthash_resident_or_throw<
                     p_minimizer_type>(collector, range, w, k);
             });
@@ -1519,6 +1521,7 @@ extract_packed_dna4_lane_chunk(
  * vectorized while allowing scanner fragments to forward their packed span
  * without constructing or re-encoding a compact sequence object.
  */
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN decode_packed_dna4_rank_vector
 template<class p_simd_tag, class p_alphabet_traits>
 [[nodiscard]] HWY_INLINE decoded_dna4_rank_vector<p_simd_tag>
 decode_packed_dna4_rank_vector(
@@ -1624,6 +1627,7 @@ decode_packed_dna4_rank_vector(
         };
     }
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END decode_packed_dna4_rank_vector
 
 /**
  * Decode packed nucleotide ranks and normalize them to minimap2 nt4 codes.
@@ -1637,6 +1641,7 @@ decode_packed_dna4_rank_vector(
  * scalar loop only prepares gather-equivalent addresses and never hashes,
  * canonicalizes, reduces a minimizer window, or emits an event.
  */
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN decode_packed_nt4_rank_vector
 template<class p_simd_tag, class p_alphabet_traits>
 [[nodiscard]] HWY_INLINE decoded_nt4_rank_vector<p_simd_tag>
 decode_packed_nt4_rank_vector(
@@ -1710,6 +1715,7 @@ decode_packed_nt4_rank_vector(
         .crossed_word = first_unit != last_unit,
     };
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END decode_packed_nt4_rank_vector
 
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> load_promoted_dna4_codes(
@@ -2569,7 +2575,7 @@ template<class p_simd_tag>
 }
 
 template<
-    bool InvalidOnly,
+    bool p_invalid_only,
     std::size_t p_window_size,
     std::size_t p_kmer_size,
     class p_minimizer_type,
@@ -2620,7 +2626,7 @@ process_chronological_candidate_block(
             state, two_stack_continuation_status::invalid_kmer_size);
     }
     if (active_lanes == 0 || active_lanes > lanes
-        || (!InvalidOnly && (state.code_tail_size != k - 1
+        || (!p_invalid_only && (state.code_tail_size != k - 1
             || state.pending_count < active_lanes))) {
         return reject_continuation(
             state, two_stack_continuation_status::invalid_range);
@@ -2676,7 +2682,7 @@ process_chronological_candidate_block(
     mask_type palindrome_mask = hn::MaskFalse(d);
     HWY_ALIGN std::array<std::uint8_t,
         k_max_exact_two_stack_kmer - 1 + max_lanes> code_scratch{};
-    if constexpr (!InvalidOnly) {
+    if constexpr (!p_invalid_only) {
         std::memcpy(
             code_scratch.data(), state.code_tail.data(), k - 1);
         std::memcpy(
@@ -3021,7 +3027,7 @@ process_chronological_candidate_block(
         state.candidate_tail_ordinal.data(),
         combined_ordinal.data() + active_lanes,
         tail_size * sizeof(std::uint64_t));
-    if constexpr (!InvalidOnly) {
+    if constexpr (!p_invalid_only) {
         std::memcpy(
             state.code_tail.data(),
             code_scratch.data() + active_lanes,
@@ -3038,7 +3044,7 @@ process_chronological_candidate_block(
     add_stats_counter(state.stats.generic_u64_candidate_blocks, 1);
     add_stats_counter(state.stats.generic_u64_lane_visits, active_lanes);
     add_stats_counter(state.stats.masked_tail_lanes, lanes - active_lanes);
-    if constexpr (!InvalidOnly) {
+    if constexpr (!p_invalid_only) {
         add_stats_counter(state.stats.consecutive_kmer_batches, 1);
         add_stats_counter(state.stats.canonical_scramble_batches, 1);
     }
@@ -3248,6 +3254,7 @@ template<
 }  // namespace two_stack_internal
 
 
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN reset_two_stack_nthash
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 [[nodiscard]] inline two_stack_continuation_status reset_two_stack_nthash(
     two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>& state,
@@ -3320,8 +3327,10 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
     state.status = two_stack_continuation_status::ok;
     return state.status;
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END reset_two_stack_nthash
 
 
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN consume_two_stack_nthash_packed_fragment
 template<
     std::size_t p_window_size,
     std::size_t p_kmer_size,
@@ -3629,6 +3638,7 @@ consume_two_stack_nthash_packed_fragment(
     return two_stack_continuation_status::ok;
     }
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END consume_two_stack_nthash_packed_fragment
 
 
 template<
@@ -3856,8 +3866,8 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
             }
         }
 
-        auto consume_resident = [&]<class ResidentRange>(
-                const ResidentRange& resident) {
+        auto consume_resident = [&]<class p_resident_range>(
+                const p_resident_range& resident) {
             const std::size_t unit_count =
                 static_cast<std::size_t>(resident.size());
             const storage_unit* packed = unit_count == 0
@@ -4122,7 +4132,7 @@ template<class p_minimizer_type,
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<p_alphabet, p_storage_unit>(
             invocation.sequence,
-            [&invocation, &result]<class Range>(Range& range) {
+            [&invocation, &result]<class p_range>(p_range& range) {
                 minimizer_sink_collector<p_minimizer_type> collector{
                     invocation.sink};
                 two_stack_finalize_result native{};
@@ -4292,7 +4302,7 @@ template<class p_minimizer_type>
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<seq::dna4, std::uint32_t>(
             invocation.sequence,
-            [&invocation, &result]<class Range>(Range& range) {
+            [&invocation, &result]<class p_range>(p_range& range) {
                 minimizer_sink_collector<p_minimizer_type> collector{
                     invocation.sink};
                 try {
@@ -4435,7 +4445,7 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
                 minimizer_representation<33u, 15u>, p_alphabet, p_storage_unit>(
                     invocation, result);
             break;
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
         case minimizer_output_layout::sequence_log2_49_kmer_7_uint64:
             is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
                 minimizer_representation<49u, 7u>, p_alphabet, p_storage_unit>(

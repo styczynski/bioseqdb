@@ -39,9 +39,9 @@ struct alignas(64) trace_event {
 static_assert(sizeof(trace_event) == 64);
 static_assert(alignof(trace_event) == 64);
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct trace_ring {
-    static constexpr std::size_t capacity = configuration_type::trace_capacity;
+    static constexpr std::size_t capacity = p_configuration_type::trace_capacity;
 
     trace_event* buffer = nullptr;
     std::atomic<std::uint64_t> write_sequence{0};

@@ -77,7 +77,7 @@ struct vulkan_runtime_status_snapshot {
 
 struct async_minimizer_sequence_build_stats_snapshot {
     std::uint64_t generation = 0;
-    bioseq::storage::indexing::last_mps_build_stats stats{};
+    bioseq::storage::indexing::last_minimizer_sequence_build_stats stats{};
     std::uint64_t worker_build_ns = 0;
     std::uint64_t pipeline_mode = 0;
     std::uint64_t max_concurrency = 0;
@@ -252,8 +252,8 @@ struct pg_minimizer_sequence_build_stats {
 };
 
 /*
- * Cross-backend evidence for the asynchronous minimizer-sequence worker's PostgreSQL leaf
- * seams.  These counters live in scheduler shared memory because the backend
+ * Cross-backend diagnostics for the asynchronous minimizer-sequence worker's
+ * PostgreSQL leaf seams. These counters live in scheduler shared memory because the backend
  * that arms an integration failure is not the background worker that consumes
  * it.  The injection selector is one-shot: the worker atomically clears it
  * before raising the requested ERROR.
@@ -330,12 +330,12 @@ void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_async_minimizer_sequence_worker_boundary_stats& stats);
 void release_pinned_dsm(dsm_handle handle) noexcept;
 void register_persist_xact_callback_pg_leaf();
-void enqueue_pending_mps_build(
+void enqueue_pending_minimizer_sequence_build(
     const persist_target& target,
     dsm_handle handle,
     std::uint64_t payload_bytes);
 [[nodiscard]] std::optional<minimizer_sequence_build_metadata>
-parse_mps_build_metadata(const char* base, Size mapped);
+parse_minimizer_sequence_build_metadata(const char* base, Size mapped);
 [[nodiscard]] const bioseq::minimizers::minimizer_kernels*
 rebind_minimizer_kernels_for_backend(
     std::int32_t backend_value,
@@ -344,20 +344,20 @@ rebind_minimizer_kernels_for_backend(
     const persist_target& target,
     std::string_view index_name);
 void publish_async_minimizer_sequence_build_stats(
-    const bioseq::storage::indexing::last_mps_build_stats& stats,
+    const bioseq::storage::indexing::last_minimizer_sequence_build_stats& stats,
     std::uint64_t worker_build_ns,
     std::uint64_t pipeline_mode,
     std::uint64_t max_concurrency,
     std::uint64_t index_memory_cap_mb,
     bool has_shareable_lazy_worker) noexcept;
-void record_async_mps_worker_pg_leaf_call(
+void record_async_minimizer_sequence_worker_pg_leaf_call(
     async_minimizer_sequence_worker_pg_failure point) noexcept;
-void record_async_mps_worker_pg_leaf_failure(
+void record_async_minimizer_sequence_worker_pg_leaf_failure(
     async_minimizer_sequence_worker_pg_failure point) noexcept;
-void inject_async_mps_worker_pg_failure_leaf(
+void inject_async_minimizer_sequence_worker_pg_failure_leaf(
     async_minimizer_sequence_worker_pg_failure point);
-void record_async_mps_materialize_admission() noexcept;
-void record_async_mps_materialize_failure_unwind(
+void record_async_minimizer_sequence_materialize_admission() noexcept;
+void record_async_minimizer_sequence_materialize_failure_unwind(
     bool admission_restored) noexcept;
 void process_minimizer_sequence_build_claim(
     const persist_claim& claim,

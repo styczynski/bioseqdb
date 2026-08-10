@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.2)
 
-# Isolated host-tool generator project. Built by BioseqCodegen.cmake as an
+# Isolated host-tool generator project. Built by bioseq_codegen.cmake as an
 # ExternalProject with either GCC 16.1/libstdc++ or Clang 22/libc++, keeping its
 # C and legacy C++ dependencies out of the main module graph. Components are
 # selected by BIOSEQ_CODEGEN_ENABLE_EXTERNAL / BIOSEQ_CODEGEN_ENABLE_WEBSITE /
@@ -44,7 +44,7 @@ if(_bioseq_expected_gcc_identity_count EQUAL
     _bioseq_expected_gcc_identity_required_count)
   set(_bioseq_codegen_gcc_only ON)
   include(
-    "${BIOSEQ_REPOSITORY_ROOT}/cmake/BioseqGccToolchain.cmake")
+    "${BIOSEQ_REPOSITORY_ROOT}/cmake/bioseq_gcc_toolchain.cmake")
   foreach(_bioseq_compiler_path_pair IN ITEMS
       "CMAKE_C_COMPILER;BIOSEQ_EXPECTED_GCC_C"
       "CMAKE_CXX_COMPILER;BIOSEQ_EXPECTED_GCC_CXX"
@@ -149,6 +149,9 @@ set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 include(FetchContent)
 
 set(_codegen_src "${CMAKE_CURRENT_SOURCE_DIR}")
+set_source_files_properties(
+  "${_codegen_src}/main.cppm"
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 
 # Shared support footprint, always compiled.
 set(_codegen_module_files
@@ -211,16 +214,16 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
   file(SHA256 "${BIOSEQ_CODEGEN_LLVM_LIB}"
     _bioseq_llvm_library_sha256)
   list(APPEND _codegen_module_files
-    "${_codegen_src}/clang_structural/model.cppm"
-    "${_codegen_src}/clang_structural/index.cppm")
+    "${_codegen_src}/structural_analysis/model.cppm"
+    "${_codegen_src}/structural_analysis/index.cppm")
   list(APPEND _codegen_implementation_files
-    "${_codegen_src}/clang_structural/implementation.cppm"
+    "${_codegen_src}/structural_analysis/implementation.cppm"
     "$<$<BOOL:${BIOSEQ_CODEGEN_ENABLE_SQL}>:${_codegen_src}/safety/fact_producer_implementation.cppm>")
   # Keep the authored production unit on the required .cppm path while
   # compiling it as the primary module's implementation unit. Clang otherwise
   # infers an interface solely from the extension and rejects `module M;`.
   set_source_files_properties(
-    "${_codegen_src}/clang_structural/implementation.cppm"
+    "${_codegen_src}/structural_analysis/implementation.cppm"
     "${_codegen_src}/safety/fact_producer_implementation.cppm"
     PROPERTIES COMPILE_OPTIONS "-x;c++")
   list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
@@ -237,7 +240,7 @@ if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
     "${_codegen_src}/namespace_materialization/validator.cppm"
     "${_codegen_src}/namespace_materialization/manifest.cppm"
     "${_codegen_src}/namespace_materialization/renderer.cppm"
-    "${_codegen_src}/namespace_materialization/contract_tests.cppm"
+    "${_codegen_src}/namespace_materialization/tests/contract/index.cppm"
     "${_codegen_src}/namespace_materialization/index.cppm")
   string(APPEND _codegen_component_imports
     "import bioseq.codegen.namespace_materialization;\n")
@@ -253,7 +256,7 @@ if(BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
     "${_codegen_src}/highway/manifest.cppm"
     "${_codegen_src}/highway/validator.cppm"
     "${_codegen_src}/highway/renderer.cppm"
-    "${_codegen_src}/highway/contract_tests.cppm"
+    "${_codegen_src}/highway/tests/contract/index.cppm"
     "${_codegen_src}/highway/index.cppm")
   string(APPEND _codegen_component_imports
     "import bioseq.codegen.highway;\n")
@@ -321,7 +324,7 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     _bioseq_prepare_test_compiler_inventory_sha256)
 
   list(APPEND _codegen_module_files
-    "${_codegen_src}/clang_structural/contract_tests.cppm"
+    "${_codegen_src}/structural_analysis/tests/contract/index.cppm"
     "${_codegen_src}/safety/model.cppm"
     "${_codegen_src}/safety/json.cppm"
     "${_codegen_src}/safety/analyzer_model.cppm"
@@ -330,13 +333,13 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/safety/analyzer.cppm"
     "${_codegen_src}/safety/serialization.cppm"
     "${_codegen_src}/safety/runtime_inventory.cppm"
-    "${_codegen_src}/safety/runtime_inventory_contract_tests.cppm"
+    "${_codegen_src}/safety/tests/contract/runtime_inventory_test.cppm"
     "${_codegen_src}/safety/fact_producer.cppm"
-    "${_codegen_src}/safety/fact_producer_contract_tests.cppm"
+    "${_codegen_src}/safety/tests/contract/fact_producer_test.cppm"
     "${_codegen_src}/safety/runtime_matrix.cppm"
     "${_codegen_src}/safety/dso.cppm"
-    "${_codegen_src}/safety/analyzer_contract_tests.cppm"
-    "${_codegen_src}/safety/contract_tests.cppm"
+    "${_codegen_src}/safety/tests/contract/analyzer_test.cppm"
+    "${_codegen_src}/safety/tests/contract/index.cppm"
     "${_codegen_src}/safety/cli.cppm"
     "${_codegen_src}/safety/index.cppm"
     "${_codegen_src}/sql/annotation_model/entities.cppm"
@@ -355,11 +358,15 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/sql/renderer/cpp_facets.cppm"
     "${_codegen_src}/sql/renderer/gucs.cppm"
     "${_codegen_src}/sql/renderer/fmgr.cppm"
+    "${_codegen_src}/sql/renderer/tests/contract/fmgr_test.cppm"
+    "${_codegen_src}/sql/renderer/tests/contract/compact_fmgr_test.cppm"
     "${_codegen_src}/sql/renderer/manifest.cppm"
     "${_codegen_src}/sql/renderer/index.cppm"
-    "${_codegen_src}/sql/tests/annotation_probe.cppm"
+    "${_codegen_src}/sql/tests/contract/fixtures/annotation_probe.cppm"
     "${_codegen_src}/sql/model.cppm"
     "${_codegen_src}/sql/policy.cppm"
+    "${_codegen_src}/sql/tests/contract/guc_test.cppm"
+    "${_codegen_src}/sql/tests/contract/index.cppm"
     "${_codegen_src}/sql/index.cppm")
   string(APPEND _codegen_component_imports
     "import bioseq.codegen.safety;\n")
@@ -390,17 +397,8 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
-  set(CPPAST_BUILD_TEST OFF CACHE BOOL "" FORCE)
-  set(CPPAST_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
-  set(CPPAST_BUILD_TOOL OFF CACHE BOOL "" FORCE)
   set(LLVM_CONFIG_BINARY "${LLVM_CONFIG_BINARY}" CACHE FILEPATH "" FORCE)
-  add_subdirectory("${BIOSEQ_REPOSITORY_ROOT}/cppast-main"
-    "${CMAKE_BINARY_DIR}/cppast" EXCLUDE_FROM_ALL)
-  set_target_properties(cppast PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS ON
-    CXX_MODULE_STD OFF)
+  find_package(cppast CONFIG REQUIRED)
 
   list(APPEND _codegen_module_files
     "${_codegen_src}/external/model.cppm"
@@ -410,10 +408,10 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
     "${_codegen_src}/external/artifact_handler.cppm"
     "${_codegen_src}/external/incremental_state.cppm"
     "${_codegen_src}/external/builder.cppm"
-    "${_codegen_src}/external/contract_tests.cppm"
+    "${_codegen_src}/external/tests/contract/index.cppm"
     "${_codegen_src}/external/index.cppm"
     "${BIOSEQ_REPOSITORY_ROOT}/bioseq/backend/common/http/validation/index.cppm")
-  list(APPEND _codegen_link_libs cppast)
+  list(APPEND _codegen_link_libs cppast::cppast)
   string(APPEND _codegen_component_imports "import bioseq.codegen.external;\n")
   string(APPEND _codegen_component_entries
     "        {\"external\", &bioseq::codegen::external::run_self_tests, "
@@ -421,20 +419,14 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
-  # Website structural pass and rendering pull C and legacy-C++ dependencies.
-  # Compile them without module scanning or import std so they never enter the
-  # generator's C++26 module graph; contain their headers in the owning units.
-  # They keep the C++26 standard (Boost.Filesystem 1.90 needs std::atomic_ref).
+  # Website structural and rendering dependencies enter only through package
+  # targets; their headers remain contained in the owning module units.
   set(_saved_scan "${CMAKE_CXX_SCAN_FOR_MODULES}")
   set(_saved_module_std "${CMAKE_CXX_MODULE_STD}")
   set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
   set(CMAKE_CXX_MODULE_STD OFF)
 
-  # MD4C 0.5.3: link md4c (typed callbacks), never md4c-html; no md2html/shared.
-  set(BUILD_MD2HTML_EXECUTABLE OFF CACHE BOOL "" FORCE)
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-  add_subdirectory("${BIOSEQ_REPOSITORY_ROOT}/md4c-master"
-    "${CMAKE_BINARY_DIR}/md4c" EXCLUDE_FROM_ALL)
+  find_package(md4c CONFIG REQUIRED)
 
   # pugixml v1.15 pinned by hash through the normal FetchContent cache.
   if(NOT TARGET pugixml::pugixml)
@@ -445,26 +437,9 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     FetchContent_MakeAvailable(pugixml)
   endif()
 
-  # Jinja2Cpp 1.3.2 with its default Boost.JSON binding; internal deps mode
-  # fetches Boost 1.90 (json/regex) and exposes Boost::json for website/json.
-  set(JINJA2CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(JINJA2CPP_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-  set(JINJA2CPP_DEPS_MODE "internal" CACHE STRING "" FORCE)
-  set(JINJA2CPP_WITH_JSON_BINDINGS "boost" CACHE STRING "" FORCE)
-  set(JINJA2CPP_USE_REGEX "std" CACHE STRING "" FORCE)
-  add_subdirectory("${BIOSEQ_REPOSITORY_ROOT}/Jinja2Cpp-master"
-    "${CMAKE_BINARY_DIR}/jinja2cpp" EXCLUDE_FROM_ALL)
-  # Jinja2Cpp 1.3.2 is not C++23/26-clean (its nonstd::expected aliases
-  # std::expected and its polymorphic value trips a libstdc++ <optional>
-  # constraint); build it and its renderer shim at their native C++17.
-  set_target_properties(jinja2cpp PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_SCAN_FOR_MODULES OFF)
-  add_library(bioseq_codegen_jinja_shim STATIC
-    "${_codegen_src}/website/template_renderer_impl.cppm")
-  set_target_properties(bioseq_codegen_jinja_shim PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
-    CXX_SCAN_FOR_MODULES OFF CXX_MODULE_STD OFF POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(bioseq_codegen_jinja_shim PRIVATE jinja2cpp Boost::json)
+  # The pinned overlay package contains Jinja2Cpp's C++17 implementation and
+  # publishes only its namespaced package target to current-standard consumers.
+  find_package(jinja2cpp CONFIG REQUIRED)
 
   set(CMAKE_CXX_SCAN_FOR_MODULES "${_saved_scan}")
   set(CMAKE_CXX_MODULE_STD "${_saved_module_std}")
@@ -492,10 +467,10 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/website/postgres/catalog.cppm"
     "${_codegen_src}/website/postgres/index.cppm"
     "${_codegen_src}/website/build_pipeline.cppm"
-    "${_codegen_src}/website/contract_tests.cppm"
+    "${_codegen_src}/website/tests/contract/index.cppm"
     "${_codegen_src}/website/index.cppm")
   list(APPEND _codegen_link_libs
-    md4c pugixml::pugixml bioseq_codegen_jinja_shim Boost::json
+    md4c::md4c pugixml::pugixml jinja2cpp::jinja2cpp Boost::json
     PkgConfig::LIBPQ)
   string(APPEND _codegen_component_imports "import bioseq.codegen.website;\n")
   string(APPEND _codegen_component_entries
@@ -516,9 +491,9 @@ list(APPEND _codegen_module_files
   "${CMAKE_BINARY_DIR}/generated/component_registry.cppm")
 
 add_executable(bioseq_codegen
-  "${_codegen_src}/main.cpp"
+  "${_codegen_src}/main.cppm"
   ${_codegen_implementation_files}
-  "$<$<BOOL:${BIOSEQ_CODEGEN_ENABLE_SQL}>:${_codegen_src}/sql/tests/annotation_probe.cpp>")
+  "$<$<BOOL:${BIOSEQ_CODEGEN_ENABLE_SQL}>:${_codegen_src}/sql/tests/contract/fixtures/annotation_probe.cpp>")
 target_sources(bioseq_codegen
   PRIVATE FILE_SET CXX_MODULES
     BASE_DIRS ${_codegen_base_dirs}
@@ -587,8 +562,8 @@ set_target_properties(bioseq_codegen PROPERTIES
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL)
   set_source_files_properties(
-    "${_codegen_src}/sql/tests/annotation_probe.cppm"
-    "${_codegen_src}/sql/tests/annotation_probe.cpp"
+    "${_codegen_src}/sql/tests/contract/fixtures/annotation_probe.cppm"
+    "${_codegen_src}/sql/tests/contract/fixtures/annotation_probe.cpp"
     PROPERTIES COMPILE_OPTIONS
       "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
   if(BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)

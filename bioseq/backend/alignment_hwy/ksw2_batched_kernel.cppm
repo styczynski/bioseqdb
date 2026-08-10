@@ -87,7 +87,7 @@ using ::bioseq::simd::detail_ksw2_batched_ordering::bucket_key_for;
 
 namespace detail_ksw2_batched {
 
-/** Compute the historical 1.5x alignment bandwidth without narrowing. */
+/** Compute the established 1.5x alignment bandwidth without narrowing. */
 [[nodiscard]] constexpr bool try_calculate_alignment_bandwidth(
     std::int32_t configured_bandwidth,
     std::int32_t& alignment_bandwidth) noexcept {

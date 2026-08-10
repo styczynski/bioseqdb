@@ -23,7 +23,7 @@ extern "C" {
 export module bioseq.postgres.support.sql_boundary:aggregate;
 
 import bioseq.postgres.support;
-import bioseq.pg_sql_boundary;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.vectorization.types;
 
 export namespace bioseq::postgres::support {
@@ -165,9 +165,9 @@ struct detail_aggregate_boundary_access final {
     }
 };
 
-template<class T>
-    requires std::same_as<T, int64_array_aggregate_state>
-[[nodiscard]] inline T read_argument(
+template<class p_value>
+    requires std::same_as<p_value, int64_array_aggregate_state>
+[[nodiscard]] inline p_value read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -188,10 +188,10 @@ template<class T>
     return detail_aggregate_boundary_access::make_array_state(array);
 }
 
-template<class T>
+template<class p_value>
     requires std::same_as<
-        T, std::optional<int64_array_aggregate_state>>
-[[nodiscard]] inline T read_argument(
+        p_value, std::optional<int64_array_aggregate_state>>
+[[nodiscard]] inline p_value read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -202,9 +202,9 @@ template<class T>
         call, zero_based_index);
 }
 
-template<class T>
-    requires std::same_as<T, int128_aggregate_state>
-[[nodiscard]] inline T read_argument(
+template<class p_value>
+    requires std::same_as<p_value, int128_aggregate_state>
+[[nodiscard]] inline p_value read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -219,10 +219,10 @@ template<class T>
     return detail_aggregate_boundary_access::make_int128_state(state);
 }
 
-template<class T>
+template<class p_value>
     requires std::same_as<
-        T, std::optional<int128_aggregate_state>>
-[[nodiscard]] inline T read_argument(
+        p_value, std::optional<int128_aggregate_state>>
+[[nodiscard]] inline p_value read_argument(
         FunctionCallInfo call,
         int zero_based_index) {
     detail::require_argument(call, zero_based_index);
@@ -233,24 +233,24 @@ template<class T>
         call, zero_based_index);
 }
 
-template<class T>
+template<class p_value>
     requires std::same_as<
-        std::remove_cvref_t<T>,
+        std::remove_cvref_t<p_value>,
         int64_array_aggregate_state>
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        T&& value) noexcept {
+        p_value&& value) noexcept {
     call->isnull = false;
     return PointerGetDatum(value.array());
 }
 
-template<class T>
+template<class p_value>
     requires std::same_as<
-        std::remove_cvref_t<T>,
+        std::remove_cvref_t<p_value>,
         int128_aggregate_state>
 [[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        T&& value) noexcept {
+        p_value&& value) noexcept {
     call->isnull = false;
     return PointerGetDatum(value.get());
 }

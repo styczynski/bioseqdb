@@ -847,8 +847,8 @@ private:
 static_assert(prov::external_api_session_compatible<ncbi_session>);
 
 struct ncbi_provider {
-  static constexpr auto id = bioseq::common::templating::CompTimeStr("ncbi");
-  static constexpr auto name = bioseq::common::templating::CompTimeStr("NCBI");
+  static constexpr auto id = bioseq::common::templating::compile_time_string("ncbi");
+  static constexpr auto name = bioseq::common::templating::compile_time_string("NCBI");
   static constexpr bool supports_sequence_retrieval = true;
 
   using plan_type = ncbi_plan;

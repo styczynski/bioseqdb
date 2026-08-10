@@ -22,7 +22,7 @@ import bioseq.cache.pg.sql.rows;
 import bioseq.cache.pg.storage;
 import bioseq.cache.pg.test_provider;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_sql_boundary;
+import bioseq.postgres.sql_boundary;
 
 export namespace bioseq::cache::pg::test_sql_catalog {
 
@@ -47,7 +47,7 @@ inline constexpr bioseq::sql::schema_entity bioseq_cache_test{};
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-[[nodiscard]] inline bioseq::pg_utils::sql_jsonb bootstrap_status() {
+[[nodiscard]] inline bioseq::postgres::support::jsonb_value bootstrap_status() {
     return storage::bootstrap_test_api::bootstrap_status();
 }
 
@@ -62,7 +62,7 @@ inline constexpr bioseq::sql::schema_entity bioseq_cache_test{};
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-[[nodiscard]] inline bioseq::pg_utils::sql_jsonb
+[[nodiscard]] inline bioseq::postgres::support::jsonb_value
 bootstrap_attach_twice() {
     return storage::bootstrap_test_api::bootstrap_attach_twice();
 }
@@ -201,7 +201,7 @@ inline void set_force_file_tier(bool enabled) {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::storage_tier_stats_row>
+bioseq::postgres::support::table_rows<sql_rows::storage_tier_stats_row>
 storage_tier_stats() {
     return test_sql_backend::storage_tier_stats();
 }
@@ -216,7 +216,7 @@ storage_tier_stats() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::entry_state_row>
+bioseq::postgres::support::table_rows<sql_rows::entry_state_row>
 entry_states() {
     return test_sql_backend::entry_states();
 }
@@ -244,7 +244,7 @@ entry_states() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::transition_state_row>
+bioseq::postgres::support::table_rows<sql_rows::transition_state_row>
 transition_state() {
     return test_sql_backend::transition_state();
 }
@@ -259,7 +259,7 @@ transition_state() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<
+bioseq::postgres::support::table_rows<
     sql_rows::relation_transition_state_row>
 relation_transition_state(
         [[bioseq_sql::param({
@@ -279,7 +279,7 @@ relation_transition_state(
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::planner_reference_counts_row>
+bioseq::postgres::support::table_rows<sql_rows::planner_reference_counts_row>
 planner_reference_counts() {
     return test_sql_backend::planner_reference_counts();
 }
@@ -294,7 +294,7 @@ planner_reference_counts() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::provider_callback_stats_row>
+bioseq::postgres::support::table_rows<sql_rows::provider_callback_stats_row>
 provider_callback_stats() {
     return test_sql_backend::provider_callback_stats();
 }
@@ -309,7 +309,7 @@ provider_callback_stats() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::plan_build_stats_row>
+bioseq::postgres::support::table_rows<sql_rows::plan_build_stats_row>
 plan_build_stats() {
     return test_sql_backend::plan_build_stats();
 }
@@ -362,7 +362,7 @@ inline void set_forced_coverage_domain_digest(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea digest) {
+        bioseq::postgres::support::bytea_value digest) {
     test_sql_backend::set_forced_coverage_domain_digest(digest);
 }
 
@@ -390,20 +390,20 @@ inline void clear_forced_coverage_domain_digest() {
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea domain_key,
+        bioseq::postgres::support::bytea_value domain_key,
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea predicate_key,
+        bioseq::postgres::support::bytea_value predicate_key,
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea provider_security_digest,
+        bioseq::postgres::support::bytea_value provider_security_digest,
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
             .default_value = bioseq::sql::checked_sql{"NULL"},
         })]]
-        std::optional<bioseq::pg_utils::sql_bytea>
+        std::optional<bioseq::postgres::support::bytea_value>
             forced_domain_digest) {
     return test_sql_backend::inject_complete_coverage(
         domain_key,
@@ -422,12 +422,12 @@ inline void clear_forced_coverage_domain_digest() {
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::injected_coverage_row>
+bioseq::postgres::support::table_rows<sql_rows::injected_coverage_row>
 lookup_injected_coverage(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea domain_key) {
+        bioseq::postgres::support::bytea_value domain_key) {
     return test_sql_backend::lookup_injected_coverage(domain_key);
 }
 
@@ -441,7 +441,7 @@ lookup_injected_coverage(
     .from = bioseq::sql::public_role,
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::coverage_bucket_state_row>
+bioseq::postgres::support::table_rows<sql_rows::coverage_bucket_state_row>
 coverage_bucket_states() {
     return test_sql_backend::coverage_bucket_states();
 }
@@ -497,7 +497,7 @@ inline void request_janitor_sweep() {
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::interval,
         })]]
-        bioseq::pg_utils::sql_interval timeout) {
+        bioseq::postgres::support::interval_value timeout) {
     return test_sql_backend::wait_for_generation_absent(
         generation, timeout);
 }
@@ -653,7 +653,7 @@ inline void provider_set_security_digest(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,
         })]]
-        bioseq::pg_utils::sql_bytea digest) {
+        bioseq::postgres::support::bytea_value digest) {
     test_provider::provider_set_security_digest(digest);
 }
 
@@ -729,7 +729,7 @@ inline void provider_reset() {
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-[[nodiscard]] inline bioseq::pg_utils::sql_jsonb provider_stats() {
+[[nodiscard]] inline bioseq::postgres::support::jsonb_value provider_stats() {
     return test_provider::provider_stats();
 }
 

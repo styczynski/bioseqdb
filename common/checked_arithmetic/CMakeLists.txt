@@ -20,7 +20,7 @@ if(BUILD_TESTING)
   find_package(Catch2 3 REQUIRED)
   add_executable(
     bioseq_checked_arithmetic_contract_tests
-    "${CMAKE_CURRENT_LIST_DIR}/contract_tests.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/tests/contract/arithmetic_test.cpp")
   set_target_properties(
     bioseq_checked_arithmetic_contract_tests
     PROPERTIES
@@ -28,7 +28,8 @@ if(BUILD_TESTING)
       CXX_STANDARD_REQUIRED ON
       CXX_EXTENSIONS ON
       CXX_MODULE_STD ON
-      INTERPROCEDURAL_OPTIMIZATION FALSE)
+      INTERPROCEDURAL_OPTIMIZATION FALSE
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching")
   target_link_libraries(
     bioseq_checked_arithmetic_contract_tests
     PRIVATE
@@ -36,8 +37,10 @@ if(BUILD_TESTING)
       Catch2::Catch2WithMain)
   add_test(
     NAME bioseq_checked_arithmetic_contract_tests
-    COMMAND bioseq_checked_arithmetic_contract_tests)
+    COMMAND "$<TARGET_FILE:bioseq_checked_arithmetic_contract_tests>"
+      "[component:common][layer:contract][feature:checked_arithmetic]")
   set_tests_properties(
     bioseq_checked_arithmetic_contract_tests
-    PROPERTIES LABELS "common;unit;checked-arithmetic")
+    PROPERTIES LABELS
+      "component:common;layer:contract;feature:checked_arithmetic")
 endif()

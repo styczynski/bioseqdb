@@ -233,7 +233,7 @@ struct postgres_callback_root {
 
 /// Canonical compiler fact product for one prepared compilation closure.
 struct compiler_analysis_facts {
-    std::uint32_t schema_version{2};
+    std::uint32_t schema_revision{2};
     compilation_profile profile{compilation_profile::production};
     std::string compiler_profile;
     std::string clang_version;

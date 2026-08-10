@@ -370,6 +370,15 @@ function firstDataUrl(elements, names) {
   return "";
 }
 
+function requireCurrentSchema(data, schema, schemaRevision, context) {
+  if (!data || typeof data !== "object" || Array.isArray(data) ||
+      data.schema !== schema || !Number.isInteger(data.schema_revision) ||
+      data.schema_revision !== schemaRevision) {
+    throw new Error(`${context} schema is not current`);
+  }
+  return data;
+}
+
 function search() {
   const input = document.getElementById("doc-search");
   const dropdown = document.getElementById("search-dd");
@@ -510,7 +519,11 @@ function search() {
           return response.json();
         })
         .then((data) => {
-          records = Array.isArray(data.records) ? data.records : [];
+          requireCurrentSchema(data, "bioseq.website.search", 2, "search index");
+          if (!Array.isArray(data.records)) {
+            throw new Error("search index records are invalid");
+          }
+          records = data.records;
           return records;
         })
         .catch(() => {
@@ -663,7 +676,10 @@ function version() {
       return response.json();
     })
     .then((data) => {
-      if (!Array.isArray(data.versions)) return;
+      requireCurrentSchema(data, "bioseq.website.versions", 1, "versions");
+      if (!Array.isArray(data.versions)) {
+        throw new Error("versions records are invalid");
+      }
       const fragment = document.createDocumentFragment();
       let foundCurrent = false;
       data.versions.forEach((record) => {
@@ -709,7 +725,15 @@ function loadEntityDataset(url) {
         if (!response.ok) throw new Error(`entity data ${response.status}`);
         return response.json();
       })
-      .then((data) => data && typeof data.entities === "object" ? data.entities : {})
+      .then((data) => {
+        requireCurrentSchema(
+          data, "bioseq.website.entity_tooltips", 1, "entity tooltips");
+        if (!data.entities || typeof data.entities !== "object" ||
+            Array.isArray(data.entities)) {
+          throw new Error("entity tooltip records are invalid");
+        }
+        return data.entities;
+      })
       .catch(() => {
         entityDatasets.delete(url);
         return {};

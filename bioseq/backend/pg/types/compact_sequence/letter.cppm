@@ -1049,7 +1049,7 @@ bool letter_wire_self_test() {
       {char{1}, static_cast<char>(dna4_code), char{0x7f}}, -1,
       ERRCODE_INVALID_BINARY_REPRESENTATION);
   bool typmod_mismatch = true;
-#if BIOSEQ_OPTTIMIZATION_LEVEL > 0
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
   constexpr std::uint8_t dna5_code =
       pgseq_supported_alphabets::index_of<::seq::dna5>();
   typmod_mismatch = letter_wire_error_probe(

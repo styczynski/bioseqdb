@@ -8,7 +8,9 @@ module;
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -35,6 +37,9 @@ struct postgres_isolation_settings {
     int server_port{};
     std::string template_database;
     bool requires_extension{true};
+    std::vector<std::string> extension_names;
+    std::vector<std::string> documented_function_schemas;
+    std::vector<std::string> documented_function_identities;
     std::vector<std::string> restricted_sequence_relations;
 };
 
@@ -297,7 +302,7 @@ private:
                 break;
             }
             outcome.notices.push_back(sql_notice{
-                .phase = sql_phase::visible,
+                .stage = sql_execution_stage::visible,
                 .severity = raw.severity,
                 .sqlstate = raw.sql_state,
                 .message = raw.message});
@@ -726,6 +731,30 @@ private:
         (void)clone_admin.execute(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
             "bioseq_internal.metadata_age_log TO " + quoted_role);
+        (void)clone_admin.execute(
+            "GRANT pg_read_all_stats TO " + quoted_role);
+        for (const std::string& schema :
+             settings.documented_function_schemas) {
+            (void)clone_admin.execute(
+                "GRANT USAGE ON SCHEMA "
+                + clone_admin.escape_identifier(schema)
+                + " TO " + quoted_role);
+        }
+        for (const std::string& identity :
+             settings.documented_function_identities) {
+            const std::size_t signature = identity.find(':', 4);
+            if (!identity.starts_with("sql:")
+                || signature == std::string::npos
+                || signature + 1 >= identity.size()) {
+                throw std::runtime_error(
+                    "invalid documented SQL function identity '"
+                    + identity + "'");
+            }
+            (void)clone_admin.execute(
+                "GRANT EXECUTE ON FUNCTION "
+                + identity.substr(signature + 1)
+                + " TO " + quoted_role);
+        }
     }
 
     /// @brief Checks the clone owner's least-privilege extension access.
@@ -742,6 +771,52 @@ private:
         if (settings.restricted_sequence_relations.empty()) {
             return make_isolation_error(
                 "generated SQL manifest supplied no internal sequence ACL targets");
+        }
+        if (settings.extension_names.empty()
+            || settings.documented_function_schemas.empty()
+            || settings.documented_function_identities.empty()) {
+            return make_isolation_error(
+                "generated SQL manifest set supplied incomplete extension ACL targets");
+        }
+        std::string extension_acl_checks;
+        for (const std::string& extension_name : settings.extension_names) {
+            extension_acl_checks +=
+                "AND EXISTS (SELECT 1 FROM pg_catalog.pg_extension x "
+                "WHERE x.extname = "
+                + role_connection.escape_literal(extension_name)
+                + " AND NOT pg_catalog.pg_has_role("
+                  "current_user, x.extowner, 'USAGE')) ";
+        }
+        std::string schema_acl_checks;
+        for (const std::string& schema :
+             settings.documented_function_schemas) {
+            const std::string literal =
+                role_connection.escape_literal(schema);
+            schema_acl_checks +=
+                "AND pg_catalog.to_regnamespace(" + literal
+                + ") IS NOT NULL "
+                  "AND pg_catalog.has_schema_privilege("
+                  "current_user, " + literal + ", 'USAGE') ";
+        }
+        std::string function_acl_checks;
+        for (const std::string& identity :
+             settings.documented_function_identities) {
+            const std::size_t signature = identity.find(':', 4);
+            if (!identity.starts_with("sql:")
+                || signature == std::string::npos
+                || signature + 1 >= identity.size()) {
+                return make_isolation_error(
+                    "invalid documented SQL function identity '"
+                    + identity + "'");
+            }
+            const std::string literal = role_connection.escape_literal(
+                identity.substr(signature + 1));
+            function_acl_checks +=
+                "AND pg_catalog.to_regprocedure(" + literal
+                + ") IS NOT NULL "
+                  "AND pg_catalog.has_function_privilege("
+                  "current_user, pg_catalog.to_regprocedure(" + literal
+                + "), 'EXECUTE') ";
         }
         std::string sequence_acl_checks;
         for (const std::string& qualified_name :
@@ -762,6 +837,11 @@ private:
             "AND pg_catalog.to_regclass('bioseq_internal.index_policy') IS NOT NULL "
             "AND pg_catalog.to_regclass('bioseq_internal.metadata_age_log') IS NOT NULL "
             "AND pg_catalog.to_regclass('bioseq_internal.seq_sub_table') IS NOT NULL "
+                + extension_acl_checks
+                + schema_acl_checks
+                + function_acl_checks +
+            "AND pg_catalog.pg_has_role("
+                "current_user, 'pg_read_all_stats', 'MEMBER') "
                 + sequence_acl_checks +
             "AND NOT pg_catalog.pg_has_role(current_user, e.extowner, 'USAGE') "
             "AND current_user = (SELECT pg_catalog.pg_get_userbyid(d.datdba) "

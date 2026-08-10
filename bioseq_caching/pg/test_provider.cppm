@@ -57,84 +57,84 @@ extern "C" {
 export module bioseq.cache.pg.test_provider;
 
 import bioseq.cache.provider_api;
-import bioseq.pg_sql_boundary;
+import bioseq.postgres.sql_boundary;
 
 namespace bioseq::cache::pg::test_provider {
 
-inline constexpr std::uint32_t kProviderId = 0x54535431U;
-inline constexpr std::uint64_t kCompatibilityFamily =
+inline constexpr std::uint32_t k_provider_id = 0x54535431U;
+inline constexpr std::uint64_t k_compatibility_family =
     0x746573745f763031ULL;
-inline constexpr std::int32_t kPlanMagic = 0x54535031;
-inline constexpr std::int32_t kPlanVersion = 2;
-inline constexpr std::uint32_t kGenerationSemanticVersion = 2;
-inline constexpr std::size_t kPlanFixedNodeCount = 11;
-inline constexpr std::size_t kMaximumPlanNodeCount = 1024;
-inline constexpr std::size_t kMaximumRequiredBoundaryCount =
-    kMaximumPlanNodeCount - kPlanFixedNodeCount;
-inline constexpr std::size_t kDigestBytes = 32;
-inline constexpr std::size_t kMaximumTargetRelations = 16;
-inline constexpr std::uint32_t kPgRelFileLocatorIdentityKindV1 = 1;
-inline constexpr std::size_t kPgRelFileLocatorIdentityBytesV1 =
+inline constexpr std::int32_t k_plan_magic = 0x54535031;
+inline constexpr std::int32_t k_plan_revision = 2;
+inline constexpr std::uint32_t k_generation_semantic_revision = 2;
+inline constexpr std::size_t k_plan_fixed_node_count = 11;
+inline constexpr std::size_t k_maximum_plan_node_count = 1024;
+inline constexpr std::size_t k_maximum_required_boundary_count =
+    k_maximum_plan_node_count - k_plan_fixed_node_count;
+inline constexpr std::size_t k_digest_bytes = 32;
+inline constexpr std::size_t k_maximum_target_relations = 16;
+inline constexpr std::uint32_t k_pg_rel_file_locator_identity_kind = 1;
+inline constexpr std::size_t k_pg_rel_file_locator_identity_bytes =
     sizeof(Oid) + sizeof(Oid) + sizeof(RelFileNumber);
 
-enum class MappingFault : std::uint16_t {
-    None = 0,
-    NullPointerNonzeroCount,
-    ShortBoundaryMap,
-    LongBoundaryMap,
-    ShortLineageMap,
-    LongLineageMap,
-    ZeroConsumerAttno,
-    ZeroSourceAttno,
-    SourceAttnoOutOfRange,
-    DuplicateConsumerAttno,
-    MissingRequiredAttno,
-    WrongType,
-    WrongTypmod,
-    WrongCollation,
-    WrongSemanticId,
-    SameTypedColumnPermutation,
-    IllegalRepeatedSourceAttno,
-    BadProviderPrivateVersion,
-    NonIntegerPersistedMapNode,
-    UnknownPersistedMapVersion,
-    DecoratedBoundarySchemaMismatch,
-    DecoratedLineageSchemaMismatch,
-    ProviderError,
-    ProviderUnsupported,
-    ProviderStatusError,
-    ProviderQueryCanceled,
-    LateFetchErrorOnce,
-    LateFetchPartialStatusErrorOnce,
-    PersistedWrongTopTag,
-    PersistedShortTop,
-    PersistedLongTop,
-    PersistedBadMagic,
-    PersistedBadVersion,
-    PersistedCountOverflow,
-    PersistedWrongEntryTag,
-    PersistedShortEntry,
-    PersistedLongEntry,
-    PersistedBadSemanticSize,
-    PersistedBadFingerprintSize,
-    PersistedBadEntryMetadata,
-    PersistedSourceFingerprintMismatch,
-    PersistedConsumerFingerprintMismatch,
-    PersistedDecoratedFingerprintMismatch,
-    PersistedMapFingerprintMismatch,
+enum class mapping_fault : std::uint16_t {
+    none = 0,
+    null_pointer_nonzero_count,
+    short_boundary_map,
+    long_boundary_map,
+    short_lineage_map,
+    long_lineage_map,
+    zero_consumer_attno,
+    zero_source_attno,
+    source_attno_out_of_range,
+    duplicate_consumer_attno,
+    missing_required_attno,
+    wrong_type,
+    wrong_typmod,
+    wrong_collation,
+    wrong_semantic_id,
+    same_typed_column_permutation,
+    illegal_repeated_source_attno,
+    bad_provider_private_revision,
+    non_integer_persisted_map_node,
+    unknown_persisted_map_revision,
+    decorated_boundary_schema_mismatch,
+    decorated_lineage_schema_mismatch,
+    provider_error,
+    provider_unsupported,
+    provider_status_error,
+    provider_query_canceled,
+    late_fetch_error_once,
+    late_fetch_partial_status_error_once,
+    persisted_wrong_top_tag,
+    persisted_short_top,
+    persisted_long_top,
+    persisted_bad_magic,
+    persisted_bad_revision,
+    persisted_count_overflow,
+    persisted_wrong_entry_tag,
+    persisted_short_entry,
+    persisted_long_entry,
+    persisted_bad_semantic_size,
+    persisted_bad_fingerprint_size,
+    persisted_bad_entry_metadata,
+    persisted_source_fingerprint_mismatch,
+    persisted_consumer_fingerprint_mismatch,
+    persisted_decorated_fingerprint_mismatch,
+    persisted_map_fingerprint_mismatch,
 };
 
-enum class DigestFault : std::uint16_t {
-    None = 0,
-    RuntimeMismatch,
+enum class digest_fault : std::uint16_t {
+    none = 0,
+    runtime_mismatch,
 };
 
-enum class ProjectionOrder : std::uint16_t {
-    Natural = 0,
-    Reverse,
+enum class projection_order : std::uint16_t {
+    natural = 0,
+    reverse,
 };
 
-struct CallbackCounters {
+struct callback_counters {
     std::uint64_t analyze_query = 0;
     std::uint64_t describe_path = 0;
     std::uint64_t domain_digest = 0;
@@ -160,24 +160,24 @@ struct CallbackCounters {
 };
 
 inline Oid g_target_relation_oid = InvalidOid;
-inline std::array<Oid, kMaximumTargetRelations> g_additional_target_relations{};
+inline std::array<Oid, k_maximum_target_relations> g_additional_target_relations{};
 inline std::size_t g_additional_target_relation_count = 0;
 inline std::uint64_t g_requested_capabilities = 1;
-inline MappingFault g_mapping_fault = MappingFault::None;
+inline mapping_fault g_mapping_fault = mapping_fault::none;
 inline const PlannedStmt* g_persisted_mapping_fault_statement = nullptr;
-inline DigestFault g_digest_fault = DigestFault::None;
-inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
+inline digest_fault g_digest_fault = digest_fault::none;
+inline projection_order g_projection_order = projection_order::natural;
 inline bool g_force_domain_digest_collision = false;
 inline bool g_provider_registered = false;
 inline bool g_provider_exact_source_elision_safe = true;
-inline BioseqCacheProviderRegistrationV2 g_provider_registration{
-    .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+inline bioseq_cache_provider_registration g_provider_registration{
+    .struct_size = sizeof(bioseq_cache_provider_registration),
 };
 inline bool g_hook_installed = false;
 inline bool g_scan_methods_registered = false;
 inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
-inline CallbackCounters g_counters{};
-inline std::array<std::uint8_t, kDigestBytes> g_provider_security_digest{};
+inline callback_counters g_counters{};
+inline std::array<std::uint8_t, k_digest_bytes> g_provider_security_digest{};
 
 [[nodiscard]] bool configured_target_relation(Oid relation_oid) noexcept {
     if (!OidIsValid(relation_oid)) {
@@ -222,9 +222,9 @@ void require_test_superuser() {
 /** Encode the cache ABI's padding-free PostgreSQL locator identity. */
 [[nodiscard]] bool provider_relation_physical_identity(
         Oid relation_oid,
-        BioseqCachePhysicalIdentityV2* output) {
+        bioseq_cache_physical_identity* output) {
     if (!OidIsValid(relation_oid) || output == nullptr
-        || kPgRelFileLocatorIdentityBytesV1 > sizeof(output->bytes)) {
+        || k_pg_rel_file_locator_identity_bytes > sizeof(output->bytes)) {
         return false;
     }
     Relation relation = table_open(relation_oid, AccessShareLock);
@@ -234,11 +234,11 @@ void require_test_superuser() {
         || !RelFileNumberIsValid(locator.relNumber)) {
         return false;
     }
-    *output = BioseqCachePhysicalIdentityV2{
-        .struct_size = sizeof(BioseqCachePhysicalIdentityV2),
-        .kind = kPgRelFileLocatorIdentityKindV1,
+    *output = bioseq_cache_physical_identity{
+        .struct_size = sizeof(bioseq_cache_physical_identity),
+        .kind = k_pg_rel_file_locator_identity_kind,
         .length = static_cast<std::uint32_t>(
-            kPgRelFileLocatorIdentityBytesV1),
+            k_pg_rel_file_locator_identity_bytes),
     };
     std::size_t offset = 0;
     std::memcpy(output->bytes + offset, &locator.spcOid, sizeof(locator.spcOid));
@@ -252,16 +252,16 @@ void require_test_superuser() {
 
 /** Emit a provider-complete write marker before transaction PRE_COMMIT. */
 [[nodiscard]] bool record_provider_relation_write(Oid relation_oid) {
-    BioseqCachePhysicalIdentityV2 identity{};
+    bioseq_cache_physical_identity identity{};
     void** slot = find_rendezvous_variable(
-        bioseq::cache::kCacheApiRendezvousName);
+        bioseq::cache::k_cache_api_rendezvous_name);
     if (!provider_relation_physical_identity(relation_oid, &identity)
         || slot == nullptr || *slot == nullptr) {
         return false;
     }
-    const auto* api = static_cast<const BioseqCacheApiV2*>(*slot);
+    const auto* api = static_cast<const bioseq_cache_api*>(*slot);
     if (api->struct_size < sizeof(*api)
-        || api->abi_version != bioseq::cache::kProviderAbiVersion
+        || api->abi_revision != bioseq::cache::k_provider_abi_revision
         || api->postgres_major
             != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
         || api->reserved != 0
@@ -299,7 +299,7 @@ void require_test_superuser() {
 }
 
 /** Deterministic non-cryptographic digest used only as provider test bytes. */
-[[nodiscard]] std::array<std::uint8_t, kDigestBytes>
+[[nodiscard]] std::array<std::uint8_t, k_digest_bytes>
 digest_plan_nodes(const List* nodes) noexcept {
     std::array<std::uint64_t, 4> state{
         0xcbf29ce484222325ULL,
@@ -325,7 +325,7 @@ digest_plan_nodes(const List* nodes) noexcept {
         }
         ++ordinal;
     }
-    std::array<std::uint8_t, kDigestBytes> result{};
+    std::array<std::uint8_t, k_digest_bytes> result{};
     for (std::size_t word = 0; word < state.size(); ++word) {
         for (std::size_t byte = 0; byte < sizeof(std::uint64_t); ++byte) {
             result[word * sizeof(std::uint64_t) + byte] =
@@ -335,7 +335,7 @@ digest_plan_nodes(const List* nodes) noexcept {
     return result;
 }
 
-struct ProjectedBoundaryWalkV1 {
+struct projected_boundary_walk {
     Index relation_index = 0;
     Bitmapset* attnos = nullptr;
     bool whole_row = false;
@@ -347,7 +347,7 @@ struct ProjectedBoundaryWalkV1 {
     if (node == nullptr) {
         return false;
     }
-    auto* context = static_cast<ProjectedBoundaryWalkV1*>(opaque);
+    auto* context = static_cast<projected_boundary_walk*>(opaque);
     if (context == nullptr) {
         return true;
     }
@@ -384,7 +384,7 @@ struct ProjectedBoundaryWalkV1 {
     }
     *output = nullptr;
     *output_count = 0;
-    ProjectedBoundaryWalkV1 context{.relation_index = relation_index};
+    projected_boundary_walk context{.relation_index = relation_index};
     static_cast<void>(projected_boundary_walker(
         reinterpret_cast<Node*>(relation_info->reltarget->exprs), &context));
     if (context.invalid) {
@@ -402,7 +402,7 @@ struct ProjectedBoundaryWalkV1 {
             ++count;
         }
     }
-    if (count > kMaximumRequiredBoundaryCount) {
+    if (count > k_maximum_required_boundary_count) {
         table_close(relation, NoLock);
         bms_free(context.attnos);
         return false;
@@ -436,8 +436,8 @@ struct ProjectedBoundaryWalkV1 {
     const std::uint32_t* required_boundary_attnos,
     std::size_t required_boundary_count) {
     List* nodes = list_make3(
-        makeInteger(kPlanVersion),
-        makeInteger(kPlanMagic),
+        makeInteger(k_plan_revision),
+        makeInteger(k_plan_magic),
         makeInteger(static_cast<std::int32_t>(relation_oid)));
     nodes = append_integer_pair(nodes, g_requested_capabilities);
     nodes = lappend(nodes, makeInteger(
@@ -450,7 +450,7 @@ struct ProjectedBoundaryWalkV1 {
         static_cast<std::int32_t>(required_boundary_count)));
     for (std::size_t index = 0; index < required_boundary_count; ++index) {
         const std::size_t source_index =
-            g_projection_order == ProjectionOrder::Natural
+            g_projection_order == projection_order::natural
             ? index
             : required_boundary_count - index - 1;
         nodes = lappend(nodes, makeInteger(static_cast<std::int32_t>(
@@ -462,7 +462,7 @@ struct ProjectedBoundaryWalkV1 {
 [[nodiscard]] std::uint32_t plan_required_boundary_attno(
     const List* nodes, std::size_t index) noexcept {
     return static_cast<std::uint32_t>(intVal(list_nth(
-        nodes, static_cast<int>(kPlanFixedNodeCount + index))));
+        nodes, static_cast<int>(k_plan_fixed_node_count + index))));
 }
 
 /** Parse and validate the fixed test-provider plan recipe. */
@@ -475,7 +475,7 @@ struct ProjectedBoundaryWalkV1 {
     AttrNumber* capability_attno,
     std::size_t* required_boundary_count) noexcept {
     if (nodes == nullptr
-        || list_length(nodes) < static_cast<int>(kPlanFixedNodeCount)) {
+        || list_length(nodes) < static_cast<int>(k_plan_fixed_node_count)) {
         return false;
     }
     for (int index = 0; index < list_length(nodes); ++index) {
@@ -484,8 +484,8 @@ struct ProjectedBoundaryWalkV1 {
             return false;
         }
     }
-    if (intVal(list_nth(nodes, 0)) != kPlanVersion
-        || intVal(list_nth(nodes, 1)) != kPlanMagic) {
+    if (intVal(list_nth(nodes, 0)) != k_plan_revision
+        || intVal(list_nth(nodes, 1)) != k_plan_magic) {
         return false;
     }
     const auto relation = static_cast<Oid>(
@@ -506,9 +506,9 @@ struct ProjectedBoundaryWalkV1 {
         || raw_capability_attno > MaxTupleAttributeNumber
         || required_count < 0
         || required_count
-            > static_cast<int>(kMaximumRequiredBoundaryCount)
+            > static_cast<int>(k_maximum_required_boundary_count)
         || list_length(nodes)
-            != static_cast<int>(kPlanFixedNodeCount) + required_count) {
+            != static_cast<int>(k_plan_fixed_node_count) + required_count) {
         return false;
     }
     const auto row_attno = static_cast<AttrNumber>(raw_row_attno);
@@ -762,14 +762,14 @@ void provider_explain_custom_scan(
 
 /** Fill one ABI schema element from a physical table attribute. */
 void fill_column_schema(
-    BioseqCacheColumnSchemaV2& output,
+    bioseq_cache_column_schema& output,
     AttrNumber attribute_number,
     Form_pg_attribute attribute,
     bool lineage) noexcept {
     const auto semantic = column_semantic_id(
         attribute_number, attribute, lineage);
     output = {
-        .struct_size = sizeof(BioseqCacheColumnSchemaV2),
+        .struct_size = sizeof(bioseq_cache_column_schema),
         .attno = static_cast<std::uint32_t>(attribute_number),
         .semantic_id_high = semantic[0],
         .semantic_id_low = semantic[1],
@@ -781,8 +781,8 @@ void fill_column_schema(
 }
 
 /** Find a schema element by its 1-based provider attribute number. */
-[[nodiscard]] const BioseqCacheColumnSchemaV2* find_schema_column(
-    const BioseqCacheColumnSchemaV2* columns,
+[[nodiscard]] const bioseq_cache_column_schema* find_schema_column(
+    const bioseq_cache_column_schema* columns,
     std::size_t count,
     std::uint32_t attribute_number) noexcept {
     for (std::size_t index = 0; index < count; ++index) {
@@ -793,8 +793,8 @@ void fill_column_schema(
     return nullptr;
 }
 
-struct NormalizedPredicateContextV1 {
-    const BioseqCachePathDomainV2* domain = nullptr;
+struct normalized_predicate_context {
+    const bioseq_cache_path_domain* domain = nullptr;
     bool valid = true;
 };
 
@@ -803,7 +803,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     if (node == nullptr) {
         return false;
     }
-    auto* context = static_cast<NormalizedPredicateContextV1*>(opaque);
+    auto* context = static_cast<normalized_predicate_context*>(opaque);
     if (context == nullptr || context->domain == nullptr
         || !context->valid) {
         return true;
@@ -833,22 +833,22 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 [[nodiscard]] bool provider_received_normalized_predicate(
-        const BioseqCachePathDomainV2& domain) {
-    NormalizedPredicateContextV1 context{.domain = &domain};
+        const bioseq_cache_path_domain& domain) {
+    normalized_predicate_context context{.domain = &domain};
     static_cast<void>(normalized_predicate_walker(
         reinterpret_cast<Node*>(domain.coverage_predicate), &context));
     return context.valid;
 }
 
 /** Query analysis admits only statements containing the configured table. */
-[[nodiscard]] BioseqCacheStatusV2 provider_analyze_query(
+[[nodiscard]] bioseq_cache_status provider_analyze_query(
     const Query* query,
-    BioseqCacheQueryIntentV2* output) {
+    bioseq_cache_query_intent* output) {
     ++g_counters.analyze_query;
     if (query == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
         || !OidIsValid(g_target_relation_oid)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     bool found = false;
     ListCell* cell = nullptr;
@@ -861,25 +861,25 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         }
     }
     if (!found) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     output->struct_size = sizeof(*output);
-    output->provider_id = kProviderId;
+    output->provider_id = k_provider_id;
     output->flags = 0;
     output->reserved = 0;
     output->provider_private_nodes = list_make2(
-        makeInteger(kPlanVersion),
+        makeInteger(k_plan_revision),
         makeInteger(static_cast<std::int32_t>(g_target_relation_oid)));
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 /** Advertise a complete raw boundary and one-occurrence lineage contract. */
-[[nodiscard]] BioseqCacheStatusV2 provider_describe_path(
+[[nodiscard]] bioseq_cache_status provider_describe_path(
     PlannerInfo* root,
     RelOptInfo* relation_info,
     Path* provider_path,
-    const BioseqCacheQueryIntentV2* intent,
-    BioseqCachePathDomainV2* output) {
+    const bioseq_cache_query_intent* intent,
+    bioseq_cache_path_domain* output) {
     ++g_counters.describe_path;
     if (root == nullptr || relation_info == nullptr || provider_path == nullptr
         || intent == nullptr || output == nullptr
@@ -888,9 +888,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         || provider_path->pathtype != T_CustomScan
         || reinterpret_cast<CustomPath*>(provider_path)->methods
             != &provider_path_methods()
-        || intent->provider_id != kProviderId
+        || intent->provider_id != k_provider_id
         || relation_info->relid == 0) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
     const bool index_valid = root->simple_rte_array != nullptr
@@ -903,7 +903,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         : nullptr;
     if (range_entry == nullptr || range_entry->rtekind != RTE_RELATION
         || !configured_target_relation(range_entry->relid)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     Oid recipe_relation_oid = InvalidOid;
     std::size_t required_boundary_count = 0;
@@ -917,13 +917,13 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             nullptr,
             &required_boundary_count)
         || recipe_relation_oid != range_entry->relid) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
     List* clauses = extract_actual_clauses(
         relation_info->baserestrictinfo, false);
     if (clauses == NIL) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     Expr* predicate = nullptr;
     if (list_length(clauses) == 1) {
@@ -936,7 +936,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     if (predicate == nullptr
         || unsafe_predicate_walker(
             reinterpret_cast<Node*>(predicate), &relation_index)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
     Relation relation = table_open(range_entry->relid, NoLock);
@@ -949,11 +949,11 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     }
     if (boundary_count == 0 || boundary_count > 1024) {
         table_close(relation, NoLock);
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
-    auto* boundary = static_cast<BioseqCacheColumnSchemaV2*>(
-        palloc0(boundary_count * sizeof(BioseqCacheColumnSchemaV2)));
+    auto* boundary = static_cast<bioseq_cache_column_schema*>(
+        palloc0(boundary_count * sizeof(bioseq_cache_column_schema)));
     auto* required_boundary = required_boundary_count == 0
         ? nullptr
         : static_cast<std::uint32_t*>(palloc0(
@@ -974,15 +974,15 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             provider_custom->custom_private, index);
         if (find_schema_column(boundary, boundary_count, attno) == nullptr) {
             table_close(relation, NoLock);
-            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+            return bioseq_cache_status_unsupported;
         }
         required_boundary[index] = attno;
     }
 
     constexpr std::array<const char*, 3> lineage_names{
         "row_id", "base_id", "occurrence_no"};
-    auto* lineage = static_cast<BioseqCacheColumnSchemaV2*>(
-        palloc0(lineage_names.size() * sizeof(BioseqCacheColumnSchemaV2)));
+    auto* lineage = static_cast<bioseq_cache_column_schema*>(
+        palloc0(lineage_names.size() * sizeof(bioseq_cache_column_schema)));
     auto* required_lineage = static_cast<std::uint32_t*>(
         palloc0(lineage_names.size() * sizeof(std::uint32_t)));
     for (std::size_t index = 0; index < lineage_names.size(); ++index) {
@@ -990,7 +990,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             range_entry->relid, lineage_names[index]);
         if (attno <= 0 || attno > descriptor->natts) {
             table_close(relation, NoLock);
-            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+            return bioseq_cache_status_unsupported;
         }
         fill_column_schema(
             lineage[index],
@@ -1002,8 +1002,8 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     table_close(relation, NoLock);
 
     output->struct_size = sizeof(*output);
-    output->provider_id = kProviderId;
-    output->compatibility_family_id = kCompatibilityFamily;
+    output->provider_id = k_provider_id;
+    output->compatibility_family_id = k_compatibility_family;
     output->capability_mask = g_requested_capabilities;
     output->coverage_predicate = predicate;
     output->boundary_columns = boundary;
@@ -1018,8 +1018,8 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         makeInteger(static_cast<std::int32_t>(range_entry->relid)));
     output->provider_private_nodes = static_cast<List*>(
         copyObject(reinterpret_cast<CustomPath*>(provider_path)->custom_private));
-    output->provider_security_digest_format_version =
-        BIOSEQ_CACHE_PROVIDER_SECURITY_DIGEST_FORMAT_V1;
+    output->provider_security_digest_format_revision =
+        bioseq_cache_provider_security_digest_format_canonical;
     output->provider_security_flags = 0;
     std::memcpy(
         output->provider_security_digest,
@@ -1029,12 +1029,12 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     g_counters.last_required_boundary_count = required_boundary_count;
     g_counters.last_lineage_column_count = lineage_names.size();
     g_counters.last_required_lineage_count = lineage_names.size();
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 /** Append stable bytes to a cache-owned bounded digest sink. */
 [[nodiscard]] bool append_digest_bytes(
-    BioseqCacheDigestSinkV2* sink,
+    bioseq_cache_digest_sink* sink,
     const void* data,
     std::size_t size) noexcept {
     return sink != nullptr && sink->struct_size >= sizeof(*sink)
@@ -1048,14 +1048,14 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
  * must meet in the same coverage directory before the generation key and
  * coverage algebra distinguish them.
  */
-[[nodiscard]] BioseqCacheStatusV2 provider_append_domain_digest(
-    const BioseqCachePathDomainV2* domain,
-    BioseqCacheDigestSinkV2* sink) {
+[[nodiscard]] bioseq_cache_status provider_append_domain_digest(
+    const bioseq_cache_path_domain* domain,
+    bioseq_cache_digest_sink* sink) {
     ++g_counters.domain_digest;
-    if (domain == nullptr || domain->provider_id != kProviderId
+    if (domain == nullptr || domain->provider_id != k_provider_id
         || domain->coverage_predicate == nullptr
         || !provider_received_normalized_predicate(*domain)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     Oid relation_oid = InvalidOid;
     AttrNumber row_attno = 0;
@@ -1070,11 +1070,11 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             &occurrence_attno,
             &capability_attno,
             nullptr)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     const std::uint64_t header = g_force_domain_digest_collision
         ? 0x434f4c4c4953494fULL
-        : kCompatibilityFamily;
+        : k_compatibility_family;
     const std::array<std::uint32_t, 5> identity{
         static_cast<std::uint32_t>(relation_oid),
         static_cast<std::uint32_t>(row_attno),
@@ -1085,22 +1085,22 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     return append_digest_bytes(sink, &header, sizeof(header))
             && append_digest_bytes(
                 sink, identity.data(), identity.size() * sizeof(identity[0]))
-        ? BIOSEQ_CACHE_STATUS_OK
-        : BIOSEQ_CACHE_STATUS_ERROR;
+        ? bioseq_cache_status_ok
+        : bioseq_cache_status_error;
 }
 
 /** Generation bytes add the exact predicate, capability, and ordered schemas. */
-[[nodiscard]] BioseqCacheStatusV2 provider_append_generation_digest(
-    const BioseqCachePathDomainV2* domain,
-    BioseqCacheDigestSinkV2* sink) {
+[[nodiscard]] bioseq_cache_status provider_append_generation_digest(
+    const bioseq_cache_path_domain* domain,
+    bioseq_cache_digest_sink* sink) {
     ++g_counters.generation_digest;
     if (provider_append_domain_digest(domain, sink)
-        != BIOSEQ_CACHE_STATUS_OK) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        != bioseq_cache_status_ok) {
+        return bioseq_cache_status_error;
     }
     char* serialized = nodeToString(domain->coverage_predicate);
     if (serialized == nullptr) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
     const std::size_t predicate_size = std::strlen(serialized);
     const std::uint64_t stable_predicate_size = predicate_size;
@@ -1109,14 +1109,14 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         && append_digest_bytes(sink, serialized, predicate_size);
     pfree(serialized);
     if (!predicate_appended) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
     if (!append_digest_bytes(
             sink, &domain->capability_mask, sizeof(domain->capability_mask))) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
     const std::array<std::uint32_t, 5> semantic_shape{
-        kGenerationSemanticVersion,
+        k_generation_semantic_revision,
         static_cast<std::uint32_t>(domain->boundary_column_count),
         static_cast<std::uint32_t>(domain->lineage_column_count),
         static_cast<std::uint32_t>(domain->required_boundary_attno_count),
@@ -1126,20 +1126,20 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             sink,
             semantic_shape.data(),
             semantic_shape.size() * sizeof(semantic_shape[0]))) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
     for (std::size_t index = 0; index < domain->boundary_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->boundary_columns[index],
-                sizeof(BioseqCacheColumnSchemaV2))) {
-            return BIOSEQ_CACHE_STATUS_ERROR;
+                sizeof(bioseq_cache_column_schema))) {
+            return bioseq_cache_status_error;
         }
     }
     for (std::size_t index = 0; index < domain->lineage_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->lineage_columns[index],
-                sizeof(BioseqCacheColumnSchemaV2))) {
-            return BIOSEQ_CACHE_STATUS_ERROR;
+                sizeof(bioseq_cache_column_schema))) {
+            return bioseq_cache_status_error;
         }
     }
     if (!append_digest_bytes(
@@ -1152,9 +1152,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
             domain->required_lineage_attnos,
             domain->required_lineage_attno_count
                 * sizeof(std::uint32_t))) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 } // namespace bioseq::cache::pg::test_provider
@@ -1165,7 +1165,7 @@ namespace bioseq::cache::pg::test_provider {
  * Genuine ordering cycle: the relation hook calls the provider table, while
  * the table must be defined after every callback it stores.
  */
-[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept;
+[[nodiscard]] const bioseq_cache_provider& provider() noexcept;
 
 /** Resolve the four required occurrence columns on the configured table. */
 [[nodiscard]] bool relation_contract_attnos(
@@ -1249,26 +1249,26 @@ void call_planner_bridge(
     Index range_table_index,
     RangeTblEntry* range_entry) noexcept {
     void** slot = find_rendezvous_variable(
-        bioseq::cache::kCacheApiRendezvousName);
+        bioseq::cache::k_cache_api_rendezvous_name);
     if (slot == nullptr || *slot == nullptr) {
         return;
     }
-    const auto* api = static_cast<const BioseqCacheApiV2*>(*slot);
+    const auto* api = static_cast<const bioseq_cache_api*>(*slot);
     if (api->struct_size
-            < offsetof(BioseqCacheApiV2, planner_bridge)
+            < offsetof(bioseq_cache_api, planner_bridge)
                 + sizeof(api->planner_bridge)
-        || api->abi_version != bioseq::cache::kProviderAbiVersion
+        || api->abi_revision != bioseq::cache::k_provider_abi_revision
         || api->postgres_major
             != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
         || api->reserved != 0 || api->instance_cookie == 0) {
         return;
     }
-    const BioseqCachePlannerBridgeV2* bridge = api->planner_bridge;
+    const bioseq_cache_planner_bridge* bridge = api->planner_bridge;
     if (bridge == nullptr) {
         return;
     }
     if (bridge->struct_size < sizeof(*bridge)
-        || bridge->abi_version != bioseq::cache::kProviderAbiVersion
+        || bridge->abi_revision != bioseq::cache::k_provider_abi_revision
         || bridge->postgres_major
             != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
         || bridge->after_provider_rel_paths == nullptr) {
@@ -1280,7 +1280,7 @@ void call_planner_bridge(
         relation,
         range_table_index,
         range_entry,
-        &provider_v2());
+        &provider());
 }
 
 /** Chained relation hook: add the provider path, then invoke the bridge. */
@@ -1378,13 +1378,13 @@ void provider_set_rel_pathlist_hook(
     }
     if (!g_provider_registered) {
         void** slot = find_rendezvous_variable(
-            bioseq::cache::kCacheApiRendezvousName);
+            bioseq::cache::k_cache_api_rendezvous_name);
         if (slot == nullptr || *slot == nullptr) {
             return false;
         }
-        auto* api = static_cast<BioseqCacheApiV2*>(*slot);
+        auto* api = static_cast<bioseq_cache_api*>(*slot);
         if (api->struct_size < sizeof(*api)
-            || api->abi_version != bioseq::cache::kProviderAbiVersion
+            || api->abi_revision != bioseq::cache::k_provider_abi_revision
             || api->postgres_major
                 != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
             || api->reserved != 0 || api->instance_cookie == 0
@@ -1392,11 +1392,11 @@ void provider_set_rel_pathlist_hook(
             return false;
         }
         g_provider_registration = {
-            .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+            .struct_size = sizeof(bioseq_cache_provider_registration),
         };
         if (api->register_provider(
-                &provider_v2(), &g_provider_registration)
-            != BIOSEQ_CACHE_STATUS_OK) {
+                &provider(), &g_provider_registration)
+            != bioseq_cache_status_ok) {
             return false;
         }
         g_provider_registered = true;
@@ -1413,11 +1413,11 @@ void provider_set_rel_pathlist_hook(
 [[nodiscard]] bool shutdown_provider() noexcept {
     if (g_provider_registered) {
         void** slot = find_rendezvous_variable(
-            bioseq::cache::kCacheApiRendezvousName);
+            bioseq::cache::k_cache_api_rendezvous_name);
         if (slot == nullptr || *slot == nullptr) {
             return false;
         }
-        auto* api = static_cast<BioseqCacheApiV2*>(*slot);
+        auto* api = static_cast<bioseq_cache_api*>(*slot);
         if (api->struct_size < sizeof(*api)
             || api->unregister_provider == nullptr
             || !api->unregister_provider(&g_provider_registration)) {
@@ -1432,63 +1432,75 @@ void provider_set_rel_pathlist_hook(
     g_previous_set_rel_pathlist_hook = nullptr;
     g_provider_registered = false;
     g_provider_registration = {
-        .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+        .struct_size = sizeof(bioseq_cache_provider_registration),
     };
     g_persisted_mapping_fault_statement = nullptr;
     return true;
 }
 
 /** Parse the normative mapping-fault control vocabulary. */
-[[nodiscard]] MappingFault parse_mapping_fault(const char* name) {
-    struct NamedFault {
+[[nodiscard]] mapping_fault parse_mapping_fault(const char* name) {
+    struct named_fault {
         const char* name;
-        MappingFault value;
+        mapping_fault value;
     };
-    static constexpr std::array<NamedFault, 44> faults{{
-        {"none", MappingFault::None},
-        {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
-        {"short_boundary_map", MappingFault::ShortBoundaryMap},
-        {"long_boundary_map", MappingFault::LongBoundaryMap},
-        {"short_lineage_map", MappingFault::ShortLineageMap},
-        {"long_lineage_map", MappingFault::LongLineageMap},
-        {"zero_consumer_attno", MappingFault::ZeroConsumerAttno},
-        {"zero_source_attno", MappingFault::ZeroSourceAttno},
-        {"source_attno_out_of_range", MappingFault::SourceAttnoOutOfRange},
-        {"duplicate_consumer_attno", MappingFault::DuplicateConsumerAttno},
-        {"missing_required_attno", MappingFault::MissingRequiredAttno},
-        {"wrong_type", MappingFault::WrongType},
-        {"wrong_typmod", MappingFault::WrongTypmod},
-        {"wrong_collation", MappingFault::WrongCollation},
-        {"wrong_semantic_id", MappingFault::WrongSemanticId},
-        {"same_typed_column_permutation", MappingFault::SameTypedColumnPermutation},
-        {"illegal_repeated_source_attno", MappingFault::IllegalRepeatedSourceAttno},
-        {"bad_provider_private_version", MappingFault::BadProviderPrivateVersion},
-        {"non_integer_persisted_map_node", MappingFault::NonIntegerPersistedMapNode},
-        {"unknown_persisted_map_version", MappingFault::UnknownPersistedMapVersion},
-        {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
-        {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
-        {"provider_error", MappingFault::ProviderError},
-        {"provider_unsupported", MappingFault::ProviderUnsupported},
-        {"provider_status_error", MappingFault::ProviderStatusError},
-        {"provider_query_canceled", MappingFault::ProviderQueryCanceled},
-        {"late_fetch_error_once", MappingFault::LateFetchErrorOnce},
-        {"late_fetch_partial_status_error_once", MappingFault::LateFetchPartialStatusErrorOnce},
-        {"persisted_wrong_top_tag", MappingFault::PersistedWrongTopTag},
-        {"persisted_short_top", MappingFault::PersistedShortTop},
-        {"persisted_long_top", MappingFault::PersistedLongTop},
-        {"persisted_bad_magic", MappingFault::PersistedBadMagic},
-        {"persisted_bad_version", MappingFault::PersistedBadVersion},
-        {"persisted_count_overflow", MappingFault::PersistedCountOverflow},
-        {"persisted_wrong_entry_tag", MappingFault::PersistedWrongEntryTag},
-        {"persisted_short_entry", MappingFault::PersistedShortEntry},
-        {"persisted_long_entry", MappingFault::PersistedLongEntry},
-        {"persisted_bad_semantic_size", MappingFault::PersistedBadSemanticSize},
-        {"persisted_bad_fingerprint_size", MappingFault::PersistedBadFingerprintSize},
-        {"persisted_bad_entry_metadata", MappingFault::PersistedBadEntryMetadata},
-        {"persisted_source_fingerprint_mismatch", MappingFault::PersistedSourceFingerprintMismatch},
-        {"persisted_consumer_fingerprint_mismatch", MappingFault::PersistedConsumerFingerprintMismatch},
-        {"persisted_decorated_fingerprint_mismatch", MappingFault::PersistedDecoratedFingerprintMismatch},
-        {"persisted_map_fingerprint_mismatch", MappingFault::PersistedMapFingerprintMismatch},
+    static constexpr std::array<named_fault, 44> faults{{
+        {"none", mapping_fault::none},
+        {"null_pointer_nonzero_count", mapping_fault::null_pointer_nonzero_count},
+        {"short_boundary_map", mapping_fault::short_boundary_map},
+        {"long_boundary_map", mapping_fault::long_boundary_map},
+        {"short_lineage_map", mapping_fault::short_lineage_map},
+        {"long_lineage_map", mapping_fault::long_lineage_map},
+        {"zero_consumer_attno", mapping_fault::zero_consumer_attno},
+        {"zero_source_attno", mapping_fault::zero_source_attno},
+        {"source_attno_out_of_range", mapping_fault::source_attno_out_of_range},
+        {"duplicate_consumer_attno", mapping_fault::duplicate_consumer_attno},
+        {"missing_required_attno", mapping_fault::missing_required_attno},
+        {"wrong_type", mapping_fault::wrong_type},
+        {"wrong_typmod", mapping_fault::wrong_typmod},
+        {"wrong_collation", mapping_fault::wrong_collation},
+        {"wrong_semantic_id", mapping_fault::wrong_semantic_id},
+        {"same_typed_column_permutation", mapping_fault::same_typed_column_permutation},
+        {"illegal_repeated_source_attno", mapping_fault::illegal_repeated_source_attno},
+        {"bad_provider_private_revision", mapping_fault::bad_provider_private_revision},
+        {"non_integer_persisted_map_node", mapping_fault::non_integer_persisted_map_node},
+        {"unknown_persisted_map_revision", mapping_fault::unknown_persisted_map_revision},
+        {"decorated_boundary_schema_mismatch", mapping_fault::decorated_boundary_schema_mismatch},
+        {"decorated_lineage_schema_mismatch", mapping_fault::decorated_lineage_schema_mismatch},
+        {"provider_error", mapping_fault::provider_error},
+        {"provider_unsupported", mapping_fault::provider_unsupported},
+        {"provider_status_error", mapping_fault::provider_status_error},
+        {"provider_query_canceled", mapping_fault::provider_query_canceled},
+        {"late_fetch_error_once", mapping_fault::late_fetch_error_once},
+        {
+            "late_fetch_partial_status_error_once",
+            mapping_fault::late_fetch_partial_status_error_once,
+        },
+        {"persisted_wrong_top_tag", mapping_fault::persisted_wrong_top_tag},
+        {"persisted_short_top", mapping_fault::persisted_short_top},
+        {"persisted_long_top", mapping_fault::persisted_long_top},
+        {"persisted_bad_magic", mapping_fault::persisted_bad_magic},
+        {"persisted_bad_revision", mapping_fault::persisted_bad_revision},
+        {"persisted_count_overflow", mapping_fault::persisted_count_overflow},
+        {"persisted_wrong_entry_tag", mapping_fault::persisted_wrong_entry_tag},
+        {"persisted_short_entry", mapping_fault::persisted_short_entry},
+        {"persisted_long_entry", mapping_fault::persisted_long_entry},
+        {"persisted_bad_semantic_size", mapping_fault::persisted_bad_semantic_size},
+        {"persisted_bad_fingerprint_size", mapping_fault::persisted_bad_fingerprint_size},
+        {"persisted_bad_entry_metadata", mapping_fault::persisted_bad_entry_metadata},
+        {
+            "persisted_source_fingerprint_mismatch",
+            mapping_fault::persisted_source_fingerprint_mismatch,
+        },
+        {
+            "persisted_consumer_fingerprint_mismatch",
+            mapping_fault::persisted_consumer_fingerprint_mismatch,
+        },
+        {
+            "persisted_decorated_fingerprint_mismatch",
+            mapping_fault::persisted_decorated_fingerprint_mismatch,
+        },
+        {"persisted_map_fingerprint_mismatch", mapping_fault::persisted_map_fingerprint_mismatch},
     }};
     for (const auto& fault : faults) {
         if (std::strcmp(name, fault.name) == 0) {
@@ -1615,9 +1627,9 @@ export void provider_set_digest_fault(const std::string& name) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     if (name == "none") {
-        g_digest_fault = DigestFault::None;
+        g_digest_fault = digest_fault::none;
     } else if (name == "runtime_mismatch") {
-        g_digest_fault = DigestFault::RuntimeMismatch;
+        g_digest_fault = digest_fault::runtime_mismatch;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1627,7 +1639,7 @@ export void provider_set_digest_fault(const std::string& name) {
 }
 
 export void provider_set_security_digest(
-        const bioseq::pg_utils::sql_bytea& digest) {
+        const bioseq::postgres::support::bytea_value& digest) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     if (digest.bytes().size() != g_provider_security_digest.size()) {
@@ -1653,9 +1665,9 @@ export void provider_set_projection_order(const std::string& name) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     if (name == "natural") {
-        g_projection_order = ProjectionOrder::Natural;
+        g_projection_order = projection_order::natural;
     } else if (name == "reverse") {
-        g_projection_order = ProjectionOrder::Reverse;
+        g_projection_order = projection_order::reverse;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1685,17 +1697,17 @@ export void provider_reset() {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     g_requested_capabilities = 1;
-    g_mapping_fault = MappingFault::None;
+    g_mapping_fault = mapping_fault::none;
     g_persisted_mapping_fault_statement = nullptr;
-    g_digest_fault = DigestFault::None;
-    g_projection_order = ProjectionOrder::Natural;
+    g_digest_fault = digest_fault::none;
+    g_projection_order = projection_order::natural;
     g_force_domain_digest_collision = false;
     g_provider_security_digest.fill(0);
     g_counters = {};
     ResetPlanCache();
 }
 
-export [[nodiscard]] bioseq::pg_utils::sql_jsonb provider_stats() {
+export [[nodiscard]] bioseq::postgres::support::jsonb_value provider_stats() {
     using namespace bioseq::cache::pg::test_provider;
     StringInfoData json{};
     initStringInfo(&json);
@@ -1745,7 +1757,7 @@ export [[nodiscard]] bioseq::pg_utils::sql_jsonb provider_stats() {
             g_counters.last_required_lineage_count),
         static_cast<unsigned long long>(
             g_counters.last_recipe_required_boundary_count));
-    bioseq::pg_utils::sql_jsonb result{std::string{json.data}};
+    bioseq::postgres::support::jsonb_value result{std::string{json.data}};
     pfree(json.data);
     return result;
 }
@@ -1755,10 +1767,10 @@ export [[nodiscard]] bioseq::pg_utils::sql_jsonb provider_stats() {
 namespace bioseq::cache::pg::test_provider {
 
 /** Extract one stable provider-opaque binding occurrence from a raw slot. */
-[[nodiscard]] BioseqCacheStatusV2 provider_extract_occurrence(
+[[nodiscard]] bioseq_cache_status provider_extract_occurrence(
     List* plan_domain_nodes,
     TupleTableSlot* slot,
-    BioseqCacheOccurrenceV2* output) {
+    bioseq_cache_occurrence* output) {
     ++g_counters.extract_occurrence;
     Oid relation_oid = InvalidOid;
     AttrNumber row_attno = 0;
@@ -1775,7 +1787,7 @@ namespace bioseq::cache::pg::test_provider {
             &occurrence_attno,
             &capability_attno,
             nullptr)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     bool row_is_null = false;
     bool base_is_null = false;
@@ -1789,7 +1801,7 @@ namespace bioseq::cache::pg::test_provider {
         slot, capability_attno, &capability_is_null);
     if (row_is_null || base_is_null || occurrence_is_null
         || capability_is_null) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     output->struct_size = sizeof(*output);
     output->rte_ordinal = 1;
@@ -1805,14 +1817,14 @@ namespace bioseq::cache::pg::test_provider {
         DatumGetInt32(occurrence_value));
     output->capability_mask = static_cast<std::uint64_t>(
         DatumGetInt64(capability_value));
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 /** Emit one terminal status for every reference on an early batch failure. */
 void emit_batch_failure_statuses(
-    BioseqCacheLateFetchSinkV2* sink,
+    bioseq_cache_late_fetch_sink* sink,
     std::size_t occurrence_count,
-    BioseqCacheStatusV2 status) noexcept {
+    bioseq_cache_status status) noexcept {
     if (sink == nullptr || sink->struct_size < sizeof(*sink)
         || sink->emit_reference_status == nullptr) {
         return;
@@ -1826,18 +1838,18 @@ void emit_batch_failure_statuses(
  * Fetch every provider-opaque row identity in one table scan under the
  * consumer snapshot, emitting values first and exactly one terminal status.
  */
-[[nodiscard]] BioseqCacheStatusV2 provider_late_fetch_batch(
+[[nodiscard]] bioseq_cache_status provider_late_fetch_batch(
     List* plan_domain_nodes,
     EState* estate,
-    const BioseqCacheOccurrenceV2* occurrences,
+    const bioseq_cache_occurrence* occurrences,
     std::size_t occurrence_count,
     const std::int16_t* attribute_numbers,
     std::size_t attribute_count,
-    BioseqCacheLateFetchSinkV2* sink) {
+    bioseq_cache_late_fetch_sink* sink) {
     ++g_counters.late_fetch_batch;
     g_counters.late_fetch_references += occurrence_count;
-    if (g_mapping_fault == MappingFault::LateFetchErrorOnce) {
-        g_mapping_fault = MappingFault::None;
+    if (g_mapping_fault == mapping_fault::late_fetch_error_once) {
+        g_mapping_fault = mapping_fault::none;
         ++g_counters.late_fetch_errors;
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
@@ -1864,17 +1876,17 @@ void emit_batch_failure_statuses(
             &capability_attno,
             nullptr)) {
         emit_batch_failure_statuses(
-            sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+            sink, occurrence_count, bioseq_cache_status_unsupported);
+        return bioseq_cache_status_unsupported;
     }
     for (std::size_t index = 0; index < occurrence_count; ++index) {
-        if (occurrences[index].struct_size < sizeof(BioseqCacheOccurrenceV2)
+        if (occurrences[index].struct_size < sizeof(bioseq_cache_occurrence)
             || occurrences[index].identity_kind != 3U
             || occurrences[index].logical_relation_oid != relation_oid
             || occurrences[index].leaf_relation_oid != relation_oid) {
             emit_batch_failure_statuses(
-                sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
-            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+                sink, occurrence_count, bioseq_cache_status_unsupported);
+            return bioseq_cache_status_unsupported;
         }
     }
 
@@ -1886,18 +1898,18 @@ void emit_batch_failure_statuses(
             || TupleDescAttr(descriptor, attno - 1)->attisdropped) {
             table_close(relation, NoLock);
             emit_batch_failure_statuses(
-                sink, occurrence_count, BIOSEQ_CACHE_STATUS_UNSUPPORTED);
-            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+                sink, occurrence_count, bioseq_cache_status_unsupported);
+            return bioseq_cache_status_unsupported;
         }
     }
 
     auto* found = static_cast<bool*>(
         palloc0(occurrence_count * sizeof(bool)));
-    auto* terminal = static_cast<BioseqCacheStatusV2*>(palloc(
-        occurrence_count * sizeof(BioseqCacheStatusV2)));
+    auto* terminal = static_cast<bioseq_cache_status*>(palloc(
+        occurrence_count * sizeof(bioseq_cache_status)));
     bool injected_partial_status_error = false;
     for (std::size_t index = 0; index < occurrence_count; ++index) {
-        terminal[index] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        terminal[index] = bioseq_cache_status_unsupported;
     }
 
     TableScanDesc scan = table_beginscan(
@@ -1940,10 +1952,10 @@ void emit_batch_failure_statuses(
                     != occurrence_identity
                 || occurrences[reference].capability_mask
                     != capability_mask) {
-                terminal[reference] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+                terminal[reference] = bioseq_cache_status_unsupported;
                 continue;
             }
-            terminal[reference] = BIOSEQ_CACHE_STATUS_OK;
+            terminal[reference] = bioseq_cache_status_ok;
             for (std::size_t requested = 0;
                  requested < attribute_count;
                  ++requested) {
@@ -1961,26 +1973,26 @@ void emit_batch_failure_statuses(
                     if (datum_bytes
                         > (std::numeric_limits<std::uint64_t>::max)()
                             - g_counters.late_fetch_bytes) {
-                        terminal[reference] = BIOSEQ_CACHE_STATUS_ERROR;
+                        terminal[reference] = bioseq_cache_status_error;
                         break;
                     }
                     value_bytes = static_cast<std::uint64_t>(datum_bytes);
                 }
-                const BioseqCacheStatusV2 status = sink->emit_value(
+                const bioseq_cache_status status = sink->emit_value(
                     sink->opaque,
                     reference,
                     requested,
                     static_cast<std::uintptr_t>(value),
                     is_null);
-                if (status != BIOSEQ_CACHE_STATUS_OK) {
+                if (status != bioseq_cache_status_ok) {
                     terminal[reference] = status;
                     break;
                 }
                 ++g_counters.late_fetch_values;
                 g_counters.late_fetch_bytes += value_bytes;
                 if (g_mapping_fault
-                    == MappingFault::LateFetchPartialStatusErrorOnce) {
-                    g_mapping_fault = MappingFault::None;
+                    == mapping_fault::late_fetch_partial_status_error_once) {
+                    g_mapping_fault = mapping_fault::none;
                     ++g_counters.late_fetch_errors;
                     injected_partial_status_error = true;
                     break;
@@ -2002,24 +2014,24 @@ void emit_batch_failure_statuses(
     if (injected_partial_status_error) {
         pfree(terminal);
         pfree(found);
-        return BIOSEQ_CACHE_STATUS_ERROR;
+        return bioseq_cache_status_error;
     }
     bool all_valid = true;
     for (std::size_t index = 0; index < occurrence_count; ++index) {
         sink->emit_reference_status(sink->opaque, index, terminal[index]);
-        all_valid = all_valid && terminal[index] == BIOSEQ_CACHE_STATUS_OK;
+        all_valid = all_valid && terminal[index] == bioseq_cache_status_ok;
     }
     pfree(terminal);
     pfree(found);
     return all_valid
-        ? BIOSEQ_CACHE_STATUS_OK
-        : BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        ? bioseq_cache_status_ok
+        : bioseq_cache_status_unsupported;
 }
 
 /** Provider-specific EXPLAIN fields contain no raw SQL or sensitive values. */
 void provider_explain_domain(
     List* plan_domain_nodes,
-    BioseqCacheExplainSinkV2* sink) {
+    bioseq_cache_explain_sink* sink) {
     if (sink == nullptr || sink->struct_size < sizeof(*sink)) {
         return;
     }
@@ -2057,8 +2069,8 @@ void provider_explain_domain(
 namespace bioseq::cache::pg::test_provider {
 
 [[nodiscard]] bool persisted_mapping_fault_active() noexcept {
-    return g_mapping_fault >= MappingFault::PersistedWrongTopTag
-        && g_mapping_fault <= MappingFault::PersistedMapFingerprintMismatch;
+    return g_mapping_fault >= mapping_fault::persisted_wrong_top_tag
+        && g_mapping_fault <= mapping_fault::persisted_map_fingerprint_mismatch;
 }
 
 [[nodiscard]] CustomScan* find_reusable_coverage_plan(
@@ -2136,7 +2148,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     }
     auto* value = reinterpret_cast<bytea*>(
         DatumGetPointer(constant->constvalue));
-    if (value == nullptr || VARSIZE_ANY_EXHDR(value) != kDigestBytes) {
+    if (value == nullptr || VARSIZE_ANY_EXHDR(value) != k_digest_bytes) {
         return false;
     }
     reinterpret_cast<std::uint8_t*>(VARDATA_ANY(value))[0] ^= 0x80U;
@@ -2168,7 +2180,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
         return false;
     }
     ListCell* plan_cell = list_nth_cell(candidate, 3);
-    if (g_mapping_fault == MappingFault::PersistedWrongTopTag) {
+    if (g_mapping_fault == mapping_fault::persisted_wrong_top_tag) {
         lfirst(plan_cell) = makeInteger(0);
         return true;
     }
@@ -2179,24 +2191,24 @@ void replace_list_node(List* list, int index, void* node) noexcept {
     if (list_length(mapping_plan) < 8) {
         return false;
     }
-    if (g_mapping_fault == MappingFault::PersistedShortTop) {
+    if (g_mapping_fault == mapping_fault::persisted_short_top) {
         lfirst(plan_cell) = list_truncate(
             mapping_plan, list_length(mapping_plan) - 1);
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedLongTop) {
+    if (g_mapping_fault == mapping_fault::persisted_long_top) {
         lfirst(plan_cell) = lappend(mapping_plan, makeInteger(0));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedBadMagic) {
+    if (g_mapping_fault == mapping_fault::persisted_bad_magic) {
         replace_list_node(mapping_plan, 0, makeInteger(0));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedBadVersion) {
+    if (g_mapping_fault == mapping_fault::persisted_bad_revision) {
         replace_list_node(mapping_plan, 1, makeInteger(999));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedCountOverflow) {
+    if (g_mapping_fault == mapping_fault::persisted_count_overflow) {
         replace_list_node(mapping_plan, 2, makeInteger(1025));
         return true;
     }
@@ -2204,31 +2216,31 @@ void replace_list_node(List* list, int index, void* node) noexcept {
         return false;
     }
     auto* entry = static_cast<List*>(list_nth(mapping_plan, 4));
-    if (g_mapping_fault == MappingFault::PersistedWrongEntryTag) {
+    if (g_mapping_fault == mapping_fault::persisted_wrong_entry_tag) {
         replace_list_node(mapping_plan, 4, makeInteger(0));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedShortEntry) {
+    if (g_mapping_fault == mapping_fault::persisted_short_entry) {
         replace_list_node(mapping_plan, 4,
             list_truncate(entry, list_length(entry) - 1));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedLongEntry) {
+    if (g_mapping_fault == mapping_fault::persisted_long_entry) {
         replace_list_node(mapping_plan, 4, lappend(entry, makeInteger(0)));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedBadSemanticSize) {
+    if (g_mapping_fault == mapping_fault::persisted_bad_semantic_size) {
         replace_list_node(entry, 4, make_fault_bytea_node(15));
         return true;
     }
-    if (g_mapping_fault == MappingFault::PersistedBadEntryMetadata) {
+    if (g_mapping_fault == mapping_fault::persisted_bad_entry_metadata) {
         replace_list_node(entry, 0, makeInteger(1));
         return true;
     }
     const int boundary_count = intVal(list_nth(mapping_plan, 2));
     const int lineage_count = intVal(list_nth(mapping_plan, 3));
     const int fingerprint_index = 4 + boundary_count + lineage_count;
-    if (g_mapping_fault == MappingFault::PersistedBadFingerprintSize) {
+    if (g_mapping_fault == mapping_fault::persisted_bad_fingerprint_size) {
         if (fingerprint_index < 4
             || fingerprint_index >= list_length(mapping_plan)) {
             return false;
@@ -2238,32 +2250,32 @@ void replace_list_node(List* list, int index, void* node) noexcept {
         return true;
     }
     const int ordinal =
-        g_mapping_fault == MappingFault::PersistedSourceFingerprintMismatch
+        g_mapping_fault == mapping_fault::persisted_source_fingerprint_mismatch
             ? 0
             : g_mapping_fault
-                    == MappingFault::PersistedConsumerFingerprintMismatch
+                    == mapping_fault::persisted_consumer_fingerprint_mismatch
                 ? 1
                 : g_mapping_fault
-                        == MappingFault::PersistedDecoratedFingerprintMismatch
+                        == mapping_fault::persisted_decorated_fingerprint_mismatch
                     ? 2
                     : 3;
     return flip_mapping_fingerprint(mapping_plan, ordinal);
 }
 
 /** Runtime digest validates only the immutable Node recipe. */
-[[nodiscard]] BioseqCacheStatusV2 provider_append_runtime_digest(
+[[nodiscard]] bioseq_cache_status provider_append_runtime_digest(
     const List* plan_domain_nodes,
     EState* estate,
-    BioseqCacheDigestSinkV2* sink) {
+    bioseq_cache_digest_sink* sink) {
     ++g_counters.runtime_digest;
     if (persisted_mapping_fault_active()) {
         if (estate == nullptr || estate->es_plannedstmt == nullptr) {
-            return BIOSEQ_CACHE_STATUS_ERROR;
+            return bioseq_cache_status_error;
         }
         if (g_persisted_mapping_fault_statement
                 != estate->es_plannedstmt) {
             if (!mutate_persisted_mapping_plan(estate)) {
-                return BIOSEQ_CACHE_STATUS_ERROR;
+                return bioseq_cache_status_error;
             }
             g_persisted_mapping_fault_statement = estate->es_plannedstmt;
         }
@@ -2276,21 +2288,21 @@ void replace_list_node(List* list, int index, void* node) noexcept {
             nullptr,
             nullptr,
             nullptr)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     auto digest = digest_plan_nodes(plan_domain_nodes);
-    if (g_digest_fault == DigestFault::RuntimeMismatch) {
+    if (g_digest_fault == digest_fault::runtime_mismatch) {
         digest[0] ^= 0x5aU;
     }
     return append_digest_bytes(sink, digest.data(), digest.size())
-        ? BIOSEQ_CACHE_STATUS_OK
-        : BIOSEQ_CACHE_STATUS_ERROR;
+        ? bioseq_cache_status_ok
+        : bioseq_cache_status_error;
 }
 
 /** Find a source column having exactly the same semantic contract. */
-[[nodiscard]] const BioseqCacheColumnSchemaV2* find_compatible_source_column(
-    const BioseqCacheColumnSchemaV2& consumer,
-    const BioseqCacheColumnSchemaV2* source_columns,
+[[nodiscard]] const bioseq_cache_column_schema* find_compatible_source_column(
+    const bioseq_cache_column_schema& consumer,
+    const bioseq_cache_column_schema* source_columns,
     std::size_t source_count) noexcept {
     for (std::size_t index = 0; index < source_count; ++index) {
         const auto& source = source_columns[index];
@@ -2307,13 +2319,13 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 
 /** Construct one complete source-to-consumer map in requested consumer order. */
 [[nodiscard]] bool fill_source_map(
-    const BioseqCacheColumnSchemaV2* consumer_columns,
+    const bioseq_cache_column_schema* consumer_columns,
     std::size_t consumer_count,
     const std::uint32_t* required_attnos,
     std::size_t required_count,
-    const BioseqCacheColumnSchemaV2* source_columns,
+    const bioseq_cache_column_schema* source_columns,
     std::size_t source_count,
-    BioseqCacheColumnMapEntryV2* output) noexcept {
+    bioseq_cache_column_map_entry* output) noexcept {
     if (required_count != 0
         && (required_attnos == nullptr || output == nullptr)) {
         return false;
@@ -2330,7 +2342,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
             return false;
         }
         output[index] = {
-            .struct_size = sizeof(BioseqCacheColumnMapEntryV2),
+            .struct_size = sizeof(bioseq_cache_column_map_entry),
             .consumer_attno = consumer->attno,
             .source_attno = source->attno,
             .flags = 0,
@@ -2347,172 +2359,172 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 
 /** Apply one malformed-output mode after constructing a correct map. */
 void apply_mapping_fault(
-    BioseqCacheSourceMappingV2& mapping,
+    bioseq_cache_source_mapping& mapping,
     std::size_t boundary_capacity,
     std::size_t lineage_capacity) {
-    auto* boundary = const_cast<BioseqCacheColumnMapEntryV2*>(
+    auto* boundary = const_cast<bioseq_cache_column_map_entry*>(
         mapping.boundary_map);
-    auto* lineage = const_cast<BioseqCacheColumnMapEntryV2*>(
+    auto* lineage = const_cast<bioseq_cache_column_map_entry*>(
         mapping.lineage_map);
     switch (g_mapping_fault) {
-        case MappingFault::None:
-        case MappingFault::DecoratedBoundarySchemaMismatch:
-        case MappingFault::DecoratedLineageSchemaMismatch:
-        case MappingFault::ProviderUnsupported:
-        case MappingFault::ProviderStatusError:
-        case MappingFault::ProviderQueryCanceled:
-        case MappingFault::LateFetchErrorOnce:
-        case MappingFault::LateFetchPartialStatusErrorOnce:
-        case MappingFault::PersistedWrongTopTag:
-        case MappingFault::PersistedShortTop:
-        case MappingFault::PersistedLongTop:
-        case MappingFault::PersistedBadMagic:
-        case MappingFault::PersistedBadVersion:
-        case MappingFault::PersistedCountOverflow:
-        case MappingFault::PersistedWrongEntryTag:
-        case MappingFault::PersistedShortEntry:
-        case MappingFault::PersistedLongEntry:
-        case MappingFault::PersistedBadSemanticSize:
-        case MappingFault::PersistedBadFingerprintSize:
-        case MappingFault::PersistedBadEntryMetadata:
-        case MappingFault::PersistedSourceFingerprintMismatch:
-        case MappingFault::PersistedConsumerFingerprintMismatch:
-        case MappingFault::PersistedDecoratedFingerprintMismatch:
-        case MappingFault::PersistedMapFingerprintMismatch:
+        case mapping_fault::none:
+        case mapping_fault::decorated_boundary_schema_mismatch:
+        case mapping_fault::decorated_lineage_schema_mismatch:
+        case mapping_fault::provider_unsupported:
+        case mapping_fault::provider_status_error:
+        case mapping_fault::provider_query_canceled:
+        case mapping_fault::late_fetch_error_once:
+        case mapping_fault::late_fetch_partial_status_error_once:
+        case mapping_fault::persisted_wrong_top_tag:
+        case mapping_fault::persisted_short_top:
+        case mapping_fault::persisted_long_top:
+        case mapping_fault::persisted_bad_magic:
+        case mapping_fault::persisted_bad_revision:
+        case mapping_fault::persisted_count_overflow:
+        case mapping_fault::persisted_wrong_entry_tag:
+        case mapping_fault::persisted_short_entry:
+        case mapping_fault::persisted_long_entry:
+        case mapping_fault::persisted_bad_semantic_size:
+        case mapping_fault::persisted_bad_fingerprint_size:
+        case mapping_fault::persisted_bad_entry_metadata:
+        case mapping_fault::persisted_source_fingerprint_mismatch:
+        case mapping_fault::persisted_consumer_fingerprint_mismatch:
+        case mapping_fault::persisted_decorated_fingerprint_mismatch:
+        case mapping_fault::persisted_map_fingerprint_mismatch:
             break;
-        case MappingFault::NullPointerNonzeroCount:
+        case mapping_fault::null_pointer_nonzero_count:
             mapping.boundary_map = nullptr;
             break;
-        case MappingFault::ShortBoundaryMap:
-        case MappingFault::MissingRequiredAttno:
+        case mapping_fault::short_boundary_map:
+        case mapping_fault::missing_required_attno:
             if (mapping.boundary_map_count != 0) {
                 --mapping.boundary_map_count;
             }
             break;
-        case MappingFault::LongBoundaryMap:
+        case mapping_fault::long_boundary_map:
             if (boundary != nullptr && boundary_capacity > mapping.boundary_map_count
                 && mapping.boundary_map_count != 0) {
                 boundary[mapping.boundary_map_count] = boundary[0];
                 ++mapping.boundary_map_count;
             }
             break;
-        case MappingFault::ShortLineageMap:
+        case mapping_fault::short_lineage_map:
             if (mapping.lineage_map_count != 0) {
                 --mapping.lineage_map_count;
             }
             break;
-        case MappingFault::LongLineageMap:
+        case mapping_fault::long_lineage_map:
             if (lineage != nullptr && lineage_capacity > mapping.lineage_map_count
                 && mapping.lineage_map_count != 0) {
                 lineage[mapping.lineage_map_count] = lineage[0];
                 ++mapping.lineage_map_count;
             }
             break;
-        case MappingFault::ZeroConsumerAttno:
+        case mapping_fault::zero_consumer_attno:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].consumer_attno = 0;
             }
             break;
-        case MappingFault::ZeroSourceAttno:
+        case mapping_fault::zero_source_attno:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].source_attno = 0;
             }
             break;
-        case MappingFault::SourceAttnoOutOfRange:
+        case mapping_fault::source_attno_out_of_range:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].source_attno = 0xffffffffU;
             }
             break;
-        case MappingFault::DuplicateConsumerAttno:
+        case mapping_fault::duplicate_consumer_attno:
             if (mapping.boundary_map_count > 1) {
                 boundary[1].consumer_attno = boundary[0].consumer_attno;
             }
             break;
-        case MappingFault::WrongType:
+        case mapping_fault::wrong_type:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].type_oid = BOOLOID;
             }
             break;
-        case MappingFault::WrongTypmod:
+        case mapping_fault::wrong_typmod:
             if (mapping.boundary_map_count != 0) {
                 ++boundary[0].typmod;
             }
             break;
-        case MappingFault::WrongCollation:
+        case mapping_fault::wrong_collation:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].collation_oid = static_cast<Oid>(9999);
             }
             break;
-        case MappingFault::WrongSemanticId:
+        case mapping_fault::wrong_semantic_id:
             if (mapping.boundary_map_count != 0) {
                 boundary[0].semantic_id_low ^= 1U;
             }
             break;
-        case MappingFault::SameTypedColumnPermutation:
+        case mapping_fault::same_typed_column_permutation:
             if (mapping.boundary_map_count > 1) {
                 boundary[0].source_attno = boundary[1].source_attno;
             }
             break;
-        case MappingFault::IllegalRepeatedSourceAttno:
+        case mapping_fault::illegal_repeated_source_attno:
             if (mapping.boundary_map_count > 1) {
                 boundary[1].source_attno = boundary[0].source_attno;
             }
             break;
-        case MappingFault::BadProviderPrivateVersion:
+        case mapping_fault::bad_provider_private_revision:
             mapping.provider_private_nodes = list_make1(makeInteger(-1));
             break;
-        case MappingFault::NonIntegerPersistedMapNode:
+        case mapping_fault::non_integer_persisted_map_node:
             mapping.provider_private_nodes = list_make1(makeString("bad"));
             break;
-        case MappingFault::UnknownPersistedMapVersion:
+        case mapping_fault::unknown_persisted_map_revision:
             mapping.provider_private_nodes = list_make1(makeInteger(999));
             break;
-        case MappingFault::ProviderError:
+        case mapping_fault::provider_error:
             break;
     }
 }
 
 /** Explicitly affirm every older source, including apparent identity maps. */
-[[nodiscard]] BioseqCacheStatusV2 provider_map_reusable_source(
+[[nodiscard]] bioseq_cache_status provider_map_reusable_source(
     PlannerInfo*,
-    const BioseqCachePathDomainV2* consumer,
-    const BioseqCacheReusableSourceV2* source,
-    BioseqCacheSourceMappingV2* output) {
+    const bioseq_cache_path_domain* consumer,
+    const bioseq_cache_reusable_source* source,
+    bioseq_cache_source_mapping* output) {
     ++g_counters.map_source;
-    if (g_mapping_fault == MappingFault::ProviderError) {
+    if (g_mapping_fault == mapping_fault::provider_error) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
              errmsg("injected generic cache-provider mapping error")));
     }
-    if (g_mapping_fault == MappingFault::ProviderQueryCanceled) {
+    if (g_mapping_fault == mapping_fault::provider_query_canceled) {
         ereport(ERROR,
             (errcode(ERRCODE_QUERY_CANCELED),
              errmsg("injected generic cache-provider query cancellation")));
     }
-    if (g_mapping_fault == MappingFault::ProviderUnsupported) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    if (g_mapping_fault == mapping_fault::provider_unsupported) {
+        return bioseq_cache_status_unsupported;
     }
-    if (g_mapping_fault == MappingFault::ProviderStatusError) {
-        return BIOSEQ_CACHE_STATUS_ERROR;
+    if (g_mapping_fault == mapping_fault::provider_status_error) {
+        return bioseq_cache_status_error;
     }
     if (consumer == nullptr || source == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
-        || consumer->provider_id != kProviderId
-        || source->provider_id != kProviderId
-        || source->compatibility_family_id != kCompatibilityFamily
+        || consumer->provider_id != k_provider_id
+        || source->provider_id != k_provider_id
+        || source->compatibility_family_id != k_compatibility_family
         || (source->capability_mask & consumer->capability_mask)
             != consumer->capability_mask) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
     const std::size_t boundary_capacity =
         consumer->required_boundary_attno_count + 1U;
     const std::size_t lineage_capacity =
         consumer->required_lineage_attno_count + 1U;
-    auto* boundary = static_cast<BioseqCacheColumnMapEntryV2*>(palloc0(
-        boundary_capacity * sizeof(BioseqCacheColumnMapEntryV2)));
-    auto* lineage = static_cast<BioseqCacheColumnMapEntryV2*>(palloc0(
-        lineage_capacity * sizeof(BioseqCacheColumnMapEntryV2)));
+    auto* boundary = static_cast<bioseq_cache_column_map_entry*>(palloc0(
+        boundary_capacity * sizeof(bioseq_cache_column_map_entry)));
+    auto* lineage = static_cast<bioseq_cache_column_map_entry*>(palloc0(
+        lineage_capacity * sizeof(bioseq_cache_column_map_entry)));
     if (!fill_source_map(
             consumer->boundary_columns,
             consumer->boundary_column_count,
@@ -2529,7 +2541,7 @@ void apply_mapping_fault(
             source->lineage_columns,
             source->lineage_column_count,
             lineage)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
 
     output->struct_size = sizeof(*output);
@@ -2538,19 +2550,19 @@ void apply_mapping_fault(
     output->boundary_map_count = consumer->required_boundary_attno_count;
     output->lineage_map = lineage;
     output->lineage_map_count = consumer->required_lineage_attno_count;
-    output->provider_private_nodes = list_make1(makeInteger(kPlanVersion));
+    output->provider_private_nodes = list_make1(makeInteger(k_plan_revision));
     apply_mapping_fault(*output, boundary_capacity, lineage_capacity);
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 /** Add cache-owned gate expressions to a cloned provider path only. */
-[[nodiscard]] BioseqCacheStatusV2 provider_decorate_path(
+[[nodiscard]] bioseq_cache_status provider_decorate_path(
     PlannerInfo* root,
     RelOptInfo* relation,
     Path* provider_path,
-    const BioseqCachePathDomainV2* domain,
+    const bioseq_cache_path_domain* domain,
     List* gated_qual_exprs,
-    BioseqCacheDecoratedPathV2* output) {
+    bioseq_cache_decorated_path* output) {
     ++g_counters.decorate_path;
     if (root == nullptr || relation == nullptr || provider_path == nullptr
         || domain == nullptr || output == nullptr
@@ -2559,7 +2571,7 @@ void apply_mapping_fault(
         || provider_path->pathtype != T_CustomScan
         || reinterpret_cast<CustomPath*>(provider_path)->methods
             != &provider_path_methods()) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     auto* original = reinterpret_cast<CustomPath*>(provider_path);
     auto* decorated = makeNode(CustomPath);
@@ -2573,7 +2585,7 @@ void apply_mapping_fault(
     foreach(cell, gated_qual_exprs) {
         const auto* expression = static_cast<const Expr*>(lfirst(cell));
         if (expression == nullptr) {
-            return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+            return bioseq_cache_status_unsupported;
         }
         auto* restriction = make_restrictinfo(
             root,
@@ -2600,46 +2612,46 @@ void apply_mapping_fault(
     output->provider_private_nodes = static_cast<List*>(
         copyObject(domain->provider_private_nodes));
 
-    if (g_mapping_fault == MappingFault::DecoratedBoundarySchemaMismatch
+    if (g_mapping_fault == mapping_fault::decorated_boundary_schema_mismatch
         && domain->boundary_column_count != 0) {
-        auto* columns = static_cast<BioseqCacheColumnSchemaV2*>(palloc(
+        auto* columns = static_cast<bioseq_cache_column_schema*>(palloc(
             domain->boundary_column_count
-            * sizeof(BioseqCacheColumnSchemaV2)));
+            * sizeof(bioseq_cache_column_schema)));
         std::memcpy(
             columns,
             domain->boundary_columns,
             domain->boundary_column_count
-                * sizeof(BioseqCacheColumnSchemaV2));
+                * sizeof(bioseq_cache_column_schema));
         columns[0].semantic_id_low ^= 1U;
         output->actual_boundary_columns = columns;
     }
-    if (g_mapping_fault == MappingFault::DecoratedLineageSchemaMismatch
+    if (g_mapping_fault == mapping_fault::decorated_lineage_schema_mismatch
         && domain->lineage_column_count != 0) {
-        auto* columns = static_cast<BioseqCacheColumnSchemaV2*>(palloc(
+        auto* columns = static_cast<bioseq_cache_column_schema*>(palloc(
             domain->lineage_column_count
-            * sizeof(BioseqCacheColumnSchemaV2)));
+            * sizeof(bioseq_cache_column_schema)));
         std::memcpy(
             columns,
             domain->lineage_columns,
             domain->lineage_column_count
-                * sizeof(BioseqCacheColumnSchemaV2));
+                * sizeof(bioseq_cache_column_schema));
         columns[0].semantic_id_low ^= 1U;
         output->actual_lineage_columns = columns;
     }
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 /** Freeze plan semantics and expected runtime digest atomically. */
-[[nodiscard]] BioseqCacheStatusV2 provider_build_plan_digest_recipe(
+[[nodiscard]] bioseq_cache_status provider_build_plan_digest_recipe(
     PlannerInfo*,
     const Plan* provider_plan,
-    BioseqCachePlanDigestRecipeV2* output) {
+    bioseq_cache_plan_digest_recipe* output) {
     ++g_counters.build_recipe;
     std::size_t required_boundary_count = 0;
     if (provider_plan == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
         || !IsA(provider_plan, CustomScan)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     const auto* scan = reinterpret_cast<const CustomScan*>(provider_plan);
     if (scan->methods != &provider_scan_methods()
@@ -2651,33 +2663,33 @@ void apply_mapping_fault(
             nullptr,
             nullptr,
             &required_boundary_count)) {
-        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+        return bioseq_cache_status_unsupported;
     }
     g_counters.last_recipe_required_boundary_count =
         required_boundary_count;
     const auto digest = digest_plan_nodes(scan->custom_private);
     output->struct_size = sizeof(*output);
     output->flags = 0;
-    output->digest_format_version = 1;
+    output->digest_format_revision = 1;
     output->reserved = 0;
     output->plan_domain_nodes = static_cast<List*>(
         copyObject(scan->custom_private));
     std::memcpy(
         output->expected_generation_digest, digest.data(), digest.size());
-    return BIOSEQ_CACHE_STATUS_OK;
+    return bioseq_cache_status_ok;
 }
 
 } // namespace bioseq::cache::pg::test_provider
 
 namespace bioseq::cache::pg::test_provider {
 
-[[nodiscard]] BioseqCacheProviderV2 make_provider_v2(
+[[nodiscard]] bioseq_cache_provider make_provider(
         std::uint32_t provider_flags) noexcept {
-    return BioseqCacheProviderV2{
-        .struct_size = sizeof(BioseqCacheProviderV2),
-        .abi_version = bioseq::cache::kProviderAbiVersion,
+    return bioseq_cache_provider{
+        .struct_size = sizeof(bioseq_cache_provider),
+        .abi_revision = bioseq::cache::k_provider_abi_revision,
         .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
-        .provider_id = kProviderId,
+        .provider_id = k_provider_id,
         .provider_flags = provider_flags,
         .reserved = 0,
         .provider_name = "generic_nullable_occurrence_test_provider",
@@ -2698,16 +2710,16 @@ namespace bioseq::cache::pg::test_provider {
 }
 
 /** Complete ABI table registered only by an explicit test-only SQL call. */
-[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept {
+[[nodiscard]] const bioseq_cache_provider& provider() noexcept {
     constexpr std::uint32_t reusable_flags =
-        BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
-        | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION;
-    static const BioseqCacheProviderV2 exact_elision_safe =
-        make_provider_v2(
+        bioseq_cache_provider_reusable_coverage
+        | bioseq_cache_provider_complete_write_observation;
+    static const bioseq_cache_provider exact_elision_safe =
+        make_provider(
             reusable_flags
-            | BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE);
-    static const BioseqCacheProviderV2 retained_source_required =
-        make_provider_v2(reusable_flags);
+            | bioseq_cache_provider_exact_source_elision_safe);
+    static const bioseq_cache_provider retained_source_required =
+        make_provider(reusable_flags);
     return g_provider_exact_source_elision_safe
         ? exact_elision_safe
         : retained_source_required;

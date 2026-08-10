@@ -6,6 +6,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -75,6 +76,231 @@ namespace bioseq::codegen::website {
     return boost::json::parse(text, {}, options);
 }
 
+namespace {
+
+void require_exact_members(
+    const boost::json::object& object,
+    std::initializer_list<std::string_view> expected_members,
+    std::string_view context) {
+    if (object.size() != expected_members.size()) {
+        throw std::runtime_error(
+            std::string(context) + ": unexpected top-level member set");
+    }
+    for (const std::string_view member : expected_members) {
+        if (object.if_contains(member) == nullptr) {
+            throw std::runtime_error(
+                std::string(context) + ": missing top-level member '"
+                + std::string(member) + "'");
+        }
+    }
+}
+
+void require_known_generated_sql_manifest_members(
+    const boost::json::object& object,
+    std::string_view context) {
+    static const std::set<std::string, std::less<>> members{
+        "schema_revision",
+        "authority_mode",
+        "compiler_profile",
+        "clang_version",
+        "compilation_signature",
+        "extension_name",
+        "extension_schema",
+        "generated_module_prefix",
+        "fmgr_boundary_module",
+        "script_sha256",
+        "statement_count",
+        "statements",
+        "entity_count",
+        "public_entity_count",
+        "public_stable_identities",
+        "public_installed_identities",
+        "routine_entity_count",
+        "c_routine_identity_count",
+        "c_link_symbol_inventory_count",
+        "c_finfo_symbol_inventory_count",
+        "c_wrapper_entity_count",
+        "generated_wrapper_symbol_count",
+        "handwritten_fmgr_export_symbol_count",
+        "handwritten_fmgr_export_external_symbol_count",
+        "handwritten_fmgr_export_owner_count",
+        "c_symbol_sharing_group_count",
+        "generated_cpp_profile_invariant",
+        "entity_handle_count",
+        "entity_handle_module_count",
+        "entity_handle_modules",
+        "row_codec_count",
+        "row_codec_module_count",
+        "row_codec_modules",
+        "routine_boundary_contract_count",
+        "routine_boundary_contracts",
+        "result_shape_contract_count",
+        "result_shape_contracts",
+        "row_codec_contract_count",
+        "row_codec_contracts",
+        "c_routine_identities",
+        "c_link_symbols",
+        "c_finfo_symbols",
+        "generated_wrapper_symbols",
+        "handwritten_fmgr_export_symbols",
+        "handwritten_fmgr_export_external_symbols",
+        "fmgr_entrypoint_module_count",
+        "fmgr_entrypoint_modules",
+        "handwritten_fmgr_export_owners",
+        "c_symbol_owners",
+        "entity_counts_by_kind",
+        "entities",
+        "guc_generation",
+    };
+    for (const auto& member : object) {
+        const auto raw = member.key();
+        const std::string key{raw.data(), raw.size()};
+        if (!members.contains(key)) {
+            throw std::runtime_error(
+                std::string(context) + ": unknown top-level member '"
+                + key + "'");
+        }
+    }
+}
+
+void require_current_schema(
+    const boost::json::object& object,
+    std::string_view expected_schema,
+    std::uint32_t expected_revision,
+    std::string_view context) {
+    const boost::json::value* const schema = object.if_contains("schema");
+    const boost::json::value* const revision =
+        object.if_contains("schema_revision");
+    const bool revision_matches = revision != nullptr
+        && ((revision->is_int64()
+             && revision->as_int64()
+                    == static_cast<std::int64_t>(expected_revision))
+            || (revision->is_uint64()
+                && revision->as_uint64()
+                       == static_cast<std::uint64_t>(expected_revision)));
+    if (schema == nullptr || !schema->is_string()
+        || std::string_view{
+               schema->as_string().data(), schema->as_string().size()}
+               != expected_schema
+        || !revision_matches) {
+        throw std::runtime_error(
+            std::string(context) + ": expected current schema '"
+            + std::string(expected_schema) + "' revision "
+            + std::to_string(expected_revision));
+    }
+}
+
+[[nodiscard]] std::uint32_t require_current_revision_member(
+    const boost::json::object& object,
+    std::string_view member,
+    std::uint32_t expected_revision,
+    std::string_view context) {
+    const boost::json::value* const revision = object.if_contains(member);
+    const bool revision_matches = revision != nullptr
+        && ((revision->is_int64()
+             && revision->as_int64()
+                    == static_cast<std::int64_t>(expected_revision))
+            || (revision->is_uint64()
+                && revision->as_uint64()
+                       == static_cast<std::uint64_t>(expected_revision)));
+    if (!revision_matches) {
+        throw std::runtime_error(
+            std::string(context) + ": expected current "
+            + std::string(member) + " "
+            + std::to_string(expected_revision));
+    }
+    return expected_revision;
+}
+
+void require_processing_contract(
+    std::string_view schema,
+    std::uint32_t schema_revision,
+    std::string_view expected_schema,
+    std::string_view parser_identity,
+    std::uint32_t parser_revision,
+    std::string_view binding_schema,
+    std::uint32_t binding_schema_revision,
+    std::string_view context) {
+    if (schema != expected_schema || schema_revision != 1
+        || parser_identity != "bioseq.website.parser"
+        || parser_revision != 1
+        || binding_schema != "bioseq.website.bindings"
+        || binding_schema_revision != 1) {
+        throw std::runtime_error(
+            std::string(context) + ": non-current processing contract");
+    }
+}
+
+void require_manifest_contract(
+    const boost::json::object& object,
+    std::string_view expected_schema,
+    std::uint32_t expected_revision) {
+    require_current_schema(
+        object, expected_schema, expected_revision, "website manifest");
+    if (expected_schema == "bioseq.website.site_manifest") {
+        require_exact_members(
+            object,
+            {"schema",
+             "schema_revision",
+             "hash_algorithm",
+             "version",
+             "source_revision",
+             "base_path",
+             "generator_signature",
+             "parser_identity",
+             "parser_revision",
+             "binding_schema",
+             "binding_schema_revision",
+             "asset_bundle_sha256",
+             "postgres_server_version",
+             "extension_version",
+             "staged_extension_sha256",
+             "inputs",
+             "outputs"},
+            "site manifest");
+        require_processing_contract(
+            std::string(object.at("schema").as_string()),
+            expected_revision,
+            expected_schema,
+            std::string(object.at("parser_identity").as_string()),
+            require_current_revision_member(
+                object, "parser_revision", 1, "site manifest"),
+            std::string(object.at("binding_schema").as_string()),
+            require_current_revision_member(
+                object, "binding_schema_revision", 1, "site manifest"),
+            "site manifest");
+    } else if (expected_schema == "bioseq.website.prepublish") {
+        require_exact_members(
+            object,
+            {"schema",
+             "schema_revision",
+             "operation",
+             "nonce",
+             "staging",
+             "new_manifest_sha256",
+             "validation_stamps"},
+            "prepublish descriptor");
+    }
+}
+
+}  // namespace
+
+void require_artifact_schema(
+    std::string_view text,
+    std::string_view expected_schema,
+    std::uint32_t expected_revision,
+    std::string_view context) {
+    const boost::json::value document = parse_json_value(text);
+    const boost::json::object& object = document.as_object();
+    require_current_schema(object, expected_schema, expected_revision, context);
+    if (expected_schema == "bioseq.website.owner") {
+        require_exact_members(
+            object,
+            {"schema", "schema_revision", "nonce", "staging"},
+            context);
+    }
+}
+
 /// @brief One website-public SQL entity projected from the generated SQL
 /// manifest.
 ///
@@ -97,8 +323,11 @@ struct sql_manifest_public_entity {
 
 /// @brief Website-facing projection of the generated SQL manifest.
 struct sql_manifest_public_projection {
+    std::string extension_name;
     std::string extension_schema;
     std::string script_sha256;
+    std::vector<std::string> stable_identities;
+    std::vector<std::string> installed_identities;
     std::vector<sql_manifest_public_entity> entities;
     std::vector<std::string> catalog_schemas;
     std::vector<std::string> restricted_sequence_names;
@@ -162,15 +391,18 @@ parse_sql_manifest_public_projection(
         fail("root must be an object");
     }
     const boost::json::object& root = document.as_object();
-    const boost::json::value& version =
-        require_member(root, "manifest_version");
-    if (!version.is_int64() || version.as_int64() != 1) {
-        fail("manifest_version must be 1");
-    }
+    require_known_generated_sql_manifest_members(root, "SQL manifest");
+    require_current_revision_member(
+        root, "schema_revision", 1, "SQL manifest");
     const std::string authority_mode =
         require_string(root, "authority_mode");
     if (authority_mode != "annotated_cpp") {
         fail("authority_mode must be 'annotated_cpp'");
+    }
+    const std::string extension_name =
+        require_string(root, "extension_name");
+    if (extension_name.empty()) {
+        fail("extension_name must not be empty");
     }
     const std::string extension_schema =
         require_string(root, "extension_schema");
@@ -197,6 +429,7 @@ parse_sql_manifest_public_projection(
     }
 
     sql_manifest_public_projection projection{
+        .extension_name = extension_name,
         .extension_schema = extension_schema,
         .script_sha256 = script_sha256,
     };
@@ -330,12 +563,13 @@ parse_sql_manifest_public_projection(
     }
     projection.catalog_schemas.assign(
         catalog_schemas.begin(), catalog_schemas.end());
+    projection.stable_identities.assign(
+        stable_identities.begin(), stable_identities.end());
+    projection.installed_identities.assign(
+        installed_identities.begin(), installed_identities.end());
     projection.restricted_sequence_names.assign(
         restricted_sequence_names.begin(),
         restricted_sequence_names.end());
-    if (projection.restricted_sequence_names.empty()) {
-        fail("manifest has no internal sequence for generic ACL validation");
-    }
     return projection;
 }
 
@@ -491,14 +725,26 @@ namespace {
 
 }  // namespace
 
-/// @brief Serializes a website plan artifact canonically (schema plan/v1).
+/// @brief Serializes the current website plan artifact canonically.
 /// @param plan Fully-built plan aggregate.
 /// @return Canonical HTML-safe JSON ending in one newline.
 [[nodiscard]] std::string serialize_site_plan(const site_plan& plan) {
+    require_processing_contract(
+        plan.schema,
+        plan.schema_revision,
+        "bioseq.website.plan",
+        plan.parser_identity,
+        plan.parser_revision,
+        plan.binding_schema,
+        plan.binding_schema_revision,
+        "site plan");
     boost::json::object root;
-    root["schema"] = plan.schema_version;
-    root["parser_version"] = plan.parser_version;
-    root["binding_schema"] = plan.binding_schema_version;
+    root["schema"] = plan.schema;
+    root["schema_revision"] = plan.schema_revision;
+    root["parser_identity"] = plan.parser_identity;
+    root["parser_revision"] = plan.parser_revision;
+    root["binding_schema"] = plan.binding_schema;
+    root["binding_schema_revision"] = plan.binding_schema_revision;
     boost::json::object version;
     version["label"] = plan.version.path_component;
     boost::json::array parts;
@@ -592,11 +838,12 @@ namespace {
 /// @brief Serializes the C++ structural/documentation entity index (§11.3).
 /// @param entities Canonical merged public entities.
 /// @param clang_version The Clang version the structural pass was linked against.
-/// @return Canonical HTML-safe JSON ending in one newline (schema cpp_entities/v1).
+/// @return Canonical HTML-safe JSON ending in one newline.
 [[nodiscard]] std::string serialize_cpp_reference_entities(
     const std::vector<reference_entity>& entities, std::string_view clang_version) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.cpp_entities/v1";
+    root["schema"] = "bioseq.website.cpp_entities";
+    root["schema_revision"] = 1;
     root["clang_version"] = std::string(clang_version);
     boost::json::array items;
     for (const reference_entity& entity : entities) {
@@ -608,11 +855,12 @@ namespace {
 
 /// @brief Serializes the SQL catalog entity index (§12.2).
 /// @param entities Documented SQL entities captured from the live catalog.
-/// @return Canonical HTML-safe JSON ending in one newline (schema sql_entities/v1).
+/// @return Canonical HTML-safe JSON ending in one newline.
 [[nodiscard]] std::string serialize_sql_entities(
     const std::vector<reference_entity>& entities) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.sql_entities/v1";
+    root["schema"] = "bioseq.website.sql_entities";
+    root["schema_revision"] = 1;
     boost::json::array items;
     for (const reference_entity& entity : entities) {
         items.push_back(serialize_entity(entity));
@@ -1122,8 +1370,32 @@ namespace {
 /// @return The documented entities in the array's stored order.
 [[nodiscard]] std::vector<reference_entity> deserialize_reference_entities(std::string_view text) {
     const boost::json::value root = parse_json_value(text);
+    const boost::json::object& object = root.as_object();
+    const boost::json::value* const schema = object.if_contains("schema");
+    if (schema == nullptr || !schema->is_string()) {
+        throw std::runtime_error(
+            "reference entities: missing current schema identity");
+    }
+    if (schema->as_string() == "bioseq.website.cpp_entities") {
+        require_exact_members(
+            object,
+            {"schema", "schema_revision", "clang_version", "entities"},
+            "C++ entities");
+        require_current_schema(
+            object, "bioseq.website.cpp_entities", 1, "C++ entities");
+    } else if (schema->as_string() == "bioseq.website.sql_entities") {
+        require_exact_members(
+            object,
+            {"schema", "schema_revision", "entities"},
+            "SQL entities");
+        require_current_schema(
+            object, "bioseq.website.sql_entities", 1, "SQL entities");
+    } else {
+        throw std::runtime_error(
+            "reference entities: unexpected schema identity");
+    }
     std::vector<reference_entity> entities;
-    const boost::json::array& items = root.at("entities").as_array();
+    const boost::json::array& items = object.at("entities").as_array();
     entities.reserve(items.size());
     for (const boost::json::value& item : items) {
         entities.push_back(deserialize_one_entity(item.as_object()));
@@ -1133,7 +1405,7 @@ namespace {
 
 /// @brief Serializes the resolved, database-independent site model (§180).
 ///
-/// Schema bioseq.website.site_model/v1: the private artifact `website execute`
+/// Schema bioseq.website.site_model revision 1: the private artifact `website execute`
 /// writes (mode 0600) and `website render` consumes without a cluster. It carries
 /// only normalized semantic projections — resolved tutorial/landing trees, executed
 /// visible-result models, the entity graph with base-independent routes, coverage,
@@ -1142,10 +1414,22 @@ namespace {
 /// @param model Fully resolved site model.
 /// @return Canonical JSON ending in one newline.
 [[nodiscard]] std::string serialize_site_model(const site_model& model) {
+    require_processing_contract(
+        model.schema,
+        model.schema_revision,
+        "bioseq.website.site_model",
+        model.parser_identity,
+        model.parser_revision,
+        model.binding_schema,
+        model.binding_schema_revision,
+        "site model");
     boost::json::object root;
-    root["schema"] = model.schema_version;
-    root["parser_version"] = model.parser_version;
-    root["binding_schema"] = model.binding_schema_version;
+    root["schema"] = model.schema;
+    root["schema_revision"] = model.schema_revision;
+    root["parser_identity"] = model.parser_identity;
+    root["parser_revision"] = model.parser_revision;
+    root["binding_schema"] = model.binding_schema;
+    root["binding_schema_revision"] = model.binding_schema_revision;
     boost::json::object version;
     version["label"] = model.version.path_component;
     boost::json::array parts;
@@ -1235,7 +1519,7 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Parses a site_model/v1 artifact back into the model, rejecting a wrong
+/// @brief Parses the current site-model artifact, rejecting a wrong
 /// schema so a stale/tampered artifact cannot silently render (§5.1, §184).
 /// @param text Canonical site_model JSON text.
 /// @return The resolved site model.
@@ -1243,13 +1527,48 @@ namespace {
     const boost::json::value document = parse_json_value(text);
     const boost::json::object& object = document.as_object();
     site_model model;
-    model.schema_version = std::string(object.at("schema").as_string());
-    if (model.schema_version != "bioseq.website.site_model/v1") {
-        throw std::runtime_error("site_model: unexpected schema '"
-                                 + model.schema_version + "'");
-    }
-    model.parser_version = std::string(object.at("parser_version").as_string());
-    model.binding_schema_version = std::string(object.at("binding_schema").as_string());
+    require_exact_members(
+        object,
+        {"schema",
+         "schema_revision",
+         "parser_identity",
+         "parser_revision",
+         "binding_schema",
+         "binding_schema_revision",
+         "version",
+         "site_title",
+         "source_revision",
+         "tutorials",
+         "landing_examples",
+         "cpp_entities",
+         "sql_entities",
+         "omitted_sql_entities",
+         "coverage",
+         "provenance",
+         "inputs",
+         "signatures"},
+        "site model");
+    require_current_schema(
+        object, "bioseq.website.site_model", 1, "site model");
+    model.schema = std::string(object.at("schema").as_string());
+    model.schema_revision = 1;
+    model.parser_identity =
+        std::string(object.at("parser_identity").as_string());
+    model.parser_revision = require_current_revision_member(
+        object, "parser_revision", 1, "site model");
+    model.binding_schema =
+        std::string(object.at("binding_schema").as_string());
+    model.binding_schema_revision = require_current_revision_member(
+        object, "binding_schema_revision", 1, "site model");
+    require_processing_contract(
+        model.schema,
+        model.schema_revision,
+        "bioseq.website.site_model",
+        model.parser_identity,
+        model.parser_revision,
+        model.binding_schema,
+        model.binding_schema_revision,
+        "site model");
     const boost::json::object& version = object.at("version").as_object();
     model.version.path_component = std::string(version.at("label").as_string());
     for (const boost::json::value& part : version.at("parts").as_array()) {
@@ -1329,7 +1648,7 @@ namespace {
     return model;
 }
 
-/// @brief Serializes the Clang source-graph closure (§11.3, schema source_graph/v1).
+/// @brief Serializes the current Clang source-graph closure (§11.3).
 /// @param clang_version The Clang version the scan was linked against.
 /// @param roots Configured primary module names (the closure seeds).
 /// @param closure Reachable Bioseq-owned units, sorted by module name.
@@ -1339,7 +1658,8 @@ namespace {
     const std::vector<std::string>& roots,
     const std::vector<module_graph_unit>& closure) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.source_graph/v1";
+    root["schema"] = "bioseq.website.source_graph";
+    root["schema_revision"] = 1;
     root["clang_version"] = std::string(clang_version);
     boost::json::array root_array;
     for (const std::string& name : roots) {
@@ -1368,29 +1688,35 @@ namespace {
     return serialize_canonical(root);
 }
 
-/// @brief Reads a top-level string field from a site manifest (or "" if absent).
-/// @param text site-manifest.json text.
-/// @param key Field name (for example "version" or "base_path").
-/// @return The string value, or empty when missing/non-string.
+/// @brief Reads a required top-level string from a current website artifact.
+/// @param text Artifact JSON text.
+/// @param key Required field name.
+/// @param expected_schema Exact current schema identity.
+/// @param expected_revision Exact current numeric schema revision.
+/// @return The required string value.
 [[nodiscard]] std::string manifest_string_field(
-    std::string_view text, std::string_view key) {
+    std::string_view text,
+    std::string_view key,
+    std::string_view expected_schema,
+    std::uint32_t expected_revision) {
     const boost::json::value root = parse_json_value(text);
-    if (!root.is_object()) {
-        return {};
-    }
     const boost::json::object& object = root.as_object();
-    const auto found = object.find(key);
-    if (found == object.end() || !found->value().is_string()) {
-        return {};
-    }
-    return std::string(found->value().as_string());
+    require_manifest_contract(object, expected_schema, expected_revision);
+    return std::string(object.at(key).as_string());
 }
 
-/// @brief Reads the owned output route set from a site manifest (§16).
-/// @param text site-manifest.json text.
+/// @brief Reads the owned output route set from a current manifest (§16).
+/// @param text Manifest JSON text.
+/// @param expected_schema Exact current schema identity.
+/// @param expected_revision Exact current numeric schema revision.
 /// @return The manifest's declared output routes (leading-slash), in stored order.
-[[nodiscard]] std::vector<std::string> manifest_output_routes(std::string_view text) {
+[[nodiscard]] std::vector<std::string> manifest_output_routes(
+    std::string_view text,
+    std::string_view expected_schema,
+    std::uint32_t expected_revision) {
     const boost::json::value root = parse_json_value(text);
+    require_manifest_contract(
+        root.as_object(), expected_schema, expected_revision);
     std::vector<std::string> routes;
     const boost::json::object& outputs = root.at("outputs").as_object();
     routes.reserve(outputs.size());
@@ -1407,7 +1733,7 @@ namespace {
 /// @param input_manifest_hashes SHA-256 of each input site-manifest.json.
 /// @param input_success_hashes SHA-256 of each input `<root>.success` marker.
 /// @param outputs Every assembled output route and its SHA-256, except itself.
-/// @return Canonical JSON ending in one newline (schema assembled_manifest/v1).
+/// @return Canonical JSON ending in one newline.
 [[nodiscard]] std::string serialize_release_manifest(
     std::string_view primary_version,
     const std::vector<std::string>& ordered_versions,
@@ -1416,7 +1742,8 @@ namespace {
     const std::vector<std::string>& input_success_hashes,
     const std::vector<std::pair<std::string, std::string>>& outputs) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.assembled_manifest/v1";
+    root["schema"] = "bioseq.website.assembled_manifest";
+    root["schema_revision"] = 1;
     root["hash_algorithm"] = "sha256";
     root["primary_version"] = std::string(primary_version);
     root["base_path"] = std::string(base_path);
@@ -1572,11 +1899,12 @@ namespace {
 /// second request. The file is named by its own SHA-256 (§16), so its bytes are
 /// immutable and long-cacheable.
 /// @param entities Canonical documented entities for the version.
-/// @return Canonical HTML-safe JSON ending in one newline (schema entity_tooltips/v1).
+/// @return Canonical HTML-safe JSON ending in one newline.
 [[nodiscard]] std::string serialize_reference_tooltips(
     const std::vector<reference_entity>& entities) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.entity_tooltips/v1";
+    root["schema"] = "bioseq.website.entity_tooltips";
+    root["schema_revision"] = 1;
     boost::json::object records;
     for (const reference_entity& entity : entities) {
         boost::json::object record;
@@ -1606,11 +1934,12 @@ namespace {
 /// @brief Serializes the versions manifest consumed by the header selector (§16).
 /// @param version_labels Version path components, newest first.
 /// @param base_path Normalized base path used to build each version route.
-/// @return Canonical HTML-safe JSON ending in one newline (schema versions/v1).
+/// @return Canonical HTML-safe JSON ending in one newline.
 [[nodiscard]] std::string serialize_release_catalog(
     const std::vector<std::string>& version_labels, std::string_view base_path) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.versions/v1";
+    root["schema"] = "bioseq.website.versions";
+    root["schema_revision"] = 1;
     root["primary"] = version_labels.empty()
         ? boost::json::value(nullptr) : boost::json::value(version_labels.front());
     boost::json::array versions;
@@ -1629,7 +1958,7 @@ namespace {
 /// @param documented_total Number with a non-empty summary.
 /// @param missing_summary Public entities missing docs (non-fatal warnings).
 /// @param fatal_missing Required/tutorial-referenced entities missing docs.
-/// @return Canonical JSON ending in one newline (schema documentation_coverage/v1).
+/// @return Canonical JSON ending in one newline.
 [[nodiscard]] boost::json::array serialize_id_array(
     const std::vector<std::string>& ids) {
     boost::json::array array;
@@ -1647,7 +1976,8 @@ namespace {
     const std::vector<std::string>& fatal_missing,
     const std::vector<coverage_group_view>& groups) {
     boost::json::object root;
-    root["schema"] = "bioseq.website.documentation_coverage/v1";
+    root["schema"] = "bioseq.website.documentation_coverage";
+    root["schema_revision"] = 1;
     root["public_total"] = static_cast<std::int64_t>(public_total);
     root["documented_total"] = static_cast<std::int64_t>(documented_total);
     boost::json::array group_array;

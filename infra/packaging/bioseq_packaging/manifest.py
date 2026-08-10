@@ -1,4 +1,4 @@
-"""Schema-v1 package manifest construction and durable checkpoints.
+"""Current package manifest construction and durable checkpoints.
 
 The worker owns one mutable manifest per architecture.  This module keeps the
 wire representation explicit, validates every lifecycle transition, and makes
@@ -17,10 +17,12 @@ import re
 import tempfile
 from typing import Any
 
+from .config import (
+    MANIFEST_SCHEMA_REVISION,
+    PACKAGE_VERSION,
+    PINNED_SIGNING_FINGERPRINT,
+)
 
-MANIFEST_SCHEMA_VERSION = 1
-PACKAGE_VERSION = "4.2.3"
-PINNED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 _HEX_40_OR_64 = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _CELL_STATES = frozenset({"building", "validated", "smoked", "uploaded", "failed"})
@@ -30,6 +32,22 @@ _SIGNATURE_KIND = {
     "rpm": "embedded-rpm-openpgp",
     "pacman": "detached-pacman-openpgp",
 }
+_MANIFEST_ROOT_KEYS = frozenset({
+    "schema_revision",
+    "package_version",
+    "architecture",
+    "status",
+    "started_at",
+    "completed_at",
+    "requested",
+    "s3",
+    "signing",
+    "source_revision",
+    "poetry_lock_sha256",
+    "python_environment",
+    "cells",
+    "errors",
+})
 
 
 class ManifestError(RuntimeError):
@@ -89,6 +107,20 @@ def write_manifest(path: Path, payload: Mapping[str, object]) -> None:
     ``os.replace`` cannot cross filesystems.  Mode, contents, and the rename are
     fsynced in that order.
     """
+
+    actual_keys = set(payload)
+    if actual_keys != _MANIFEST_ROOT_KEYS:
+        raise ManifestError(
+            "package manifest has unexpected keys: "
+            f"missing={sorted(_MANIFEST_ROOT_KEYS - actual_keys)} "
+            f"extra={sorted(actual_keys - _MANIFEST_ROOT_KEYS)}"
+        )
+    revision = payload.get("schema_revision")
+    if type(revision) is not int or revision != MANIFEST_SCHEMA_REVISION:
+        raise ManifestError(
+            "package manifest schema_revision must be integer revision "
+            f"{MANIFEST_SCHEMA_REVISION}"
+        )
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +201,7 @@ def _validate_validation(value: object, *, label: str) -> None:
         "six_artifacts": True,
         "rpath_absent": True,
         "compiler_runtime_safe": True,
-        "optimization_level": 0,
+        "template_flatten_profile": "dna4_uint64",
     }
     if any(validation.get(key) != expected for key, expected in required.items()):
         raise ManifestError(f"{label} did not pass every package assertion")
@@ -237,7 +269,7 @@ def _validate_artifact(value: object, *, label: str) -> dict[str, object]:
 
 
 class ManifestStore:
-    """Own a schema-v1 manifest and checkpoint every cell transition."""
+    """Own the current manifest and checkpoint every cell transition."""
 
     __slots__ = ("path", "_payload", "_clock", "_redactor")
 
@@ -310,7 +342,7 @@ class ManifestStore:
             python_environment.get("poetry"), label="runtime Poetry version"
         )
         payload: dict[str, object] = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "schema_revision": MANIFEST_SCHEMA_REVISION,
             "package_version": _required_string(package_version, label="package version"),
             "architecture": architecture_name,
             "status": "failed",

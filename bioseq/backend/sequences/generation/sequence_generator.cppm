@@ -36,7 +36,7 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::sequences::generation {
 
-/// Simulation knobs. Substitution + indel models mirror SEAL's generators.
+/// Simulation parameters for substitution and indel models.
 struct generator_params {
     std::size_t reference_length       = 10'000;
     std::size_t fragment_count         = 100;
@@ -60,49 +60,51 @@ struct generator_params {
     bool use_vulkan = false;
 };
 
-template <sequence_alphabet p_alphabet_t>
+template <sequence_alphabet p_alphabet>
 struct base_alphabet_probability {
-    using alphabet_t = p_alphabet_t;
+    using alphabet_t = p_alphabet;
     static constexpr std::size_t alphabet_size = seqan3::alphabet_size<alphabet_t>;
     static constexpr std::array<double, alphabet_size> probability() noexcept {
-        std::array<double, alphabet_size> p{};
-        for (std::size_t i = 0; i < alphabet_size; ++i) {
-            p[i] = 1.0 / static_cast<double>(alphabet_size);
+        std::array<double, alphabet_size> probabilities{};
+        for (std::size_t alphabet_index = 0; alphabet_index < alphabet_size; ++alphabet_index) {
+            probabilities[alphabet_index] = 1.0 / static_cast<double>(alphabet_size);
         }
-        return p;
+        return probabilities;
     }
 };
 
-template <sequence_alphabet p_alphabet_t>
-struct alphabet_probability : base_alphabet_probability<p_alphabet_t> {};
+template <sequence_alphabet p_alphabet>
+struct alphabet_probability : base_alphabet_probability<p_alphabet> {};
 
 template <>
 struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
     static constexpr std::array<double, alphabet_size> probability() noexcept {
-        constexpr double n_rate = 0.01;
-        const std::size_t n_rank =
+        constexpr double unknown_base_rate = 0.01;
+        const std::size_t unknown_base_rank =
             static_cast<std::size_t>(seq::dna5{}.assign_char('N').to_rank());
-        std::array<double, alphabet_size> p{};
-        for (std::size_t i = 0; i < alphabet_size; ++i) {
-            p[i] = (1.0 - n_rate) / 4.0;
+        std::array<double, alphabet_size> probabilities{};
+        for (std::size_t alphabet_index = 0; alphabet_index < alphabet_size; ++alphabet_index) {
+            probabilities[alphabet_index] = (1.0 - unknown_base_rate) / 4.0;
         }
-        p[n_rank] = n_rate;
-        return p;
+        probabilities[unknown_base_rank] = unknown_base_rate;
+        return probabilities;
     }
 };
 
-template <std::size_t N>
-consteval bool probabilities_sum_to_one(const std::array<double, N>& p) noexcept {
+template <std::size_t p_probability_count>
+consteval bool probabilities_sum_to_one(
+    const std::array<double, p_probability_count>& probabilities) noexcept {
     double sum = 0.0;
-    for (double value : p) {
+    for (double value : probabilities) {
         sum += value;
     }
     return sum > 1.0 - 1e-9 && sum < 1.0 + 1e-9;
 }
 
-template <std::size_t N>
-consteval bool probabilities_nonnegative(const std::array<double, N>& p) noexcept {
-    for (double value : p) {
+template <std::size_t p_probability_count>
+consteval bool probabilities_nonnegative(
+    const std::array<double, p_probability_count>& probabilities) noexcept {
+    for (double value : probabilities) {
         if (value < 0.0) {
             return false;
         }
@@ -110,101 +112,113 @@ consteval bool probabilities_nonnegative(const std::array<double, N>& p) noexcep
     return true;
 }
 
-template <typename T>
+template <typename p_probability_model>
 concept is_valid_alphabet_probability =
-    sequence_alphabet<typename T::alphabet_t> &&
+    sequence_alphabet<typename p_probability_model::alphabet_t> &&
     requires {
-        { T::alphabet_size } -> std::convertible_to<std::size_t>;
-        { T::probability() } -> std::same_as<std::array<double, T::alphabet_size>>;
+        { p_probability_model::alphabet_size } -> std::convertible_to<std::size_t>;
+        { p_probability_model::probability() } ->
+            std::same_as<std::array<double, p_probability_model::alphabet_size>>;
     } &&
-    (T::alphabet_size == seqan3::alphabet_size<typename T::alphabet_t>) &&
-    probabilities_nonnegative(T::probability()) &&
-    probabilities_sum_to_one(T::probability());
+    (p_probability_model::alphabet_size ==
+     seqan3::alphabet_size<typename p_probability_model::alphabet_t>) &&
+    probabilities_nonnegative(p_probability_model::probability()) &&
+    probabilities_sum_to_one(p_probability_model::probability());
 
 static_assert(is_valid_alphabet_probability<alphabet_probability<seq::dna4>>);
 static_assert(is_valid_alphabet_probability<alphabet_probability<seq::dna5>>);
 static_assert(is_valid_alphabet_probability<alphabet_probability<seq::aa27>>);
 
-template <typename R>
+template <typename p_sequence_config>
 concept packed_sequence_config =
-    is_sequence_custom_alphabet<R> &&
+    is_sequence_custom_alphabet<p_sequence_config> &&
     requires {
-        typename compact_sequence_range<R>::base_container;
-        typename compact_sequence_range<R>::traits;
-        { compact_sequence_range<R>::from_packed(
-              typename compact_sequence_range<R>::base_container{},
-              std::size_t{0}) } -> std::same_as<compact_sequence_range<R>>;
+        typename compact_sequence_range<p_sequence_config>::base_container;
+        typename compact_sequence_range<p_sequence_config>::traits;
+        { compact_sequence_range<p_sequence_config>::from_packed(
+              typename compact_sequence_range<p_sequence_config>::base_container{},
+              std::size_t{0}) } ->
+            std::same_as<compact_sequence_range<p_sequence_config>>;
     };
 
 inline constexpr std::uint32_t k_chunk_units = 8;
 inline constexpr std::uint64_t k_reference_stream_space = 1ull << 40;
 
 struct taus_lcg_state {
-    std::uint32_t x = 0;
-    std::uint32_t y = 0;
-    std::uint32_t z = 0;
-    std::uint32_t w = 0;
+    std::uint32_t first_taus_state = 0;
+    std::uint32_t second_taus_state = 0;
+    std::uint32_t third_taus_state = 0;
+    std::uint32_t lcg_state = 0;
 };
 
 [[gnu::always_inline]] inline std::uint32_t taus_step(
-    std::uint32_t value, int s1, int s2, int s3, std::uint32_t mask) noexcept {
-    const std::uint32_t b = (((value << s1) ^ value) >> s2);
-    return (((value & mask) << s3) ^ b);
+    std::uint32_t value,
+    int xor_left_shift,
+    int xor_right_shift,
+    int state_left_shift,
+    std::uint32_t mask) noexcept {
+    const std::uint32_t mixed_bits = (((value << xor_left_shift) ^ value) >> xor_right_shift);
+    return (((value & mask) << state_left_shift) ^ mixed_bits);
 }
 
 [[gnu::always_inline]] inline std::uint32_t lcg_step(
-    std::uint32_t value, std::uint32_t a, std::uint32_t c) noexcept {
-    return a * value + c;
+    std::uint32_t value, std::uint32_t multiplier, std::uint32_t increment) noexcept {
+    return multiplier * value + increment;
 }
 
 [[gnu::always_inline]] inline std::uint32_t next_u32(taus_lcg_state& state) noexcept {
-    state.x = taus_step(state.x, 13, 19, 12, 4294967294u);
-    state.y = taus_step(state.y,  2, 25,  4, 4294967288u);
-    state.z = taus_step(state.z,  3, 11, 17, 4294967280u);
-    state.w = lcg_step(state.w, 1664525u, 1013904223u);
-    return state.x ^ state.y ^ state.z ^ state.w;
+    state.first_taus_state = taus_step(state.first_taus_state, 13, 19, 12, 4294967294u);
+    state.second_taus_state = taus_step(state.second_taus_state, 2, 25, 4, 4294967288u);
+    state.third_taus_state = taus_step(state.third_taus_state, 3, 11, 17, 4294967280u);
+    state.lcg_state = lcg_step(state.lcg_state, 1664525u, 1013904223u);
+    return state.first_taus_state ^ state.second_taus_state ^
+           state.third_taus_state ^ state.lcg_state;
 }
 
-[[gnu::always_inline]] inline std::uint64_t splitmix64(std::uint64_t x) noexcept {
-    x += 0x9e3779b97f4a7c15ULL;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
+[[gnu::always_inline]] inline std::uint64_t splitmix64(std::uint64_t state) noexcept {
+    state += 0x9e3779b97f4a7c15ULL;
+    state = (state ^ (state >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    state = (state ^ (state >> 27)) * 0x94d049bb133111ebULL;
+    return state ^ (state >> 31);
 }
 
 [[gnu::always_inline]] inline taus_lcg_state seed_stream(
     std::uint64_t global_seed, std::uint64_t stream_id) noexcept {
-    const std::uint64_t s = global_seed ^ (stream_id * 0x9e3779b97f4a7c15ULL);
-    const std::uint64_t a = splitmix64(s);
-    const std::uint64_t b = splitmix64(a);
+    const std::uint64_t stream_seed = global_seed ^ (stream_id * 0x9e3779b97f4a7c15ULL);
+    const std::uint64_t first_mix = splitmix64(stream_seed);
+    const std::uint64_t second_mix = splitmix64(first_mix);
     taus_lcg_state state{
-        static_cast<std::uint32_t>(a), static_cast<std::uint32_t>(a >> 32),
-        static_cast<std::uint32_t>(b), static_cast<std::uint32_t>(b >> 32)};
-    if (state.x < 129u) state.x += 129u;
-    if (state.y < 129u) state.y += 129u;
-    if (state.z < 129u) state.z += 129u;
+        static_cast<std::uint32_t>(first_mix), static_cast<std::uint32_t>(first_mix >> 32),
+        static_cast<std::uint32_t>(second_mix), static_cast<std::uint32_t>(second_mix >> 32)};
+    if (state.first_taus_state < 129u) state.first_taus_state += 129u;
+    if (state.second_taus_state < 129u) state.second_taus_state += 129u;
+    if (state.third_taus_state < 129u) state.third_taus_state += 129u;
     return state;
 }
 
-template <std::size_t N>
-constexpr std::array<std::uint32_t, N> make_integer_cdf(
-    const std::array<double, N>& probabilities) noexcept {
-    std::array<std::uint32_t, N> cdf{};
-    double acc = 0.0;
-    for (std::size_t k = 0; k < N; ++k) {
-        acc += probabilities[k];
-        const double scaled = acc * 4294967296.0;
-        cdf[k] = scaled >= 4294967295.0
+template <std::size_t p_probability_count>
+constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
+    const std::array<double, p_probability_count>& probabilities) noexcept {
+    std::array<std::uint32_t, p_probability_count> cumulative_distribution{};
+    double accumulated_probability = 0.0;
+    for (std::size_t probability_index = 0;
+         probability_index < p_probability_count;
+         ++probability_index) {
+        accumulated_probability += probabilities[probability_index];
+        const double scaled = accumulated_probability * 4294967296.0;
+        cumulative_distribution[probability_index] = scaled >= 4294967295.0
             ? 0xFFFFFFFFu
             : static_cast<std::uint32_t>(scaled);
     }
-    return cdf;
+    return cumulative_distribution;
 }
 
 [[gnu::always_inline]] inline std::uint32_t sample_rank(
-    const std::uint32_t* cdf, std::uint32_t alphabet_size, std::uint32_t draw) noexcept {
+    const std::uint32_t* cumulative_distribution,
+    std::uint32_t alphabet_size,
+    std::uint32_t draw) noexcept {
     std::uint32_t rank = 0;
-    while (rank + 1u < alphabet_size && draw >= cdf[rank]) {
+    while (rank + 1u < alphabet_size && draw >= cumulative_distribution[rank]) {
         ++rank;
     }
     return rank;
@@ -215,27 +229,28 @@ constexpr std::array<std::uint32_t, N> make_integer_cdf(
 }
 
 [[gnu::always_inline]] inline std::uint32_t next_below(
-    taus_lcg_state& state, std::uint32_t n) noexcept {
+    taus_lcg_state& state, std::uint32_t exclusive_upper_bound) noexcept {
     return static_cast<std::uint32_t>(
-        (static_cast<std::uint64_t>(next_u32(state)) * n) >> 32);
+        (static_cast<std::uint64_t>(next_u32(state)) * exclusive_upper_bound) >> 32);
 }
 
 [[gnu::always_inline]] inline std::uint64_t next_u64(taus_lcg_state& state) noexcept {
-    const std::uint64_t hi = next_u32(state);
-    const std::uint64_t lo = next_u32(state);
-    return (hi << 32) | lo;
+    const std::uint64_t high_bits = next_u32(state);
+    const std::uint64_t low_bits = next_u32(state);
+    return (high_bits << 32) | low_bits;
 }
 
 [[gnu::always_inline]] inline std::uint64_t next_below64(
-    taus_lcg_state& state, std::uint64_t n) noexcept {
-    if (n == 0) {
+    taus_lcg_state& state, std::uint64_t exclusive_upper_bound) noexcept {
+    if (exclusive_upper_bound == 0) {
         return 0;
     }
-    const std::uint64_t threshold = (std::uint64_t{0} - n) % n;
+    const std::uint64_t threshold =
+        (std::uint64_t{0} - exclusive_upper_bound) % exclusive_upper_bound;
     for (;;) {
-        const std::uint64_t x = next_u64(state);
-        if (x >= threshold) {
-            return x % n;
+        const std::uint64_t random_value = next_u64(state);
+        if (random_value >= threshold) {
+            return random_value % exclusive_upper_bound;
         }
     }
 }
@@ -248,110 +263,117 @@ constexpr std::array<std::uint32_t, N> make_integer_cdf(
 
 inline double next_gaussian(
     taus_lcg_state& state, double mean, double stddev) noexcept {
-    double u1 = next_unit_double(state);
-    const double u2 = next_unit_double(state);
-    if (u1 < 1e-300) {
-        u1 = 1e-300;
+    double radial_uniform = next_unit_double(state);
+    const double angular_uniform = next_unit_double(state);
+    if (radial_uniform < 1e-300) {
+        radial_uniform = 1e-300;
     }
-    const double r = std::sqrt(-2.0 * std::log(u1));
-    const double theta = 6.283185307179586 * u2;
-    return mean + stddev * (r * std::cos(theta));
+    const double radius = std::sqrt(-2.0 * std::log(radial_uniform));
+    const double theta = 6.283185307179586 * angular_uniform;
+    return mean + stddev * (radius * std::cos(theta));
 }
 
-template <typename p_traits>
-[[gnu::always_inline]] constexpr typename p_traits::storage_unit pack_unit(
-    const typename p_traits::letter_unit* ranks, std::size_t valid) noexcept {
-    using unit_t = typename p_traits::storage_unit;
-    unit_t acc = 0;
+template <typename p_sequence_traits>
+[[gnu::always_inline]] constexpr typename p_sequence_traits::storage_unit pack_unit(
+    const typename p_sequence_traits::letter_unit* ranks, std::size_t valid) noexcept {
+    using unit_t = typename p_sequence_traits::storage_unit;
+    unit_t packed_unit = 0;
     for (std::size_t slot = 0; slot < valid; ++slot) {
-        acc = static_cast<unit_t>(
-            acc | (static_cast<unit_t>(ranks[slot]) << (slot * p_traits::bits_per_char)));
+        packed_unit = static_cast<unit_t>(
+            packed_unit |
+            (static_cast<unit_t>(ranks[slot]) << (slot * p_sequence_traits::bits_per_char)));
     }
-    return acc;
+    return packed_unit;
 }
 
-template <typename p_traits>
-[[nodiscard]] std::pair<std::vector<typename p_traits::storage_unit>, std::size_t>
-pack_ranks_no_sentinel(std::span<const typename p_traits::letter_unit> ranks) {
-    using unit_t = typename p_traits::storage_unit;
-    std::vector<unit_t> out;
+template <typename p_sequence_traits>
+[[nodiscard]] std::pair<std::vector<typename p_sequence_traits::storage_unit>, std::size_t>
+pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> ranks) {
+    using unit_t = typename p_sequence_traits::storage_unit;
+    std::vector<unit_t> packed_units;
     const std::size_t units =
-        (ranks.size() + p_traits::letters_per_unit - 1) / p_traits::letters_per_unit;
-    out.resize(units);
+        (ranks.size() + p_sequence_traits::letters_per_unit - 1) /
+        p_sequence_traits::letters_per_unit;
+    packed_units.resize(units);
     for (std::size_t unit = 0; unit < units; ++unit) {
-        const std::size_t first = unit * p_traits::letters_per_unit;
+        const std::size_t first = unit * p_sequence_traits::letters_per_unit;
         const std::size_t valid =
-            std::min<std::size_t>(p_traits::letters_per_unit, ranks.size() - first);
-        out[unit] = pack_unit<p_traits>(ranks.data() + first, valid);
+            std::min<std::size_t>(p_sequence_traits::letters_per_unit, ranks.size() - first);
+        packed_units[unit] = pack_unit<p_sequence_traits>(ranks.data() + first, valid);
     }
-    const std::size_t padding = units == 0 ? 0 : units * p_traits::letters_per_unit - ranks.size();
-    return {std::move(out), padding};
+    const std::size_t padding =
+        units == 0 ? 0 : units * p_sequence_traits::letters_per_unit - ranks.size();
+    return {std::move(packed_units), padding};
 }
 
-template <typename Seq>
+template <typename p_sequence_type>
 void extract_window_ranks(
-    const Seq& seq,
+    const p_sequence_type& sequence,
     std::size_t start,
     std::size_t end,
     bool is_reverse,
-    std::span<typename Seq::traits::letter_unit> out_ranks) {
-    using traits = typename Seq::traits;
+    std::span<typename p_sequence_type::traits::letter_unit> out_ranks) {
+    using sequence_traits = typename p_sequence_type::traits;
     DEBUG_ASSERT(out_ranks.size() >= end - start, "extract_window_ranks: output too small");
     if (end <= start) {
         return;
     }
-    if constexpr (sizeof(typename traits::letter_unit) == sizeof(std::uint8_t)) {
-        auto out8 = std::span<std::uint8_t>{
+    if constexpr (sizeof(typename sequence_traits::letter_unit) == sizeof(std::uint8_t)) {
+        auto byte_output = std::span<std::uint8_t>{
             reinterpret_cast<std::uint8_t*>(out_ranks.data()), end - start};
         if (is_reverse) {
-            seq.template to_encoded_into<false, true>(out8, start, end);
-            if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
+            sequence.template to_encoded_into<false, true>(byte_output, start, end);
+            if constexpr (seqan3::nucleotide_alphabet<typename sequence_traits::alphabet_type>) {
                 for (auto& rank : out_ranks) {
-                    rank = static_cast<typename traits::letter_unit>(
-                        traits::letter_complement(static_cast<typename traits::storage_unit>(rank)));
+                    rank = static_cast<typename sequence_traits::letter_unit>(
+                        sequence_traits::letter_complement(
+                            static_cast<typename sequence_traits::storage_unit>(rank)));
                 }
             }
         } else {
-            seq.template to_encoded_into<false, false>(out8, start, end);
+            sequence.template to_encoded_into<false, false>(byte_output, start, end);
         }
     } else {
         const std::size_t length = end - start;
-        auto iter = seq.template iterable<logical_rank>().begin();
-        for (std::size_t i = 0; i < start; ++i) {
+        auto iter = sequence.template iterable<logical_rank>().begin();
+        for (std::size_t offset = 0; offset < start; ++offset) {
             ++iter;
         }
         if (is_reverse) {
-            for (std::size_t i = 0; i < length; ++i) {
+            for (std::size_t offset = 0; offset < length; ++offset) {
                 auto letter = *iter;
-                if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
-                    out_ranks[length - 1 - i] = static_cast<typename traits::letter_unit>(
-                        traits::letter_complement(static_cast<typename traits::storage_unit>(letter)));
+                if constexpr (seqan3::nucleotide_alphabet<typename sequence_traits::alphabet_type>) {
+                    out_ranks[length - 1 - offset] =
+                        static_cast<typename sequence_traits::letter_unit>(
+                            sequence_traits::letter_complement(
+                                static_cast<typename sequence_traits::storage_unit>(letter)));
                 } else {
-                    out_ranks[length - 1 - i] = static_cast<typename traits::letter_unit>(letter);
+                    out_ranks[length - 1 - offset] =
+                        static_cast<typename sequence_traits::letter_unit>(letter);
                 }
                 ++iter;
             }
         } else {
-            for (std::size_t i = 0; i < length; ++i) {
-                out_ranks[i] = static_cast<typename traits::letter_unit>(*iter);
+            for (std::size_t offset = 0; offset < length; ++offset) {
+                out_ranks[offset] = static_cast<typename sequence_traits::letter_unit>(*iter);
                 ++iter;
             }
         }
     }
 }
 
-template <typename p_traits>
+template <typename p_sequence_traits>
 void generate_units_cpu_for_sequence(
-    std::span<typename p_traits::storage_unit> out_units,
+    std::span<typename p_sequence_traits::storage_unit> out_units,
     std::uint64_t symbols_per_seq,
     std::uint64_t seq_index,
     std::uint64_t /*seq_count*/,
     std::span<const std::uint32_t> cdf,
     std::uint64_t seed) {
-    constexpr std::uint32_t lpu = p_traits::letters_per_unit;
+    constexpr std::uint32_t lpu = p_sequence_traits::letters_per_unit;
     const std::uint64_t units_per_seq = (symbols_per_seq + lpu - 1) / lpu;
     const std::uint64_t chunks_per_seq = (units_per_seq + k_chunk_units - 1) / k_chunk_units;
-    const std::uint32_t alphabet_size = p_traits::alphabet_size;
+    const std::uint32_t alphabet_size = p_sequence_traits::alphabet_size;
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
 
     auto& pool = bioseq::parallelism::global_pool::instance();
@@ -359,24 +381,27 @@ void generate_units_cpu_for_sequence(
         bioseq::parallelism::range_body{
             [out_units, cdf_ptr = cdf.data(), symbols_per_seq, units_per_seq,
              alphabet_size, stream_base, seed](std::size_t lo, std::size_t hi) {
-                typename p_traits::letter_unit ranks[k_chunk_units * p_traits::letters_per_unit];
+                typename p_sequence_traits::letter_unit
+                    ranks[k_chunk_units * p_sequence_traits::letters_per_unit];
                 for (std::size_t local_chunk = lo; local_chunk < hi; ++local_chunk) {
                     taus_lcg_state state = seed_stream(seed, stream_base + local_chunk);
-                    const std::uint64_t local_unit0 = local_chunk * k_chunk_units;
-                    for (std::uint32_t u = 0; u < k_chunk_units; ++u) {
-                        const std::uint64_t local_unit = local_unit0 + u;
+                    const std::uint64_t first_local_unit = local_chunk * k_chunk_units;
+                    for (std::uint32_t unit_offset = 0;
+                         unit_offset < k_chunk_units;
+                         ++unit_offset) {
+                        const std::uint64_t local_unit = first_local_unit + unit_offset;
                         if (local_unit >= units_per_seq) {
                             break;
                         }
-                        const std::uint64_t sym0 = local_unit * lpu;
+                        const std::uint64_t first_symbol = local_unit * lpu;
                         const std::uint32_t valid = static_cast<std::uint32_t>(
-                            std::min<std::uint64_t>(lpu, symbols_per_seq - sym0));
+                            std::min<std::uint64_t>(lpu, symbols_per_seq - first_symbol));
                         for (std::uint32_t slot = 0; slot < valid; ++slot) {
-                            ranks[slot] = static_cast<typename p_traits::letter_unit>(
+                            ranks[slot] = static_cast<typename p_sequence_traits::letter_unit>(
                                 sample_rank(cdf_ptr, alphabet_size, next_u32(state)));
                         }
                         out_units[static_cast<std::size_t>(local_unit)] =
-                            pack_unit<p_traits>(ranks, valid);
+                            pack_unit<p_sequence_traits>(ranks, valid);
                     }
                 }
             }});
@@ -406,9 +431,9 @@ void generate_units_cpu_for_sequence(
     return length;
 }
 
-template <typename p_traits>
+template <typename p_sequence_traits>
 void apply_substitutions(
-    std::span<typename p_traits::letter_unit> ranks,
+    std::span<typename p_sequence_traits::letter_unit> ranks,
     double rate,
     taus_lcg_state& state) {
     if (rate <= 0.0) {
@@ -419,8 +444,8 @@ void apply_substitutions(
         : static_cast<std::uint32_t>(rate * 4294967296.0);
     for (auto& rank : ranks) {
         if (rate >= 1.0 || next_u32(state) < threshold) {
-            rank = static_cast<typename p_traits::letter_unit>(
-                next_other_rank(state, p_traits::alphabet_size, rank));
+            rank = static_cast<typename p_sequence_traits::letter_unit>(
+                next_other_rank(state, p_sequence_traits::alphabet_size, rank));
         }
     }
 }
@@ -438,7 +463,7 @@ struct indel_event_counts {
     std::string message = "Vulkan sequence generation selected but ";
     message += operation;
     message += " cannot run";
-    if (!runtime.usable()) {
+    if (!runtime.is_usable()) {
         message += ": runtime unavailable";
         if (!runtime.initialization_error().empty()) {
             message += ": ";
@@ -454,9 +479,9 @@ struct indel_event_counts {
     throw bioseq::gpu::vulkan::vulkan_runtime_error(message);
 }
 
-template <typename p_traits, typename p_output_vector>
+template <typename p_sequence_traits, typename p_output_vector>
 void apply_indels(
-    std::span<const typename p_traits::letter_unit> in_ranks,
+    std::span<const typename p_sequence_traits::letter_unit> in_ranks,
     const generator_params& params,
     std::span<const std::uint32_t> cdf,
     taus_lcg_state& state,
@@ -473,19 +498,22 @@ void apply_indels(
         params.deletion_rate >= 1.0 ? 0xFFFFFFFFu :
         static_cast<std::uint32_t>(params.deletion_rate * 4294967296.0);
 
-    std::size_t pos = 0;
-    while (pos < in_ranks.size()) {
+    std::size_t position = 0;
+    while (position < in_ranks.size()) {
         if (counts != nullptr) {
             counts->visited_positions += 1;
         }
-        out_ranks.push_back(in_ranks[pos]);
+        out_ranks.push_back(in_ranks[position]);
         if (insertion_threshold != 0u &&
             (params.insertion_rate >= 1.0 || next_u32(state) < insertion_threshold)) {
             const std::size_t length = clamp_round_nonneg(
                 next_gaussian(state, params.insertion_length_mean, params.insertion_length_stddev));
-            for (std::size_t i = 0; i < length; ++i) {
-                out_ranks.push_back(static_cast<typename p_traits::letter_unit>(
-                    sample_rank(cdf.data(), p_traits::alphabet_size, next_u32(state))));
+            for (std::size_t inserted_position = 0;
+                 inserted_position < length;
+                 ++inserted_position) {
+                out_ranks.push_back(static_cast<typename p_sequence_traits::letter_unit>(
+                    sample_rank(
+                        cdf.data(), p_sequence_traits::alphabet_size, next_u32(state))));
             }
             if (counts != nullptr) {
                 counts->insertions += 1;
@@ -504,24 +532,26 @@ void apply_indels(
                 counts->deleted_bp += deleted;
             }
         }
-        pos += advance;
+        position += advance;
     }
 }
 
 template <
-    packed_sequence_config R,
-    typename Prob = alphabet_probability<typename compact_sequence_range<R>::traits::alphabet_type>>
-requires is_valid_alphabet_probability<Prob>
+    packed_sequence_config p_sequence_config,
+    typename p_probability_model = alphabet_probability<
+        typename compact_sequence_range<p_sequence_config>::traits::alphabet_type>>
+requires is_valid_alphabet_probability<p_probability_model>
 class sequence_generator {
 public:
-    using seq_t = compact_sequence_range<R>;
+    using seq_t = compact_sequence_range<p_sequence_config>;
     using seq_traits = typename seq_t::traits;
     using alphabet_t = typename seq_traits::alphabet_type;
     using unit_t = typename seq_traits::storage_unit;
     using rank_t = typename seq_traits::letter_unit;
 
-    static_assert(std::same_as<typename Prob::alphabet_t, alphabet_t>,
-                  "Prob must describe the same alphabet as R");
+    static_assert(
+        std::same_as<typename p_probability_model::alphabet_t, alphabet_t>,
+        "probability model must describe the configured sequence alphabet");
 
     explicit sequence_generator(const generator_params& params) noexcept
         : params_(params) {}
@@ -542,7 +572,7 @@ public:
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
         const std::size_t padding =
             units == 0 ? 0 : static_cast<std::size_t>(units * lpu - symbols);
-        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
 
         std::vector<seq_t> out;
         out.reserve(count);
@@ -614,7 +644,7 @@ public:
         constexpr std::uint32_t lpu = seq_traits::letters_per_unit;
         const std::uint64_t symbols = params_.reference_length;
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
-        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
 
         std::vector<unit_t> data(static_cast<std::size_t>(units));
         if (params_.use_vulkan) {
@@ -675,13 +705,13 @@ public:
                 count);
             return {};
         }
-        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
         std::vector<query_target_pair> pairs(count);
         auto& pool = bioseq::parallelism::global_pool::instance();
         pool.parallel_for_with_context(0, count, 1, bioseq::parallelism::range_body{
             [this, &pairs, &reference, first](std::size_t lo, std::size_t hi) {
-                for (std::size_t i = lo; i < hi; ++i) {
-                    const std::size_t fragment_index = first + i;
+                for (std::size_t pair_index = lo; pair_index < hi; ++pair_index) {
+                    const std::size_t fragment_index = first + pair_index;
                     taus_lcg_state state =
                         seed_stream(params_.seed, k_reference_stream_space + fragment_index);
                     const std::size_t length = sample_fragment_length(
@@ -727,7 +757,7 @@ public:
                     pair.effective_error_rate =
                         params_.substitution_rate + params_.insertion_rate + params_.deletion_rate;
                     pair.original_query_length = length;
-                    pairs[i] = std::move(pair);
+                    pairs[pair_index] = std::move(pair);
                 }
             }});
         return pairs;
@@ -739,7 +769,7 @@ public:
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
         const std::size_t padding =
             units == 0 ? 0 : static_cast<std::size_t>(units * lpu - symbols);
-        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
 
         std::vector<seq_t> out;
         out.reserve(count);
@@ -761,7 +791,12 @@ private:
     generator_params params_;
 };
 
-template <sequence_alphabet A, typename U = std::uint32_t, typename Prob = alphabet_probability<A>>
-using alphabet_sequence_generator = sequence_generator<sequence_custom_alphabet<A, U>, Prob>;
+template <
+    sequence_alphabet p_alphabet,
+    typename p_storage_unit = std::uint32_t,
+    typename p_probability_model = alphabet_probability<p_alphabet>>
+using alphabet_sequence_generator = sequence_generator<
+    sequence_custom_alphabet<p_alphabet, p_storage_unit>,
+    p_probability_model>;
 
 }  // namespace bioseq::sequences::generation

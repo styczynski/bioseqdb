@@ -177,7 +177,8 @@ raise_custom_scan_required()
 			 errmsg("Custom Scan required"),
 			 errdetail("bioseq_external relations are read through the bioseq_external "
 					   "Custom Scan; a physical scan path was reached instead."),
-			 errhint("Ensure the extension is loaded and bioseq.enable_custom_scan is on.")));
+			 errhint("Ensure the extension is loaded and "
+			         "bioseq.planner.custom_scan.enabled is on.")));
 	pg_unreachable();
 }
 

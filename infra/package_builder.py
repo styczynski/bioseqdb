@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Provision, run, verify, and image BioSeq's native AWS package builders.
 
-This is the OpenTofu-only entry point for DOC0390.  The normal ``run`` command
+The normal ``run`` command
 owns the complete lifecycle: it selects architecture-specific cached AMIs,
 applies the isolated OpenTofu stack without permitting instance replacement,
 starts only the exact instances recorded in that stack, prepares lock-hashed
@@ -60,6 +60,10 @@ PROTECTED_INSTANCE_IDS = frozenset(
     }
 )
 
+BOOTSTRAP_SCHEMA_REVISION = 2
+WORKER_GENERATION = "python-poetry"
+WORKER_GENERATION_REVISION = 1
+
 EXPECTED_INSTANCE_TAGS = {
     "Project": "bioseq",
     "Component": "package-build-machine",
@@ -74,11 +78,10 @@ CACHE_TAGS = {
     "ManagedBy": "bioseq-package-builder",
     "BaseOS": "ubuntu-24.04",
     "CacheStage": "post-build",
-    "WorkerGeneration": "python-poetry-v1",
+    "WorkerGeneration": WORKER_GENERATION,
+    "WorkerGenerationRevision": str(WORKER_GENERATION_REVISION),
 }
 
-BOOTSTRAP_SCHEMA = "2"
-WORKER_GENERATION = "python-poetry-v1"
 EXPECTED_PACKAGE_VERSION = "4.2.3"
 EXPECTED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 DEFAULT_REGION = "us-east-1"
@@ -86,7 +89,56 @@ DEFAULT_S3_PREFIX = "bioseq/packages"
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
 REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
-SOURCE_ARCHIVE_REVISION = "repository-root-sealed-papers-excluded-v3"
+SOURCE_ARCHIVE_IDENTITY = "repository-root-sealed-papers-excluded"
+SOURCE_ARCHIVE_REVISION = 3
+PACKAGE_MATRIX_SCHEMA_REVISION = 1
+PACKAGE_MANIFEST_SCHEMA_REVISION = 1
+PACKAGE_RUN_SCHEMA_REVISION = 1
+_PACKAGE_MANIFEST_ROOT_KEYS = frozenset({
+    "schema_revision",
+    "package_version",
+    "architecture",
+    "status",
+    "started_at",
+    "completed_at",
+    "requested",
+    "s3",
+    "signing",
+    "source_revision",
+    "poetry_lock_sha256",
+    "python_environment",
+    "cells",
+    "errors",
+})
+_PACKAGE_RUN_COMMON_KEYS = frozenset({
+    "schema_revision",
+    "status",
+    "run_id",
+    "revision",
+    "source_revision",
+    "poetry_lock_sha256",
+    "worker_generation",
+    "worker_generation_revision",
+    "completed_at",
+    "selection",
+    "bucket",
+    "s3_prefix",
+    "artifact_count",
+    "python_environments",
+    "worker_units",
+    "manifests",
+    "builders_left_running",
+})
+_PACKAGE_RUN_ROOT_SHAPES = (
+    _PACKAGE_RUN_COMMON_KEYS | {"worker_launch_acknowledged"},
+    _PACKAGE_RUN_COMMON_KEYS | {
+        "worker_launch_acknowledged", "cache_images",
+    },
+    _PACKAGE_RUN_COMMON_KEYS | {
+        "finalizer_revision", "finalized_from_completed_manifests",
+        "cache_images",
+    },
+)
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -111,6 +163,67 @@ ACTIVE_CHILDREN_LOCK = threading.RLock()
 
 class PackageBuilderError(RuntimeError):
     """An actionable, fail-closed package-builder error."""
+
+
+def require_exact_keys(
+    value: dict[str, Any], expected: frozenset[str] | set[str], label: str,
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise PackageBuilderError(
+            f"{label} has unexpected keys: "
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+        )
+
+
+def require_current_package_manifest(
+    value: object, *, label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PackageBuilderError(f"{label} must be an object")
+    require_exact_keys(value, _PACKAGE_MANIFEST_ROOT_KEYS, label)
+    revision = value["schema_revision"]
+    if (
+        type(revision) is not int
+        or revision != PACKAGE_MANIFEST_SCHEMA_REVISION
+    ):
+        raise PackageBuilderError(
+            f"{label} schema_revision must be integer revision "
+            f"{PACKAGE_MANIFEST_SCHEMA_REVISION}"
+        )
+    return value
+
+
+def require_current_package_run_result(
+    value: object, *, label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PackageBuilderError(f"{label} must be an object")
+    actual = set(value)
+    if actual not in _PACKAGE_RUN_ROOT_SHAPES:
+        expected = min(
+            _PACKAGE_RUN_ROOT_SHAPES,
+            key=lambda candidate: len(actual ^ candidate),
+        )
+        raise PackageBuilderError(
+            f"{label} has unexpected keys: "
+            f"missing={sorted(expected - actual)} "
+            f"extra={sorted(actual - expected)}"
+        )
+    revision = value["schema_revision"]
+    worker_revision = value["worker_generation_revision"]
+    if type(revision) is not int or revision != PACKAGE_RUN_SCHEMA_REVISION:
+        raise PackageBuilderError(
+            f"{label} schema_revision must be integer revision "
+            f"{PACKAGE_RUN_SCHEMA_REVISION}"
+        )
+    if (
+        value["worker_generation"] != WORKER_GENERATION
+        or type(worker_revision) is not int
+        or worker_revision != WORKER_GENERATION_REVISION
+    ):
+        raise PackageBuilderError(f"{label} worker generation is not current")
+    return value
 
 
 def utc_now() -> str:
@@ -350,8 +463,21 @@ def load_matrix(path: Path = MATRIX_FILE) -> Matrix:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise PackageBuilderError(f"cannot load package matrix {path}: {error}") from error
-    if raw.get("schema_version") != 1:
-        raise PackageBuilderError("package matrix schema_version must be 1")
+    if not isinstance(raw, dict):
+        raise PackageBuilderError("package matrix must be an object")
+    require_exact_keys(
+        raw,
+        {"schema_revision", "postgresql_majors", "architectures", "distributions"},
+        "package matrix",
+    )
+    if (
+        type(raw["schema_revision"]) is not int
+        or raw["schema_revision"] != PACKAGE_MATRIX_SCHEMA_REVISION
+    ):
+        raise PackageBuilderError(
+            "package matrix schema_revision must be integer revision "
+            f"{PACKAGE_MATRIX_SCHEMA_REVISION}"
+        )
 
     architecture_rows = raw.get("architectures")
     if not isinstance(architecture_rows, dict) or set(architecture_rows) != {
@@ -367,6 +493,11 @@ def load_matrix(path: Path = MATRIX_FILE) -> Matrix:
     for name, row in architecture_rows.items():
         if not isinstance(row, dict):
             raise PackageBuilderError(f"matrix architecture {name!r} must be an object")
+        require_exact_keys(
+            row,
+            {"aws_architecture", "artifact_architecture", "instance_type"},
+            f"matrix architecture {name!r}",
+        )
         values = (
             row.get("aws_architecture"),
             row.get("artifact_architecture"),
@@ -386,6 +517,7 @@ def load_matrix(path: Path = MATRIX_FILE) -> Matrix:
     for row in distribution_rows:
         if not isinstance(row, dict):
             raise PackageBuilderError("every matrix distribution must be an object")
+        require_exact_keys(row, {"id", "package_format"}, "matrix distribution")
         distro_id = row.get("id")
         package_format = row.get("package_format")
         if not isinstance(distro_id, str) or not distro_id:
@@ -675,7 +807,7 @@ def tofu_apply(
         "x64_ami_id": cached_amis.get("x64", ""),
         "artifact_bucket_name": artifact_bucket_name,
         "artifact_prefix": artifact_prefix,
-        "ami_schema_version": BOOTSTRAP_SCHEMA,
+        "ami_schema_revision": BOOTSTRAP_SCHEMA_REVISION,
         "root_volume_size_gb": "500",
         "compiler_rt_priority": "1",
     }
@@ -762,7 +894,8 @@ def latest_cached_ami(
         [
             f"Name=tag:BuildArchitecture,Values={architecture.name}",
             f"Name=tag:Architecture,Values={architecture.aws_architecture}",
-            f"Name=tag:BootstrapSchema,Values={BOOTSTRAP_SCHEMA}",
+            "Name=tag:BootstrapSchemaRevision,Values="
+            f"{BOOTSTRAP_SCHEMA_REVISION}",
             f"Name=tag:PoetryLockSha256,Values={lock_sha256}",
             f"Name=tag:CompleteMatrixFingerprint,Values={matrix_fingerprint}",
             f"Name=architecture,Values={architecture.aws_architecture}",
@@ -792,7 +925,7 @@ def latest_cached_ami(
             **CACHE_TAGS,
             "BuildArchitecture": architecture.name,
             "Architecture": architecture.aws_architecture,
-            "BootstrapSchema": BOOTSTRAP_SCHEMA,
+            "BootstrapSchemaRevision": str(BOOTSTRAP_SCHEMA_REVISION),
             "PoetryLockSha256": lock_sha256,
             "CompleteMatrixFingerprint": matrix_fingerprint,
         }
@@ -877,7 +1010,7 @@ def describe_builder(region: str, builder: Builder, expected: Architecture) -> d
         **EXPECTED_INSTANCE_TAGS,
         "BuildArchitecture": expected.name,
         "Architecture": expected.aws_architecture,
-        "AmiSchemaVersion": BOOTSTRAP_SCHEMA,
+        "AmiSchemaRevision": str(BOOTSTRAP_SCHEMA_REVISION),
     }
     wrong_tags = {
         key: (tags.get(key), value)
@@ -1157,7 +1290,8 @@ def wait_for_bootstrap(builder: Builder, key_path: Path) -> None:
         "test \"$(cat /opt/bioseq-package-builder/PROVISION_STATUS)\" = READY; "
         "test -s /opt/bioseq-package-builder/READY; "
         f"grep -Fqx 'architecture={expected}' /opt/bioseq-package-builder/READY; "
-        f"grep -Fqx 'ami_schema_version={BOOTSTRAP_SCHEMA}' /opt/bioseq-package-builder/READY; "
+        f"grep -Fqx 'ami_schema_revision={BOOTSTRAP_SCHEMA_REVISION}' "
+        "/opt/bioseq-package-builder/READY; "
         "sudo /usr/local/sbin/bioseq-package-builder-verify; "
         "test -x /usr/local/bin/bioseq-compiler-rt-launcher; "
         "docker info >/dev/null"
@@ -1169,7 +1303,7 @@ def wait_for_bootstrap(builder: Builder, key_path: Path) -> None:
 def reconcile_remote_bootstrap(
     builder: Builder, key_path: Path, remote_source: str
 ) -> None:
-    """Reconcile schema-2 bootstrap in place without rebooting or stopping."""
+    """Reconcile the current bootstrap in place without rebooting or stopping."""
 
     wait_for_ssh(builder, key_path)
     ssh_run(
@@ -1184,14 +1318,14 @@ def reconcile_remote_bootstrap(
         key_path,
         "set -eu; "
         "test \"$(cat /opt/bioseq-package-builder/PROVISION_STATUS 2>/dev/null)\" = READY; "
-        f"grep -Fqx 'ami_schema_version={BOOTSTRAP_SCHEMA}' "
+        f"grep -Fqx 'ami_schema_revision={BOOTSTRAP_SCHEMA_REVISION}' "
         "/opt/bioseq-package-builder/READY; "
         "sudo /usr/local/sbin/bioseq-package-builder-verify",
         capture=True,
         check=False,
     )
     if ready.returncode == 0:
-        info(f"schema-{BOOTSTRAP_SCHEMA} bootstrap already reconciled on {builder.architecture}")
+        info(f"current bootstrap already reconciled on {builder.architecture}")
         return
     source_bootstrap = (
         f"{remote_source}/infra/package_build_infra/scripts/bootstrap.sh"
@@ -1202,9 +1336,10 @@ def reconcile_remote_bootstrap(
         f"sudo install -o root -g root -m 0755 {shlex.quote(source_bootstrap)} "
         "/usr/local/sbin/bioseq-package-builder-bootstrap; "
         "sudo sed -i -E "
-        f"\"s/^BIOSEQ_AMI_SCHEMA_VERSION=.*/BIOSEQ_AMI_SCHEMA_VERSION='{BOOTSTRAP_SCHEMA}'/\" "
+        "\"s/^BIOSEQ_AMI_SCHEMA_REVISION=.*/"
+        f"BIOSEQ_AMI_SCHEMA_REVISION='{BOOTSTRAP_SCHEMA_REVISION}'/\" "
         "/etc/bioseq-package-builder.env; "
-        f"grep -Fqx \"BIOSEQ_AMI_SCHEMA_VERSION='{BOOTSTRAP_SCHEMA}'\" "
+        f"grep -Fqx \"BIOSEQ_AMI_SCHEMA_REVISION='{BOOTSTRAP_SCHEMA_REVISION}'\" "
         "/etc/bioseq-package-builder.env; "
         "sudo /usr/local/sbin/bioseq-package-builder-bootstrap"
     )
@@ -1245,7 +1380,8 @@ def create_cached_ami(
     )
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = (
-        f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-"
+        f"bioseq-package-builder-{architecture.name}-schema-revision-"
+        f"{BOOTSTRAP_SCHEMA_REVISION}-"
         f"{matrix_fingerprint[:12]}-{stamp}"
     )
     payload = aws_json(
@@ -1267,12 +1403,13 @@ def create_cached_ami(
         **CACHE_TAGS,
         "BuildArchitecture": architecture.name,
         "Architecture": architecture.aws_architecture,
-        "BootstrapSchema": BOOTSTRAP_SCHEMA,
+        "BootstrapSchemaRevision": str(BOOTSTRAP_SCHEMA_REVISION),
         "SourceRevision": revision,
         "SourceInstanceId": builder.instance_id,
         "PoetryLockSha256": lock_sha256,
         "CompleteMatrixFingerprint": matrix_fingerprint,
         "WorkerGeneration": WORKER_GENERATION,
+        "WorkerGenerationRevision": str(WORKER_GENERATION_REVISION),
         "Name": name,
     }
     aws_no_output(
@@ -1294,12 +1431,13 @@ def create_cached_ami(
         **CACHE_TAGS,
         "BuildArchitecture": architecture.name,
         "Architecture": architecture.aws_architecture,
-        "BootstrapSchema": BOOTSTRAP_SCHEMA,
+        "BootstrapSchemaRevision": str(BOOTSTRAP_SCHEMA_REVISION),
         "SourceRevision": revision,
         "SourceInstanceId": builder.instance_id,
         "PoetryLockSha256": lock_sha256,
         "CompleteMatrixFingerprint": matrix_fingerprint,
         "WorkerGeneration": WORKER_GENERATION,
+        "WorkerGenerationRevision": str(WORKER_GENERATION_REVISION),
         "Name": name,
     }
     if (
@@ -1453,7 +1591,8 @@ def _remote_committed_source_path(revision: str) -> str:
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise PackageBuilderError("committed source sync requires a full Git revision")
     return (
-        f"{REMOTE_WORKSPACE}/source-{SOURCE_ARCHIVE_REVISION}-{revision}"
+        f"{REMOTE_WORKSPACE}/source-{SOURCE_ARCHIVE_IDENTITY}-revision-"
+        f"{SOURCE_ARCHIVE_REVISION}-{revision}"
     )
 
 
@@ -1462,7 +1601,11 @@ def sync_committed_source(builder: Builder, key_path: Path, revision: str) -> st
     remote_staging = f"{remote_source}.tmp-{secrets.token_hex(16)}"
     remote_lock = f"{remote_source}.lock"
     marker = hashlib.sha256(
-        f"{SOURCE_ARCHIVE_REVISION}\0{revision}".encode("ascii")
+        (
+            f"{SOURCE_ARCHIVE_IDENTITY}\n"
+            f"revision={SOURCE_ARCHIVE_REVISION}\n"
+            f"source_revision={revision}\n"
+        ).encode("ascii")
     ).hexdigest()
     remote_source_q = shlex.quote(remote_source)
     remote_staging_q = shlex.quote(remote_staging)
@@ -2234,7 +2377,7 @@ def launch_remote_build(
         "--",
         "/usr/bin/env",
         "AWS_DEFAULT_REGION=" + region,
-        "BIOSEQ_OPTTIMIZATION_LEVEL=0",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64",
         "BIOSEQ_PACKAGE_PARALLELISM=4",
         f"BIOSEQ_POETRY_VERSION={poetry_environment.poetry_version}",
         "BIOSEQ_COMPILER_RT_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher",
@@ -2328,10 +2471,12 @@ def wait_remote_build(
         raise PackageBuilderError(
             f"{handle.builder.architecture} manifest is invalid JSON: {error}"
         ) from error
+    manifest = require_current_package_manifest(
+        manifest,
+        label=f"{handle.builder.architecture} package manifest",
+    )
     if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_version") != 1
-        or manifest.get("status") != "success"
+        manifest.get("status") != "success"
         or manifest.get("architecture") != handle.builder.architecture
         or manifest.get("errors") != []
     ):
@@ -2383,7 +2528,18 @@ def require_smoke_attestation(
         "nonempty_roundtrip",
         "fresh_container",
     )
-    if not isinstance(smoke, dict) or any(smoke.get(name) is not True for name in required_true):
+    if not isinstance(smoke, dict):
+        raise PackageBuilderError(f"{label} is not an object: {smoke}")
+    require_exact_keys(
+        smoke,
+        {
+            *required_true,
+            "architecture", "postgres_major", "distro", "roundtrip",
+            "container_image",
+        },
+        label,
+    )
+    if any(smoke.get(name) is not True for name in required_true):
         raise PackageBuilderError(f"{label} did not pass every assertion: {smoke}")
     if (
         smoke.get("architecture") != architecture
@@ -2409,9 +2565,11 @@ def validate_manifest(
     poetry_lock_sha256: str,
     python_environment: PoetryEnvironment,
 ) -> list[dict[str, Any]]:
-    if manifest.get("schema_version") != 1 or manifest.get("status") != "success":
+    manifest = require_current_package_manifest(
+        manifest, label=f"{architecture} package manifest")
+    if manifest.get("status") != "success":
         raise PackageBuilderError(
-            f"{architecture} manifest did not report schema 1 success"
+            f"{architecture} manifest did not report success"
         )
     if manifest.get("package_version") != EXPECTED_PACKAGE_VERSION:
         raise PackageBuilderError(f"{architecture} manifest package version mismatch")
@@ -2421,24 +2579,49 @@ def validate_manifest(
         raise PackageBuilderError(f"{architecture} manifest source revision mismatch")
     if manifest.get("poetry_lock_sha256") != poetry_lock_sha256:
         raise PackageBuilderError(f"{architecture} manifest Poetry lock mismatch")
-    if manifest.get("python_environment") != python_environment.manifest_value():
+    manifest_python = manifest.get("python_environment")
+    if not isinstance(manifest_python, dict):
+        raise PackageBuilderError(
+            f"{architecture} manifest Python environment is not an object")
+    require_exact_keys(
+        manifest_python, {"python", "poetry"},
+        f"{architecture} manifest Python environment",
+    )
+    if manifest_python != python_environment.manifest_value():
         raise PackageBuilderError(f"{architecture} manifest Python environment mismatch")
     if manifest.get("errors") != []:
         raise PackageBuilderError(f"{architecture} successful manifest contains errors")
-    requested = manifest.get("requested", {})
-    requested_pg = requested.get("postgres", requested.get("postgresql_majors", []))
+    requested = manifest.get("requested")
+    if not isinstance(requested, dict):
+        raise PackageBuilderError(f"{architecture} requested matrix is not an object")
+    require_exact_keys(
+        requested, {"postgres", "distros"},
+        f"{architecture} requested matrix",
+    )
+    requested_pg = requested.get("postgres", [])
     if sorted(requested_pg) != sorted(selection.postgresql_majors):
         raise PackageBuilderError(f"{architecture} manifest PostgreSQL selection mismatch")
     if sorted(requested.get("distros", [])) != sorted(selection.distributions):
         raise PackageBuilderError(f"{architecture} manifest distro selection mismatch")
-    s3 = manifest.get("s3", {})
+    s3 = manifest.get("s3")
+    if not isinstance(s3, dict):
+        raise PackageBuilderError(f"{architecture} manifest S3 contract is not an object")
+    require_exact_keys(
+        s3, {"bucket", "region", "base_prefix"},
+        f"{architecture} manifest S3 contract",
+    )
     if (
         s3.get("bucket") != bucket
         or s3.get("region") != region
         or s3.get("base_prefix") != s3_prefix
     ):
         raise PackageBuilderError(f"{architecture} manifest S3 contract mismatch")
-    signing = manifest.get("signing", {})
+    signing = manifest.get("signing")
+    if not isinstance(signing, dict):
+        raise PackageBuilderError(
+            f"{architecture} manifest signing evidence is not an object")
+    require_exact_keys(
+        signing, {"fingerprint"}, f"{architecture} manifest signing evidence")
     signing_fingerprint = str(signing.get("fingerprint", ""))
     if signing_fingerprint != EXPECTED_SIGNING_FINGERPRINT:
         raise PackageBuilderError(
@@ -2482,7 +2665,7 @@ def validate_manifest(
             "six_artifacts": True,
             "rpath_absent": True,
             "compiler_runtime_safe": True,
-            "optimization_level": 0,
+            "template_flatten_profile": "dna4_uint64",
         }
         if any(validation.get(name) != value for name, value in required_validation.items()):
             raise PackageBuilderError(
@@ -2788,6 +2971,8 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
 
 
 def write_last_run(payload: dict[str, Any]) -> None:
+    payload = require_current_package_run_result(
+        payload, label="package run result")
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     temporary = LAST_RUN_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2835,7 +3020,7 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
             cached[name] = str(image["ImageId"])
             info(f"selected cached {name} AMI {cached[name]}")
         else:
-            info(f"no schema-{BOOTSTRAP_SCHEMA} cached {name} AMI; using Canonical base")
+            info(f"no current cached {name} AMI; using Canonical base")
     outputs = tofu_apply(
         region=args.region,
         ssh_cidr=ssh_cidr,
@@ -2864,8 +3049,9 @@ def complete_matrix_fingerprint(matrix: Matrix, lock_sha256: str) -> str:
     if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
         raise PackageBuilderError("complete-matrix fingerprint requires a lock SHA-256")
     payload = {
-        "bootstrap_schema": BOOTSTRAP_SCHEMA,
+        "bootstrap_schema_revision": BOOTSTRAP_SCHEMA_REVISION,
         "worker_generation": WORKER_GENERATION,
+        "worker_generation_revision": WORKER_GENERATION_REVISION,
         "poetry_lock_sha256": lock_sha256,
         "architectures": {
             name: {
@@ -3260,13 +3446,14 @@ def execute_build(
         )
     verify_s3_uploads(args.region, bucket, uploads)
     result = {
-        "schema_version": 1,
+        "schema_revision": PACKAGE_RUN_SCHEMA_REVISION,
         "status": "success",
         "run_id": run_id,
         "revision": revision,
         "source_revision": revision,
         "poetry_lock_sha256": lock_sha256,
         "worker_generation": WORKER_GENERATION,
+        "worker_generation_revision": WORKER_GENERATION_REVISION,
         "completed_at": utc_now(),
         "selection": {
             "architectures": list(selection.architectures),
@@ -3317,11 +3504,10 @@ def fetch_completed_manifest(
         raise PackageBuilderError(
             f"{builder.architecture} completed manifest is invalid JSON: {error}"
         ) from error
-    if not isinstance(manifest, dict):
-        raise PackageBuilderError(
-            f"{builder.architecture} completed manifest must be an object"
-        )
-    return manifest
+    return require_current_package_manifest(
+        manifest,
+        label=f"{builder.architecture} completed package manifest",
+    )
 
 
 def finalize_completed_run(
@@ -3423,7 +3609,7 @@ def finalize_completed_run(
         * len(matrix.postgresql_majors)
     )
     result: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_revision": PACKAGE_RUN_SCHEMA_REVISION,
         "status": "success",
         "run_id": args.run_id,
         "revision": revision,
@@ -3431,6 +3617,7 @@ def finalize_completed_run(
         "finalizer_revision": finalizer_revision,
         "poetry_lock_sha256": lock_sha256,
         "worker_generation": WORKER_GENERATION,
+        "worker_generation_revision": WORKER_GENERATION_REVISION,
         "selection": {
             "architectures": list(selection.architectures),
             "distributions": list(selection.distributions),
@@ -3498,6 +3685,16 @@ def cmd_status(args: argparse.Namespace) -> None:
         return
     builders = output_builders(outputs, matrix)
     records = validate_builders(args.region, builders, matrix)
+    last_run = None
+    if LAST_RUN_FILE.exists():
+        try:
+            last_run = json.loads(LAST_RUN_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise PackageBuilderError(
+                f"cannot read package run result {LAST_RUN_FILE}: {error}"
+            ) from error
+        last_run = require_current_package_run_result(
+            last_run, label="stored package run result")
     payload = {
         "region": args.region,
         "bucket": outputs.get("package_bucket_name"),
@@ -3511,7 +3708,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             }
             for name, builder in builders.items()
         },
-        "last_run": json.loads(LAST_RUN_FILE.read_text()) if LAST_RUN_FILE.exists() else None,
+        "last_run": last_run,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -3615,7 +3812,7 @@ def add_matrix_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--distros",
         action="append",
-        help="comma-separated native package distro IDs (default: complete DOC0390 set)",
+        help="comma-separated native package distro IDs (default: complete current set)",
     )
     parser.add_argument(
         "--postgres",

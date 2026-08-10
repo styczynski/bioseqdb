@@ -22,7 +22,7 @@ import :manifest;
 import :model;
 import :renderer;
 import :validator;
-import :contract_tests;
+import :tests.contract;
 import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
@@ -240,7 +240,9 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
 
 [[nodiscard]] inline std::string domain_topology_identity(
     const std::vector<domain_topology_provenance>& topologies) {
-    std::string material = "bioseq-highway-domain-topologies-v1\n";
+    std::string material =
+        "bioseq-highway-domain-topologies\n"
+        "revision=1\n";
     for (std::size_t index = 0; index < topologies.size(); ++index) {
         const domain_topology_provenance& topology = topologies[index];
         material += std::to_string(index) + "\t" + topology.name + "\t"
@@ -304,7 +306,8 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
         render_depfile(command.stamp, std::move(prepared.dependencies)));
     publish_artifact_if_changed(
         command.stamp,
-        "bioseq_highway_prepare_stamp/v2\n"
+        "bioseq_highway_prepare_stamp\n"
+        "revision=2\n"
         "profile=production\n"
         "authority=core\n"
         "signature_source_sha256="
@@ -380,7 +383,8 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
         .source_inventory = std::move(sources),
         .clang_release = structural.clang_release,
         .compilation_signature = bioseq::common::sha256_hex(
-            "bioseq_highway_relocatable_prepared_closure/v2\n"
+            "bioseq_highway_relocatable_prepared_closure\n"
+            "revision=2\n"
             + prepared.relocatable_compilation_signature + "\n"
             + "domain_topologies_sha256="
             + domain_topology_identity(domain_topologies) + "\n"),

@@ -10,7 +10,11 @@ from pathlib import Path
 BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
+import postgres_runtime  # noqa: E402
+import postgres_safety  # noqa: E402
+import process_state  # noqa: E402
 
 
 class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
@@ -19,6 +23,37 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
         "sha256": "1" * 64,
         "version_line": "cmake version test",
     }
+
+    def test_split_process_state_loads_sanitizer_environment_helpers(
+            self) -> None:
+        environment = process_state._build_worker_descendant_environment({
+            "DYLD_INSERT_LIBRARIES": "/untrusted/preload.dylib",
+            "BIOSEQ_TEST_SENTINEL": "preserved",
+        })
+        self.assertNotIn("DYLD_INSERT_LIBRARIES", environment)
+        self.assertEqual(environment["BIOSEQ_TEST_SENTINEL"], "preserved")
+
+    def test_error_safety_report_uses_live_generated_artifact_path(
+            self) -> None:
+        self.assertEqual(
+            postgres_safety.POSTGRES_ERROR_SAFETY_RUNTIME_REPORT_RELATIVE_PATH,
+            Path(
+                "bioseq/generated/sql/safety/runtime/candidate/"
+                "runtime-validation.json"
+            ),
+        )
+        cmake = (
+            BUILD_MCP_DIR.parent / "bioseq" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        for fragment in (
+            '"${CMAKE_CURRENT_BINARY_DIR}/generated/sql"',
+            '"${BIOSEQ_SQL_CODEGEN_DIR}/safety"',
+            '"${BIOSEQ_SQL_SAFETY_ARTIFACT_ROOT}/runtime"',
+            '"${_bioseq_sql_runtime_root}/candidate"',
+            '"${_bioseq_sql_runtime_candidate_root}/runtime-validation.json"',
+        ):
+            with self.subTest(cmake_path_fragment=fragment):
+                self.assertIn(fragment, cmake)
 
     def _write_presets(self, root: Path) -> Path:
         presets_file = root / "CMakePresets.json"
@@ -51,7 +86,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
     def test_inherited_preset_value_uses_earlier_parent_priority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             presets_file = self._write_presets(Path(temporary))
-            contract = server._cmake_preset_cache_contract(
+            contract = build_presets._cmake_preset_cache_contract(
                 "selected",
                 ("PostgreSQL_CONFIG",),
                 presets_file=presets_file,
@@ -68,7 +103,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
             root = Path(temporary)
             presets_file = self._write_presets(root)
             build_dir = root / "build"
-            first = server._cmake_configure_stamp_document(
+            first = build_worker._cmake_configure_stamp_document(
                 "selected",
                 mode_cache_variables={"BIOSEQ_BUILD_CACHE": "ON"},
                 managed_arguments=["-DBIOSEQ_CLANG_RT_PRIORITY=3"],
@@ -76,9 +111,9 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 cmake_executable_identity=self._CMAKE_IDENTITY,
                 presets_file=presets_file,
             )
-            server._publish_cmake_configure_stamp(build_dir, first)
+            build_worker._publish_cmake_configure_stamp(build_dir, first)
             self.assertEqual(
-                server._cmake_configure_stamp_status(build_dir, first),
+                build_worker._cmake_configure_stamp_status(build_dir, first),
                 (True, "configure inputs match"),
             )
 
@@ -90,7 +125,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 json.dumps(payload),
                 encoding="utf-8",
             )
-            second = server._cmake_configure_stamp_document(
+            second = build_worker._cmake_configure_stamp_document(
                 "selected",
                 mode_cache_variables={"BIOSEQ_BUILD_CACHE": "ON"},
                 managed_arguments=["-DBIOSEQ_CLANG_RT_PRIORITY=3"],
@@ -103,7 +138,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 second["inputs_sha256"],
             )
             self.assertEqual(
-                server._cmake_configure_stamp_status(build_dir, second),
+                build_worker._cmake_configure_stamp_status(build_dir, second),
                 (False, "configure inputs changed"),
             )
 
@@ -116,19 +151,19 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 "mode_cache_variables": {"BIOSEQ_BUILD_CACHE": "ON"},
                 "presets_file": presets_file,
             }
-            first = server._cmake_configure_stamp_document(
+            first = build_worker._cmake_configure_stamp_document(
                 managed_arguments=["-DFLAG=one"],
                 environment={"VCPKG_ROOT": "/vcpkg/one"},
                 cmake_executable_identity=self._CMAKE_IDENTITY,
                 **common,
             )
-            changed_environment = server._cmake_configure_stamp_document(
+            changed_environment = build_worker._cmake_configure_stamp_document(
                 managed_arguments=["-DFLAG=one"],
                 environment={"VCPKG_ROOT": "/vcpkg/two"},
                 cmake_executable_identity=self._CMAKE_IDENTITY,
                 **common,
             )
-            changed_argument = server._cmake_configure_stamp_document(
+            changed_argument = build_worker._cmake_configure_stamp_document(
                 managed_arguments=["-DFLAG=two"],
                 environment={"VCPKG_ROOT": "/vcpkg/one"},
                 cmake_executable_identity=self._CMAKE_IDENTITY,
@@ -150,9 +185,9 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
             build_dir = root / "build"
             build_dir.mkdir()
             expected = {"artifact_kind": "expected"}
-            stamp = build_dir / server._CMAKE_CONFIGURE_STAMP_NAME
+            stamp = build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME
             stamp.write_text("{", encoding="utf-8")
-            matches, reason = server._cmake_configure_stamp_status(
+            matches, reason = build_worker._cmake_configure_stamp_status(
                 build_dir,
                 expected,
             )
@@ -164,7 +199,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
             target.write_text(json.dumps(expected), encoding="utf-8")
             stamp.symlink_to(target)
             self.assertEqual(
-                server._cmake_configure_stamp_status(
+                build_worker._cmake_configure_stamp_status(
                     build_dir,
                     expected,
                 ),
@@ -189,7 +224,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            repairs = server._cmake_preset_cache_repairs(
+            repairs = build_presets._cmake_preset_cache_repairs(
                 build_dir,
                 "selected",
                 presets_file=presets_file,
@@ -205,7 +240,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(
-                server._cmake_preset_cache_repairs(
+                build_presets._cmake_preset_cache_repairs(
                     build_dir,
                     "selected",
                     presets_file=presets_file,
@@ -231,12 +266,12 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                server._postgresql_discovery_cache_reset_args(
+                postgres_runtime._postgresql_discovery_cache_reset_args(
                     build_dir,
                     "selected",
                     presets_file=presets_file,
                 ),
-                server._POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS,
+                postgres_runtime._POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS,
             )
 
             cache.write_text(
@@ -247,7 +282,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(
-                server._postgresql_discovery_cache_reset_args(
+                postgres_runtime._postgresql_discovery_cache_reset_args(
                     build_dir,
                     "selected",
                     presets_file=presets_file,
@@ -258,17 +293,17 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
     def test_checked_in_safety_presets_inherit_local_pin(self) -> None:
         expected = "/opt/homebrew/opt/postgresql@17/bin/pg_config"
         for preset in (
-            server.POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
-            server.POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET,
+            build_presets.POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+            build_presets.POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET,
         ):
             with self.subTest(preset=preset):
                 self.assertEqual(
-                    server._cmake_preset_cache_contract(
+                    build_presets._cmake_preset_cache_contract(
                         preset, ("PostgreSQL_CONFIG",)),
                     {"PostgreSQL_CONFIG": expected},
                 )
                 self.assertEqual(
-                    server._postgres_error_safety_cache_contract(preset)[
+                    postgres_safety._postgres_error_safety_cache_contract(preset)[
                         "PostgreSQL_CONFIG"],
                     expected,
                 )
@@ -282,7 +317,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
         ):
             with self.subTest(preset=preset):
                 self.assertEqual(
-                    server._cmake_preset_cache_contract(
+                    build_presets._cmake_preset_cache_contract(
                         preset, ("PostgreSQL_CONFIG",)),
                     {},
                 )

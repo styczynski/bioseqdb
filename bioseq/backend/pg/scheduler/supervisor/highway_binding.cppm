@@ -27,7 +27,7 @@ rebind_minimizer_kernels_for_backend(
     const auto& binding = bioseq::simd_dispatch::
         registered_highway_target_binding(highway_executed_target);
     const auto* kernels = &binding.kernels->minimizers;
-    if ((backend == minimizer_sketch_backend::two_stack_nthash
+    if ((backend == minimizer_sketch_backend::exact_simd
             && kernels->two_stack_nthash == nullptr)
         || (backend == minimizer_sketch_backend::bounded_nthash_simd
             && kernels->bounded_nthash == nullptr)) {

@@ -51,8 +51,8 @@ struct sink_write_result {
 /// pre-reserved offset and surfaces errors via
 /// `last_error_message()`. Sinks are monomorphic per template
 /// instantiation; no virtuals.
-template <typename sink_t>
-concept io_sink = requires(sink_t& sink,
+template <typename p_sink>
+concept io_sink = requires(p_sink& sink,
                             const std::uint8_t* src,
                             std::size_t size,
                             std::uint64_t offset) {

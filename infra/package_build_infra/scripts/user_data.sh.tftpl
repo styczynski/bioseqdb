@@ -23,7 +23,7 @@ ARTIFACT_BUCKET='${artifact_bucket_name}'
 ARTIFACT_PREFIX='${artifact_prefix}'
 AWS_ARCHITECTURE='${aws_architecture}'
 AWS_REGION='${region}'
-BIOSEQ_AMI_SCHEMA_VERSION='${schema_version}'
+BIOSEQ_AMI_SCHEMA_REVISION='${schema_revision}'
 BIOSEQ_BUILD_ARCHITECTURE='${builder_architecture}'
 BIOSEQ_COMPILER_RT_PRIORITY='${compiler_rt_priority}'
 BIOSEQ_DISK_SWAP_PRIORITY='${disk_swap_priority}'
@@ -37,7 +37,7 @@ TARGET_USER='${target_user}'
 EOF
 chmod 0644 /etc/bioseq-package-builder.env
 
-# Compressing the separately versioned bootstrap keeps rendered EC2 user-data
+# Compressing the bootstrap keeps rendered EC2 user-data
 # comfortably below the 16 KiB API limit.
 BOOTSTRAP=/usr/local/sbin/bioseq-package-builder-bootstrap
 # OpenTofu template interpolation is intentionally single-quoted for the shell.

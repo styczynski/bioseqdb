@@ -15,37 +15,34 @@ import :wire;
 
 export namespace bioseq::cache {
 
-enum class SqlBool : std::uint8_t {
-    FalseValue = 0,
-    TrueValue = 1,
-    Unknown = 2,
+enum class sql_bool : std::uint8_t {
+    false_value = 0,
+    true_value = 1,
+    unknown = 2,
 };
 
 /** Model PostgreSQL WHERE acceptance: only TRUE passes. */
-[[nodiscard]] constexpr bool passes_where(SqlBool value) noexcept {
-    return value == SqlBool::TrueValue;
+[[nodiscard]] constexpr bool passes_where(sql_bool value) noexcept {
+    return value == sql_bool::true_value;
 }
 
 /** Model PostgreSQL `value IS NOT TRUE`. */
-[[nodiscard]] constexpr SqlBool is_not_true(SqlBool value) noexcept {
-    return value == SqlBool::TrueValue
-        ? SqlBool::FalseValue
-        : SqlBool::TrueValue;
+[[nodiscard]] constexpr sql_bool is_not_true(sql_bool value) noexcept {
+    return value == sql_bool::true_value ? sql_bool::false_value : sql_bool::true_value;
 }
 
 /** One expensive-domain occurrence and its predicate truth values. */
-struct CoverageRow {
+struct coverage_row {
     std::uint64_t occurrence = 0;
     std::int64_t visible_value = 0;
-    SqlBool requested_predicate = SqlBool::FalseValue;
-    std::vector<SqlBool> source_predicates;
+    sql_bool requested_predicate = sql_bool::false_value;
+    std::vector<sql_bool> source_predicates;
 };
 
 /** Disjoint branch ownership plus the newly computed residual occurrences. */
-class CoverageAssignment {
-public:
-    explicit CoverageAssignment(std::size_t source_count)
-        : branches_(source_count) {}
+class coverage_assignment {
+  public:
+    explicit coverage_assignment(std::size_t source_count) : branches_(source_count) {}
 
     /** Add one occurrence to its deterministic cached branch. */
     void append_branch(std::size_t source, std::uint64_t occurrence) {
@@ -58,8 +55,7 @@ public:
     }
 
     /** Return one cached branch's occurrence identifiers. */
-    [[nodiscard]] const std::vector<std::uint64_t>& branch(
-        std::size_t source) const noexcept {
+    [[nodiscard]] const std::vector<std::uint64_t>& branch(std::size_t source) const noexcept {
         return branches_[source];
     }
 
@@ -77,21 +73,19 @@ public:
         return count;
     }
 
-    /** Return all occurrence IDs in ascending proof-fixture order. */
+    /** Return all occurrence IDs in ascending fixture order. */
     [[nodiscard]] std::vector<std::uint64_t> all_occurrences() const {
         std::vector<std::uint64_t> occurrences;
         occurrences.reserve(occurrence_count());
         for (const auto& branch_rows : branches_) {
-            occurrences.insert(
-                occurrences.end(), branch_rows.begin(), branch_rows.end());
+            occurrences.insert(occurrences.end(), branch_rows.begin(), branch_rows.end());
         }
-        occurrences.insert(
-            occurrences.end(), residual_.begin(), residual_.end());
+        occurrences.insert(occurrences.end(), residual_.begin(), residual_.end());
         std::sort(occurrences.begin(), occurrences.end());
         return occurrences;
     }
 
-private:
+  private:
     std::vector<std::vector<std::uint64_t>> branches_;
     std::vector<std::uint64_t> residual_;
 };
@@ -100,28 +94,23 @@ private:
  * Apply the normative disjoint formula. Invalid earlier sources do not
  * exclude overlap from later valid sources or the residual.
  */
-[[nodiscard]] inline CoverageAssignment partition_coverage(
-    std::span<const CoverageRow> rows,
-    std::span<const bool> source_validity) {
-    CoverageAssignment result(source_validity.size());
-    for (const CoverageRow& row : rows) {
+[[nodiscard]] inline coverage_assignment partition_coverage(std::span<const coverage_row> rows,
+                                                            std::span<const bool> source_validity) {
+    coverage_assignment result(source_validity.size());
+    for (const coverage_row& row : rows) {
         if (!passes_where(row.requested_predicate)) {
             continue;
         }
         bool assigned = false;
-        for (std::size_t source = 0;
-             source < source_validity.size();
-             ++source) {
-            if (!source_validity[source]
-                || source >= row.source_predicates.size()
-                || !passes_where(row.source_predicates[source])) {
+        for (std::size_t source = 0; source < source_validity.size(); ++source) {
+            if (!source_validity[source] || source >= row.source_predicates.size() ||
+                !passes_where(row.source_predicates[source])) {
                 continue;
             }
             bool excluded_by_earlier = false;
             for (std::size_t earlier = 0; earlier < source; ++earlier) {
-                if (source_validity[earlier]
-                    && earlier < row.source_predicates.size()
-                    && passes_where(row.source_predicates[earlier])) {
+                if (source_validity[earlier] && earlier < row.source_predicates.size() &&
+                    passes_where(row.source_predicates[earlier])) {
                     excluded_by_earlier = true;
                     break;
                 }
@@ -140,33 +129,28 @@ private:
 }
 
 /** Deterministic source-order inputs from the registry candidate model. */
-struct CoverageSourceOrderKey {
+struct coverage_source_order_key {
     bool complete = false;
     std::uint64_t estimated_covered_rows = 0;
     std::uint64_t stored_bytes = 0;
     std::uint64_t claim_sequence = 0;
-    CacheDigest256 digest{};
+    cache_digest_256 digest{};
 };
 
 /** Compare nonnegative fractions exactly without cross-product overflow. */
-[[nodiscard]] constexpr bool fraction_less_exact(
-    std::uint64_t left_numerator,
-    std::uint64_t left_denominator,
-    std::uint64_t right_numerator,
-    std::uint64_t right_denominator) noexcept {
+[[nodiscard]] constexpr bool fraction_less_exact(std::uint64_t left_numerator,
+                                                 std::uint64_t left_denominator,
+                                                 std::uint64_t right_numerator,
+                                                 std::uint64_t right_denominator) noexcept {
     if (left_denominator == 0 || right_denominator == 0) {
         return left_denominator != 0 && right_denominator == 0;
     }
     bool reversed = false;
     for (;;) {
-        const std::uint64_t left_quotient =
-            left_numerator / left_denominator;
-        const std::uint64_t right_quotient =
-            right_numerator / right_denominator;
+        const std::uint64_t left_quotient = left_numerator / left_denominator;
+        const std::uint64_t right_quotient = right_numerator / right_denominator;
         if (left_quotient != right_quotient) {
-            return reversed
-                ? left_quotient > right_quotient
-                : left_quotient < right_quotient;
+            return reversed ? left_quotient > right_quotient : left_quotient < right_quotient;
         }
         left_numerator %= left_denominator;
         right_numerator %= right_denominator;
@@ -174,9 +158,7 @@ struct CoverageSourceOrderKey {
             if (left_numerator == 0 && right_numerator == 0) {
                 return false;
             }
-            return reversed
-                ? right_numerator == 0
-                : left_numerator == 0;
+            return reversed ? right_numerator == 0 : left_numerator == 0;
         }
         std::swap(left_numerator, left_denominator);
         std::swap(right_numerator, right_denominator);
@@ -185,28 +167,27 @@ struct CoverageSourceOrderKey {
 }
 
 /** Compare sources using completion, benefit, density, sequence, then digest. */
-[[nodiscard]] inline bool coverage_source_precedes(
-    const CoverageSourceOrderKey& left,
-    const CoverageSourceOrderKey& right) noexcept {
+[[nodiscard]] inline bool
+coverage_source_precedes(const coverage_source_order_key& left,
+                         const coverage_source_order_key& right) noexcept {
     if (left.estimated_covered_rows != right.estimated_covered_rows) {
         return left.estimated_covered_rows > right.estimated_covered_rows;
     }
     if (left.complete != right.complete) {
         return left.complete;
     }
-    const auto density_less = [](const CoverageSourceOrderKey& first,
-                                 const CoverageSourceOrderKey& second) {
+    const auto density_less = [](const coverage_source_order_key& first,
+                                 const coverage_source_order_key& second) {
         if (first.estimated_covered_rows == 0) {
             return false;
         }
         if (second.estimated_covered_rows == 0) {
             return true;
         }
-        return fraction_less_exact(
-            first.stored_bytes,
-            first.estimated_covered_rows,
-            second.stored_bytes,
-            second.estimated_covered_rows);
+        return fraction_less_exact(first.stored_bytes,
+                                   first.estimated_covered_rows,
+                                   second.stored_bytes,
+                                   second.estimated_covered_rows);
     };
     if (density_less(left, right)) {
         return true;

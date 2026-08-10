@@ -18,12 +18,12 @@ export namespace bioseq::postgres::support {
  *
  * Generated owner modules provide instances with static storage duration.
  */
-template<class E>
+template<class p_enum>
 struct postgres_enum_registration {
     char const* name;
     char const* short_description;
     char const* long_description;
-    E boot_value;
+    p_enum boot_value;
     config_enum_entry const* entries;
     GucContext context;
     int flags;
@@ -57,14 +57,14 @@ struct postgres_enum_registration {
 
 namespace bioseq::postgres::support::detail {
 
-template<class Storage, class Registration>
+template<class p_storage, class p_registration>
 concept pg_exposes_registration_init =
-    requires(Storage& storage, Registration const& registration) {
+    requires(p_storage& storage, p_registration const& registration) {
         storage.init(registration);
     };
 
-template<class Storage>
-concept pg_exposes_wire_cell = requires(Storage& storage) {
+template<class p_storage>
+concept pg_exposes_wire_cell = requires(p_storage& storage) {
     storage.wire_;
 };
 

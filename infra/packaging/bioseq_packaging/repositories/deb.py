@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 
+from ..artifacts import sha256_file
 from ..model import (
     BindMount,
     CellContext,
@@ -120,14 +120,6 @@ gpg --batch --no-tty --homedir "${gpg_home}" --yes --armor \
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_TARGET = PurePosixPath("/repo")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _debian_architecture(cell: CellContext) -> str:
@@ -289,7 +281,7 @@ def _validate_repository(root: Path, package_path: Path) -> tuple[Path, ...]:
     packages_fields = _parse_control_fields(packages)
     if packages_fields.get("Filename") != package_path.name:
         raise RepositoryBuildError("APT Packages does not name the retained DEB")
-    expected_package = (_sha256(package_path), package_path.stat().st_size)
+    expected_package = (sha256_file(package_path), package_path.stat().st_size)
     if (
         packages_fields.get("SHA256"),
         int(packages_fields.get("Size", "-1")),
@@ -308,7 +300,7 @@ def _validate_repository(root: Path, package_path: Path) -> tuple[Path, ...]:
         raise RepositoryBuildError("APT Release has an unexpected SHA256 path set")
     for relative in sorted(expected_release_paths):
         payload = stable / relative
-        if release_entries[relative] != (_sha256(payload), payload.stat().st_size):
+        if release_entries[relative] != (sha256_file(payload), payload.stat().st_size):
             raise RepositoryBuildError(
                 f"APT Release does not bind the exact {relative} bytes"
             )
@@ -345,7 +337,7 @@ def build_repository(
     package_path.chmod(0o644)
     if (
         package_path.stat().st_size != source_artifact.stat().st_size
-        or _sha256(package_path) != _sha256(source_artifact)
+        or sha256_file(package_path) != sha256_file(source_artifact)
     ):
         raise RepositoryBuildError("APT repository copy changed the DEB artifact bytes")
 

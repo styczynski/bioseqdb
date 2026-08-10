@@ -4,9 +4,24 @@
  */
 module;
 
+#include <bit>
+#include <cassert>
+#include <charconv>
+#include <cmath>
 #include <concepts>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <ranges>
+#include <span>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <typeinfo>
+#include <utility>
+#include <vector>
+#include <version>
 
 #include <seqan3/contrib/sdsl-lite.hpp>
 

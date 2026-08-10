@@ -99,7 +99,7 @@ inline void collect_minimizers_view(
 	constexpr std::uint64_t k_max_window_span = 256u;
 	hasher_type hasher(kmer_size);
 
-	circular_append_buffer<p_minimizer_type, k_max_window_span> buffer(window_size);
+	bioseq::common::circular_append_buffer<p_minimizer_type, k_max_window_span> buffer(window_size);
 
 	p_minimizer_type current_min = p_minimizer_type::maximum();
 	auto current_min_pos = buffer.get_begin_position();

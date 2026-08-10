@@ -21,7 +21,7 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] loop_scope {
     const loop_descriptor* descriptor = nullptr;
     std::uint64_t start_time_ns = 0;
@@ -32,13 +32,13 @@ struct [[nodiscard]] loop_scope {
 
     [[gnu::always_inline]]
     explicit loop_scope(const loop_descriptor* loop_descriptor) noexcept {
-        if constexpr (configuration_type::enable_profiling) {
+        if constexpr (p_configuration_type::enable_profiling) {
             if (!is_runtime_enabled() || loop_descriptor == nullptr || loop_descriptor->id == 0) return;
-            auto* profiler = active_thread_profiler<configuration_type>;
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             descriptor = loop_descriptor;
             start_time_ns = clock::now_ns();
-            if constexpr (configuration_type::enable_counters) {
+            if constexpr (p_configuration_type::enable_counters) {
                 counter_start = pmu::read_thread_counters();
             }
             profiler->stack_depth += 1;
@@ -49,22 +49,22 @@ struct [[nodiscard]] loop_scope {
     }
 
     [[gnu::always_inline]] ~loop_scope() noexcept {
-        if constexpr (configuration_type::enable_profiling) {
+        if constexpr (p_configuration_type::enable_profiling) {
             if (is_skipped) return;
             const auto end_ns = clock::now_ns();
             const auto duration_ns = end_ns - start_time_ns;
             pmu::counter_sample counter_delta{};
-            if constexpr (configuration_type::enable_counters) {
+            if constexpr (p_configuration_type::enable_counters) {
                 const auto counter_end = pmu::read_thread_counters();
                 counter_delta = pmu::subtract_clamped(counter_end, counter_start);
             }
-            auto* profiler = active_thread_profiler<configuration_type>;
+            auto* profiler = active_thread_profiler<p_configuration_type>;
             if (profiler == nullptr) return;
             if (profiler->stack_depth > 0) profiler->stack_depth -= 1;
             auto* aggregate = profiler->loop_aggregates.find_or_create(descriptor->id);
             if (aggregate != nullptr) {
                 record_loop_duration(*aggregate, duration_ns, iterations, work);
-                if constexpr (configuration_type::enable_counters) {
+                if constexpr (p_configuration_type::enable_counters) {
                     aggregate->total_cycles += counter_delta.cycles;
                     aggregate->total_instructions += counter_delta.instructions;
                     aggregate->total_branches += counter_delta.branches;
@@ -75,7 +75,7 @@ struct [[nodiscard]] loop_scope {
     }
 
     [[gnu::always_inline]] void record_iteration(std::uint64_t work_units = 1) noexcept {
-        if constexpr (configuration_type::enable_profiling) {
+        if constexpr (p_configuration_type::enable_profiling) {
             iterations += 1;
             work += work_units;
         } else {
@@ -89,10 +89,10 @@ struct [[nodiscard]] loop_scope {
     loop_scope& operator=(const loop_scope&) = delete;
 };
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline loop_scope<configuration_type> loop(const loop_descriptor* descriptor) noexcept {
-    return loop_scope<configuration_type>(descriptor);
+inline loop_scope<p_configuration_type> loop(const loop_descriptor* descriptor) noexcept {
+    return loop_scope<p_configuration_type>(descriptor);
 }
 
 /// Non-templated convenience overload — see region.cppm for rationale.

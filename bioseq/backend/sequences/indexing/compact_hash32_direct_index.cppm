@@ -180,7 +180,7 @@ export namespace bioseq::indexing {
 
 inline constexpr std::uint64_t k_direct_inverted_index_magic =
     0x3132494432334842ULL; // "Bhash32DI21", byte-order-independent numeric tag.
-inline constexpr std::uint32_t k_direct_inverted_index_format_revision = 1u;
+inline constexpr std::uint32_t k_direct_inverted_index_layout_revision = 1u;
 inline constexpr std::uint32_t k_direct_inverted_index_header_bytes = 256u;
 inline constexpr std::uint32_t k_direct_inverted_index_control_bytes = 48u;
 inline constexpr std::uint32_t k_direct_inverted_index_run_summary_bytes = 32u;
@@ -208,7 +208,7 @@ enum class direct_inverted_index_error : std::uint8_t {
     bucket_count,
     image_size,
     bad_magic,
-    bad_format_revision,
+    bad_layout_revision,
     bad_header,
     bad_flags,
     reserved_nonzero,
@@ -227,7 +227,7 @@ enum class direct_inverted_index_error : std::uint8_t {
     order,
     fixed_width,
     replay_mismatch,
-    compatibility,
+    storage_contract_mismatch,
     receipt_mismatch,
 };
 
@@ -243,7 +243,7 @@ struct direct_index_occurrence {
 struct direct_index_identity {
     std::uint64_t generation_id = 0u;
     std::uint64_t source_identity = 0u;
-    std::uint64_t compatibility_checksum = 0u;
+    std::uint64_t storage_contract_checksum = 0u;
     std::uint64_t target_length = 0u;
 
     [[nodiscard]] constexpr bool operator==(
@@ -432,7 +432,7 @@ export namespace bioseq::indexing {
 inline constexpr std::uint64_t k_compact_hash32_direct_index_magic =
     0x3143443233485342ULL;
 /// Persisted compact-hash image revision; current images retain byte value 2.
-inline constexpr std::uint32_t k_compact_hash32_direct_index_format_revision = 2u;
+inline constexpr std::uint32_t k_compact_hash32_direct_index_layout_revision = 2u;
 inline constexpr std::uint32_t k_compact_hash32_direct_index_header_bytes = 256u;
 /// `{u32 posting_or_inline,u16 count,u16 strand0}`. A P32 singleton is
 /// encoded in the first word; every other run names its first posting ordinal.
@@ -492,7 +492,7 @@ struct compact_hash32_geometry {
 
 [[nodiscard]] constexpr std::expected<compact_hash32_address,
     direct_inverted_index_error>
-compact_hash32_address(
+resolve_compact_hash32_address(
         std::uint32_t hash,
         compact_hash32_geometry geometry = {}) noexcept {
     if (geometry.hash_domain_bits < 9u
@@ -582,7 +582,7 @@ struct compact_hash32_build_options {
 
 struct compact_hash32_image_plan {
     direct_index_identity identity{};
-    std::uint32_t format_revision = k_compact_hash32_direct_index_format_revision;
+    std::uint32_t layout_revision = k_compact_hash32_direct_index_layout_revision;
     std::uint16_t descriptor_width_bytes =
         k_compact_hash32_direct_index_descriptor_bytes;
     std::uint32_t max_occ_cap = 0u;
@@ -625,7 +625,7 @@ struct compact_hash32_direct_index_view {
     compact_hash32_header header{};
 };
 
-/// Compatibility receipt supplied by the enclosing persisted-image format.
+/// Storage-contract receipt supplied by the enclosing persisted-image format.
 /// The bounded opener authenticates and decodes only the fixed direct-index
 /// header; it deliberately does not fault in or checksum any payload page.
 struct compact_hash32_bounded_open_options {
@@ -1075,7 +1075,7 @@ estimate_compact_hash32_image_bytes(
         : static_cast<std::uint32_t>(
             (std::uint64_t{1u} << geometry.hash_domain_bits) - 1u);
     if (geometry.max_hash != expected_max) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     const std::uint64_t domain_hashes =
         std::uint64_t{1u} << geometry.hash_domain_bits;
@@ -1089,9 +1089,9 @@ estimate_compact_hash32_image_bytes(
         .accepted_hash_count = accepted_hash_count,
         .accepted_posting_count = accepted_posting_count,
         // With U nonempty runs and P postings, at least 2U-P runs are
-        // singletons.  V2 can inline that guaranteed population for P32;
-        // the estimate is therefore a conservative upper bound when the
-        // caller has only aggregate U/P stats.
+        // singletons.  The compact P32 encoding can inline that guaranteed
+        // population; the estimate is therefore a conservative upper bound
+        // when the caller has only aggregate U/P stats.
         .inline_singleton_count = posting_width_bytes == 4u
                 && accepted_hash_count
                     > accepted_posting_count - accepted_hash_count
@@ -1236,7 +1236,7 @@ geometry_counts(compact_hash32_geometry geometry) noexcept {
         : static_cast<std::uint32_t>(
             (std::uint64_t{1u} << geometry.hash_domain_bits) - 1u);
     if (geometry.max_hash != expected_max) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     const std::uint64_t hash_count =
         std::uint64_t{1u} << geometry.hash_domain_bits;
@@ -1482,7 +1482,7 @@ public:
         crc_update_le(stream_crc_, header.target_strand_zero_count);
 
         if (writer_ != nullptr) {
-            const auto address = compact_hash32_address(
+            const auto address = resolve_compact_hash32_address(
                 header.hash, options_.geometry);
             if (!address) return fail_(address.error());
             if (auto ranks = write_rank_through_(
@@ -1513,8 +1513,8 @@ public:
                         writer_->plan->descriptor_width_bytes,
                         writer_->plan->descriptors_offset,
                         writer_->plan->descriptors_bytes)
-                    || writer_->plan->format_revision
-                        != k_compact_hash32_direct_index_format_revision
+                    || writer_->plan->layout_revision
+                        != k_compact_hash32_direct_index_layout_revision
                     || writer_->plan->descriptor_width_bytes
                         != k_compact_hash32_direct_index_descriptor_bytes
                     || header.global_count
@@ -1747,7 +1747,7 @@ layout_from_receipt(
     if (options.identity.target_length > (std::uint64_t{1u} << 63u)
         || options.identity.generation_id == 0u
         || options.identity.source_identity == 0u
-        || options.identity.compatibility_checksum == 0u
+        || options.identity.storage_contract_checksum == 0u
         || (options.max_occ_cap
             > (std::numeric_limits<std::uint16_t>::max)())) {
         return std::unexpected(direct_inverted_index_error::invalid_options);
@@ -1772,11 +1772,11 @@ layout_from_receipt(
         || !checked_add(receipt.accepted_posting_count,
             receipt.rejected_posting_count, source_posting_count)
         || source_posting_count != receipt.source_posting_count) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     compact_hash32_image_plan plan{
         .identity = options.identity,
-        .format_revision = k_compact_hash32_direct_index_format_revision,
+        .layout_revision = k_compact_hash32_direct_index_layout_revision,
         .descriptor_width_bytes =
             k_compact_hash32_direct_index_descriptor_bytes,
         .max_occ_cap = options.max_occ_cap,
@@ -1917,7 +1917,7 @@ build_compact_hash32_direct_index_into(
             > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::size_t>::max)())
         || image.size() != planned.image_bytes) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     std::fill(image.begin(), image.end(), std::byte{0});
     compact_hash32_writer_state writer{
@@ -1957,7 +1957,7 @@ build_compact_hash32_direct_index_into(
 
     write_le<std::uint64_t>(image, 0u, k_compact_hash32_direct_index_magic);
     write_le<std::uint32_t>(image, 8u,
-        planned.format_revision);
+        planned.layout_revision);
     write_le<std::uint32_t>(image, 12u,
         k_compact_hash32_direct_index_header_bytes);
     write_le<std::uint32_t>(image, 16u, 0u);
@@ -1971,7 +1971,7 @@ build_compact_hash32_direct_index_into(
     write_le<std::uint64_t>(image, 32u,
         planned.identity.source_identity);
     write_le<std::uint64_t>(image, 40u,
-        planned.identity.compatibility_checksum);
+        planned.identity.storage_contract_checksum);
     write_le<std::uint64_t>(image, 48u,
         planned.identity.target_length);
     write_le<std::uint32_t>(image, 56u, planned.max_occ_cap);
@@ -2078,10 +2078,10 @@ open_compact_hash32_direct_index_bounded(
             != k_compact_hash32_direct_index_magic) {
         return std::unexpected(direct_inverted_index_error::bad_magic);
     }
-    const std::uint32_t format_revision =
+    const std::uint32_t layout_revision =
         read_le<std::uint32_t>(header_bytes, 8u);
-    if (format_revision != k_compact_hash32_direct_index_format_revision) {
-        return std::unexpected(direct_inverted_index_error::bad_format_revision);
+    if (layout_revision != k_compact_hash32_direct_index_layout_revision) {
+        return std::unexpected(direct_inverted_index_error::bad_layout_revision);
     }
     const std::uint16_t descriptor_width_bytes =
         read_le<std::uint16_t>(header_bytes, 22u);
@@ -2097,12 +2097,12 @@ open_compact_hash32_direct_index_bounded(
     }
 
     compact_hash32_header header{};
-    header.format_revision = format_revision;
+    header.layout_revision = layout_revision;
     header.descriptor_width_bytes = descriptor_width_bytes;
     header.identity = direct_index_identity{
         .generation_id = read_le<std::uint64_t>(header_bytes, 24u),
         .source_identity = read_le<std::uint64_t>(header_bytes, 32u),
-        .compatibility_checksum = read_le<std::uint64_t>(header_bytes, 40u),
+        .storage_contract_checksum = read_le<std::uint64_t>(header_bytes, 40u),
         .target_length = read_le<std::uint64_t>(header_bytes, 48u),
     };
     header.max_occ_cap = read_le<std::uint32_t>(header_bytes, 56u);
@@ -2239,7 +2239,7 @@ open_compact_hash32_direct_index_bounded(
     };
     const auto layout = layout_from_receipt(layout_options, receipt);
     if (!layout
-        || layout->format_revision != header.format_revision
+        || layout->layout_revision != header.layout_revision
         || layout->descriptor_width_bytes
             != header.descriptor_width_bytes
         || layout->inline_singleton_count
@@ -2293,9 +2293,9 @@ validate_compact_hash32_direct_index(
             != k_compact_hash32_direct_index_magic) {
         return std::unexpected(direct_inverted_index_error::bad_magic);
     }
-    const std::uint32_t format_revision = read_le<std::uint32_t>(image, 8u);
-    if (format_revision != k_compact_hash32_direct_index_format_revision) {
-        return std::unexpected(direct_inverted_index_error::bad_format_revision);
+    const std::uint32_t layout_revision = read_le<std::uint32_t>(image, 8u);
+    if (layout_revision != k_compact_hash32_direct_index_layout_revision) {
+        return std::unexpected(direct_inverted_index_error::bad_layout_revision);
     }
     const std::uint16_t descriptor_width_bytes =
         read_le<std::uint16_t>(image, 22u);
@@ -2310,12 +2310,12 @@ validate_compact_hash32_direct_index(
         return std::unexpected(direct_inverted_index_error::bad_header);
     }
     compact_hash32_header header{};
-    header.format_revision = format_revision;
+    header.layout_revision = layout_revision;
     header.descriptor_width_bytes = descriptor_width_bytes;
     header.identity = direct_index_identity{
         .generation_id = read_le<std::uint64_t>(image, 24u),
         .source_identity = read_le<std::uint64_t>(image, 32u),
-        .compatibility_checksum = read_le<std::uint64_t>(image, 40u),
+        .storage_contract_checksum = read_le<std::uint64_t>(image, 40u),
         .target_length = read_le<std::uint64_t>(image, 48u),
     };
     header.max_occ_cap = read_le<std::uint32_t>(image, 56u);
@@ -2418,7 +2418,7 @@ validate_compact_hash32_direct_index(
     };
     const auto layout = layout_from_receipt(layout_options, receipt);
     if (!layout
-        || layout->format_revision != header.format_revision
+        || layout->layout_revision != header.layout_revision
         || layout->descriptor_width_bytes
             != header.descriptor_width_bytes
         || layout->inline_singleton_count
@@ -2603,7 +2603,7 @@ query_compact_hash32_direct_index(
         || queries.size()
             > static_cast<std::size_t>(
                 (std::numeric_limits<std::uint32_t>::max)())) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     try {
         compact_hash32_query_plan plan{
@@ -2633,7 +2633,7 @@ query_compact_hash32_direct_index(
             compact_hash32_decoded_descriptor descriptor = previous_descriptor;
             if (!have_previous || hash != previous_hash) {
                 ++plan.stats.distinct_query_hash_count;
-                const auto address = compact_hash32_address(
+                const auto address = resolve_compact_hash32_address(
                     hash, view.header.geometry);
                 if (!address) return std::unexpected(address.error());
                 if (cached_rank_group
@@ -2683,7 +2683,6 @@ query_compact_hash32_direct_index(
                         view.header.descriptors_offset
                             + dense
                                 * view.header.descriptor_width_bytes,
-                        view.header.format_revision,
                         view.header.posting_width_bytes);
                     ++plan.stats.descriptors_examined;
                     if (descriptor.global_count > runtime_max_occ) {
@@ -2807,16 +2806,16 @@ query_compact_hash32_direct_index(
 /// peak logical capacity is U+c (at most 2U), while the returned plan retains
 /// exactly c 8-byte mappings. The visitor re-derives descriptors and strand
 /// spans from the image.
-template <class HashAt>
-requires std::is_nothrow_invocable_v<HashAt&, std::size_t>
+template <class p_hash_at>
+requires std::is_nothrow_invocable_v<p_hash_at&, std::size_t>
     && std::is_same_v<
-        std::invoke_result_t<HashAt&, std::size_t>, std::uint32_t>
+        std::invoke_result_t<p_hash_at&, std::size_t>, std::uint32_t>
 [[nodiscard]] inline std::expected<compact_hash32_unique_query_plan,
     direct_inverted_index_error>
 query_compact_hash32_direct_index_unique_projected(
         const compact_hash32_direct_index_view& view,
         std::size_t strictly_increasing_unique_hash_count,
-        HashAt hash_at,
+        p_hash_at hash_at,
         std::uint32_t runtime_max_occ) {
     using namespace compact_hash32_detail;
     if (runtime_max_occ == 0u
@@ -2824,7 +2823,7 @@ query_compact_hash32_direct_index_unique_projected(
         || strictly_increasing_unique_hash_count
             >= static_cast<std::size_t>(
                 k_direct_inverted_index_no_selection)) {
-        return std::unexpected(direct_inverted_index_error::compatibility);
+        return std::unexpected(direct_inverted_index_error::storage_contract_mismatch);
     }
     try {
         compact_hash32_unique_query_plan plan{};
@@ -2867,7 +2866,7 @@ query_compact_hash32_direct_index_unique_projected(
                 return std::unexpected(direct_inverted_index_error::order);
             }
             ++plan.stats.distinct_query_hash_count;
-            const auto address = compact_hash32_address(
+            const auto address = resolve_compact_hash32_address(
                 hash, view.header.geometry);
             if (!address) return std::unexpected(address.error());
             if (cached_rank_group
@@ -2923,7 +2922,6 @@ query_compact_hash32_direct_index_unique_projected(
                 view.image,
                 view.header.descriptors_offset
                     + dense * view.header.descriptor_width_bytes,
-                view.header.format_revision,
                 view.header.posting_width_bytes);
             ++plan.stats.descriptors_examined;
             if (descriptor.global_count > runtime_max_occ) {
@@ -3045,8 +3043,7 @@ query_compact_hash32_direct_index_unique_projected(
     }
 }
 
-/// Compatibility wrapper for callers that already own a contiguous u32 hash
-/// sequence. It delegates to the same projected authority, preserving the
+/// Contiguous-u32 adapter over the projected query authority. It preserves
 /// accepted-plan accounting and authentication.
 [[nodiscard]] inline std::expected<compact_hash32_unique_query_plan,
     direct_inverted_index_error>
@@ -3103,7 +3100,7 @@ visit_compact_hash32_direct_index_postings(
          selection_ordinal < plan.selections.size(); ++selection_ordinal) {
         const compact_hash32_selection& selection =
             plan.selections[selection_ordinal];
-        const auto address = compact_hash32_address(
+        const auto address = resolve_compact_hash32_address(
             selection.hash, view.header.geometry);
         if (!address
             || (have_previous_hash && selection.hash <= previous_hash)
@@ -3177,7 +3174,6 @@ visit_compact_hash32_direct_index_postings(
         const compact_hash32_decoded_descriptor descriptor = decode_descriptor(
             view.image,
             descriptor_offset,
-            view.header.format_revision,
             view.header.posting_width_bytes);
         if (descriptor.strand_zero_count > descriptor.global_count) {
             return std::unexpected(direct_inverted_index_error::query_plan);
@@ -3313,7 +3309,7 @@ bind_compact_hash32_direct_index_selection_spans(
         || read_le<std::uint64_t>(view.image, 0u)
             != k_compact_hash32_direct_index_magic
         || read_le<std::uint32_t>(view.image, 8u)
-            != view.header.format_revision
+            != view.header.layout_revision
         || read_le<std::uint64_t>(view.image, 208u)
             != view.header.header_crc64
         || read_le<std::uint64_t>(view.image, 216u)
@@ -3331,8 +3327,8 @@ bind_compact_hash32_direct_index_selection_spans(
             k_compact_hash32_inline_singleton_count_offset);
     std::uint64_t expected_descriptor_bytes = 0u;
     std::uint64_t expected_posting_bytes = 0u;
-    if (view.header.format_revision
-            != k_compact_hash32_direct_index_format_revision
+    if (view.header.layout_revision
+            != k_compact_hash32_direct_index_layout_revision
         || view.header.descriptor_width_bytes
             != expected_descriptor_width
         || read_le<std::uint16_t>(view.image, 22u)
@@ -3546,7 +3542,6 @@ visit_compact_hash32_direct_index_selection_span_range(
         const compact_hash32_decoded_descriptor descriptor = decode_descriptor(
             accessor.view_.image,
             descriptor_offset,
-            accessor.view_.header.format_revision,
             accessor.view_.header.posting_width_bytes);
         ++stats.descriptors_examined;
         if (descriptor.global_count == 0u
@@ -3708,9 +3703,9 @@ visit_compact_hash32_direct_index_selection_spans(
         std::forward<p_visitor>(visitor));
 }
 
-/// Compatibility wrapper for existing consumers.  Plan authentication,
-/// dense descriptor binding, and span bounds are shared with the bulk API;
-/// only this adapter performs one indirect call per decoded posting.
+/// Callback adapter over the bulk span visitor. Plan authentication, dense
+/// descriptor binding, and span bounds are shared with the bulk API; only this
+/// adapter performs one indirect call per decoded posting.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats,
     direct_inverted_index_error>
 visit_compact_hash32_direct_index_postings(
@@ -3911,7 +3906,7 @@ prepare_build(
     if (options.identity.target_length > (std::uint64_t{1u} << 63u)
         || options.identity.generation_id == 0u
         || options.identity.source_identity == 0u
-        || options.identity.compatibility_checksum == 0u
+        || options.identity.storage_contract_checksum == 0u
         || input.size() > options.max_occurrences) {
         return std::unexpected(direct_inverted_index_error::invalid_options);
     }
@@ -4396,7 +4391,7 @@ build_direct_inverted_index(
             plan.postings_offset, plan.postings_bytes);
 
         write_le<std::uint64_t>(bytes, 0u, k_direct_inverted_index_magic);
-        write_le<std::uint32_t>(bytes, 8u, k_direct_inverted_index_format_revision);
+        write_le<std::uint32_t>(bytes, 8u, k_direct_inverted_index_layout_revision);
         write_le<std::uint32_t>(bytes, 12u,
             k_direct_inverted_index_header_bytes);
         write_le<std::uint32_t>(bytes, 16u,
@@ -4407,7 +4402,7 @@ build_direct_inverted_index(
         write_le<std::uint64_t>(bytes, 32u,
             options.identity.source_identity);
         write_le<std::uint64_t>(bytes, 40u,
-            options.identity.compatibility_checksum);
+            options.identity.storage_contract_checksum);
         write_le<std::uint64_t>(bytes, 48u,
             options.identity.target_length);
         write_le<std::uint64_t>(bytes, 56u, plan.occurrence_count);
@@ -4478,8 +4473,8 @@ validate_direct_inverted_index(
         return std::unexpected(direct_inverted_index_error::bad_magic);
     }
     if (read_le<std::uint32_t>(image, 8u)
-            != k_direct_inverted_index_format_revision) {
-        return std::unexpected(direct_inverted_index_error::bad_format_revision);
+            != k_direct_inverted_index_layout_revision) {
+        return std::unexpected(direct_inverted_index_error::bad_layout_revision);
     }
     if (read_le<std::uint32_t>(image, 12u)
             != k_direct_inverted_index_header_bytes) {
@@ -4491,7 +4486,7 @@ validate_direct_inverted_index(
         .identity = direct_index_identity{
             .generation_id = read_le<std::uint64_t>(image, 24u),
             .source_identity = read_le<std::uint64_t>(image, 32u),
-            .compatibility_checksum = read_le<std::uint64_t>(image, 40u),
+            .storage_contract_checksum = read_le<std::uint64_t>(image, 40u),
             .target_length = read_le<std::uint64_t>(image, 48u),
         },
         .occurrence_count = read_le<std::uint64_t>(image, 56u),

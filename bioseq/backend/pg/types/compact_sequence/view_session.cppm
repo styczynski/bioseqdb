@@ -148,8 +148,8 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
     bioseq::pg_types::seq::dispatch_instance(
         static_cast<std::uint8_t>(value.alphabet_code),
         static_cast<std::uint8_t>(value.storage_unit_byte_width),
-        [&valid, &value]<class Instance>() {
-            using range = compact_sequence_range<Instance>;
+        [&valid, &value]<class p_instance>() {
+            using range = compact_sequence_range<p_instance>;
             using traits = typename range::traits;
             const std::uint64_t units = value.bp_size == 0u ? 0u
                 : (static_cast<std::uint64_t>(value.bp_size)
@@ -333,9 +333,9 @@ classify_and_describe_sequence_header(Datum input)
             bioseq::pg_types::seq::dispatch_instance(
                 static_cast<std::uint8_t>(header->alphabet_code),
                 static_cast<std::uint8_t>(header->storage_unit_byte_width),
-                [header, raw_size, &metadata_ok]<class Instance>() {
+                [header, raw_size, &metadata_ok]<class p_instance>() {
                     using traits =
-                        typename compact_sequence_range<Instance>::traits;
+                        typename compact_sequence_range<p_instance>::traits;
                     const std::uint64_t units = header->bp_size == 0u ? 0u
                         : (static_cast<std::uint64_t>(header->bp_size)
                            + traits::letters_per_unit - 1u)
@@ -434,15 +434,15 @@ struct pg_sequence_facade_state {
     piece_edge tree;
 };
 
-template<class Alphabet>
+template<class p_alphabet>
 [[nodiscard]] inline std::uint8_t complement_rank(std::uint8_t rank)
 {
     return static_cast<std::uint8_t>(
-        bioseq::storage::lazy_sequence_traits<Alphabet>::
+        bioseq::storage::lazy_sequence_traits<p_alphabet>::
             letter_complement(rank));
 }
 
-template<class Alphabet>
+template<class p_alphabet>
 [[nodiscard]] bool emit_literal_range(
     piece_edge edge,
     std::uint64_t from,
@@ -457,10 +457,10 @@ template<class Alphabet>
     bioseq::pg_types::seq::dispatch_instance(
         literal.stored_type_params.alphabet_code,
         literal.stored_type_params.storage_unit_byte_width,
-        [&ok, &literal, edge, from, to, output]<class Instance>() {
+        [&ok, &literal, edge, from, to, output]<class p_instance>() {
             if constexpr (std::is_same_v<
-                              typename Instance::alphabet_type, Alphabet>) {
-                using range = compact_sequence_range<Instance>;
+                              typename p_instance::alphabet_type, p_alphabet>) {
+                using range = compact_sequence_range<p_instance>;
                 using traits = typename range::traits;
                 using unit = typename traits::storage_unit;
                 auto const* units = reinterpret_cast<unit const*>(literal.bytes);
@@ -479,7 +479,7 @@ template<class Alphabet>
                     std::uint8_t rank = static_cast<std::uint8_t>(
                         (word >> shift) & traits::char_mask);
                     if (complement) {
-                        rank = complement_rank<Alphabet>(rank);
+                        rank = complement_rank<p_alphabet>(rank);
                     }
                     output[static_cast<std::size_t>(index - from)] = rank;
                 }
@@ -489,7 +489,7 @@ template<class Alphabet>
     return ok;
 }
 
-template<class Alphabet>
+template<class p_alphabet>
 [[nodiscard]] bool emit_tree_range(
     pg_sequence_read_session& session,
     piece_edge edge,
@@ -513,7 +513,7 @@ template<class Alphabet>
         if (first_to > first_from) {
             const std::size_t count = static_cast<std::size_t>(
                 first_to - first_from);
-            if (!emit_tree_range<Alphabet>(
+            if (!emit_tree_range<p_alphabet>(
                     session, children.first, first_from, first_to,
                     output.first(count))) {
                 return false;
@@ -523,7 +523,7 @@ template<class Alphabet>
         if (to > split) {
             const std::uint64_t second_from = from > split ? from - split : 0u;
             const std::uint64_t second_to = to - split;
-            if (!emit_tree_range<Alphabet>(
+            if (!emit_tree_range<p_alphabet>(
                     session, children.second, second_from, second_to,
                     output.subspan(emitted))) {
                 return false;
@@ -532,7 +532,7 @@ template<class Alphabet>
         return true;
     }
     if (edge.node->node_kind == piece_node::kind::literal) {
-        return emit_literal_range<Alphabet>(edge, from, to, output);
+        return emit_literal_range<p_alphabet>(edge, from, to, output);
     }
     const auto& source = edge.node->payload.source;
     const bool reverse = bioseq::storage::has_reverse(edge.transform);
@@ -545,7 +545,7 @@ template<class Alphabet>
     return status == pg_sequence_source_read_status::ok;
 }
 
-template<class Alphabet>
+template<class p_alphabet>
 [[nodiscard]] bool emit_flat_range(
     bioseq::pg_types::seq const& flat,
     std::uint64_t from,
@@ -556,10 +556,10 @@ template<class Alphabet>
     bioseq::pg_types::seq::dispatch_instance(
         static_cast<std::uint8_t>(flat.alphabet_code),
         static_cast<std::uint8_t>(flat.storage_unit_byte_width),
-        [&ok, &flat, from, to, output]<class Instance>() {
-          if constexpr (std::is_same_v<typename Instance::alphabet_type,
-                                       Alphabet>) {
-            using range = compact_sequence_range<Instance>;
+        [&ok, &flat, from, to, output]<class p_instance>() {
+          if constexpr (std::is_same_v<typename p_instance::alphabet_type,
+                                       p_alphabet>) {
+            using range = compact_sequence_range<p_instance>;
             using traits = typename range::traits;
             using unit = typename traits::storage_unit;
             auto const *units = reinterpret_cast<unit const *>(flat.data);
@@ -579,7 +579,7 @@ template<class Alphabet>
     return ok;
 }
 
-template <class Alphabet>
+template <class p_alphabet>
 [[nodiscard]] std::uint8_t const *
 facade_ptr_at(pg_sequence_facade_state const &state,
               bool mirror_coordinates, bool reverse_output,
@@ -600,13 +600,13 @@ facade_ptr_at(pg_sequence_facade_state const &state,
 #ifdef BIOSEQ_TEST_INDEXES
     note_pg_sequence_facade_contiguous_access();
 #endif
-    ok = emit_flat_range<Alphabet>(*state.flat, base_from, base_to,
+    ok = emit_flat_range<p_alphabet>(*state.flat, base_from, base_to,
                                    output.first(count));
   } else {
 #ifdef BIOSEQ_TEST_INDEXES
     note_pg_sequence_facade_source_stream_callback();
 #endif
-    ok = emit_tree_range<Alphabet>(*state.session, state.tree, base_from,
+    ok = emit_tree_range<p_alphabet>(*state.session, state.tree, base_from,
                                    base_to, output.first(count));
   }
   if (!ok) {
@@ -617,32 +617,28 @@ facade_ptr_at(pg_sequence_facade_state const &state,
   }
   if (complement_output) {
     for (std::size_t index = 0; index < count; ++index) {
-      output[index] = complement_rank<Alphabet>(output[index]);
+      output[index] = complement_rank<p_alphabet>(output[index]);
     }
   }
   return output.data();
 }
 
-template <class Alphabet, bool IsReversed, bool WriteReversed>
+template <class p_alphabet, bool p_is_reversed, bool p_write_reversed>
 [[nodiscard]] std::uint8_t const *
 facade_ptr_at_callback(void const *opaque,
                        bioseq::storage::sequence_size_t from, std::size_t count,
                        std::span<std::uint8_t> output) {
-  /* `IsReversed` changes the logical coordinate system, while
-   * `WriteReversed` changes only the order in which that logical interval is
-   * written.  Folding both booleans into one sequence_transform used to mirror
-   * the requested coordinate range for (false,true), and failed to mirror it
-   * for (true,true).  Canonical minimizer cursors exercise both orientations,
-   * so a source-backed target then lost its first valid seeds even though an
-   * identity text read was correct.  Keep coordinate mirroring, output order,
-   * and complementation as the three independent parts of the facade ABI. */
+  /* `p_is_reversed` changes the logical coordinate system, while
+   * `p_write_reversed` changes only the order in which that logical interval is
+   * written. Keep coordinate mirroring, output order, and complementation as
+   * three independent parts of the facade ABI. */
   constexpr bool reverse_output =
-      (IsReversed && !WriteReversed) || (!IsReversed && WriteReversed);
-  return facade_ptr_at<Alphabet>(
+      (p_is_reversed && !p_write_reversed) || (!p_is_reversed && p_write_reversed);
+  return facade_ptr_at<p_alphabet>(
       *static_cast<pg_sequence_facade_state const *>(opaque),
-      /*mirror_coordinates=*/IsReversed,
+      /*mirror_coordinates=*/p_is_reversed,
       reverse_output,
-      /*complement_output=*/IsReversed,
+      /*complement_output=*/p_is_reversed,
       from, count, output);
 }
 
@@ -673,14 +669,14 @@ facade_bp_size(void const *opaque) noexcept {
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
-template <class Alphabet>
+template <class p_alphabet>
 [[nodiscard]] auto facade_resident_probe(void const *opaque,
                                          bioseq::storage::sequence_size_t from,
                                          bioseq::storage::sequence_size_t to,
                                          std::uint8_t requested_width) noexcept
     -> typename bioseq::storage::lazy_sequence_view<
-        Alphabet>::resident_packed_result {
-  using view = bioseq::storage::lazy_sequence_view<Alphabet>;
+        p_alphabet>::resident_packed_result {
+  using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   if (state.flat == nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -700,7 +696,7 @@ template <class Alphabet>
     return descriptor{};
   }
   constexpr std::uint64_t bits = bioseq::storage::lazy_sequence_traits<
-      Alphabet>::logical_bits_per_symbol;
+      p_alphabet>::logical_bits_per_symbol;
   const std::uint64_t letters_per_unit = requested_width * 8u / bits;
   const std::uint64_t first_unit = from / letters_per_unit;
   const std::uint64_t leading = from % letters_per_unit;
@@ -720,30 +716,30 @@ template <class Alphabet>
   };
 }
 
-template<class Alphabet>
+template<class p_alphabet>
 struct facade_adapter {
-    using view = bioseq::storage::lazy_sequence_view<Alphabet>;
+    using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
     static inline const typename view::backend_ops ops{
         .bp_size = &facade_bp_size,
         .read_at = {
-            &facade_ptr_at_callback<Alphabet, false, false>,
-            &facade_ptr_at_callback<Alphabet, false, true>,
-            &facade_ptr_at_callback<Alphabet, true, false>,
-            &facade_ptr_at_callback<Alphabet, true, true>,
+            &facade_ptr_at_callback<p_alphabet, false, false>,
+            &facade_ptr_at_callback<p_alphabet, false, true>,
+            &facade_ptr_at_callback<p_alphabet, true, false>,
+            &facade_ptr_at_callback<p_alphabet, true, true>,
         },
-        .try_resident_packed = &facade_resident_probe<Alphabet>,
+        .try_resident_packed = &facade_resident_probe<p_alphabet>,
         .copy_packed_sequence = nullptr,
         .worker_shareable = &facade_worker_shareable,
     };
 };
 
-template<class Alphabet, std::size_t StorageUnitByteWidth>
+template<class p_alphabet, std::size_t p_storage_unit_byte_width>
 consteval bool facade_adapter_profile_contract()
 {
-    using adapter = facade_adapter<Alphabet>;
-    using view = bioseq::storage::lazy_sequence_view<Alphabet>;
+    using adapter = facade_adapter<p_alphabet>;
+    using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
     return pgseq_supported_storage_unit_byte_widths::
-               contains<StorageUnitByteWidth>
+               contains<p_storage_unit_byte_width>
         && std::is_same_v<typename adapter::view, view>
         && std::is_same_v<
                decltype(adapter::ops),
@@ -754,10 +750,10 @@ consteval bool facade_adapter_profile_contract()
 // alphabet. Repeating the enabled physical-width matrix must resolve to that
 // same view type rather than creating a width dimension.
 static_assert(facade_adapter_profile_contract<seq::dna4, 8u>());
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 static_assert(facade_adapter_profile_contract<seq::dna5, 8u>());
 #endif
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
 static_assert(facade_adapter_profile_contract<seq::dna4, 1u>());
 static_assert(facade_adapter_profile_contract<seq::dna4, 2u>());
 static_assert(facade_adapter_profile_contract<seq::dna4, 4u>());
@@ -766,10 +762,10 @@ static_assert(facade_adapter_profile_contract<seq::dna5, 2u>());
 static_assert(facade_adapter_profile_contract<seq::dna5, 4u>());
 #endif
 
-template<class Alphabet>
+template<class p_alphabet>
 inline void release_facade_owner(void* opaque) noexcept
 {
-    using owner = bioseq::storage::retained_lazy_sequence_view<Alphabet>;
+    using owner = bioseq::storage::retained_lazy_sequence_view<p_alphabet>;
     static_cast<owner*>(opaque)->~owner();
 }
 
@@ -791,25 +787,25 @@ facade_probe_tree_contains_source(piece_edge edge) noexcept {
       facade_probe_tree_contains_source(edge.node->payload.branch.right);
 }
 
-template <bool IsReversed, bool WriteReversed, class View>
+template <bool p_is_reversed, bool p_write_reversed, class p_view>
 void record_orientation_matches(
-    View baseline, View flat_facade, View source_facade,
+    p_view baseline, p_view flat_facade, p_view source_facade,
     std::size_t from, std::size_t to, std::uint8_t& match_mask) {
-  constexpr std::size_t kProbeSymbols = 11u;
-  if (to - from != kProbeSymbols) {
+  constexpr std::size_t k_probe_symbols = 11u;
+  if (to - from != k_probe_symbols) {
     return;
   }
-  std::array<std::uint8_t, kProbeSymbols> expected{};
-  std::array<std::uint8_t, kProbeSymbols> flat_observed{};
-  std::array<std::uint8_t, kProbeSymbols> source_observed{};
-  baseline.template copy_ranks<IsReversed, WriteReversed>(
+  std::array<std::uint8_t, k_probe_symbols> expected{};
+  std::array<std::uint8_t, k_probe_symbols> flat_observed{};
+  std::array<std::uint8_t, k_probe_symbols> source_observed{};
+  baseline.template copy_ranks<p_is_reversed, p_write_reversed>(
       expected, from, to);
-  flat_facade.template copy_ranks<IsReversed, WriteReversed>(
+  flat_facade.template copy_ranks<p_is_reversed, p_write_reversed>(
       flat_observed, from, to);
-  source_facade.template copy_ranks<IsReversed, WriteReversed>(
+  source_facade.template copy_ranks<p_is_reversed, p_write_reversed>(
       source_observed, from, to);
   constexpr std::uint8_t orientation =
-      (IsReversed ? 2u : 0u) | (WriteReversed ? 1u : 0u);
+      (p_is_reversed ? 2u : 0u) | (p_write_reversed ? 1u : 0u);
   if (flat_observed == expected) {
     match_mask |= static_cast<std::uint8_t>(1u << orientation);
   }
@@ -821,15 +817,15 @@ void record_orientation_matches(
 
 } // namespace
 
-export template <sequence_alphabet Alphabet>
-[[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<Alphabet>*
+export template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<p_alphabet>*
 make_pg_sequence_call_owner(
     pg_sequence_read_session& session,
     Datum detoasted_or_expanded,
     pg_sequence_descriptor descriptor)
 {
     constexpr std::uint8_t expected_alphabet =
-        pgseq_supported_alphabets::template index_of<Alphabet>();
+        pgseq_supported_alphabets::template index_of<p_alphabet>();
     if (!descriptor.alphabet_bound
         || descriptor.alphabet_code != expected_alphabet
         || descriptor.kind == pg_sequence_datum_kind::locator) {
@@ -854,15 +850,15 @@ make_pg_sequence_call_owner(
             detoasted_or_expanded)->root;
     }
 
-    using adapter = facade_adapter<Alphabet>;
-    using owner = bioseq::storage::retained_lazy_sequence_view<Alphabet>;
+    using adapter = facade_adapter<p_alphabet>;
+    using owner = bioseq::storage::retained_lazy_sequence_view<p_alphabet>;
     auto facade = typename adapter::view{state, std::addressof(adapter::ops)};
     void* storage = MemoryContextAllocZero(
         session.payload_context, sizeof(owner));
     auto* result = ::new (storage) owner{
         facade, state, &release_facade_backing_noop};
     register_pg_sequence_call_owner(
-        session, result, &release_facade_owner<Alphabet>);
+        session, result, &release_facade_owner<p_alphabet>);
     return result;
 }
 
@@ -872,8 +868,8 @@ make_pg_sequence_call_owner(
  * a separately flattened copy is only the compact in-memory oracle. */
 export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     Datum input) {
-  constexpr std::size_t kFrom = 3u;
-  constexpr std::size_t kTo = 14u;
+  constexpr std::size_t k_from = 3u;
+  constexpr std::size_t k_to = 14u;
   auto const* expanded = get_pg_sequence_expanded_ro(input);
   const auto source_descriptor = classify_and_describe_sequence(input);
   const bool expanded_kind =
@@ -881,7 +877,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
       source_descriptor.kind == pg_sequence_datum_kind::expanded_read_write;
   if (expanded == nullptr || !expanded_kind ||
       !source_descriptor.alphabet_bound ||
-      source_descriptor.bp_length < 2u * kTo + 1u ||
+      source_descriptor.bp_length < 2u * k_to + 1u ||
       !facade_probe_tree_contains_source(
           expanded == nullptr ? piece_edge{} : expanded->root)) {
     ereport(ERROR,
@@ -929,10 +925,10 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
           source_descriptor.storage_unit_byte_width,
           [local_session, input, source_descriptor, flat_datum,
            flat_descriptor, flat,
-           &match_mask]<class Instance>() {
-            using range = compact_sequence_range<Instance>;
+           &match_mask]<class p_instance>() {
+            using range = compact_sequence_range<p_instance>;
             using alphabet = typename range::traits::alphabet_type;
-            compact_sequence_range<Instance> baseline_range{*flat};
+            compact_sequence_range<p_instance> baseline_range{*flat};
             const auto baseline =
                 bioseq::storage::make_lazy_sequence_view(baseline_range);
             auto* flat_owner = make_pg_sequence_call_owner<alphabet>(
@@ -941,16 +937,16 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
                 *local_session, input, source_descriptor);
             record_orientation_matches<false, false>(
                 baseline, flat_owner->view(), source_owner->view(),
-                kFrom, kTo, match_mask);
+                k_from, k_to, match_mask);
             record_orientation_matches<false, true>(
                 baseline, flat_owner->view(), source_owner->view(),
-                kFrom, kTo, match_mask);
+                k_from, k_to, match_mask);
             record_orientation_matches<true, false>(
                 baseline, flat_owner->view(), source_owner->view(),
-                kFrom, kTo, match_mask);
+                k_from, k_to, match_mask);
             record_orientation_matches<true, true>(
                 baseline, flat_owner->view(), source_owner->view(),
-                kFrom, kTo, match_mask);
+                k_from, k_to, match_mask);
           });
       finish_pg_sequence_read_session(local_session, true);
     } catch (...) {
@@ -987,19 +983,19 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
 }
 #endif
 
-export template <typename T>
+export template <typename p_result>
 inline constexpr bool is_borrowed_view_result_v =
-    std::ranges::view<std::remove_cvref_t<T>>
-    || std::input_or_output_iterator<std::remove_cvref_t<T>>;
+    std::ranges::view<std::remove_cvref_t<p_result>>
+    || std::input_or_output_iterator<std::remove_cvref_t<p_result>>;
 
-export template <typename Result, typename Fn>
-Result with_pg_sequence_view(
+export template <typename p_result, typename p_function>
+p_result with_pg_sequence_view(
     Datum datum,
-    Fn&& view_callback)
+    p_function&& view_callback)
 {
-    static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
-    static_assert(!is_borrowed_view_result_v<Result>);
-    static_assert(std::is_trivially_destructible_v<Result>);
+    static_assert(!std::is_reference_v<p_result> && !std::is_pointer_v<p_result>);
+    static_assert(!is_borrowed_view_result_v<p_result>);
+    static_assert(std::is_trivially_destructible_v<p_result>);
 
     bioseq::pg_types::seq* flat_copy = nullptr;
     Datum dispatch_datum = datum;
@@ -1017,7 +1013,7 @@ Result with_pg_sequence_view(
                  errmsg("operation requires a bound bioseq alphabet")));
     }
 
-    std::optional<Result> result;
+    std::optional<p_result> result;
     std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
@@ -1030,12 +1026,12 @@ Result with_pg_sequence_view(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, &view_callback, dispatch_datum, descriptor,
-                 local_session]<class Instance>() {
-                    using alphabet = typename Instance::alphabet_type;
+                 local_session]<class p_instance>() {
+                    using alphabet = typename p_instance::alphabet_type;
                     auto* owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, dispatch_datum, descriptor);
                     result.emplace(
-                        std::forward<Fn>(view_callback)(owner->view()));
+                        std::forward<p_function>(view_callback)(owner->view()));
                 });
             finish_pg_sequence_read_session(local_session, true);
         } catch (...) {
@@ -1063,15 +1059,15 @@ Result with_pg_sequence_view(
     return std::move(*result);
 }
 
-export template <typename Result, typename Fn>
-Result with_pg_sequence_views(
+export template <typename p_result, typename p_function>
+p_result with_pg_sequence_views(
     Datum left_datum,
     Datum right_datum,
-    Fn&& callback)
+    p_function&& callback)
 {
-    static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
-    static_assert(!is_borrowed_view_result_v<Result>);
-    static_assert(std::is_trivially_destructible_v<Result>);
+    static_assert(!std::is_reference_v<p_result> && !std::is_pointer_v<p_result>);
+    static_assert(!is_borrowed_view_result_v<p_result>);
+    static_assert(std::is_trivially_destructible_v<p_result>);
 
     Datum datums[2]{left_datum, right_datum};
     bioseq::pg_types::seq* flat[2]{};
@@ -1096,7 +1092,7 @@ Result with_pg_sequence_views(
                  errmsg("binary bioseq view operation requires one bound alphabet")));
     }
 
-    std::optional<Result> result;
+    std::optional<p_result> result;
     std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
@@ -1110,13 +1106,13 @@ Result with_pg_sequence_views(
                 left.storage_unit_byte_width,
                 [&result, &callback, local_session,
                  left_dispatch = dispatch[0],
-                 right_dispatch = dispatch[1], left, right]<class Instance>() {
-                    using alphabet = typename Instance::alphabet_type;
+                 right_dispatch = dispatch[1], left, right]<class p_instance>() {
+                    using alphabet = typename p_instance::alphabet_type;
                     auto* left_owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, left_dispatch, left);
                     auto* right_owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, right_dispatch, right);
-                    result.emplace(std::forward<Fn>(callback)(
+                    result.emplace(std::forward<p_function>(callback)(
                         left_owner->view(), right_owner->view()));
                 });
             finish_pg_sequence_read_session(local_session, true);
@@ -1182,9 +1178,9 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
         bioseq::pg_types::seq::dispatch_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
-            [input, index, &result]<class Instance>() {
+            [input, index, &result]<class p_instance>() {
                 using traits =
-                    typename compact_sequence_range<Instance>::traits;
+                    typename compact_sequence_range<p_instance>::traits;
                 using unit = typename traits::storage_unit;
                 const std::uint64_t unit_index =
                     index / traits::letters_per_unit;
@@ -1269,8 +1265,8 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, dispatch, descriptor, index,
-                 local_session]<class Instance>() {
-                    using alphabet = typename Instance::alphabet_type;
+                 local_session]<class p_instance>() {
+                    using alphabet = typename p_instance::alphabet_type;
                     auto* owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, dispatch, descriptor);
                     std::array<std::uint8_t, 1> scratch{};

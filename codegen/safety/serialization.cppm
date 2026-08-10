@@ -639,8 +639,8 @@ inline void validate_runtime_source_anchor_shape(
 
 inline void validate_runtime_probe_inventory_shape(
     const runtime_probe_inventory& inventory) {
-    if (inventory.schema_version != 1
-        || inventory.probe_abi_version != 2
+    if (inventory.schema_revision != 1
+        || inventory.probe_abi_revision != 2
         || profile_name(inventory.profile) == "unknown"
         || !detail::lowercase_sha256(inventory.ledger_sha256)
         || !detail::lowercase_sha256(
@@ -660,7 +660,8 @@ inline void validate_runtime_probe_inventory_shape(
                 .inventory_producer_executable_sha256)
         || inventory.entries.empty()) {
         throw std::runtime_error(
-            "runtime inventory lacks schema-v1/ABI-v2 metadata, "
+            "runtime inventory lacks schema revision 1/ABI revision 2 "
+            "metadata, "
             "exact hashes, or entries");
     }
     std::set<
@@ -685,17 +686,18 @@ inline void validate_runtime_probe_inventory_shape(
         }
         if (entry.sql_identity.empty()
             || !valid_inventory_fault_key(entry.fault_key)
-            || !entry.site_id.starts_with("probe:v2:")
-            || entry.site_id.size() != 73
+            || !entry.site_id.starts_with("probe:")
+            || entry.site_id.size() != 70
             || !detail::lowercase_sha256(
-                std::string_view{entry.site_id}.substr(9))
+                std::string_view{entry.site_id}.substr(6))
+            || entry.site_revision != 2
             || !detail::lowercase_sha256(
                 entry.ledger_site_sha256)
             || entry.transitive_call_path.empty()
-            || entry.probe_contract.abi_version
-                != inventory.probe_abi_version
-            || entry.probe_contract.abi_version
-                != expected.abi_version
+            || entry.probe_contract.abi_revision
+                != inventory.probe_abi_revision
+            || entry.probe_contract.abi_revision
+                != expected.abi_revision
             || entry.probe_contract.expected_visit_count
                 != expected.expected_visit_count
             || entry.probe_contract.expected_trigger_count
@@ -820,22 +822,22 @@ parse_runtime_probe_contract(
     require_exact_fields(
         value,
         {
-            "abi_version",
+            "abi_revision",
             "expected_trigger_count",
             "expected_visit_count",
             "ordering",
         },
         context);
-    const std::size_t abi_version = size_value(
-        json_field(value, "abi_version", context),
-        std::string{context} + ".abi_version");
-    if (abi_version != 2) {
+    const std::size_t abi_revision = size_value(
+        json_field(value, "abi_revision", context),
+        std::string{context} + ".abi_revision");
+    if (abi_revision != 2) {
         throw std::runtime_error(
             std::string{context}
-            + " requires ABI version 2");
+            + " requires ABI revision 2");
     }
     return {
-        .abi_version = 2,
+        .abi_revision = 2,
         .expected_visit_count = size_value(
             json_field(
                 value, "expected_visit_count", context),
@@ -907,6 +909,7 @@ parse_runtime_probe_inventory_entry(
             "relation",
             "site_anchor",
             "site_id",
+            "site_revision",
             "sql_identity",
             "transitive_call_path",
             "trigger_anchor",
@@ -920,6 +923,10 @@ parse_runtime_probe_inventory_entry(
             value, "fault_key", context),
         .site_id = string_field(
             value, "site_id", context),
+        .site_revision = static_cast<std::uint32_t>(
+            size_value(
+                json_field(value, "site_revision", context),
+                std::string{context} + ".site_revision")),
         .relation = parse_runtime_relation(
             string_field(value, "relation", context)),
         .ledger_site_sha256 = string_field(
@@ -1317,8 +1324,8 @@ parse_bridge_transition_evidence(
     return result;
 }
 
-[[nodiscard]] inline bridge_transition_proof
-parse_bridge_transition_proof(
+[[nodiscard]] inline bridge_transition_validation
+parse_bridge_transition_validation(
     const json_value& input,
     std::string_view context) {
     const json_value::object& value = json_object(input, context);
@@ -1442,7 +1449,7 @@ parse_bridge_transition_proof(
     if (!std::holds_alternative<std::nullptr_t>(
             bridge_evidence.value)) {
         result.bridge_evidence =
-            parse_bridge_transition_proof(
+            parse_bridge_transition_validation(
                 bridge_evidence,
                 std::string{context} + ".bridge_evidence");
     }
@@ -2049,9 +2056,9 @@ postgres_callback_root_json(const postgres_callback_root& value) {
 [[nodiscard]] inline json_value::object runtime_probe_contract_json(
     const runtime_probe_contract& value) {
     return {
-        {"abi_version",
+        {"abi_revision",
          json_value{
-             static_cast<std::size_t>(value.abi_version)}},
+             static_cast<std::size_t>(value.abi_revision)}},
         {"expected_trigger_count",
          json_value{value.expected_trigger_count}},
         {"expected_visit_count",
@@ -2101,6 +2108,9 @@ runtime_probe_inventory_entry_json(
              runtime_source_anchor_json(
                  value.site_anchor)}},
         {"site_id", value.site_id},
+        {"site_revision",
+         json_value{
+             static_cast<std::size_t>(value.site_revision)}},
         {"sql_identity", value.sql_identity},
         {"transitive_call_path",
          json_value{
@@ -2346,11 +2356,23 @@ runtime_probe_inventory_entry_json(
     const json_value document = parse_json(text);
     const json_value::object& root =
         json_object(document, "provenance");
+    serialization_detail::require_exact_fields(
+        root,
+        {
+            "pg_no_longjmp_allowlist",
+            "postgresql_major",
+            "postgresql_revision",
+            "postgresql_tag",
+            "records",
+            "schema_revision",
+            "source_base_url",
+        },
+        "provenance");
     provenance_bundle result{
-        .schema_version = static_cast<std::uint32_t>(
+        .schema_revision = static_cast<std::uint32_t>(
             serialization_detail::size_value(
-                json_field(root, "schema_version", "provenance"),
-                "provenance.schema_version")),
+                json_field(root, "schema_revision", "provenance"),
+                "provenance.schema_revision")),
         .postgresql_major = static_cast<std::uint32_t>(
             serialization_detail::size_value(
                 json_field(
@@ -2363,6 +2385,10 @@ runtime_probe_inventory_entry_json(
             serialization_detail::string_field(
                 root, "postgresql_revision", "provenance"),
     };
+    if (result.schema_revision != 2) {
+        throw std::runtime_error(
+            "provenance requires schema revision 2");
+    }
     const json_value::array& records = json_array(
         json_field(root, "records", "provenance"),
         "provenance.records");
@@ -2484,7 +2510,8 @@ runtime_probe_inventory_entry_json(
     return result;
 }
 
-/// Parses exact schema-v2 compiler facts and rejects unknown root fields.
+/// Parses compiler facts for the current semantic contract and rejects unknown
+/// root fields.
 [[nodiscard]] inline compiler_analysis_facts
 parse_compiler_analysis_facts_json(std::string_view text) {
     const json_value document = parse_json(text);
@@ -2504,24 +2531,24 @@ parse_compiler_analysis_facts_json(std::string_view text) {
             "profile",
             "root_usrs",
             "runtime_probes",
-            "schema_version",
+            "schema_revision",
             "source_list_sha256",
             "sql_manifest_sha256",
         },
         "compiler analysis facts");
-    const std::size_t schema_version =
+    const std::size_t schema_revision =
         serialization_detail::size_value(
             json_field(
                 root,
-                "schema_version",
+                "schema_revision",
                 "compiler analysis facts"),
-            "compiler analysis facts.schema_version");
-    if (schema_version != 2) {
+            "compiler analysis facts.schema_revision");
+    if (schema_revision != 2) {
         throw std::runtime_error(
-            "compiler analysis facts require schema version 2");
+            "compiler analysis facts require schema revision 2");
     }
     compiler_analysis_facts result{
-        .schema_version = 2,
+        .schema_revision = 2,
         .profile = serialization_detail::parse_profile(
             serialization_detail::string_field(
                 root, "profile", "compiler analysis facts")),
@@ -2745,40 +2772,40 @@ parse_runtime_probe_inventory_json(std::string_view text) {
             "inventory_producer_executable_sha256",
             "ledger_sha256",
             "pcm_manifest_sha256",
-            "probe_abi_version",
+            "probe_abi_revision",
             "profile",
-            "schema_version",
+            "schema_revision",
             "source_list_sha256",
             "sql_manifest_sha256",
         },
         "runtime probe inventory");
-    const std::size_t schema_version =
+    const std::size_t schema_revision =
         serialization_detail::size_value(
             json_field(
                 root,
-                "schema_version",
+                "schema_revision",
                 "runtime probe inventory"),
-            "runtime probe inventory.schema_version");
-    const std::size_t probe_abi_version =
+            "runtime probe inventory.schema_revision");
+    const std::size_t probe_abi_revision =
         serialization_detail::size_value(
             json_field(
                 root,
-                "probe_abi_version",
+                "probe_abi_revision",
                 "runtime probe inventory"),
-            "runtime probe inventory.probe_abi_version");
-    if (schema_version != 1 || probe_abi_version != 2) {
+            "runtime probe inventory.probe_abi_revision");
+    if (schema_revision != 1 || probe_abi_revision != 2) {
         throw std::runtime_error(
-            "runtime probe inventory requires schema version 1 "
-            "and probe ABI version 2");
+            "runtime probe inventory requires schema revision 1 "
+            "and probe ABI revision 2");
     }
     runtime_probe_inventory result{
-        .schema_version = 1,
+        .schema_revision = 1,
         .profile = serialization_detail::parse_profile(
             serialization_detail::string_field(
                 root,
                 "profile",
                 "runtime probe inventory")),
-        .probe_abi_version = 2,
+        .probe_abi_revision = 2,
         .ledger_sha256 =
             serialization_detail::string_field(
                 root,
@@ -2864,29 +2891,29 @@ parse_runtime_probe_inventory_json(std::string_view text) {
             "producer_executable_sha256",
             "profile",
             "provenance_bundle_sha256",
-            "schema_version",
+            "schema_revision",
             "source_list_sha256",
             "sql_manifest_sha256",
             "symbol_groups",
         },
         "safety ledger");
-    const std::size_t schema_version =
+    const std::size_t schema_revision =
         serialization_detail::size_value(
             json_field(
-                root, "schema_version", "safety ledger"),
-            "safety ledger.schema_version");
+                root, "schema_revision", "safety ledger"),
+            "safety ledger.schema_revision");
     const std::size_t postgresql_major =
         serialization_detail::size_value(
             json_field(
                 root, "postgresql_major", "safety ledger"),
             "safety ledger.postgresql_major");
-    if (schema_version != 2 || postgresql_major != 17) {
+    if (schema_revision != 2 || postgresql_major != 17) {
         throw std::runtime_error(
-            "safety ledger requires schema version 2 and PostgreSQL 17");
+            "safety ledger requires schema revision 2 and PostgreSQL 17");
     }
     safety_ledger result{
-        .schema_version =
-            static_cast<std::uint32_t>(schema_version),
+        .schema_revision =
+            static_cast<std::uint32_t>(schema_revision),
         .profile = serialization_detail::parse_profile(
             serialization_detail::string_field(
                 root, "profile", "safety ledger")),
@@ -2990,9 +3017,9 @@ parse_runtime_probe_inventory_json(std::string_view text) {
 /// Renders compiler facts with deterministic function and object ordering.
 [[nodiscard]] inline std::string render_compiler_analysis_facts_json(
     const compiler_analysis_facts& facts) {
-    if (facts.schema_version != 2) {
+    if (facts.schema_revision != 2) {
         throw std::runtime_error(
-            "compiler analysis facts require schema version 2");
+            "compiler analysis facts require schema revision 2");
     }
     std::vector<const function_flow*> functions;
     functions.reserve(facts.functions.size());
@@ -3041,9 +3068,9 @@ parse_runtime_probe_inventory_json(std::string_view text) {
          json_value{
              serialization_detail::runtime_probes_json(
                  facts.runtime_probes)}},
-        {"schema_version",
+        {"schema_revision",
          json_value{
-             static_cast<std::size_t>(facts.schema_version)}},
+             static_cast<std::size_t>(facts.schema_revision)}},
         {"source_list_sha256", facts.source_list_sha256},
         {"sql_manifest_sha256", facts.sql_manifest_sha256},
     });
@@ -3095,15 +3122,15 @@ render_runtime_probe_inventory_json(
         {"ledger_sha256", inventory.ledger_sha256},
         {"pcm_manifest_sha256",
          inventory.pcm_manifest_sha256},
-        {"probe_abi_version",
+        {"probe_abi_revision",
          json_value{
              static_cast<std::size_t>(
-                 inventory.probe_abi_version)}},
+                 inventory.probe_abi_revision)}},
         {"profile", profile_name(inventory.profile)},
-        {"schema_version",
+        {"schema_revision",
          json_value{
              static_cast<std::size_t>(
-                 inventory.schema_version)}},
+                 inventory.schema_revision)}},
         {"source_list_sha256",
          inventory.source_list_sha256},
         {"sql_manifest_sha256",
@@ -3114,9 +3141,9 @@ render_runtime_probe_inventory_json(
 /// Renders the exact current safety-ledger schema.
 [[nodiscard]] inline std::string render_safety_ledger_json(
     const safety_ledger& ledger) {
-    if (ledger.schema_version != 2) {
+    if (ledger.schema_revision != 2) {
         throw std::runtime_error(
-            "safety ledger requires schema version 2");
+            "safety ledger requires schema revision 2");
     }
     json_value::array parents;
     parents.reserve(ledger.parents.size());
@@ -3200,9 +3227,9 @@ render_runtime_probe_inventory_json(
         {"profile", profile_name(ledger.profile)},
         {"provenance_bundle_sha256",
          ledger.provenance_bundle_sha256},
-        {"schema_version",
+        {"schema_revision",
          json_value{
-             static_cast<std::size_t>(ledger.schema_version)}},
+             static_cast<std::size_t>(ledger.schema_revision)}},
         {"source_list_sha256", ledger.source_list_sha256},
         {"sql_manifest_sha256", ledger.sql_manifest_sha256},
         {"symbol_groups", json_value{std::move(groups)}},

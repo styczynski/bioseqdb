@@ -638,7 +638,7 @@ inline void render_selector_switch(
            << ";\n\n";
     detail::render_imports(output, plan, false, true);
     if (plan.topology.region.configured_output_module_name
-        == "bioseq.scheduler.dispatch_processor") {
+        == detail::scheduler_output_module) {
         output << "import :cpu_preparation_support;\n\n";
     }
     output << "namespace " << coordinate.identity_namespace << " {\n"
@@ -735,7 +735,7 @@ inline void render_selector_switch(
         4u);
     const bool scheduler_selector =
         plan.topology.region.configured_output_module_name
-            == "bioseq.scheduler.dispatch_processor"
+            == detail::scheduler_output_module
         && std::ranges::any_of(
             identity_groups,
             [](const axis_group* group) { return group->name == "alphabet"; })

@@ -22,11 +22,11 @@ inline constexpr std::size_t vqsort_minimum_bytes = 100u * 1024u;
 
 /**
  * @brief Minimum key count corresponding to `vqsort_minimum_bytes`.
- * @tparam key_type Key representation stored in the input array.
+ * @tparam p_key_type Key representation stored in the input array.
  */
-template <class key_type>
+template <class p_key_type>
 inline constexpr std::size_t vqsort_minimum_keys =
-    vqsort_minimum_bytes / sizeof(key_type);
+    vqsort_minimum_bytes / sizeof(p_key_type);
 
 /**
  * VQSort selection for 128-bit keys is explicitly disabled. A 128-bit NEON
@@ -45,11 +45,11 @@ inline constexpr std::size_t unsigned_128_scalar_key_limit = 8u;
 
 /**
  * @brief Accepts stream widths implemented by the fixed dispatch bridge.
- * @tparam stream_width Independent-vector count.
+ * @tparam p_stream_width Independent-vector count.
  */
-template <std::size_t stream_width>
+template <std::size_t p_stream_width>
 concept supported_unsigned_128_stream_width =
-    stream_width >= 1u && stream_width <= 4u;
+    p_stream_width >= 1u && p_stream_width <= 4u;
 
 namespace detail {
 
@@ -94,17 +94,17 @@ void sort_unsigned_128_descending_stream_width_4(
     std::size_t key_count);
 
 /** Dispatches an ascending streamed sort to its fixed-width implementation. */
-template <std::size_t stream_width>
+template <std::size_t p_stream_width>
 inline void dispatch_unsigned_128_ascending_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
 {
-    static_assert(supported_unsigned_128_stream_width<stream_width>);
-    if constexpr (stream_width == 1u) {
+    static_assert(supported_unsigned_128_stream_width<p_stream_width>);
+    if constexpr (p_stream_width == 1u) {
         sort_unsigned_128_ascending_stream_width_1(keys, key_count);
-    } else if constexpr (stream_width == 2u) {
+    } else if constexpr (p_stream_width == 2u) {
         sort_unsigned_128_ascending_stream_width_2(keys, key_count);
-    } else if constexpr (stream_width == 3u) {
+    } else if constexpr (p_stream_width == 3u) {
         sort_unsigned_128_ascending_stream_width_3(keys, key_count);
     } else {
         sort_unsigned_128_ascending_stream_width_4(keys, key_count);
@@ -112,17 +112,17 @@ inline void dispatch_unsigned_128_ascending_stream(
 }
 
 /** Dispatches a descending streamed sort to its fixed-width implementation. */
-template <std::size_t stream_width>
+template <std::size_t p_stream_width>
 inline void dispatch_unsigned_128_descending_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
 {
-    static_assert(supported_unsigned_128_stream_width<stream_width>);
-    if constexpr (stream_width == 1u) {
+    static_assert(supported_unsigned_128_stream_width<p_stream_width>);
+    if constexpr (p_stream_width == 1u) {
         sort_unsigned_128_descending_stream_width_1(keys, key_count);
-    } else if constexpr (stream_width == 2u) {
+    } else if constexpr (p_stream_width == 2u) {
         sort_unsigned_128_descending_stream_width_2(keys, key_count);
-    } else if constexpr (stream_width == 3u) {
+    } else if constexpr (p_stream_width == 3u) {
         sort_unsigned_128_descending_stream_width_3(keys, key_count);
     } else {
         sort_unsigned_128_descending_stream_width_4(keys, key_count);
@@ -169,7 +169,7 @@ void sort_unsigned_128_descending_vqsort(
 
 /**
  * @brief Sorts unsigned 128-bit keys ascending with streamed partition scans.
- * @tparam stream_width Independent-vector count used by each partition scan.
+ * @tparam p_stream_width Independent-vector count used by each partition scan.
  * @param keys Mutable key array.
  * @param key_count Number of keys.
  *
@@ -177,33 +177,33 @@ void sort_unsigned_128_descending_vqsort(
  * comparison convention.
  */
 template <
-    std::size_t stream_width = unsigned_128_default_stream_width>
-    requires supported_unsigned_128_stream_width<stream_width>
+    std::size_t p_stream_width = unsigned_128_default_stream_width>
+    requires supported_unsigned_128_stream_width<p_stream_width>
 inline void sort_unsigned_128_ascending_vector_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
 {
-    detail::dispatch_unsigned_128_ascending_stream<stream_width>(
+    detail::dispatch_unsigned_128_ascending_stream<p_stream_width>(
         keys,
         key_count);
 }
 
 /**
  * @brief Sorts unsigned 128-bit keys descending with streamed partition scans.
- * @tparam stream_width Independent-vector count used by each partition scan.
+ * @tparam p_stream_width Independent-vector count used by each partition scan.
  * @param keys Mutable key array.
  * @param key_count Number of keys.
  *
  * Ordering is reverse lexicographic by `(hi, lo)`.
  */
 template <
-    std::size_t stream_width = unsigned_128_default_stream_width>
-    requires supported_unsigned_128_stream_width<stream_width>
+    std::size_t p_stream_width = unsigned_128_default_stream_width>
+    requires supported_unsigned_128_stream_width<p_stream_width>
 inline void sort_unsigned_128_descending_vector_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
 {
-    detail::dispatch_unsigned_128_descending_stream<stream_width>(
+    detail::dispatch_unsigned_128_descending_stream<p_stream_width>(
         keys,
         key_count);
 }

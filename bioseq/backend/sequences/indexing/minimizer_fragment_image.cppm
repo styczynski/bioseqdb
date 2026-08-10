@@ -34,11 +34,14 @@ export namespace bioseq::indexing {
 /// Identifies a minimizer-fragment image without relying on a native object layout.
 inline constexpr std::uint64_t k_minimizer_fragment_image_magic = 0x32563546504d5342ULL;
 /// Current serialized image layout revision.
-inline constexpr std::uint32_t k_minimizer_fragment_image_format_revision = 2u;
+inline constexpr std::uint32_t k_minimizer_fragment_image_layout_revision = 2u;
 /// Fixed authenticated header size in bytes.
 inline constexpr std::uint32_t k_minimizer_fragment_image_header_bytes = 4096u;
 /// Serialized semantic identity retained at byte 34.
 inline constexpr std::uint8_t k_minimizer_fragment_image_index_identity = 1u;
+/// Sole serialized storage kind retained at byte 35.
+inline constexpr std::uint8_t
+    k_minimizer_fragment_image_relation_backed_storage_kind = 0u;
 /// Serialized layout identity retained at bytes 36..37.
 inline constexpr std::uint16_t k_minimizer_fragment_image_layout_identity = 5u;
 /// Alignment required for the three primary image sections.
@@ -72,34 +75,6 @@ inline constexpr std::uint64_t k_minimizer_fragment_image_default_max_mapped_byt
             std::numeric_limits<std::size_t>::max());
     }
 }();
-
-/**
- * @brief Describes how the serialized image is exposed to the byte codec.
- *
- * The values are persisted at byte 35 and therefore remain stable. The type
- * contains no PostgreSQL object or lifecycle behavior.
- */
-enum class minimizer_fragment_image_storage_kind : std::uint8_t {
-    relation_backed = 0u,
-    mapped_file = 1u,
-};
-
-static_assert(static_cast<std::uint8_t>(
-                  minimizer_fragment_image_storage_kind::relation_backed) == 0u);
-static_assert(static_cast<std::uint8_t>(
-                  minimizer_fragment_image_storage_kind::mapped_file) == 1u);
-
-/**
- * @brief Checks a serialized storage-kind byte.
- * @param[in] storage_kind Encoded byte read from the fixed header.
- * @return True when the byte names a supported storage view.
- */
-[[nodiscard]] constexpr bool is_valid_minimizer_fragment_image_storage_kind(
-        std::uint8_t storage_kind) noexcept {
-    return storage_kind
-            == static_cast<std::uint8_t>(minimizer_fragment_image_storage_kind::relation_backed)
-        || storage_kind == static_cast<std::uint8_t>(minimizer_fragment_image_storage_kind::mapped_file);
-}
 
 /** @brief Byte range and checksum for one serialized image section. */
 struct minimizer_fragment_image_section {
@@ -139,7 +114,7 @@ struct minimizer_fragment_compact_hash32_section_spec {
 /** @brief Decoded authenticated header; section offsets remain borrowed metadata. */
 struct minimizer_fragment_image_header {
     std::uint64_t magic = 0u;
-    std::uint32_t format_revision = 0u;
+    std::uint32_t layout_revision = 0u;
     std::uint32_t header_bytes = 0u;
     std::uint32_t database_oid = 0u;
     std::uint32_t tablespace_oid = 0u;
@@ -147,13 +122,14 @@ struct minimizer_fragment_image_header {
     std::uint32_t user_relid = 0u;
     std::uint16_t column_attno = 0u;
     std::uint8_t index_identity = 0u;
-    std::uint8_t storage_kind = 0u;
+    std::uint8_t storage_kind =
+        k_minimizer_fragment_image_relation_backed_storage_kind;
     std::uint16_t layout_identity = 0u;
     std::uint64_t query_key = 0u;
     std::uint64_t generation_id = 0u;
     std::uint64_t source_identity = 0u;
     std::uint64_t source_content_crc = 0u;
-    std::uint64_t compatibility_crc = 0u;
+    std::uint64_t storage_contract_checksum = 0u;
     std::uint64_t target_length = 0u;
     std::uint64_t file_bytes = 0u;
     std::uint32_t position_segment_count = 0u;
@@ -163,7 +139,7 @@ struct minimizer_fragment_image_header {
     minimizer_fragment_image_section manifest{};
     std::uint64_t header_crc64 = 0u;
     std::uint64_t feature_bitmap = 0u;
-    minimizer_fragment_compact_hash32_section_receipt compact_h32_direct{};
+    minimizer_fragment_compact_hash32_section_receipt compact_hash32_direct{};
 
     friend constexpr bool operator==(
         const minimizer_fragment_image_header&, const minimizer_fragment_image_header&) = default;
@@ -178,7 +154,7 @@ struct minimizer_fragment_image_layout {
     minimizer_fragment_image_section directory{};
     minimizer_fragment_image_section manifest{};
     std::uint64_t feature_bitmap = 0u;
-    minimizer_fragment_compact_hash32_section_receipt compact_h32_direct{};
+    minimizer_fragment_compact_hash32_section_receipt compact_hash32_direct{};
     std::uint64_t file_bytes = 0u;
 
     friend constexpr bool operator==(
@@ -199,13 +175,12 @@ struct expected_minimizer_fragment_image_identity {
     std::uint32_t user_relid = 0u;
     std::uint16_t column_attno = 0u;
     std::uint8_t index_identity = k_minimizer_fragment_image_index_identity;
-    std::uint8_t storage_kind = 0u;
     std::uint16_t layout_identity = k_minimizer_fragment_image_layout_identity;
     std::uint64_t query_key = 0u;
     std::uint64_t generation_id = 0u;
     std::uint64_t source_identity = 0u;
     std::uint64_t source_content_crc = 0u;
-    std::uint64_t compatibility_crc = 0u;
+    std::uint64_t storage_contract_checksum = 0u;
     std::uint64_t target_length = 0u;
     std::uint64_t file_bytes = 0u;
     std::uint32_t position_segment_count = 0u;
@@ -218,7 +193,7 @@ struct expected_minimizer_fragment_image_identity {
     /// header receipt.  When supplied, these fields are compared exactly.
     std::optional<std::uint64_t> feature_bitmap = std::nullopt;
     std::optional<minimizer_fragment_compact_hash32_section_receipt>
-        compact_h32_direct = std::nullopt;
+        compact_hash32_direct = std::nullopt;
 };
 
 /** @brief Selects bounded metadata authentication or a full payload scrub. */
@@ -242,7 +217,7 @@ struct minimizer_fragment_image_validation_options {
 enum class minimizer_fragment_image_error : std::uint8_t {
     header_size_mismatch,
     bad_magic,
-    bad_format_revision,
+    bad_layout_revision,
     bad_header_bytes,
     bad_index_identity,
     bad_storage_kind,
@@ -257,9 +232,9 @@ enum class minimizer_fragment_image_error : std::uint8_t {
     manifest_offset_mismatch,
     manifest_end_mismatch,
     unsupported_features,
-    compact_h32_direct_feature_mismatch,
-    compact_h32_direct_offset_mismatch,
-    compact_h32_direct_end_mismatch,
+    compact_hash32_direct_feature_mismatch,
+    compact_hash32_direct_offset_mismatch,
+    compact_hash32_direct_end_mismatch,
     file_offset_not_representable,
     mapped_size_not_representable,
     nonzero_section_padding,
@@ -282,7 +257,7 @@ struct validated_minimizer_fragment_image_view {
     std::span<const std::byte> payload{};
     std::span<const std::byte> directory{};
     std::span<const std::byte> manifest{};
-    std::span<const std::byte> compact_h32_direct{};
+    std::span<const std::byte> compact_hash32_direct{};
     std::uint64_t header_crc_bytes = 0u;
     std::uint64_t payload_crc_bytes = 0u;
     std::uint64_t directory_crc_bytes = 0u;
@@ -302,7 +277,7 @@ plan_minimizer_fragment_image_layout(
     std::uint64_t directory_crc64 = 0u,
     std::uint64_t manifest_crc64 = 0u,
     std::optional<minimizer_fragment_compact_hash32_section_spec>
-        compact_h32_direct = std::nullopt) noexcept;
+        compact_hash32_direct = std::nullopt) noexcept;
 
 /**
  * @brief Validates section offsets and addressability without reading payload bytes.
@@ -342,28 +317,28 @@ validate_minimizer_fragment_image(
 
 namespace bioseq::indexing::minimizer_fragment_image_detail {
 
-template <class UInt>
-requires (std::is_unsigned_v<UInt>)
+template <class p_uint>
+requires (std::is_unsigned_v<p_uint>)
 /** @brief Stores one unsigned value at a prevalidated little-endian offset. */
 constexpr void store_le(
         std::span<std::byte> encoded,
         std::size_t offset,
-        UInt value) noexcept {
-    for (std::size_t byte = 0u; byte < sizeof(UInt); ++byte) {
-        encoded[offset + byte] = static_cast<std::byte>(value & UInt{0xffu});
+        p_uint value) noexcept {
+    for (std::size_t byte = 0u; byte < sizeof(p_uint); ++byte) {
+        encoded[offset + byte] = static_cast<std::byte>(value & p_uint{0xffu});
         value >>= 8u;
     }
 }
 
-template <class UInt>
-requires (std::is_unsigned_v<UInt>)
+template <class p_uint>
+requires (std::is_unsigned_v<p_uint>)
 /** @brief Loads one unsigned value from a prevalidated little-endian offset. */
-[[nodiscard]] constexpr UInt load_le(
+[[nodiscard]] constexpr p_uint load_le(
         std::span<const std::byte> encoded,
         std::size_t offset) noexcept {
-    UInt value = 0u;
-    for (std::size_t byte = 0u; byte < sizeof(UInt); ++byte) {
-        value |= static_cast<UInt>(
+    p_uint value = 0u;
+    for (std::size_t byte = 0u; byte < sizeof(p_uint); ++byte) {
+        value |= static_cast<p_uint>(
             std::to_integer<std::uint8_t>(encoded[offset + byte]))
             << (byte * 8u);
     }
@@ -395,7 +370,7 @@ static_assert((k_minimizer_fragment_image_section_alignment
 static_assert((k_minimizer_fragment_compact_hash32_alignment
     & (k_minimizer_fragment_compact_hash32_alignment - 1u)) == 0u);
 
-[[nodiscard]] constexpr bool has_compact_h32_direct_feature(
+[[nodiscard]] constexpr bool has_compact_hash32_direct_feature(
         std::uint64_t feature_bitmap) noexcept {
     return (feature_bitmap & k_minimizer_fragment_compact_hash32_feature) != 0u;
 }
@@ -436,13 +411,13 @@ static_assert((k_minimizer_fragment_compact_hash32_alignment
         && header.user_relid == expected.user_relid
         && header.column_attno == expected.column_attno
         && header.index_identity == expected.index_identity
-        && header.storage_kind == expected.storage_kind
         && header.layout_identity == expected.layout_identity
         && header.query_key == expected.query_key
         && header.generation_id == expected.generation_id
         && header.source_identity == expected.source_identity
         && header.source_content_crc == expected.source_content_crc
-        && header.compatibility_crc == expected.compatibility_crc
+        && header.storage_contract_checksum
+            == expected.storage_contract_checksum
         && header.target_length == expected.target_length
         && header.file_bytes == expected.file_bytes
         && header.position_segment_count == expected.position_segment_count
@@ -454,8 +429,8 @@ static_assert((k_minimizer_fragment_compact_hash32_alignment
         && header.header_crc64 == expected.header_crc64
         && (!expected.feature_bitmap
             || header.feature_bitmap == *expected.feature_bitmap)
-        && (!expected.compact_h32_direct
-            || header.compact_h32_direct == *expected.compact_h32_direct);
+        && (!expected.compact_hash32_direct
+            || header.compact_hash32_direct == *expected.compact_hash32_direct);
 }
 
 } // namespace bioseq::indexing::minimizer_fragment_image_detail
@@ -471,7 +446,7 @@ plan_minimizer_fragment_image_layout(
         std::uint64_t directory_crc64,
         std::uint64_t manifest_crc64,
         std::optional<minimizer_fragment_compact_hash32_section_spec>
-            compact_h32_direct) noexcept {
+            compact_hash32_direct) noexcept {
     minimizer_fragment_image_layout layout{};
     layout.payload = minimizer_fragment_image_section{
         .offset = k_minimizer_fragment_image_header_bytes,
@@ -518,13 +493,13 @@ plan_minimizer_fragment_image_layout(
     if (!manifest_end) {
         return std::unexpected(manifest_end.error());
     }
-    if (!compact_h32_direct) {
+    if (!compact_hash32_direct) {
         layout.file_bytes = *manifest_end;
         return layout;
     }
-    if (compact_h32_direct->bytes == 0u) {
+    if (compact_hash32_direct->bytes == 0u) {
         return std::unexpected(
-            minimizer_fragment_image_error::compact_h32_direct_feature_mismatch);
+            minimizer_fragment_image_error::compact_hash32_direct_feature_mismatch);
     }
     const auto direct_offset = minimizer_fragment_image_detail::checked_align_up(
         *manifest_end, k_minimizer_fragment_compact_hash32_alignment);
@@ -532,14 +507,14 @@ plan_minimizer_fragment_image_layout(
         return std::unexpected(direct_offset.error());
     }
     layout.feature_bitmap = k_minimizer_fragment_compact_hash32_feature;
-    layout.compact_h32_direct = minimizer_fragment_compact_hash32_section_receipt{
+    layout.compact_hash32_direct = minimizer_fragment_compact_hash32_section_receipt{
         .offset = *direct_offset,
-        .bytes = compact_h32_direct->bytes,
-        .direct_header_crc64 = compact_h32_direct->direct_header_crc64,
+        .bytes = compact_hash32_direct->bytes,
+        .direct_header_crc64 = compact_hash32_direct->direct_header_crc64,
     };
     const auto direct_end = minimizer_fragment_image_detail::checked_add(
-        layout.compact_h32_direct.offset,
-        layout.compact_h32_direct.bytes);
+        layout.compact_hash32_direct.offset,
+        layout.compact_hash32_direct.bytes);
     if (!direct_end) {
         return std::unexpected(direct_end.error());
     }
@@ -613,40 +588,40 @@ validate_minimizer_fragment_image_layout(
     if ((header.feature_bitmap & ~k_minimizer_fragment_image_known_features) != 0u) {
         return std::unexpected(minimizer_fragment_image_error::unsupported_features);
     }
-    if (!minimizer_fragment_image_detail::has_compact_h32_direct_feature(
+    if (!minimizer_fragment_image_detail::has_compact_hash32_direct_feature(
             header.feature_bitmap)) {
         if (!minimizer_fragment_image_detail::direct_receipt_is_zero(
-                header.compact_h32_direct)) {
+                header.compact_hash32_direct)) {
             return std::unexpected(
-                minimizer_fragment_image_error::compact_h32_direct_feature_mismatch);
+                minimizer_fragment_image_error::compact_hash32_direct_feature_mismatch);
         }
         if (*manifest_end != header.file_bytes) {
             return std::unexpected(minimizer_fragment_image_error::manifest_end_mismatch);
         }
         return {};
     }
-    if (header.compact_h32_direct.bytes == 0u) {
+    if (header.compact_hash32_direct.bytes == 0u) {
         return std::unexpected(
-            minimizer_fragment_image_error::compact_h32_direct_feature_mismatch);
+            minimizer_fragment_image_error::compact_hash32_direct_feature_mismatch);
     }
     const auto expected_direct_offset = minimizer_fragment_image_detail::checked_align_up(
         *manifest_end, k_minimizer_fragment_compact_hash32_alignment);
     if (!expected_direct_offset) {
         return std::unexpected(expected_direct_offset.error());
     }
-    if (header.compact_h32_direct.offset != *expected_direct_offset) {
+    if (header.compact_hash32_direct.offset != *expected_direct_offset) {
         return std::unexpected(
-            minimizer_fragment_image_error::compact_h32_direct_offset_mismatch);
+            minimizer_fragment_image_error::compact_hash32_direct_offset_mismatch);
     }
     const auto direct_end = minimizer_fragment_image_detail::checked_add(
-        header.compact_h32_direct.offset,
-        header.compact_h32_direct.bytes);
+        header.compact_hash32_direct.offset,
+        header.compact_hash32_direct.bytes);
     if (!direct_end) {
         return std::unexpected(direct_end.error());
     }
     if (*direct_end != header.file_bytes) {
         return std::unexpected(
-            minimizer_fragment_image_error::compact_h32_direct_end_mismatch);
+            minimizer_fragment_image_error::compact_hash32_direct_end_mismatch);
     }
     return {};
 }
@@ -656,8 +631,8 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     if (header.magic != k_minimizer_fragment_image_magic) {
         return std::unexpected(minimizer_fragment_image_error::bad_magic);
     }
-    if (header.format_revision != k_minimizer_fragment_image_format_revision) {
-        return std::unexpected(minimizer_fragment_image_error::bad_format_revision);
+    if (header.layout_revision != k_minimizer_fragment_image_layout_revision) {
+        return std::unexpected(minimizer_fragment_image_error::bad_layout_revision);
     }
     if (header.header_bytes != k_minimizer_fragment_image_header_bytes) {
         return std::unexpected(minimizer_fragment_image_error::bad_header_bytes);
@@ -665,7 +640,8 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     if (header.index_identity != k_minimizer_fragment_image_index_identity) {
         return std::unexpected(minimizer_fragment_image_error::bad_index_identity);
     }
-    if (!is_valid_minimizer_fragment_image_storage_kind(header.storage_kind)) {
+    if (header.storage_kind
+        != k_minimizer_fragment_image_relation_backed_storage_kind) {
         return std::unexpected(minimizer_fragment_image_error::bad_storage_kind);
     }
     if (header.layout_identity != k_minimizer_fragment_image_layout_identity) {
@@ -681,7 +657,7 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     const std::span<std::byte> bytes{encoded};
     using minimizer_fragment_image_detail::store_le;
     store_le(bytes, 0u, header.magic);
-    store_le(bytes, 8u, header.format_revision);
+    store_le(bytes, 8u, header.layout_revision);
     store_le(bytes, 12u, header.header_bytes);
     store_le(bytes, 16u, header.database_oid);
     store_le(bytes, 20u, header.tablespace_oid);
@@ -695,7 +671,7 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     store_le(bytes, 48u, header.generation_id);
     store_le(bytes, 56u, header.source_identity);
     store_le(bytes, 64u, header.source_content_crc);
-    store_le(bytes, 72u, header.compatibility_crc);
+    store_le(bytes, 72u, header.storage_contract_checksum);
     store_le(bytes, 80u, header.target_length);
     store_le(bytes, 88u, header.file_bytes);
     store_le(bytes, 96u, header.position_segment_count);
@@ -710,10 +686,10 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     store_le(bytes, 168u, header.manifest.bytes);
     store_le(bytes, 176u, header.manifest.crc64);
     store_le(bytes, 192u, header.feature_bitmap);
-    store_le(bytes, 200u, header.compact_h32_direct.offset);
-    store_le(bytes, 208u, header.compact_h32_direct.bytes);
+    store_le(bytes, 200u, header.compact_hash32_direct.offset);
+    store_le(bytes, 208u, header.compact_hash32_direct.bytes);
     store_le(
-        bytes, 216u, header.compact_h32_direct.direct_header_crc64);
+        bytes, 216u, header.compact_hash32_direct.direct_header_crc64);
     // encoded is zero-initialized, including 184..191 during this checksum.
     header.header_crc64 = minimizer_fragment_image_detail::header_crc(bytes);
     store_le(bytes, k_minimizer_fragment_image_header_crc_offset, header.header_crc64);
@@ -728,7 +704,7 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     using minimizer_fragment_image_detail::load_le;
     minimizer_fragment_image_header header{};
     header.magic = load_le<std::uint64_t>(encoded, 0u);
-    header.format_revision = load_le<std::uint32_t>(encoded, 8u);
+    header.layout_revision = load_le<std::uint32_t>(encoded, 8u);
     header.header_bytes = load_le<std::uint32_t>(encoded, 12u);
     header.database_oid = load_le<std::uint32_t>(encoded, 16u);
     header.tablespace_oid = load_le<std::uint32_t>(encoded, 20u);
@@ -742,7 +718,7 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     header.generation_id = load_le<std::uint64_t>(encoded, 48u);
     header.source_identity = load_le<std::uint64_t>(encoded, 56u);
     header.source_content_crc = load_le<std::uint64_t>(encoded, 64u);
-    header.compatibility_crc = load_le<std::uint64_t>(encoded, 72u);
+    header.storage_contract_checksum = load_le<std::uint64_t>(encoded, 72u);
     header.target_length = load_le<std::uint64_t>(encoded, 80u);
     header.file_bytes = load_le<std::uint64_t>(encoded, 88u);
     header.position_segment_count = load_le<std::uint32_t>(encoded, 96u);
@@ -765,7 +741,7 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     header.header_crc64 = load_le<std::uint64_t>(
         encoded, k_minimizer_fragment_image_header_crc_offset);
     header.feature_bitmap = load_le<std::uint64_t>(encoded, 192u);
-    header.compact_h32_direct = minimizer_fragment_compact_hash32_section_receipt{
+    header.compact_hash32_direct = minimizer_fragment_compact_hash32_section_receipt{
         .offset = load_le<std::uint64_t>(encoded, 200u),
         .bytes = load_le<std::uint64_t>(encoded, 208u),
         .direct_header_crc64 = load_le<std::uint64_t>(encoded, 216u),
@@ -774,8 +750,8 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     if (header.magic != k_minimizer_fragment_image_magic) {
         return std::unexpected(minimizer_fragment_image_error::bad_magic);
     }
-    if (header.format_revision != k_minimizer_fragment_image_format_revision) {
-        return std::unexpected(minimizer_fragment_image_error::bad_format_revision);
+    if (header.layout_revision != k_minimizer_fragment_image_layout_revision) {
+        return std::unexpected(minimizer_fragment_image_error::bad_layout_revision);
     }
     if (header.header_bytes != k_minimizer_fragment_image_header_bytes) {
         return std::unexpected(minimizer_fragment_image_error::bad_header_bytes);
@@ -783,7 +759,8 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     if (header.index_identity != k_minimizer_fragment_image_index_identity) {
         return std::unexpected(minimizer_fragment_image_error::bad_index_identity);
     }
-    if (!is_valid_minimizer_fragment_image_storage_kind(header.storage_kind)) {
+    if (header.storage_kind
+        != k_minimizer_fragment_image_relation_backed_storage_kind) {
         return std::unexpected(minimizer_fragment_image_error::bad_storage_kind);
     }
     if (header.layout_identity != k_minimizer_fragment_image_layout_identity) {
@@ -793,14 +770,14 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
         return std::unexpected(minimizer_fragment_image_error::unsupported_features);
     }
     const bool has_direct =
-        minimizer_fragment_image_detail::has_compact_h32_direct_feature(
+        minimizer_fragment_image_detail::has_compact_hash32_direct_feature(
             header.feature_bitmap);
-    if (has_direct != (header.compact_h32_direct.bytes != 0u)
+    if (has_direct != (header.compact_hash32_direct.bytes != 0u)
         || (!has_direct
             && !minimizer_fragment_image_detail::direct_receipt_is_zero(
-                header.compact_h32_direct))) {
+                header.compact_hash32_direct))) {
         return std::unexpected(
-            minimizer_fragment_image_error::compact_h32_direct_feature_mismatch);
+            minimizer_fragment_image_error::compact_hash32_direct_feature_mismatch);
     }
     if (!minimizer_fragment_image_detail::all_zero(encoded.subspan(38u, 2u))
         || !minimizer_fragment_image_detail::all_zero(encoded.subspan(100u, 4u))
@@ -853,14 +830,14 @@ open_minimizer_fragment_image_bounded(
     const auto manifest = image.subspan(
         static_cast<std::size_t>(decoded->manifest.offset),
         static_cast<std::size_t>(decoded->manifest.bytes));
-    const auto compact_h32_direct =
-        minimizer_fragment_image_detail::has_compact_h32_direct_feature(
+    const auto compact_hash32_direct =
+        minimizer_fragment_image_detail::has_compact_hash32_direct_feature(
             decoded->feature_bitmap)
         ? image.subspan(
             static_cast<std::size_t>(
-                decoded->compact_h32_direct.offset),
+                decoded->compact_hash32_direct.offset),
             static_cast<std::size_t>(
-                decoded->compact_h32_direct.bytes))
+                decoded->compact_hash32_direct.bytes))
         : std::span<const std::byte>{};
 
     return validated_minimizer_fragment_image_view{
@@ -868,7 +845,7 @@ open_minimizer_fragment_image_bounded(
         .payload = payload,
         .directory = directory,
         .manifest = manifest,
-        .compact_h32_direct = compact_h32_direct,
+        .compact_hash32_direct = compact_hash32_direct,
         .header_crc_bytes = k_minimizer_fragment_image_header_bytes,
         .payload_crc_bytes = 0u,
         .directory_crc_bytes = 0u,
@@ -886,7 +863,7 @@ validate_minimizer_fragment_image(
     const auto payload = bounded->payload;
     const auto directory = bounded->directory;
     const auto manifest = bounded->manifest;
-    const auto compact_h32_direct = bounded->compact_h32_direct;
+    const auto compact_hash32_direct = bounded->compact_hash32_direct;
     const auto payload_offset = static_cast<std::size_t>(
         decoded.payload.offset);
     const auto payload_bytes = static_cast<std::size_t>(
@@ -900,7 +877,7 @@ validate_minimizer_fragment_image(
     const auto manifest_bytes = static_cast<std::size_t>(
         decoded.manifest.bytes);
     const bool has_direct =
-        minimizer_fragment_image_detail::has_compact_h32_direct_feature(
+        minimizer_fragment_image_detail::has_compact_hash32_direct_feature(
             decoded.feature_bitmap);
 
     const auto payload_end = payload_offset + payload_bytes;
@@ -913,7 +890,7 @@ validate_minimizer_fragment_image(
     std::span<const std::byte> manifest_padding{};
     if (has_direct) {
         const auto direct_offset = static_cast<std::size_t>(
-            decoded.compact_h32_direct.offset);
+            decoded.compact_hash32_direct.offset);
         manifest_padding = image.subspan(
             manifest_end, direct_offset - manifest_end);
     }
@@ -971,7 +948,7 @@ validate_minimizer_fragment_image(
         .layout = generation_manifest->layout,
         .generation_id = decoded.generation_id,
         .source_identity = decoded.source_identity,
-        .compatibility_checksum = decoded.compatibility_crc,
+        .storage_contract_checksum = decoded.storage_contract_checksum,
         .manifest_checksum = decoded.manifest.crc64,
         .source_content_checksum = decoded.source_content_crc,
     };
@@ -992,7 +969,7 @@ validate_minimizer_fragment_image(
         .payload = payload,
         .directory = directory,
         .manifest = manifest,
-        .compact_h32_direct = compact_h32_direct,
+        .compact_hash32_direct = compact_hash32_direct,
         .header_crc_bytes = k_minimizer_fragment_image_header_bytes,
         .payload_crc_bytes =
             options.payload_crc_policy == minimizer_fragment_payload_crc_policy::validate

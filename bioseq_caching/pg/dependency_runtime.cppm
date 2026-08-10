@@ -35,53 +35,53 @@ import bioseq.cache.pg.shared_registry;
 
 export namespace bioseq::cache::pg::dependency_runtime {
 
-inline constexpr std::uint32_t kMaximumDirtyDependenciesV1 = 256;
-inline constexpr std::uint32_t kMaximumSnapshotTicketDependenciesV1 = 1'024;
-inline constexpr std::uint32_t kMaximumDirtyFramesV1 = 256;
+inline constexpr std::uint32_t k_maximum_dirty_dependencies = 256;
+inline constexpr std::uint32_t k_maximum_snapshot_ticket_dependencies = 1'024;
+inline constexpr std::uint32_t k_maximum_dirty_frames = 256;
 
-enum class DependencyRuntimeErrorV1 : std::uint32_t {
-  None = 0,
-  InvalidArgument,
-  RegistryUnavailable,
-  CapacityExceeded,
-  NonCanonical,
-  ReferenceAcquireFailed,
-  ReferenceValidationFailed,
-  ReferenceReleaseFailed,
-  OwnerClaimFailed,
-  OwnerRecordFailed,
-  TransitionPublishFailed,
-  TransitionFinishFailed,
-  SavepointMismatch,
-  VectorAllocationFailed,
-  VectorValidationFailed,
-  LockedActionFailed,
-  EmergencyFallback,
+enum class dependency_runtime_error : std::uint32_t {
+  none = 0,
+  invalid_argument,
+  registry_unavailable,
+  capacity_exceeded,
+  non_canonical,
+  reference_acquire_failed,
+  reference_validation_failed,
+  reference_release_failed,
+  owner_claim_failed,
+  owner_record_failed,
+  transition_publish_failed,
+  transition_finish_failed,
+  savepoint_mismatch,
+  vector_allocation_failed,
+  vector_validation_failed,
+  locked_action_failed,
+  emergency_fallback,
 };
 
-enum class DependencyRuntimePausePointV1 : std::uint8_t {
-  BeforeVisibilityTicket = 1,
-  AfterTransitionPublish = 2,
+enum class dependency_runtime_pause_point : std::uint8_t {
+  before_visibility_ticket = 1,
+  after_transition_publish = 2,
 };
 
 /** Utility command whose prepared transaction is about to be resolved. */
-enum class ExternalPreparedResolutionKindV1 : std::uint8_t {
-  CommitPrepared = 1,
-  RollbackPrepared = 2,
+enum class external_prepared_resolution_kind : std::uint8_t {
+  commit_prepared = 1,
+  rollback_prepared = 2,
 };
 
 /** Result known after standard_ProcessUtility returns or throws. */
-enum class ExternalPreparedResolutionOutcomeV1 : std::uint8_t {
-  Committed = 1,
-  RolledBack = 2,
-  NotResolved = 3,
-  Ambiguous = 4,
+enum class external_prepared_resolution_outcome : std::uint8_t {
+  committed = 1,
+  rolled_back = 2,
+  not_resolved = 3,
+  ambiguous = 4,
 };
 
-enum class ExternalPreparedResolutionStateV1 : std::uint8_t {
-  Empty = 0,
-  Active = 1,
-  Finished = 2,
+enum class external_prepared_resolution_state : std::uint8_t {
+  empty = 0,
+  active = 1,
+  finished = 2,
 };
 
 /**
@@ -89,56 +89,56 @@ enum class ExternalPreparedResolutionStateV1 : std::uint8_t {
  * The directory reference is diagnostic only while active; the transition
  * ledger owns and releases the linear capability.
  */
-struct ExternalPreparedResolutionTokenV1 {
-  TransitionOwnerClaimV1 claim{};
-  DependencyReferenceV1 database_guard{};
+struct external_prepared_resolution_token {
+  transition_owner_claim claim{};
+  dependency_reference database_guard{};
   std::uint64_t resolution_identity = 0;
   std::uint32_t database_oid = 0;
-  ExternalPreparedResolutionKindV1 kind =
-      ExternalPreparedResolutionKindV1::CommitPrepared;
-  ExternalPreparedResolutionOutcomeV1 outcome =
-      ExternalPreparedResolutionOutcomeV1::NotResolved;
-  ExternalPreparedResolutionStateV1 state =
-      ExternalPreparedResolutionStateV1::Empty;
+  external_prepared_resolution_kind kind =
+      external_prepared_resolution_kind::commit_prepared;
+  external_prepared_resolution_outcome outcome =
+      external_prepared_resolution_outcome::not_resolved;
+  external_prepared_resolution_state state =
+      external_prepared_resolution_state::empty;
   std::uint8_t reserved = 0;
 
   [[nodiscard]] explicit operator bool() const noexcept {
-    return state == ExternalPreparedResolutionStateV1::Active &&
+    return state == external_prepared_resolution_state::active &&
            static_cast<bool>(claim) && database_guard.active &&
            resolution_identity != 0 && database_oid != 0 && reserved == 0;
   }
 
   [[nodiscard]] bool operator==(
-      const ExternalPreparedResolutionTokenV1 &) const noexcept = default;
+      const external_prepared_resolution_token &) const noexcept = default;
 };
 
-struct DependencyRuntimeTestHooksV1 {
+struct dependency_runtime_test_hooks {
   void *context = nullptr;
-  void (*pause)(void *, DependencyRuntimePausePointV1) noexcept = nullptr;
+  void (*pause)(void *, dependency_runtime_pause_point) noexcept = nullptr;
 };
 
-struct DependencyRuntimeResultV1 {
-  DependencyRuntimeErrorV1 error = DependencyRuntimeErrorV1::None;
+struct dependency_runtime_result {
+  dependency_runtime_error error = dependency_runtime_error::none;
   std::uint32_t dependency_count = 0;
   bool fail_open = false;
   bool coarse_fallback_required = false;
   std::array<std::uint8_t, 2> reserved{};
 
   [[nodiscard]] explicit operator bool() const noexcept {
-    return error == DependencyRuntimeErrorV1::None;
+    return error == dependency_runtime_error::none;
   }
 };
 
 /** Process-local read capabilities; never copy an active ticket. */
-struct DependencySnapshotTicketV1 {
-  std::array<DependencyReferenceV1,
-             kMaximumSnapshotTicketDependenciesV1>
+struct dependency_snapshot_ticket {
+  std::array<dependency_reference,
+             k_maximum_snapshot_ticket_dependencies>
       references{};
-  std::array<DependencyVectorEntryV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_vector_entry,
+             k_maximum_snapshot_ticket_dependencies>
       entries{};
-  DependencyReferenceV1 conservative_guard_reference{};
-  DependencyVectorEntryV1 conservative_guard_entry{};
+  dependency_reference conservative_guard_reference{};
+  dependency_vector_entry conservative_guard_entry{};
   std::uint64_t emergency_write_epoch = 0;
   std::uint64_t emergency_change_generation = 0;
   std::uint64_t snapshot_binding_completion_count = 0;
@@ -156,10 +156,10 @@ struct DependencySnapshotTicketV1 {
  * call a dependency-directory API; this preserves dependency -> registry lock
  * order.  A successful action must provide an exact rollback operation.
  */
-struct DependencyTicketLockedActionV1 {
+struct dependency_ticket_locked_action {
   void *context = nullptr;
   bool (*apply)(
-      void *, std::span<const DependencyVectorEntryV1>) noexcept = nullptr;
+      void *, std::span<const dependency_vector_entry>) noexcept = nullptr;
   void (*rollback)(void *) noexcept = nullptr;
 
   [[nodiscard]] bool valid() const noexcept {
@@ -169,8 +169,8 @@ struct DependencyTicketLockedActionV1 {
 };
 
 /** DSA-owned canonical envelope backed by generation references. */
-struct DependencyGenerationVectorV1 {
-  DependencyVectorEntryV1 conservative_guard_entry{};
+struct dependency_generation_vector {
+  dependency_vector_entry conservative_guard_entry{};
   dsa_pointer envelope = InvalidDsaPointer;
   std::uint32_t bytes = 0;
   std::uint32_t count = 0;
@@ -185,8 +185,8 @@ struct DependencyGenerationVectorV1 {
 };
 
 /** Lock-dropped release outcome; applied prefix remains authoritative on error. */
-struct DependencyGenerationReleaseBatchV1 {
-  DependencyRuntimeErrorV1 error = DependencyRuntimeErrorV1::None;
+struct dependency_generation_release_batch {
+  dependency_runtime_error error = dependency_runtime_error::none;
   std::uint32_t dependency_count = 0;
   std::uint32_t reference_count = 0;
   std::uint32_t first_reference = 0;
@@ -196,7 +196,7 @@ struct DependencyGenerationReleaseBatchV1 {
   std::array<std::uint8_t, 2> reserved{};
 };
 
-struct DependencyRuntimeDiagnosticsV1 {
+struct dependency_runtime_diagnostics {
   std::uint64_t ticket_capture_count = 0;
   std::uint64_t ticket_validation_failure_count = 0;
   std::uint64_t generation_handoff_count = 0;
@@ -214,19 +214,19 @@ struct DependencyRuntimeDiagnosticsV1 {
   bool coarse_fallback_required = false;
 };
 
-[[nodiscard]] DependencyRuntimeResultV1 capture_snapshot_ticket(
-    std::span<const DependencyVersion> dependencies,
-    DependencySnapshotTicketV1 *ticket,
-    const DependencyKey *conservative_guard_key,
+[[nodiscard]] dependency_runtime_result capture_snapshot_ticket(
+    std::span<const dependency_version> dependencies,
+    dependency_snapshot_ticket *ticket,
+    const dependency_key *conservative_guard_key,
     std::uint64_t snapshot_binding_completion_count,
     std::uint64_t continuing_completion_count) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 validate_snapshot_ticket(
-    const DependencySnapshotTicketV1 &ticket) noexcept;
+[[nodiscard]] dependency_runtime_result validate_snapshot_ticket(
+    const dependency_snapshot_ticket &ticket) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 validate_snapshot_ticket_locked(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyTicketLockedActionV1 action = {}) noexcept;
+[[nodiscard]] dependency_runtime_result validate_snapshot_ticket_locked(
+    const dependency_snapshot_ticket &ticket,
+    dependency_ticket_locked_action action = {}) noexcept;
 
 /**
  * Revalidate a copied canonical vector and optionally apply one atomic action.
@@ -235,142 +235,142 @@ struct DependencyRuntimeDiagnosticsV1 {
  * lets COMPLETE hits tolerate unrelated rollbacks while their action checks a
  * persisted committed-write epoch/token.
  */
-[[nodiscard]] DependencyRuntimeResultV1 validate_dependency_vector_locked(
+[[nodiscard]] dependency_runtime_result validate_dependency_vector_locked(
     std::span<const std::byte> dependency_vector_envelope,
-    const DependencyVectorEntryV1 *conservative_guard,
+    const dependency_vector_entry *conservative_guard,
     std::uint64_t snapshot_binding_completion_count,
     std::uint64_t continuing_completion_count,
-    DependencyTicketLockedActionV1 action = {}) noexcept;
+    dependency_ticket_locked_action action = {}) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 release_snapshot_ticket(
-    DependencySnapshotTicketV1 *ticket) noexcept;
+[[nodiscard]] dependency_runtime_result release_snapshot_ticket(
+    dependency_snapshot_ticket *ticket) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 retain_generation_vector(
-    DependencySnapshotTicketV1 *ticket,
-    DependencyGenerationVectorV1 *generation) noexcept;
+[[nodiscard]] dependency_runtime_result retain_generation_vector(
+    dependency_snapshot_ticket *ticket,
+    dependency_generation_vector *generation) noexcept;
 
 /** Acquire Generation refs/envelope while retaining the active Ticket refs. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 retain_generation_vector_preserving_ticket(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyGenerationVectorV1 *generation) noexcept;
+    const dependency_snapshot_ticket &ticket,
+    dependency_generation_vector *generation) noexcept;
 
 /** Borrow the canonical envelope until the wrapper is released/transferred. */
 [[nodiscard]] std::span<const std::byte>
 dependency_generation_vector_envelope(
-    const DependencyGenerationVectorV1 &generation) noexcept;
+    const dependency_generation_vector &generation) noexcept;
 
 /** Free only temporary DSA bytes after registry ownership is established. */
-[[nodiscard]] DependencyRuntimeResultV1 transfer_generation_vector_to_registry(
-    DependencyGenerationVectorV1 *generation) noexcept;
+[[nodiscard]] dependency_runtime_result transfer_generation_vector_to_registry(
+    dependency_generation_vector *generation) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 release_generation_vector(
-    DependencyGenerationVectorV1 *generation) noexcept;
+[[nodiscard]] dependency_runtime_result release_generation_vector(
+    dependency_generation_vector *generation) noexcept;
 
 /** Release a contiguous Generation-reference suffix outside registry locks. */
-[[nodiscard]] DependencyGenerationReleaseBatchV1 release_generation_entries(
+[[nodiscard]] dependency_generation_release_batch release_generation_entries(
     std::span<const std::byte> dependency_vector_envelope,
-    const DependencyVectorEntryV1 *conservative_guard,
+    const dependency_vector_entry *conservative_guard,
     std::uint32_t first_reference) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &dependency) noexcept;
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &dependency) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &dependency,
-    const PhysicalIdentityV1 &committed_physical_identity) noexcept;
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &dependency,
+    const physical_identity &committed_physical_identity) noexcept;
 
 /** Stage one same-key physical identity replacement for commit. */
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &observed_dependency,
-    const DependencyVersion &committed_dependency) noexcept;
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &observed_dependency,
+    const dependency_version &committed_dependency) noexcept;
 
 /** Force the root transaction's per-database definition guard. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 observe_database_definition_dependency(
     std::uint32_t database_oid) noexcept;
 
 /** Stage one precise object-definition mutation for PRE_COMMIT capture. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 observe_object_definition_dependency(
-    const ObjectDefinitionMutationV1 &mutation) noexcept;
+    const object_definition_mutation &mutation) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 begin_dirty_frame(
+[[nodiscard]] dependency_runtime_result begin_dirty_frame(
     SubTransactionId child, SubTransactionId parent) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1 finish_dirty_frame(
+[[nodiscard]] dependency_runtime_result finish_dirty_frame(
     SubTransactionId child, SubTransactionId parent,
     bool committed) noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 publish_pre_commit_transitions() noexcept;
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 finish_post_visibility_transitions(bool committed) noexcept;
 
 /** Acquire and publish the database guard before PostgreSQL visibility. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 begin_external_prepared_resolution(
-    ExternalPreparedResolutionKindV1 kind,
+    external_prepared_resolution_kind kind,
     std::uint32_t database_oid,
     std::uint64_t resolution_identity,
-    ExternalPreparedResolutionTokenV1 *token) noexcept;
+    external_prepared_resolution_token *token) noexcept;
 
 /** Resolve, drain, generation-publish, wake, and release exactly once. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 finish_external_prepared_resolution(
-    ExternalPreparedResolutionTokenV1 *token,
-    ExternalPreparedResolutionOutcomeV1 outcome) noexcept;
+    external_prepared_resolution_token *token,
+    external_prepared_resolution_outcome outcome) noexcept;
 
 void force_emergency_fallback() noexcept;
 void register_dependency_runtime_callbacks() noexcept;
 void set_dependency_runtime_test_hooks(
-    DependencyRuntimeTestHooksV1 hooks) noexcept;
-[[nodiscard]] DependencyRuntimeDiagnosticsV1
-dependency_runtime_diagnostics() noexcept;
+    dependency_runtime_test_hooks hooks) noexcept;
+[[nodiscard]] dependency_runtime_diagnostics
+read_dependency_runtime_diagnostics() noexcept;
 
 }  // namespace bioseq::cache::pg::dependency_runtime
 
 namespace bioseq::cache::pg::dependency_runtime::detail {
 
-struct DirtyFrameV1 {
+struct dirty_frame {
   SubTransactionId child = InvalidSubTransactionId;
   SubTransactionId parent = InvalidSubTransactionId;
   std::uint32_t retained_count = 0;
 };
 
-inline std::array<TransitionDependencyReferenceV1,
-                  kMaximumDirtyDependenciesV1>
+inline std::array<transition_dependency_reference,
+                  k_maximum_dirty_dependencies>
     g_dirty_references{};
-inline std::array<DependencyVersion, kMaximumDirtyDependenciesV1>
+inline std::array<dependency_version, k_maximum_dirty_dependencies>
     g_dirty_versions{};
-inline std::array<PhysicalIdentityV1, kMaximumDirtyDependenciesV1>
+inline std::array<physical_identity, k_maximum_dirty_dependencies>
     g_committed_physical_identities{};
-inline std::array<DirtyFrameV1, kMaximumDirtyFramesV1> g_dirty_frames{};
+inline std::array<dirty_frame, k_maximum_dirty_frames> g_dirty_frames{};
 inline std::uint32_t g_dirty_count = 0;
 inline std::uint32_t g_dirty_frame_count = 0;
-inline TransitionOwnerClaimV1 g_owner_claim{};
+inline transition_owner_claim g_owner_claim{};
 inline bool g_owner_active = false;
 inline bool g_transition_published = false;
 inline bool g_force_coarse = false;
 inline bool g_emergency_transition_published = false;
 inline bool g_callbacks_registered = false;
 inline bool g_external_exit_registered = false;
-inline ExternalPreparedResolutionTokenV1 g_external_prepared_token{};
-inline DependencyRuntimeTestHooksV1 g_test_hooks{};
-inline DependencyRuntimeDiagnosticsV1 g_diagnostics{};
-inline ObjectDefinitionDependencyCollectorV1<>
+inline external_prepared_resolution_token g_external_prepared_token{};
+inline dependency_runtime_test_hooks g_test_hooks{};
+inline dependency_runtime_diagnostics g_diagnostics{};
+inline object_definition_dependency_collector<>
     g_object_definition_dependencies{};
 inline bool g_object_definition_pre_commit_captured = false;
 
 static_assert(
-    kMaximumObjectDefinitionSpecificDependenciesV1 + 2U ==
-    kMaximumDirtyDependenciesV1);
+    k_maximum_object_definition_specific_dependencies + 2U ==
+    k_maximum_dirty_dependencies);
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 validate_snapshot_ticket_locked_impl(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyTicketLockedActionV1 action,
+    const dependency_snapshot_ticket &ticket,
+    dependency_ticket_locked_action action,
     bool completion_lock_already_held) noexcept;
 
 void saturating_increment(std::uint64_t &value) noexcept {
@@ -379,13 +379,13 @@ void saturating_increment(std::uint64_t &value) noexcept {
   }
 }
 
-void pause(DependencyRuntimePausePointV1 point) noexcept {
+void pause(dependency_runtime_pause_point point) noexcept {
   if (g_test_hooks.pause != nullptr) {
     g_test_hooks.pause(g_test_hooks.context, point);
   }
 }
 
-[[nodiscard]] const shared_registry::SharedRegistryAttachmentV1 *
+[[nodiscard]] const shared_registry::shared_registry_attachment *
 attachment() noexcept {
   return shared_registry::current_shared_registry_attachment();
 }
@@ -411,7 +411,7 @@ void release_partition(void *, std::uint32_t partition) noexcept {
 }
 
 [[nodiscard]] bool wake_partition(void *, std::uint32_t) noexcept {
-  const shared_registry::SharedRegistryEmergencyAccessV1 emergency =
+  const shared_registry::shared_registry_emergency_access emergency =
       shared_registry::shared_emergency_dependency();
   if (emergency.state_changed == nullptr) {
     return false;
@@ -420,44 +420,44 @@ void release_partition(void *, std::uint32_t partition) noexcept {
   return true;
 }
 
-[[nodiscard]] DependencyDirectoryCallbacksV1 directory_callbacks(
-    DependencyDirectoryLockModeV1 mode =
-        DependencyDirectoryLockModeV1::AcquireRelease) noexcept {
-  DependencyDirectoryCallbacksV1 callbacks{
+[[nodiscard]] dependency_directory_callbacks directory_callbacks(
+    dependency_directory_lock_mode mode =
+        dependency_directory_lock_mode::acquire_release) noexcept {
+  dependency_directory_callbacks callbacks{
       .lock_mode = mode,
       .next_sequence = next_sequence,
       .wake_partition = wake_partition,
   };
-  if (mode == DependencyDirectoryLockModeV1::AcquireRelease) {
+  if (mode == dependency_directory_lock_mode::acquire_release) {
     callbacks.acquire_partition = acquire_partition;
     callbacks.release_partition = release_partition;
   }
   return callbacks;
 }
 
-[[nodiscard]] DependencyReferenceV1 dependency_reference(
-    const TransitionDependencyReferenceV1 &reference) noexcept {
-  return DependencyReferenceV1{
+[[nodiscard]] dependency_reference dependency_reference_from_transition(
+    const transition_dependency_reference &reference) noexcept {
+  return dependency_reference{
       .key = reference.key,
       .record_offset = reference.record_offset,
       .partition_index = reference.partition_index,
       .physical_identity = reference.physical_identity,
       .record_generation = reference.record_generation,
-      .kind = DependencyReferenceKindV1::Owner,
+      .kind = dependency_reference_kind::owner,
       .active = reference.active,
       .transition_active = reference.transition_active,
   };
 }
 
-[[nodiscard]] TransitionDependencyReferenceV1 transition_reference(
-    const DependencyReferenceV1 &reference) noexcept {
-  return TransitionDependencyReferenceV1{
+[[nodiscard]] transition_dependency_reference transition_reference(
+    const dependency_reference &reference) noexcept {
+  return transition_dependency_reference{
       .key = reference.key,
       .record_offset = reference.record_offset,
       .partition_index = reference.partition_index,
       .physical_identity = reference.physical_identity,
       .record_generation = reference.record_generation,
-      .kind = TransitionReferenceKindV1::Owner,
+      .kind = transition_reference_kind::owner,
       .active = reference.active,
       .transition_active = reference.transition_active,
   };
@@ -502,21 +502,21 @@ void unlock_partitions_reverse(
   }
 }
 
-[[nodiscard]] TransitionCallbackResultV1 begin_transition(
-    void *, TransitionDependencyReferenceV1 *reference) noexcept {
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+[[nodiscard]] transition_callback_result begin_transition(
+    void *, transition_dependency_reference *reference) noexcept {
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr || reference == nullptr) {
     return {.coarse_fallback_required = true, .error = 1};
   }
-  DependencyReferenceV1 capability = dependency_reference(*reference);
-  const DependencyMutationResultV1 mutation = begin_dependency_transition(
+  dependency_reference capability = dependency_reference_from_transition(*reference);
+  const dependency_mutation_result mutation = begin_dependency_transition(
       registry->dependency, capability,
-      directory_callbacks(DependencyDirectoryLockModeV1::AlreadyLocked));
+      directory_callbacks(dependency_directory_lock_mode::already_locked));
   if (mutation.applied) {
     reference->physical_identity = capability.physical_identity;
     reference->transition_active = capability.transition_active;
   }
-  return TransitionCallbackResultV1{
+  return transition_callback_result{
       .applied = mutation.applied,
       .diagnostic_success = mutation.diagnostic_success,
       .coarse_fallback_required = mutation.coarse_fallback_required,
@@ -524,50 +524,50 @@ void unlock_partitions_reverse(
   };
 }
 
-[[nodiscard]] TransitionCallbackResultV1 finish_transition(
-    void *, TransitionDependencyReferenceV1 *reference,
-    TransitionResolutionV1 resolution) noexcept {
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+[[nodiscard]] transition_callback_result finish_transition(
+    void *, transition_dependency_reference *reference,
+    transition_resolution resolution) noexcept {
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr || reference == nullptr) {
     return {.coarse_fallback_required = true, .error = 1};
   }
-  DependencyReferenceV1 capability = dependency_reference(*reference);
-  DependencyPhysicalIdentityActionV1 identity_action =
-      DependencyPhysicalIdentityActionV1::Preserve;
-  PhysicalIdentityV1 committed_identity = capability.physical_identity;
-  if (resolution == TransitionResolutionV1::Committed) {
+  dependency_reference capability = dependency_reference_from_transition(*reference);
+  dependency_physical_identity_action identity_action =
+      dependency_physical_identity_action::preserve;
+  physical_identity committed_identity = capability.physical_identity;
+  if (resolution == transition_resolution::committed) {
     for (std::uint32_t index = 0; index < g_dirty_count; ++index) {
-      const TransitionDependencyReferenceV1 &dirty =
+      const transition_dependency_reference &dirty =
           g_dirty_references[index];
       if (dirty.key == reference->key &&
           dirty.record_offset == reference->record_offset &&
           dirty.record_generation == reference->record_generation) {
         committed_identity = g_committed_physical_identities[index];
         identity_action = committed_identity == capability.physical_identity
-            ? DependencyPhysicalIdentityActionV1::Preserve
-            : DependencyPhysicalIdentityActionV1::Replace;
+            ? dependency_physical_identity_action::preserve
+            : dependency_physical_identity_action::replace;
         break;
       }
     }
   }
-  const DependencyMutationResultV1 mutation = finish_dependency_transition(
+  const dependency_mutation_result mutation = finish_dependency_transition(
       registry->dependency, capability,
-      DependencyTransitionResolutionV1{
-          .outcome = resolution == TransitionResolutionV1::Committed
-              ? DependencyTransitionOutcomeV1::Committed
-              : resolution == TransitionResolutionV1::KnownAborted
-                  ? DependencyTransitionOutcomeV1::KnownAborted
-                  : DependencyTransitionOutcomeV1::Aborted,
+      dependency_transition_resolution{
+          .outcome = resolution == transition_resolution::committed
+              ? dependency_transition_outcome::committed
+              : resolution == transition_resolution::known_aborted
+                  ? dependency_transition_outcome::known_aborted
+                  : dependency_transition_outcome::aborted,
           .physical_identity_action = identity_action,
           .physical_identity = committed_identity,
       },
-      directory_callbacks(DependencyDirectoryLockModeV1::AlreadyLocked));
+      directory_callbacks(dependency_directory_lock_mode::already_locked));
   if (mutation.applied) {
     reference->physical_identity = capability.physical_identity;
     reference->record_generation = capability.record_generation;
     reference->transition_active = capability.transition_active;
   }
-  return TransitionCallbackResultV1{
+  return transition_callback_result{
       .applied = mutation.applied,
       .diagnostic_success = mutation.diagnostic_success,
       .coarse_fallback_required = mutation.coarse_fallback_required,
@@ -575,20 +575,20 @@ void unlock_partitions_reverse(
   };
 }
 
-[[nodiscard]] TransitionCallbackResultV1 release_owner_reference(
-    void *, TransitionDependencyReferenceV1 *reference) noexcept {
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+[[nodiscard]] transition_callback_result release_owner_reference(
+    void *, transition_dependency_reference *reference) noexcept {
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr || reference == nullptr) {
     return {.coarse_fallback_required = true, .error = 1};
   }
-  DependencyReferenceV1 capability = dependency_reference(*reference);
-  const DependencyMutationResultV1 mutation = release_dependency_reference(
+  dependency_reference capability = dependency_reference_from_transition(*reference);
+  const dependency_mutation_result mutation = release_dependency_reference(
       registry->dependency, capability,
-      directory_callbacks(DependencyDirectoryLockModeV1::AlreadyLocked));
+      directory_callbacks(dependency_directory_lock_mode::already_locked));
   if (mutation.applied) {
     reference->active = capability.active;
   }
-  return TransitionCallbackResultV1{
+  return transition_callback_result{
       .applied = mutation.applied,
       .diagnostic_success = mutation.diagnostic_success,
       .coarse_fallback_required = mutation.coarse_fallback_required,
@@ -597,9 +597,9 @@ void unlock_partitions_reverse(
 }
 
 [[nodiscard]] bool owner_alive(
-    void *, const TransitionOwnerIdentityV1 &owner) noexcept {
+    void *, const transition_owner_identity &owner) noexcept {
   return shared_registry::backend_identity_alive(
-      shared_registry::SharedRegistryOwnerTokenV1{
+      shared_registry::shared_registry_owner_token{
           .owner = {
               .proc_number = owner.proc_number,
               .pid = owner.pid,
@@ -610,18 +610,18 @@ void unlock_partitions_reverse(
       });
 }
 
-void mark_coarse(void *, TransitionLedgerErrorV1) noexcept {
+void mark_coarse(void *, transition_ledger_error) noexcept {
   g_force_coarse = true;
   saturating_increment(g_diagnostics.emergency_fallback_count);
 }
 
-void mark_failed(void *, TransitionLedgerErrorV1) noexcept {
+void mark_failed(void *, transition_ledger_error) noexcept {
   g_force_coarse = true;
   saturating_increment(g_diagnostics.emergency_fallback_count);
 }
 
-[[nodiscard]] TransitionLedgerCallbacksV1 ledger_callbacks() noexcept {
-  return TransitionLedgerCallbacksV1{
+[[nodiscard]] transition_ledger_callbacks ledger_callbacks() noexcept {
+  return transition_ledger_callbacks{
       .lock_owner_slot = lock_owner,
       .unlock_owner_slot = unlock_owner,
       .lock_partitions = lock_partitions,
@@ -683,9 +683,9 @@ void mark_failed(void *, TransitionLedgerErrorV1) noexcept {
 }
 
 /** Hold the PostgreSQL completion counter stable for fallback vectors. */
-class CompletionCountGuard final {
+class completion_count_guard final {
  public:
-  CompletionCountGuard(bool required, std::uint64_t expected) noexcept
+  completion_count_guard(bool required, std::uint64_t expected) noexcept
       : required_(required), expected_(expected) {
     if (required_) {
       LWLockAcquire(ProcArrayLock, LW_SHARED);
@@ -693,10 +693,10 @@ class CompletionCountGuard final {
     }
   }
 
-  CompletionCountGuard(const CompletionCountGuard &) = delete;
-  CompletionCountGuard &operator=(const CompletionCountGuard &) = delete;
+  completion_count_guard(const completion_count_guard &) = delete;
+  completion_count_guard &operator=(const completion_count_guard &) = delete;
 
-  ~CompletionCountGuard() {
+  ~completion_count_guard() {
     if (locked_) {
       LWLockRelease(ProcArrayLock);
     }
@@ -742,7 +742,7 @@ class CompletionCountGuard final {
 }
 
 [[nodiscard]] bool begin_emergency_transition() noexcept {
-  const shared_registry::SharedRegistryEmergencyAccessV1 emergency =
+  const shared_registry::shared_registry_emergency_access emergency =
       shared_registry::shared_emergency_dependency();
   if (g_emergency_transition_published) {
     return true;
@@ -759,7 +759,7 @@ class CompletionCountGuard final {
 }
 
 [[nodiscard]] bool finish_emergency_transition(bool publish_epoch) noexcept {
-  const shared_registry::SharedRegistryEmergencyAccessV1 emergency =
+  const shared_registry::shared_registry_emergency_access emergency =
       shared_registry::shared_emergency_dependency();
   if (!g_emergency_transition_published) {
     return true;
@@ -781,40 +781,40 @@ void reset_owner_state() noexcept {
   g_owner_active = false;
   g_transition_published = false;
   g_force_coarse = false;
-  for (TransitionDependencyReferenceV1 &reference : g_dirty_references) {
+  for (transition_dependency_reference &reference : g_dirty_references) {
     reference = {};
   }
-  for (DependencyVersion &version : g_dirty_versions) {
+  for (dependency_version &version : g_dirty_versions) {
     version = {};
   }
-  for (PhysicalIdentityV1 &identity : g_committed_physical_identities) {
+  for (physical_identity &identity : g_committed_physical_identities) {
     identity = {};
   }
-  for (DirtyFrameV1 &frame : g_dirty_frames) {
+  for (dirty_frame &frame : g_dirty_frames) {
     frame = {};
   }
   g_object_definition_dependencies.reset();
   g_object_definition_pre_commit_captured = false;
 }
 
-[[nodiscard]] bool valid_version(const DependencyVersion &version) noexcept {
-  return dependency_vector_entry_valid_v1(
-      DependencyVectorEntryV1{
+[[nodiscard]] bool valid_version(const dependency_version &version) noexcept {
+  return dependency_vector_entry_valid(
+      dependency_vector_entry{
           .version = version,
           .record_generation = 1,
       });
 }
 
-[[nodiscard]] DependencyVersion object_definition_version(
-    const ObjectDefinitionMutationV1 &mutation,
-    const PhysicalIdentityV1 &identity) noexcept {
-  return DependencyVersion{
+[[nodiscard]] dependency_version object_definition_version(
+    const object_definition_mutation &mutation,
+    const physical_identity &identity) noexcept {
+  return dependency_version{
       .key = mutation.key,
       .committed_epoch = 1,
       .physical_identity = identity,
-      .observability = database_definition_guard_key_valid_v1(mutation.key)
-          ? WriteObservability::DatabaseWideFallback
-          : WriteObservability::ExecutorUtilityOnly,
+      .observability = database_definition_guard_key_valid(mutation.key)
+          ? write_observability::database_wide_fallback
+          : write_observability::executor_utility_only,
   };
 }
 
@@ -832,48 +832,48 @@ void reset_owner_state() noexcept {
   return g_object_definition_dependencies.initialize(
              database_oid,
              static_cast<std::uint32_t>(current_subtransaction)) ==
-         ObjectDefinitionDependencyErrorV1::None;
+         object_definition_dependency_error::none;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 ensure_object_definition_guard_reference(
     std::uint32_t database_oid) noexcept {
-  const ObjectDefinitionMutationV1 guard =
-      make_object_definition_mutation_v1(
-          database_definition_guard_key_v1(database_oid));
+  const object_definition_mutation guard =
+      make_object_definition_mutation(
+          database_definition_guard_key(database_oid));
   return dependency_runtime::observe_dirty_dependency(
       object_definition_version(
           guard, guard.previous_physical_identity));
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 ensure_object_definition_write_guard_reference(
     std::uint32_t database_oid) noexcept {
-  return dependency_runtime::observe_dirty_dependency(DependencyVersion{
+  return dependency_runtime::observe_dirty_dependency(dependency_version{
       .key = {
           .database_oid = database_oid,
           .class_oid = 0,
           .object_oid = database_oid,
           .object_sub_id = 0,
-          .kind = DependencyKind::DatabaseWriteEpoch,
+          .kind = dependency_kind::database_write_epoch,
           .reserved = 0,
       },
       .committed_epoch = 1,
       .physical_identity = {},
-      .observability = WriteObservability::DatabaseWideFallback,
+      .observability = write_observability::database_wide_fallback,
   });
 }
 
 /** Definition mutations invalidate both choices for the reserved DB guard. */
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 ensure_object_definition_database_guards(
     std::uint32_t database_oid) noexcept {
-  DependencyRuntimeResultV1 result =
+  dependency_runtime_result result =
       ensure_object_definition_guard_reference(database_oid);
   if (!result) {
     return result;
   }
-  const DependencyRuntimeResultV1 write =
+  const dependency_runtime_result write =
       ensure_object_definition_write_guard_reference(database_oid);
   if (!write) {
     return write;
@@ -885,9 +885,9 @@ ensure_object_definition_database_guards(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 capture_object_definition_dependencies_pre_commit() noexcept {
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (g_object_definition_pre_commit_captured) {
     result.dependency_count = g_dirty_count;
     result.coarse_fallback_required =
@@ -901,10 +901,10 @@ capture_object_definition_dependencies_pre_commit() noexcept {
     return result;
   }
 
-  std::array<ObjectDefinitionMutationV1,
-             kMaximumDirtyDependenciesV1>
+  std::array<object_definition_mutation,
+             k_maximum_dirty_dependencies>
       mutations{};
-  const ObjectDefinitionCopyResultV1 copied =
+  const object_definition_copy_result copied =
       g_object_definition_dependencies.copy_committed_dependencies(
           mutations);
   const std::uint32_t database_oid =
@@ -925,20 +925,20 @@ capture_object_definition_dependencies_pre_commit() noexcept {
 
   std::size_t new_specific_count = 0;
   for (std::size_t index = 0; index < copied.count; ++index) {
-    const ObjectDefinitionMutationV1 &mutation = mutations[index];
-    if (database_definition_guard_key_valid_v1(mutation.key)) {
+    const object_definition_mutation &mutation = mutations[index];
+    if (database_definition_guard_key_valid(mutation.key)) {
       continue;
     }
     const bool duplicate = std::any_of(
         g_dirty_versions.begin(),
         g_dirty_versions.begin() + g_dirty_count,
-        [&mutation](const DependencyVersion &version) noexcept {
+        [&mutation](const dependency_version &version) noexcept {
           return version.key == mutation.key;
         });
     new_specific_count += static_cast<std::size_t>(!duplicate);
   }
   if (new_specific_count >
-      kMaximumDirtyDependenciesV1 - g_dirty_count) {
+      k_maximum_dirty_dependencies - g_dirty_count) {
     g_object_definition_dependencies.force_database_definition_guard();
     result.dependency_count = g_dirty_count;
     result.coarse_fallback_required = true;
@@ -946,15 +946,15 @@ capture_object_definition_dependencies_pre_commit() noexcept {
   }
 
   for (std::size_t index = 0; index < copied.count; ++index) {
-    const ObjectDefinitionMutationV1 &mutation = mutations[index];
-    if (database_definition_guard_key_valid_v1(mutation.key)) {
+    const object_definition_mutation &mutation = mutations[index];
+    if (database_definition_guard_key_valid(mutation.key)) {
       continue;
     }
-    const DependencyVersion observed = object_definition_version(
+    const dependency_version observed = object_definition_version(
         mutation, mutation.previous_physical_identity);
-    const DependencyVersion committed = object_definition_version(
+    const dependency_version committed = object_definition_version(
         mutation, mutation.current_physical_identity);
-    const DependencyRuntimeResultV1 staged =
+    const dependency_runtime_result staged =
         dependency_runtime::observe_dirty_dependency(
             observed, committed);
     if (!staged) {
@@ -973,29 +973,29 @@ capture_object_definition_dependencies_pre_commit() noexcept {
 
 /** Capture requests name identity/observability; the directory supplies epoch. */
 [[nodiscard]] bool valid_capture_request(
-    const DependencyVersion &request) noexcept {
-  DependencyVersion shape = request;
+    const dependency_version &request) noexcept {
+  dependency_version shape = request;
   shape.committed_epoch = 1;
   return valid_version(shape);
 }
 
 [[nodiscard]] bool conservative_guard_key_valid(
-    const DependencyKey &key) noexcept {
+    const dependency_key &key) noexcept {
   return key.database_oid != 0 && key.class_oid == 0 &&
          key.object_oid == key.database_oid && key.object_sub_id == 0 &&
-         (key.kind == DependencyKind::DatabaseWriteEpoch ||
-          key.kind == DependencyKind::DatabaseDefinitionEpoch) &&
+         (key.kind == dependency_kind::database_write_epoch ||
+          key.kind == dependency_kind::database_definition_epoch) &&
          key.reserved == 0;
 }
 
 [[nodiscard]] bool conservative_guard_entry_valid(
-    const DependencyVectorEntryV1 &entry) noexcept {
-  return database_guard_entry_valid_v1(entry);
+    const dependency_vector_entry &entry) noexcept {
+  return database_guard_entry_valid(entry);
 }
 
 [[nodiscard]] bool exact_snapshot(
-    const DependencyVectorEntryV1 &expected,
-    const DependencyEpochSnapshotV1 &actual) noexcept {
+    const dependency_vector_entry &expected,
+    const dependency_epoch_snapshot &actual) noexcept {
   return actual.key == expected.version.key &&
          actual.physical_identity == expected.version.physical_identity &&
          actual.record_generation == expected.record_generation &&
@@ -1004,18 +1004,18 @@ capture_object_definition_dependencies_pre_commit() noexcept {
          actual.transition_count == 0;
 }
 
-struct EmergencyEpochSnapshotV1 {
+struct emergency_epoch_snapshot {
   std::uint64_t write_epoch = 0;
   std::uint64_t change_generation = 0;
 };
 
 /** A generation bracket detects begin/finish races around the zero sample. */
 [[nodiscard]] bool sample_stable_emergency_epoch(
-    EmergencyEpochSnapshotV1 *snapshot) noexcept {
+    emergency_epoch_snapshot *snapshot) noexcept {
   if (snapshot == nullptr) {
     return false;
   }
-  const shared_registry::SharedRegistryEmergencyAccessV1 emergency =
+  const shared_registry::shared_registry_emergency_access emergency =
       shared_registry::shared_emergency_dependency();
   if (!emergency) {
     return false;
@@ -1032,7 +1032,7 @@ struct EmergencyEpochSnapshotV1 {
       transition_count != 0) {
     return false;
   }
-  *snapshot = EmergencyEpochSnapshotV1{
+  *snapshot = emergency_epoch_snapshot{
       .write_epoch = write_epoch,
       .change_generation = generation_after,
   };
@@ -1040,24 +1040,24 @@ struct EmergencyEpochSnapshotV1 {
 }
 
 [[nodiscard]] bool emergency_epoch_matches(
-    const DependencySnapshotTicketV1 &ticket,
-    const EmergencyEpochSnapshotV1 &snapshot) noexcept {
+    const dependency_snapshot_ticket &ticket,
+    const emergency_epoch_snapshot &snapshot) noexcept {
   return ticket.emergency_write_epoch == snapshot.write_epoch &&
          ticket.emergency_change_generation == snapshot.change_generation;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 release_ticket_internal(
-    DependencySnapshotTicketV1 *ticket) noexcept {
-  DependencyRuntimeResultV1 result{};
+[[nodiscard]] dependency_runtime_result release_ticket_internal(
+    dependency_snapshot_ticket *ticket) noexcept {
+  dependency_runtime_result result{};
   if (ticket == nullptr || !ticket->active ||
-      ticket->count > kMaximumSnapshotTicketDependenciesV1) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      ticket->count > k_maximum_snapshot_ticket_dependencies) {
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     return result;
   }
@@ -1066,7 +1066,7 @@ struct EmergencyEpochSnapshotV1 {
     if (!ticket->references[index].active) {
       continue;
     }
-    const DependencyMutationResultV1 released = release_dependency_reference(
+    const dependency_mutation_result released = release_dependency_reference(
         registry->dependency, ticket->references[index],
         directory_callbacks());
     failed = failed || !released.applied;
@@ -1075,7 +1075,7 @@ struct EmergencyEpochSnapshotV1 {
         released.coarse_fallback_required;
   }
   if (ticket->conservative_guard_reference.active) {
-    const DependencyMutationResultV1 released =
+    const dependency_mutation_result released =
         release_dependency_reference(
             registry->dependency,
             ticket->conservative_guard_reference,
@@ -1087,7 +1087,7 @@ struct EmergencyEpochSnapshotV1 {
   }
   result.dependency_count = ticket->count;
   if (failed) {
-    result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+    result.error = dependency_runtime_error::reference_release_failed;
     result.fail_open = true;
   } else {
     *ticket = {};
@@ -1097,12 +1097,12 @@ struct EmergencyEpochSnapshotV1 {
 
 void external_prepared_exit(int, Datum) {
   if (g_external_prepared_token.state !=
-      ExternalPreparedResolutionStateV1::Active) {
+      external_prepared_resolution_state::active) {
     return;
   }
   static_cast<void>(finish_external_prepared_resolution(
       &g_external_prepared_token,
-      ExternalPreparedResolutionOutcomeV1::Ambiguous));
+      external_prepared_resolution_outcome::ambiguous));
 }
 
 void xact_callback(XactEvent event, void *) {
@@ -1143,12 +1143,12 @@ void subxact_callback(
       static_cast<void>(begin_dirty_frame(child, parent));
       if (initialize_object_definition_collector(
               static_cast<std::uint32_t>(MyDatabaseId), parent)) {
-        const ObjectDefinitionDependencyErrorV1 definition_error =
+        const object_definition_dependency_error definition_error =
             g_object_definition_dependencies.begin_savepoint(
                 static_cast<std::uint32_t>(child),
                 static_cast<std::uint32_t>(parent));
         if (definition_error !=
-            ObjectDefinitionDependencyErrorV1::None) {
+            object_definition_dependency_error::none) {
           static_cast<void>(ensure_object_definition_database_guards(
               static_cast<std::uint32_t>(MyDatabaseId)));
         }
@@ -1169,7 +1169,7 @@ void subxact_callback(
       static_cast<void>(finish_dirty_frame(
           child, parent, committed));
       if (g_object_definition_dependencies.transaction_dirty()) {
-        const DependencyRuntimeResultV1 guard =
+        const dependency_runtime_result guard =
             ensure_object_definition_database_guards(
                 static_cast<std::uint32_t>(MyDatabaseId));
         if (!guard) {
@@ -1187,100 +1187,100 @@ void subxact_callback(
 
 export namespace bioseq::cache::pg::dependency_runtime {
 
-[[nodiscard]] DependencyRuntimeResultV1 capture_snapshot_ticket(
-    std::span<const DependencyVersion> dependencies,
-    DependencySnapshotTicketV1 *ticket,
-    const DependencyKey *conservative_guard_key,
+[[nodiscard]] dependency_runtime_result capture_snapshot_ticket(
+    std::span<const dependency_version> dependencies,
+    dependency_snapshot_ticket *ticket,
+    const dependency_key *conservative_guard_key,
     std::uint64_t snapshot_binding_completion_count,
     std::uint64_t continuing_completion_count) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (ticket == nullptr || ticket->active ||
       snapshot_binding_completion_count == 0) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  if (dependencies.size() > kMaximumSnapshotTicketDependenciesV1) {
-    result.error = DependencyRuntimeErrorV1::CapacityExceeded;
+  if (dependencies.size() > k_maximum_snapshot_ticket_dependencies) {
+    result.error = dependency_runtime_error::capacity_exceeded;
     result.fail_open = true;
     return result;
   }
   if (conservative_guard_key != nullptr &&
       !conservative_guard_key_valid(*conservative_guard_key)) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
   for (std::size_t index = 0; index < dependencies.size(); ++index) {
     if (!valid_capture_request(dependencies[index])) {
-      result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      result.error = dependency_runtime_error::invalid_argument;
       result.fail_open = true;
       return result;
     }
     if (conservative_guard_key != nullptr &&
         dependencies[index].key == *conservative_guard_key) {
-      result.error = DependencyRuntimeErrorV1::NonCanonical;
+      result.error = dependency_runtime_error::non_canonical;
       result.fail_open = true;
       return result;
     }
-    if (index != 0 && !dependency_key_less_v1(
+    if (index != 0 && !dependency_key_less(
         dependencies[index - 1].key, dependencies[index].key)) {
-      result.error = DependencyRuntimeErrorV1::NonCanonical;
+      result.error = dependency_runtime_error::non_canonical;
       result.fail_open = true;
       return result;
     }
   }
   const bool explicit_guard_requires_completion =
       conservative_guard_key != nullptr &&
-      database_guard_requires_completion_v1(*conservative_guard_key);
+      database_guard_requires_completion(*conservative_guard_key);
   const bool effective_completion_guard =
       explicit_guard_requires_completion || std::any_of(
           dependencies.begin(), dependencies.end(),
-          [](const DependencyVersion &version) noexcept {
+          [](const dependency_version &version) noexcept {
             return version.observability ==
-                   WriteObservability::DatabaseWideFallback;
+                   write_observability::database_wide_fallback;
           });
   if (continuing_completion_count != 0 &&
       (!effective_completion_guard ||
        continuing_completion_count !=
            snapshot_binding_completion_count)) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     return result;
   }
   Snapshot snapshot = GetActiveSnapshot();
   if (snapshot == nullptr || !IsMVCCSnapshot(snapshot)) {
-    result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+    result.error = dependency_runtime_error::reference_validation_failed;
     result.fail_open = true;
     return result;
   }
-  pause(DependencyRuntimePausePointV1::BeforeVisibilityTicket);
+  pause(dependency_runtime_pause_point::before_visibility_ticket);
   LWLockAcquire(ProcArrayLock, LW_SHARED);
   const std::uint64_t completion_count =
       TransamVariables->xactCompletionCount;
-  if (!dependency_completion_handshake_valid_v1(
+  if (!dependency_completion_handshake_valid(
           snapshot->snapXactCompletionCount,
           snapshot_binding_completion_count,
           completion_count,
           continuing_completion_count)) {
     LWLockRelease(ProcArrayLock);
-    result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+    result.error = dependency_runtime_error::reference_validation_failed;
     result.fail_open = true;
     result.coarse_fallback_required = true;
     saturating_increment(g_diagnostics.ticket_validation_failure_count);
     return result;
   }
-  EmergencyEpochSnapshotV1 emergency{};
+  emergency_epoch_snapshot emergency{};
   if (!sample_stable_emergency_epoch(&emergency)) {
     LWLockRelease(ProcArrayLock);
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
     result.fail_open = true;
     result.coarse_fallback_required = true;
     return result;
@@ -1293,19 +1293,19 @@ export namespace bioseq::cache::pg::dependency_runtime {
   ticket->explicit_completion_guard = conservative_guard_key != nullptr;
   ticket->requires_completion_guard = effective_completion_guard;
   ticket->active = true;
-  for (const DependencyVersion &version : dependencies) {
-    const DependencyReferenceResultV1 acquired =
+  for (const dependency_version &version : dependencies) {
+    const dependency_reference_result acquired =
         acquire_dependency_reference(
             registry->dependency,
-            DependencyReferenceRequestV1{
+            dependency_reference_request{
                 .key = version.key,
                 .physical_identity = version.physical_identity,
                 .observability = version.observability,
-                .kind = DependencyReferenceKindV1::Ticket,
+                .kind = dependency_reference_kind::ticket,
             },
             directory_callbacks());
     if (!acquired) {
-      result.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed;
+      result.error = dependency_runtime_error::reference_acquire_failed;
       result.fail_open = true;
       result.coarse_fallback_required =
           acquired.coarse_fallback_required;
@@ -1315,7 +1315,7 @@ export namespace bioseq::cache::pg::dependency_runtime {
     }
     const std::uint32_t index = ticket->count++;
     ticket->references[index] = acquired.reference;
-    ticket->entries[index] = DependencyVectorEntryV1{
+    ticket->entries[index] = dependency_vector_entry{
         .version = {
             .key = acquired.snapshot.key,
             .committed_epoch = acquired.snapshot.committed_epoch,
@@ -1325,7 +1325,7 @@ export namespace bioseq::cache::pg::dependency_runtime {
         .record_generation = acquired.snapshot.record_generation,
     };
     if (!exact_snapshot(ticket->entries[index], acquired.snapshot)) {
-      result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+      result.error = dependency_runtime_error::reference_validation_failed;
       result.fail_open = true;
       static_cast<void>(release_ticket_internal(ticket));
       LWLockRelease(ProcArrayLock);
@@ -1334,19 +1334,19 @@ export namespace bioseq::cache::pg::dependency_runtime {
     }
   }
   if (conservative_guard_key != nullptr) {
-    const DependencyReferenceResultV1 acquired =
+    const dependency_reference_result acquired =
         acquire_dependency_reference(
             registry->dependency,
-            DependencyReferenceRequestV1{
+            dependency_reference_request{
                 .key = *conservative_guard_key,
                 .physical_identity = {},
                 .observability =
-                    WriteObservability::DatabaseWideFallback,
-                .kind = DependencyReferenceKindV1::Ticket,
+                    write_observability::database_wide_fallback,
+                .kind = dependency_reference_kind::ticket,
             },
             directory_callbacks());
     if (!acquired) {
-      result.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed;
+      result.error = dependency_runtime_error::reference_acquire_failed;
       result.fail_open = true;
       result.coarse_fallback_required = true;
       static_cast<void>(release_ticket_internal(ticket));
@@ -1354,7 +1354,7 @@ export namespace bioseq::cache::pg::dependency_runtime {
       return result;
     }
     ticket->conservative_guard_reference = acquired.reference;
-    ticket->conservative_guard_entry = DependencyVectorEntryV1{
+    ticket->conservative_guard_entry = dependency_vector_entry{
         .version = {
             .key = acquired.snapshot.key,
             .committed_epoch = acquired.snapshot.committed_epoch,
@@ -1367,7 +1367,7 @@ export namespace bioseq::cache::pg::dependency_runtime {
             ticket->conservative_guard_entry) ||
         !exact_snapshot(ticket->conservative_guard_entry,
                         acquired.snapshot)) {
-      result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+      result.error = dependency_runtime_error::reference_validation_failed;
       result.fail_open = true;
       result.coarse_fallback_required = true;
       static_cast<void>(release_ticket_internal(ticket));
@@ -1376,10 +1376,10 @@ export namespace bioseq::cache::pg::dependency_runtime {
       return result;
     }
   }
-  const DependencyRuntimeResultV1 stable =
+  const dependency_runtime_result stable =
       validate_snapshot_ticket_locked_impl(*ticket, {}, true);
   if (!stable) {
-    const DependencyRuntimeResultV1 released = release_ticket_internal(ticket);
+    const dependency_runtime_result released = release_ticket_internal(ticket);
     result = stable;
     result.coarse_fallback_required =
         result.coarse_fallback_required ||
@@ -1390,7 +1390,7 @@ export namespace bioseq::cache::pg::dependency_runtime {
   if (TransamVariables->xactCompletionCount != completion_count) {
     static_cast<void>(release_ticket_internal(ticket));
     LWLockRelease(ProcArrayLock);
-    result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+    result.error = dependency_runtime_error::reference_validation_failed;
     result.fail_open = true;
     result.coarse_fallback_required = true;
     saturating_increment(g_diagnostics.ticket_validation_failure_count);
@@ -1406,43 +1406,43 @@ export namespace bioseq::cache::pg::dependency_runtime {
 
 namespace bioseq::cache::pg::dependency_runtime::detail {
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 validate_snapshot_ticket_locked_impl(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyTicketLockedActionV1 action,
+    const dependency_snapshot_ticket &ticket,
+    dependency_ticket_locked_action action,
     bool completion_lock_already_held) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   result.dependency_count = ticket.count;
   if (!ticket.active ||
-      ticket.count > kMaximumSnapshotTicketDependenciesV1 ||
+      ticket.count > k_maximum_snapshot_ticket_dependencies ||
       ticket.emergency_change_generation == 0 ||
       ticket.snapshot_binding_completion_count == 0 ||
       !action.valid() ||
       std::any_of(
           ticket.reserved.begin(), ticket.reserved.end(),
           [](std::uint8_t value) noexcept { return value != 0; })) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     return result;
   }
-  const auto *header = reinterpret_cast<const DependencyDirectoryHeaderV1 *>(
+  const auto *header = reinterpret_cast<const dependency_directory_header *>(
       registry->dependency.region.data());
   if (header == nullptr ||
-      header->bootstrap_state != BootstrapState::Ready ||
+      header->bootstrap_state != bootstrap_state::ready ||
       header->config.partition_count == 0) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     return result;
   }
   std::array<std::uint32_t,
-             kMaximumSnapshotTicketDependenciesV1 + 1U>
+             k_maximum_snapshot_ticket_dependencies + 1U>
       partitions{};
   std::uint32_t partition_count = 0;
   bool requires_completion_guard = false;
@@ -1450,18 +1450,18 @@ validate_snapshot_ticket_locked_impl(
     if (!ticket.references[index] ||
         ticket.references[index].partition_index >=
             header->config.partition_count ||
-        !dependency_vector_entry_valid_v1(ticket.entries[index]) ||
-        (index != 0 && !dependency_key_less_v1(
+        !dependency_vector_entry_valid(ticket.entries[index]) ||
+        (index != 0 && !dependency_key_less(
             ticket.entries[index - 1U].version.key,
             ticket.entries[index].version.key))) {
-      result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      result.error = dependency_runtime_error::invalid_argument;
       result.fail_open = true;
       return result;
     }
     requires_completion_guard =
         requires_completion_guard ||
         ticket.entries[index].version.observability ==
-            WriteObservability::DatabaseWideFallback;
+            write_observability::database_wide_fallback;
     partitions[partition_count++] =
         ticket.references[index].partition_index;
   }
@@ -1471,7 +1471,7 @@ validate_snapshot_ticket_locked_impl(
             header->config.partition_count ||
         !conservative_guard_entry_valid(
             ticket.conservative_guard_entry)) {
-      result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      result.error = dependency_runtime_error::invalid_argument;
       result.fail_open = true;
       return result;
     }
@@ -1479,24 +1479,24 @@ validate_snapshot_ticket_locked_impl(
         ticket.conservative_guard_reference.partition_index;
   } else if (ticket.conservative_guard_reference ||
              ticket.conservative_guard_entry !=
-                 DependencyVectorEntryV1{}) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+                 dependency_vector_entry{}) {
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
   const bool explicit_guard_requires_completion =
       ticket.explicit_completion_guard &&
-      database_guard_requires_completion_v1(
+      database_guard_requires_completion(
           ticket.conservative_guard_entry);
   if ((explicit_guard_requires_completion || requires_completion_guard) !=
       ticket.requires_completion_guard) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
   if (ticket.snapshot_xact_completion_count != 0 &&
       !ticket.requires_completion_guard) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
@@ -1511,7 +1511,7 @@ validate_snapshot_ticket_locked_impl(
   if (acquired_completion_lock) {
     LWLockAcquire(ProcArrayLock, LW_SHARED);
   }
-  if (!dependency_completion_handshake_valid_v1(
+  if (!dependency_completion_handshake_valid(
           0,
           ticket.snapshot_binding_completion_count,
           TransamVariables->xactCompletionCount,
@@ -1519,7 +1519,7 @@ validate_snapshot_ticket_locked_impl(
     if (acquired_completion_lock) {
       LWLockRelease(ProcArrayLock);
     }
-    result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+    result.error = dependency_runtime_error::reference_validation_failed;
     result.fail_open = true;
     result.coarse_fallback_required = true;
     saturating_increment(g_diagnostics.ticket_validation_failure_count);
@@ -1529,67 +1529,67 @@ validate_snapshot_ticket_locked_impl(
     if (acquired_completion_lock) {
       LWLockRelease(ProcArrayLock);
     }
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     result.coarse_fallback_required = true;
     return result;
   }
 
   bool action_applied = false;
-  EmergencyEpochSnapshotV1 before{};
+  emergency_epoch_snapshot before{};
   if (!sample_stable_emergency_epoch(&before) ||
       !emergency_epoch_matches(ticket, before)) {
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
     result.fail_open = true;
     result.coarse_fallback_required = true;
   }
   for (std::uint32_t index = 0;
-       result.error == DependencyRuntimeErrorV1::None &&
+       result.error == dependency_runtime_error::none &&
        index < ticket.count;
        ++index) {
-    const DependencySnapshotResultV1 snapshot = snapshot_dependency(
+    const dependency_snapshot_result snapshot = snapshot_dependency(
         registry->dependency, ticket.references[index],
-        directory_callbacks(DependencyDirectoryLockModeV1::AlreadyLocked));
+        directory_callbacks(dependency_directory_lock_mode::already_locked));
     if (!snapshot ||
         !exact_snapshot(ticket.entries[index], snapshot.snapshot)) {
-      result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+      result.error = dependency_runtime_error::reference_validation_failed;
       result.fail_open = true;
       result.coarse_fallback_required = snapshot.coarse_fallback_required;
     }
   }
-  if (result.error == DependencyRuntimeErrorV1::None &&
+  if (result.error == dependency_runtime_error::none &&
       ticket.explicit_completion_guard) {
-    const DependencySnapshotResultV1 snapshot = snapshot_dependency(
+    const dependency_snapshot_result snapshot = snapshot_dependency(
         registry->dependency, ticket.conservative_guard_reference,
-        directory_callbacks(DependencyDirectoryLockModeV1::AlreadyLocked));
+        directory_callbacks(dependency_directory_lock_mode::already_locked));
     if (!snapshot ||
         !exact_snapshot(ticket.conservative_guard_entry,
                         snapshot.snapshot)) {
-      result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+      result.error = dependency_runtime_error::reference_validation_failed;
       result.fail_open = true;
       result.coarse_fallback_required = true;
     }
   }
-  if (result.error == DependencyRuntimeErrorV1::None &&
+  if (result.error == dependency_runtime_error::none &&
       action.apply != nullptr) {
     action_applied = action.apply(
         action.context,
-        std::span<const DependencyVectorEntryV1>(
+        std::span<const dependency_vector_entry>(
             ticket.entries.data(), ticket.count));
     if (!action_applied) {
-      result.error = DependencyRuntimeErrorV1::LockedActionFailed;
+      result.error = dependency_runtime_error::locked_action_failed;
       result.fail_open = true;
     }
   }
-  EmergencyEpochSnapshotV1 after{};
-  if (result.error == DependencyRuntimeErrorV1::None &&
+  emergency_epoch_snapshot after{};
+  if (result.error == dependency_runtime_error::none &&
       (!sample_stable_emergency_epoch(&after) ||
        !emergency_epoch_matches(ticket, after))) {
     if (action_applied) {
       action.rollback(action.context);
       action_applied = false;
     }
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
     result.fail_open = true;
     result.coarse_fallback_required = true;
   }
@@ -1607,81 +1607,81 @@ validate_snapshot_ticket_locked_impl(
 
 export namespace bioseq::cache::pg::dependency_runtime {
 
-[[nodiscard]] DependencyRuntimeResultV1 validate_snapshot_ticket_locked(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyTicketLockedActionV1 action) noexcept {
+[[nodiscard]] dependency_runtime_result validate_snapshot_ticket_locked(
+    const dependency_snapshot_ticket &ticket,
+    dependency_ticket_locked_action action) noexcept {
   return detail::validate_snapshot_ticket_locked_impl(ticket, action, false);
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 validate_dependency_vector_locked(
+[[nodiscard]] dependency_runtime_result validate_dependency_vector_locked(
     std::span<const std::byte> dependency_vector_envelope,
-    const DependencyVectorEntryV1 *conservative_guard,
+    const dependency_vector_entry *conservative_guard,
     std::uint64_t snapshot_binding_completion_count,
     std::uint64_t continuing_completion_count,
-    DependencyTicketLockedActionV1 action) noexcept {
+    dependency_ticket_locked_action action) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (!action.valid() || snapshot_binding_completion_count == 0) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
   if (conservative_guard != nullptr &&
       !conservative_guard_entry_valid(*conservative_guard)) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  const DependencyVectorEnvelopeResultV1 validation =
+  const dependency_vector_envelope_result validation =
       validate_dependency_vector_envelope(dependency_vector_envelope);
   if (!validation ||
       validation.header.entry_count >
-          kMaximumSnapshotTicketDependenciesV1) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+          k_maximum_snapshot_ticket_dependencies) {
+    result.error = dependency_runtime_error::vector_validation_failed;
     result.fail_open = true;
     return result;
   }
   result.dependency_count = validation.header.entry_count;
-  std::array<DependencyVectorEntryV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_vector_entry,
+             k_maximum_snapshot_ticket_dependencies>
       expected_entries{};
-  const DependencyVectorEnvelopeResultV1 decoded =
+  const dependency_vector_envelope_result decoded =
       copy_dependency_vector_entries(
           dependency_vector_envelope,
-          std::span<DependencyVectorEntryV1>(
+          std::span<dependency_vector_entry>(
               expected_entries.data(), result.dependency_count));
   if (!decoded) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     result.fail_open = true;
     return result;
   }
   const bool vector_requires_completion_guard = std::any_of(
       expected_entries.begin(),
       expected_entries.begin() + result.dependency_count,
-      [](const DependencyVectorEntryV1 &entry) noexcept {
+      [](const dependency_vector_entry &entry) noexcept {
         return entry.version.observability ==
-               WriteObservability::DatabaseWideFallback;
+               write_observability::database_wide_fallback;
       });
   const bool effective_completion_guard =
       (conservative_guard != nullptr &&
-       database_guard_requires_completion_v1(*conservative_guard)) ||
+       database_guard_requires_completion(*conservative_guard)) ||
       vector_requires_completion_guard;
   if (continuing_completion_count != 0 &&
       !effective_completion_guard) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
 
-  std::array<DependencyVersion,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_version,
+             k_maximum_snapshot_ticket_dependencies>
       versions{};
   for (std::uint32_t index = 0; index < result.dependency_count; ++index) {
     versions[index] = expected_entries[index].version;
   }
-  DependencySnapshotTicketV1 ticket{};
-  const DependencyRuntimeResultV1 captured = capture_snapshot_ticket(
-      std::span<const DependencyVersion>(
+  dependency_snapshot_ticket ticket{};
+  const dependency_runtime_result captured = capture_snapshot_ticket(
+      std::span<const dependency_version>(
           versions.data(), result.dependency_count),
       &ticket,
       conservative_guard == nullptr
@@ -1707,14 +1707,14 @@ export namespace bioseq::cache::pg::dependency_runtime {
           snapshot_binding_completion_count ||
       ticket.snapshot_xact_completion_count !=
           continuing_completion_count) {
-    result.error = DependencyRuntimeErrorV1::ReferenceValidationFailed;
+    result.error = dependency_runtime_error::reference_validation_failed;
     result.fail_open = true;
     result.coarse_fallback_required = effective_completion_guard;
     saturating_increment(g_diagnostics.ticket_validation_failure_count);
   } else {
     result = validate_snapshot_ticket_locked(ticket, action);
   }
-  const DependencyRuntimeResultV1 released =
+  const dependency_runtime_result released =
       release_snapshot_ticket(&ticket);
   result.coarse_fallback_required =
       result.coarse_fallback_required ||
@@ -1726,41 +1726,41 @@ export namespace bioseq::cache::pg::dependency_runtime {
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 validate_snapshot_ticket(
-    const DependencySnapshotTicketV1 &ticket) noexcept {
+[[nodiscard]] dependency_runtime_result validate_snapshot_ticket(
+    const dependency_snapshot_ticket &ticket) noexcept {
   return validate_snapshot_ticket_locked(ticket);
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 release_snapshot_ticket(
-    DependencySnapshotTicketV1 *ticket) noexcept {
+[[nodiscard]] dependency_runtime_result release_snapshot_ticket(
+    dependency_snapshot_ticket *ticket) noexcept {
   return detail::release_ticket_internal(ticket);
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 retain_generation_vector_preserving_ticket(
-    const DependencySnapshotTicketV1 &ticket,
-    DependencyGenerationVectorV1 *generation) noexcept {
+    const dependency_snapshot_ticket &ticket,
+    dependency_generation_vector *generation) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (generation == nullptr || generation->active || !ticket.active ||
-      ticket.count > kMaximumSnapshotTicketDependenciesV1) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      ticket.count > k_maximum_snapshot_ticket_dependencies) {
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
-  const DependencyRuntimeResultV1 stable = validate_snapshot_ticket(ticket);
+  const dependency_runtime_result stable = validate_snapshot_ticket(ticket);
   if (!stable) {
     return stable;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    return {.error = DependencyRuntimeErrorV1::RegistryUnavailable,
+    return {.error = dependency_runtime_error::registry_unavailable,
             .fail_open = true};
   }
-  CompletionCountGuard completion_guard(
+  completion_count_guard completion_guard(
       true, ticket.snapshot_binding_completion_count);
   if (!completion_guard.matches()) {
-    return {.error = DependencyRuntimeErrorV1::ReferenceValidationFailed,
+    return {.error = dependency_runtime_error::reference_validation_failed,
             .dependency_count = ticket.count,
             .fail_open = true,
             .coarse_fallback_required = true};
@@ -1771,10 +1771,10 @@ retain_generation_vector_preserving_ticket(
       ticket.requires_completion_guard;
   const bool explicit_completion_guard =
       ticket.explicit_completion_guard;
-  std::array<DependencyReferenceV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_reference,
+             k_maximum_snapshot_ticket_dependencies>
       generation_references{};
-  DependencyReferenceV1 generation_guard_reference{};
+  dependency_reference generation_guard_reference{};
   std::uint32_t retained_count = 0;
   const auto release_retained_references =
       [registry,
@@ -1793,24 +1793,24 @@ retain_generation_vector_preserving_ticket(
     }
   };
   for (std::uint32_t index = 0; index < ticket.count; ++index) {
-    const DependencyVectorEntryV1 &expected = ticket.entries[index];
-    const DependencyReferenceResultV1 acquired = acquire_dependency_reference(
+    const dependency_vector_entry &expected = ticket.entries[index];
+    const dependency_reference_result acquired = acquire_dependency_reference(
         registry->dependency,
-        DependencyReferenceRequestV1{
+        dependency_reference_request{
             .key = expected.version.key,
             .physical_identity = expected.version.physical_identity,
             .observability = expected.version.observability,
-            .kind = DependencyReferenceKindV1::Generation,
+            .kind = dependency_reference_kind::generation,
         },
         directory_callbacks());
     if (!acquired || !exact_snapshot(expected, acquired.snapshot)) {
       if (acquired) {
-        DependencyReferenceV1 cleanup = acquired.reference;
+        dependency_reference cleanup = acquired.reference;
         static_cast<void>(release_dependency_reference(
             registry->dependency, cleanup, directory_callbacks()));
       }
       release_retained_references();
-      return {.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed,
+      return {.error = dependency_runtime_error::reference_acquire_failed,
               .dependency_count = retained_count,
               .fail_open = true,
               .coarse_fallback_required =
@@ -1819,27 +1819,27 @@ retain_generation_vector_preserving_ticket(
     generation_references[retained_count++] = acquired.reference;
   }
   if (ticket.explicit_completion_guard) {
-    const DependencyReferenceResultV1 acquired = acquire_dependency_reference(
+    const dependency_reference_result acquired = acquire_dependency_reference(
         registry->dependency,
-        DependencyReferenceRequestV1{
+        dependency_reference_request{
             .key = ticket.conservative_guard_entry.version.key,
             .physical_identity =
                 ticket.conservative_guard_entry.version.physical_identity,
             .observability =
                 ticket.conservative_guard_entry.version.observability,
-            .kind = DependencyReferenceKindV1::Generation,
+            .kind = dependency_reference_kind::generation,
         },
         directory_callbacks());
     if (!acquired ||
         !exact_snapshot(ticket.conservative_guard_entry,
                         acquired.snapshot)) {
       if (acquired) {
-        DependencyReferenceV1 cleanup = acquired.reference;
+        dependency_reference cleanup = acquired.reference;
         static_cast<void>(release_dependency_reference(
             registry->dependency, cleanup, directory_callbacks()));
       }
       release_retained_references();
-      return {.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed,
+      return {.error = dependency_runtime_error::reference_acquire_failed,
               .dependency_count = retained_count,
               .fail_open = true,
               .coarse_fallback_required = true};
@@ -1853,22 +1853,22 @@ retain_generation_vector_preserving_ticket(
     release_retained_references();
     static_cast<void>(increment_atomic(
         &registry->root->hot_allocation_failures));
-    return {.error = DependencyRuntimeErrorV1::VectorAllocationFailed,
+    return {.error = dependency_runtime_error::vector_allocation_failed,
             .dependency_count = retained_count,
             .fail_open = true};
   }
   auto *address = static_cast<std::byte *>(
       dsa_get_address(registry->area, allocation));
   const std::span<std::byte> envelope(address, bytes);
-  const DependencyVectorEnvelopeResultV1 initialized =
+  const dependency_vector_envelope_result initialized =
       initialize_dependency_vector_envelope(
           envelope,
-          std::span<const DependencyVectorEntryV1>(
+          std::span<const dependency_vector_entry>(
               ticket.entries.data(), ticket.count));
   if (!initialized) {
     dsa_free(registry->area, allocation);
     release_retained_references();
-    return {.error = DependencyRuntimeErrorV1::VectorValidationFailed,
+    return {.error = dependency_runtime_error::vector_validation_failed,
             .dependency_count = retained_count,
             .fail_open = true};
   }
@@ -1877,7 +1877,7 @@ retain_generation_vector_preserving_ticket(
     release_retained_references();
     static_cast<void>(increment_atomic(
         &registry->root->hot_allocation_failures));
-    return {.error = DependencyRuntimeErrorV1::VectorAllocationFailed,
+    return {.error = dependency_runtime_error::vector_allocation_failed,
             .dependency_count = retained_count,
             .fail_open = true,
             .coarse_fallback_required = true};
@@ -1900,12 +1900,12 @@ retain_generation_vector_preserving_ticket(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 retain_generation_vector(
-    DependencySnapshotTicketV1 *ticket,
-    DependencyGenerationVectorV1 *generation) noexcept {
-  DependencyRuntimeResultV1 result{};
+[[nodiscard]] dependency_runtime_result retain_generation_vector(
+    dependency_snapshot_ticket *ticket,
+    dependency_generation_vector *generation) noexcept {
+  dependency_runtime_result result{};
   if (ticket == nullptr) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.fail_open = true;
     return result;
   }
@@ -1913,7 +1913,7 @@ retain_generation_vector_preserving_ticket(
   if (!result) {
     return result;
   }
-  const DependencyRuntimeResultV1 released_ticket =
+  const dependency_runtime_result released_ticket =
       release_snapshot_ticket(ticket);
   result.coarse_fallback_required =
       result.coarse_fallback_required ||
@@ -1921,7 +1921,7 @@ retain_generation_vector_preserving_ticket(
   if (released_ticket) {
     return result;
   }
-  const DependencyRuntimeResultV1 released_generation =
+  const dependency_runtime_result released_generation =
       release_generation_vector(generation);
   result.error = released_ticket.error;
   result.fail_open = true;
@@ -1933,13 +1933,13 @@ retain_generation_vector_preserving_ticket(
 
 [[nodiscard]] std::span<const std::byte>
 dependency_generation_vector_envelope(
-    const DependencyGenerationVectorV1 &generation) noexcept {
+    const dependency_generation_vector &generation) noexcept {
   using namespace detail;
   const std::uint32_t reference_count =
       generation.count +
       static_cast<std::uint32_t>(generation.explicit_completion_guard);
   if (!generation.active || !DsaPointerIsValid(generation.envelope) ||
-      generation.count > kMaximumSnapshotTicketDependenciesV1 ||
+      generation.count > k_maximum_snapshot_ticket_dependencies ||
       generation.released_count > reference_count ||
       generation.reserved_alignment != 0 ||
       generation.bytes != dependency_vector_envelope_bytes(generation.count) ||
@@ -1951,39 +1951,39 @@ dependency_generation_vector_envelope(
        !conservative_guard_entry_valid(
            generation.conservative_guard_entry)) ||
       (!generation.explicit_completion_guard &&
-       generation.conservative_guard_entry != DependencyVectorEntryV1{})) {
+       generation.conservative_guard_entry != dependency_vector_entry{})) {
     return {};
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
     return {};
   }
   const auto *address = static_cast<const std::byte *>(
       dsa_get_address(registry->area, generation.envelope));
   const std::span<const std::byte> envelope(address, generation.bytes);
-  const DependencyVectorEnvelopeResultV1 validation =
+  const dependency_vector_envelope_result validation =
       validate_dependency_vector_envelope(envelope);
   if (!validation || validation.header.entry_count != generation.count ||
       validation.header.payload_checksum != generation.checksum) {
     return {};
   }
-  std::array<DependencyVectorEntryV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_vector_entry,
+             k_maximum_snapshot_ticket_dependencies>
       entries{};
-  const DependencyVectorEnvelopeResultV1 decoded =
+  const dependency_vector_envelope_result decoded =
       copy_dependency_vector_entries(
           envelope,
-          std::span<DependencyVectorEntryV1>(entries.data(), generation.count));
+          std::span<dependency_vector_entry>(entries.data(), generation.count));
   const bool requires_completion_guard =
       decoded && std::any_of(
           entries.begin(), entries.begin() + generation.count,
-          [](const DependencyVectorEntryV1 &entry) noexcept {
+          [](const dependency_vector_entry &entry) noexcept {
             return entry.version.observability ==
-                   WriteObservability::DatabaseWideFallback;
+                   write_observability::database_wide_fallback;
           });
   const bool explicit_guard_requires_completion =
       generation.explicit_completion_guard &&
-      database_guard_requires_completion_v1(
+      database_guard_requires_completion(
           generation.conservative_guard_entry);
   if (!decoded ||
       (explicit_guard_requires_completion || requires_completion_guard) !=
@@ -1995,25 +1995,25 @@ dependency_generation_vector_envelope(
   return envelope;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 transfer_generation_vector_to_registry(
-    DependencyGenerationVectorV1 *generation) noexcept {
+[[nodiscard]] dependency_runtime_result transfer_generation_vector_to_registry(
+    dependency_generation_vector *generation) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (generation == nullptr || generation->released_count != 0 ||
       dependency_generation_vector_envelope(*generation).empty()) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     result.fail_open = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.fail_open = true;
     return result;
   }
   const std::uint32_t dependency_count = generation->count;
   if (!subtract_atomic(&registry->root->hot_live_bytes, generation->bytes)) {
-    result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+    result.error = dependency_runtime_error::reference_release_failed;
     result.dependency_count = dependency_count;
     result.fail_open = true;
     result.coarse_fallback_required = true;
@@ -2025,20 +2025,20 @@ dependency_generation_vector_envelope(
   return result;
 }
 
-[[nodiscard]] DependencyGenerationReleaseBatchV1 release_generation_entries(
+[[nodiscard]] dependency_generation_release_batch release_generation_entries(
     std::span<const std::byte> dependency_vector_envelope,
-    const DependencyVectorEntryV1 *conservative_guard,
+    const dependency_vector_entry *conservative_guard,
     std::uint32_t first_reference) noexcept {
   using namespace detail;
-  DependencyGenerationReleaseBatchV1 result{
+  dependency_generation_release_batch result{
       .first_reference = first_reference,
   };
-  const DependencyVectorEnvelopeResultV1 validation =
+  const dependency_vector_envelope_result validation =
       validate_dependency_vector_envelope(dependency_vector_envelope);
   if (!validation ||
       (conservative_guard != nullptr &&
        !conservative_guard_entry_valid(*conservative_guard))) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     return result;
   }
   result.dependency_count = validation.header.entry_count;
@@ -2046,45 +2046,45 @@ dependency_generation_vector_envelope(
       result.dependency_count +
       static_cast<std::uint32_t>(conservative_guard != nullptr);
   if (first_reference > result.reference_count) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     return result;
   }
-  std::array<DependencyVectorEntryV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_vector_entry,
+             k_maximum_snapshot_ticket_dependencies>
       entries{};
-  const DependencyVectorEnvelopeResultV1 decoded =
+  const dependency_vector_envelope_result decoded =
       copy_dependency_vector_entries(
           dependency_vector_envelope,
-          std::span<DependencyVectorEntryV1>(entries.data(),
+          std::span<dependency_vector_entry>(entries.data(),
                                              result.dependency_count));
   if (!decoded) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     return result;
   }
   for (std::uint32_t index = first_reference;
        index < result.reference_count; ++index) {
-    const DependencyVectorEntryV1 &entry =
+    const dependency_vector_entry &entry =
         index < result.dependency_count ? entries[index]
                                         : *conservative_guard;
-    const DependencyMutationResultV1 released =
+    const dependency_mutation_result released =
         release_dependency_generation_entry(
             registry->dependency, entry, directory_callbacks());
     result.coarse_fallback_required =
         result.coarse_fallback_required ||
         released.coarse_fallback_required;
     if (!released.applied) {
-      result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+      result.error = dependency_runtime_error::reference_release_failed;
       break;
     }
     ++result.applied_count;
-    if (released.error != DependencyDirectoryErrorV1::None &&
-        result.error == DependencyRuntimeErrorV1::None) {
-      result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+    if (released.error != dependency_directory_error::none &&
+        result.error == dependency_runtime_error::none) {
+      result.error = dependency_runtime_error::reference_release_failed;
     }
   }
   result.complete =
@@ -2092,49 +2092,49 @@ dependency_generation_vector_envelope(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 release_generation_vector(
-    DependencyGenerationVectorV1 *generation) noexcept {
+[[nodiscard]] dependency_runtime_result release_generation_vector(
+    dependency_generation_vector *generation) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (generation == nullptr) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     return result;
   }
   const std::span<const std::byte> envelope =
       dependency_generation_vector_envelope(*generation);
   if (envelope.empty()) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     result.coarse_fallback_required = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
+  const shared_registry::shared_registry_attachment *registry = attachment();
   if (registry == nullptr) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     return result;
   }
-  std::array<DependencyVectorEntryV1,
-             kMaximumSnapshotTicketDependenciesV1>
+  std::array<dependency_vector_entry,
+             k_maximum_snapshot_ticket_dependencies>
       entries{};
-  const DependencyVectorEnvelopeResultV1 decoded =
+  const dependency_vector_envelope_result decoded =
       copy_dependency_vector_entries(
           envelope,
-          std::span<DependencyVectorEntryV1>(
+          std::span<dependency_vector_entry>(
               entries.data(), generation->count));
   if (!decoded || decoded.header.payload_checksum != generation->checksum) {
-    result.error = DependencyRuntimeErrorV1::VectorValidationFailed;
+    result.error = dependency_runtime_error::vector_validation_failed;
     result.coarse_fallback_required = true;
     return result;
   }
   for (std::uint32_t index = generation->released_count;
        index < generation->count; ++index) {
-    const DependencyMutationResultV1 released =
+    const dependency_mutation_result released =
         release_dependency_generation_entry(
             registry->dependency, entries[index], directory_callbacks());
     result.coarse_fallback_required =
         result.coarse_fallback_required ||
         released.coarse_fallback_required;
     if (!released.applied) {
-      result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+      result.error = dependency_runtime_error::reference_release_failed;
       result.dependency_count = generation->count;
       return result;
     }
@@ -2142,7 +2142,7 @@ dependency_generation_vector_envelope(
   }
   if (generation->explicit_completion_guard &&
       generation->released_count == generation->count) {
-    const DependencyMutationResultV1 released =
+    const dependency_mutation_result released =
         release_dependency_generation_entry(
             registry->dependency,
             generation->conservative_guard_entry,
@@ -2151,7 +2151,7 @@ dependency_generation_vector_envelope(
         result.coarse_fallback_required ||
         released.coarse_fallback_required;
     if (!released.applied) {
-      result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+      result.error = dependency_runtime_error::reference_release_failed;
       result.dependency_count = generation->count;
       return result;
     }
@@ -2159,7 +2159,7 @@ dependency_generation_vector_envelope(
   }
   if (!subtract_atomic(
       &registry->root->hot_live_bytes, generation->bytes)) {
-    result.error = DependencyRuntimeErrorV1::ReferenceReleaseFailed;
+    result.error = dependency_runtime_error::reference_release_failed;
     result.dependency_count = generation->count;
     result.coarse_fallback_required = true;
     return result;
@@ -2171,13 +2171,13 @@ dependency_generation_vector_envelope(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &dependency,
-    const PhysicalIdentityV1 &committed_physical_identity) noexcept {
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &dependency,
+    const physical_identity &committed_physical_identity) noexcept {
   using namespace detail;
   if (!valid_version(dependency) ||
-      !physical_identity_valid_v1(committed_physical_identity)) {
-    return {.error = DependencyRuntimeErrorV1::InvalidArgument,
+      !physical_identity_valid(committed_physical_identity)) {
+    return {.error = dependency_runtime_error::invalid_argument,
             .coarse_fallback_required = true};
   }
   for (std::uint32_t index = 0; index < g_dirty_count; ++index) {
@@ -2189,49 +2189,49 @@ dependency_generation_vector_envelope(
                 .coarse_fallback_required = g_force_coarse};
       }
       force_emergency_fallback();
-      return {.error = DependencyRuntimeErrorV1::ReferenceValidationFailed,
+      return {.error = dependency_runtime_error::reference_validation_failed,
               .dependency_count = g_dirty_count,
               .coarse_fallback_required = true};
     }
   }
-  if (g_dirty_count >= kMaximumDirtyDependenciesV1) {
+  if (g_dirty_count >= k_maximum_dirty_dependencies) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::CapacityExceeded,
+    return {.error = dependency_runtime_error::capacity_exceeded,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
-  const shared_registry::SharedRegistryBackendIdentityV1 backend =
+  const shared_registry::shared_registry_attachment *registry = attachment();
+  const shared_registry::shared_registry_backend_identity backend =
       shared_registry::current_backend_identity();
   if (registry == nullptr || !backend.valid()) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::RegistryUnavailable,
+    return {.error = dependency_runtime_error::registry_unavailable,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  const DependencyReferenceResultV1 acquired = acquire_dependency_reference(
+  const dependency_reference_result acquired = acquire_dependency_reference(
       registry->dependency,
-      DependencyReferenceRequestV1{
+      dependency_reference_request{
           .key = dependency.key,
           .physical_identity = dependency.physical_identity,
           .observability = dependency.observability,
-          .kind = DependencyReferenceKindV1::Owner,
+          .kind = dependency_reference_kind::owner,
       },
       directory_callbacks());
   if (!acquired) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed,
+    return {.error = dependency_runtime_error::reference_acquire_failed,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  DependencyReferenceV1 capability = acquired.reference;
-  const TransitionDependencyReferenceV1 ledger_reference =
+  dependency_reference capability = acquired.reference;
+  const transition_dependency_reference ledger_reference =
       transition_reference(capability);
   if (!g_owner_active) {
     const FullTransactionId full_xid = GetTopFullTransactionId();
-    const TransitionLedgerOperationResultV1 claimed = claim_transition_owner(
+    const transition_ledger_operation_result claimed = claim_transition_owner(
         shared_registry::shared_transition_ledger(),
-        TransitionOwnerIdentityV1{
+        transition_owner_identity{
             .proc_number = backend.proc_number,
             .pid = backend.pid,
             .backend_nonce = backend.backend_nonce,
@@ -2239,12 +2239,12 @@ dependency_generation_vector_envelope(
             .full_xid = U64FromFullTransactionId(full_xid),
         },
         ledger_reference, ledger_callbacks(),
-        TransitionInitialReferenceRoleV1::PreciseAndFallback);
+        transition_initial_reference_role::precise_and_fallback);
     if (!claimed) {
       static_cast<void>(release_dependency_reference(
           registry->dependency, capability, directory_callbacks()));
       force_emergency_fallback();
-      return {.error = DependencyRuntimeErrorV1::OwnerClaimFailed,
+      return {.error = dependency_runtime_error::owner_claim_failed,
               .dependency_count = g_dirty_count,
               .coarse_fallback_required = true};
     }
@@ -2252,7 +2252,7 @@ dependency_generation_vector_envelope(
     g_owner_active = true;
     saturating_increment(g_diagnostics.owner_claim_count);
   } else {
-    const TransitionLedgerOperationResultV1 recorded =
+    const transition_ledger_operation_result recorded =
         record_transition_dependency(
             shared_registry::shared_transition_ledger(), g_owner_claim,
             ledger_reference, ledger_callbacks());
@@ -2260,7 +2260,7 @@ dependency_generation_vector_envelope(
       static_cast<void>(release_dependency_reference(
           registry->dependency, capability, directory_callbacks()));
       force_emergency_fallback();
-      return {.error = DependencyRuntimeErrorV1::OwnerRecordFailed,
+      return {.error = dependency_runtime_error::owner_record_failed,
               .dependency_count = g_dirty_count,
               .coarse_fallback_required = true};
     }
@@ -2274,24 +2274,24 @@ dependency_generation_vector_envelope(
           .coarse_fallback_required = g_force_coarse};
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &dependency) noexcept {
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &dependency) noexcept {
   return observe_dirty_dependency(
       dependency, dependency.physical_identity);
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 observe_dirty_dependency(
-    const DependencyVersion &observed_dependency,
-    const DependencyVersion &committed_dependency) noexcept {
-  DependencyVersion observed_shape = observed_dependency;
-  DependencyVersion committed_shape = committed_dependency;
+[[nodiscard]] dependency_runtime_result observe_dirty_dependency(
+    const dependency_version &observed_dependency,
+    const dependency_version &committed_dependency) noexcept {
+  dependency_version observed_shape = observed_dependency;
+  dependency_version committed_shape = committed_dependency;
   observed_shape.physical_identity = {};
   committed_shape.physical_identity = {};
   if (!detail::valid_version(observed_dependency) ||
       !detail::valid_version(committed_dependency) ||
       observed_shape != committed_shape) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::InvalidArgument,
+    return {.error = dependency_runtime_error::invalid_argument,
             .dependency_count = detail::g_dirty_count,
             .coarse_fallback_required = true};
   }
@@ -2299,7 +2299,7 @@ dependency_generation_vector_envelope(
       observed_dependency, committed_dependency.physical_identity);
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 observe_database_definition_dependency(
     std::uint32_t database_oid) noexcept {
   using namespace detail;
@@ -2307,13 +2307,13 @@ observe_database_definition_dependency(
       !initialize_object_definition_collector(
           database_oid, GetCurrentSubTransactionId())) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::InvalidArgument,
+    return {.error = dependency_runtime_error::invalid_argument,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
   g_object_definition_dependencies.force_database_definition_guard();
   g_object_definition_pre_commit_captured = false;
-  DependencyRuntimeResultV1 result =
+  dependency_runtime_result result =
       ensure_object_definition_database_guards(database_oid);
   result.coarse_fallback_required = true;
   if (!result) {
@@ -2322,31 +2322,31 @@ observe_database_definition_dependency(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 observe_object_definition_dependency(
-    const ObjectDefinitionMutationV1 &mutation) noexcept {
+    const object_definition_mutation &mutation) noexcept {
   using namespace detail;
   if (!IsTransactionState() || mutation.key.database_oid == 0 ||
       !initialize_object_definition_collector(
           mutation.key.database_oid,
           GetCurrentSubTransactionId())) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::InvalidArgument,
+    return {.error = dependency_runtime_error::invalid_argument,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  const ObjectDefinitionObservationResultV1 observed =
+  const object_definition_observation_result observed =
       g_object_definition_dependencies.observe(
           static_cast<std::uint32_t>(GetCurrentSubTransactionId()),
           mutation);
   g_object_definition_pre_commit_captured = false;
   if (!observed.root_guard_required) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::InvalidArgument,
+    return {.error = dependency_runtime_error::invalid_argument,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  DependencyRuntimeResultV1 result =
+  dependency_runtime_result result =
       ensure_object_definition_database_guards(
           mutation.key.database_oid);
   result.coarse_fallback_required =
@@ -2358,17 +2358,17 @@ observe_object_definition_dependency(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 begin_dirty_frame(
+[[nodiscard]] dependency_runtime_result begin_dirty_frame(
     SubTransactionId child, SubTransactionId parent) noexcept {
   using namespace detail;
   if (child == InvalidSubTransactionId ||
-      g_dirty_frame_count >= kMaximumDirtyFramesV1) {
+      g_dirty_frame_count >= k_maximum_dirty_frames) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::CapacityExceeded,
+    return {.error = dependency_runtime_error::capacity_exceeded,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  g_dirty_frames[g_dirty_frame_count++] = DirtyFrameV1{
+  g_dirty_frames[g_dirty_frame_count++] = dirty_frame{
       .child = child,
       .parent = parent,
       .retained_count = g_dirty_count,
@@ -2377,26 +2377,26 @@ observe_object_definition_dependency(
           .coarse_fallback_required = g_force_coarse};
 }
 
-[[nodiscard]] DependencyRuntimeResultV1 finish_dirty_frame(
+[[nodiscard]] dependency_runtime_result finish_dirty_frame(
     SubTransactionId child, SubTransactionId parent,
     bool committed) noexcept {
   using namespace detail;
   if (g_dirty_frame_count == 0) {
-    return {.error = DependencyRuntimeErrorV1::SavepointMismatch,
+    return {.error = dependency_runtime_error::savepoint_mismatch,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
-  const DirtyFrameV1 frame = g_dirty_frames[g_dirty_frame_count - 1U];
+  const dirty_frame frame = g_dirty_frames[g_dirty_frame_count - 1U];
   if (frame.child != child || frame.parent != parent) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::SavepointMismatch,
+    return {.error = dependency_runtime_error::savepoint_mismatch,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
   --g_dirty_frame_count;
   if (frame.retained_count > g_dirty_count) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::SavepointMismatch,
+    return {.error = dependency_runtime_error::savepoint_mismatch,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
@@ -2405,13 +2405,13 @@ observe_object_definition_dependency(
             .coarse_fallback_required = g_force_coarse};
   }
   if (frame.retained_count == 0) {
-    const TransitionLedgerOperationResultV1 cleared =
+    const transition_ledger_operation_result cleared =
         finish_owner_transitions(
             shared_registry::shared_transition_ledger(), g_owner_claim,
-            TransitionResolutionV1::KnownAborted, ledger_callbacks());
+            transition_resolution::known_aborted, ledger_callbacks());
     if (!cleared) {
       force_emergency_fallback();
-      return {.error = DependencyRuntimeErrorV1::OwnerRecordFailed,
+      return {.error = dependency_runtime_error::owner_record_failed,
               .dependency_count = g_dirty_count,
               .coarse_fallback_required = true};
     }
@@ -2427,16 +2427,16 @@ observe_object_definition_dependency(
     saturating_increment(g_diagnostics.savepoint_rebuild_count);
     return {.coarse_fallback_required = g_force_coarse};
   }
-  const TransitionLedgerOperationResultV1 rebuilt =
+  const transition_ledger_operation_result rebuilt =
       rebuild_transition_dependencies(
           shared_registry::shared_transition_ledger(), g_owner_claim,
-          std::span<const TransitionDependencyReferenceV1>(
+          std::span<const transition_dependency_reference>(
               g_dirty_references.data() + 1U,
               frame.retained_count - 1U),
           ledger_callbacks());
   if (!rebuilt) {
     force_emergency_fallback();
-    return {.error = DependencyRuntimeErrorV1::OwnerRecordFailed,
+    return {.error = dependency_runtime_error::owner_record_failed,
             .dependency_count = g_dirty_count,
             .coarse_fallback_required = true};
   }
@@ -2452,17 +2452,17 @@ observe_object_definition_dependency(
           .coarse_fallback_required = g_force_coarse};
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 publish_pre_commit_transitions() noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (g_transition_published || g_emergency_transition_published) {
     result.dependency_count = g_dirty_count;
     result.coarse_fallback_required = g_force_coarse;
     return result;
   }
   if (g_owner_active) {
-    const TransitionLedgerOperationResultV1 published =
+    const transition_ledger_operation_result published =
         begin_owner_transitions(
             shared_registry::shared_transition_ledger(), g_owner_claim,
             ledger_callbacks());
@@ -2471,48 +2471,48 @@ publish_pre_commit_transitions() noexcept {
       saturating_increment(g_diagnostics.transition_publish_count);
     } else {
       g_force_coarse = true;
-      result.error = DependencyRuntimeErrorV1::TransitionPublishFailed;
+      result.error = dependency_runtime_error::transition_publish_failed;
       result.coarse_fallback_required = true;
     }
   }
   if (g_force_coarse && !begin_emergency_transition()) {
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
     result.coarse_fallback_required = true;
   }
-  pause(DependencyRuntimePausePointV1::AfterTransitionPublish);
+  pause(dependency_runtime_pause_point::after_transition_publish);
   result.dependency_count = g_dirty_count;
   result.coarse_fallback_required =
       result.coarse_fallback_required || g_force_coarse;
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 finish_post_visibility_transitions(bool committed) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (committed && (g_owner_active || g_force_coarse) &&
       !g_transition_published && !g_emergency_transition_published) {
     g_force_coarse = true;
     static_cast<void>(begin_emergency_transition());
   }
   if (g_owner_active) {
-    const TransitionResolutionV1 resolution =
+    const transition_resolution resolution =
         g_transition_published
-        ? (committed ? TransitionResolutionV1::Committed
-                     : TransitionResolutionV1::KnownAborted)
-        : TransitionResolutionV1::KnownAborted;
-    const TransitionLedgerOperationResultV1 finished =
+        ? (committed ? transition_resolution::committed
+                     : transition_resolution::known_aborted)
+        : transition_resolution::known_aborted;
+    const transition_ledger_operation_result finished =
         finish_owner_transitions(
             shared_registry::shared_transition_ledger(), g_owner_claim,
             resolution, ledger_callbacks());
     if (!finished) {
-      result.error = DependencyRuntimeErrorV1::TransitionFinishFailed;
+      result.error = dependency_runtime_error::transition_finish_failed;
       result.coarse_fallback_required = true;
       g_force_coarse = true;
     }
   }
   if (!finish_emergency_transition(committed)) {
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
     result.coarse_fallback_required = true;
   }
   result.dependency_count = g_dirty_count;
@@ -2523,65 +2523,65 @@ finish_post_visibility_transitions(bool committed) noexcept {
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 begin_external_prepared_resolution(
-    ExternalPreparedResolutionKindV1 kind,
+    external_prepared_resolution_kind kind,
     std::uint32_t database_oid,
     std::uint64_t resolution_identity,
-    ExternalPreparedResolutionTokenV1 *token) noexcept {
+    external_prepared_resolution_token *token) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   const bool kind_valid =
-      kind == ExternalPreparedResolutionKindV1::CommitPrepared ||
-      kind == ExternalPreparedResolutionKindV1::RollbackPrepared;
+      kind == external_prepared_resolution_kind::commit_prepared ||
+      kind == external_prepared_resolution_kind::rollback_prepared;
   if (token == nullptr ||
-      token->state != ExternalPreparedResolutionStateV1::Empty ||
+      token->state != external_prepared_resolution_state::empty ||
       !kind_valid || database_oid == 0 || resolution_identity == 0) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.coarse_fallback_required = true;
     return result;
   }
   if (g_owner_active || g_dirty_count != 0 ||
       g_emergency_transition_published ||
       g_external_prepared_token.state ==
-          ExternalPreparedResolutionStateV1::Active) {
-    result.error = DependencyRuntimeErrorV1::OwnerClaimFailed;
+          external_prepared_resolution_state::active) {
+    result.error = dependency_runtime_error::owner_claim_failed;
     result.coarse_fallback_required = true;
     return result;
   }
-  const shared_registry::SharedRegistryAttachmentV1 *registry = attachment();
-  const shared_registry::SharedRegistryBackendIdentityV1 backend =
+  const shared_registry::shared_registry_attachment *registry = attachment();
+  const shared_registry::shared_registry_backend_identity backend =
       shared_registry::current_backend_identity();
   if (registry == nullptr || !backend.valid()) {
-    result.error = DependencyRuntimeErrorV1::RegistryUnavailable;
+    result.error = dependency_runtime_error::registry_unavailable;
     result.coarse_fallback_required = true;
     return result;
   }
-  DependencyReferenceResultV1 acquired = acquire_dependency_reference(
+  dependency_reference_result acquired = acquire_dependency_reference(
       registry->dependency,
-      DependencyReferenceRequestV1{
-          .key = DependencyKey{
+      dependency_reference_request{
+          .key = dependency_key{
               .database_oid = database_oid,
               .class_oid = 0,
               .object_oid = database_oid,
               .object_sub_id = 0,
-              .kind = DependencyKind::DatabaseWriteEpoch,
+              .kind = dependency_kind::database_write_epoch,
           },
           .physical_identity = {},
-          .observability = WriteObservability::DatabaseWideFallback,
-          .kind = DependencyReferenceKindV1::Owner,
+          .observability = write_observability::database_wide_fallback,
+          .kind = dependency_reference_kind::owner,
       },
       directory_callbacks());
   if (!acquired) {
     force_emergency_fallback();
-    result.error = DependencyRuntimeErrorV1::ReferenceAcquireFailed;
+    result.error = dependency_runtime_error::reference_acquire_failed;
     result.coarse_fallback_required = true;
     return result;
   }
-  DependencyReferenceV1 capability = acquired.reference;
-  const TransitionLedgerOperationResultV1 claimed = claim_transition_owner(
+  dependency_reference capability = acquired.reference;
+  const transition_ledger_operation_result claimed = claim_transition_owner(
       shared_registry::shared_transition_ledger(),
-      TransitionOwnerIdentityV1{
+      transition_owner_identity{
           .proc_number = backend.proc_number,
           .pid = backend.pid,
           .backend_nonce = backend.backend_nonce,
@@ -2589,32 +2589,32 @@ begin_external_prepared_resolution(
           .full_xid = resolution_identity,
       },
       transition_reference(capability), ledger_callbacks(),
-      TransitionInitialReferenceRoleV1::PreciseAndFallback);
+      transition_initial_reference_role::precise_and_fallback);
   if (!claimed) {
     static_cast<void>(release_dependency_reference(
         registry->dependency, capability, directory_callbacks()));
     force_emergency_fallback();
-    result.error = DependencyRuntimeErrorV1::OwnerClaimFailed;
+    result.error = dependency_runtime_error::owner_claim_failed;
     result.coarse_fallback_required = true;
     return result;
   }
-  const TransitionLedgerOperationResultV1 published =
+  const transition_ledger_operation_result published =
       begin_owner_transitions(
           shared_registry::shared_transition_ledger(), claimed.claim,
           ledger_callbacks());
   if (!published) {
-    const TransitionLedgerOperationResultV1 drained =
+    const transition_ledger_operation_result drained =
         finish_owner_transitions(
             shared_registry::shared_transition_ledger(), claimed.claim,
-            TransitionResolutionV1::Aborted, ledger_callbacks());
+            transition_resolution::aborted, ledger_callbacks());
     force_emergency_fallback();
     const bool emergency_started = begin_emergency_transition();
     const bool emergency_finished =
         emergency_started && finish_emergency_transition(true);
-    result.error = DependencyRuntimeErrorV1::TransitionPublishFailed;
+    result.error = dependency_runtime_error::transition_publish_failed;
     result.coarse_fallback_required = true;
     if (!drained || !emergency_finished) {
-      result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+      result.error = dependency_runtime_error::emergency_fallback;
     }
     return result;
   }
@@ -2622,14 +2622,14 @@ begin_external_prepared_resolution(
     before_shmem_exit(external_prepared_exit, Datum{0});
     g_external_exit_registered = true;
   }
-  *token = ExternalPreparedResolutionTokenV1{
+  *token = external_prepared_resolution_token{
       .claim = claimed.claim,
       .database_guard = capability,
       .resolution_identity = resolution_identity,
       .database_oid = database_oid,
       .kind = kind,
-      .outcome = ExternalPreparedResolutionOutcomeV1::NotResolved,
-      .state = ExternalPreparedResolutionStateV1::Active,
+      .outcome = external_prepared_resolution_outcome::not_resolved,
+      .state = external_prepared_resolution_state::active,
   };
   g_external_prepared_token = *token;
   result.dependency_count = 1;
@@ -2637,41 +2637,41 @@ begin_external_prepared_resolution(
   return result;
 }
 
-[[nodiscard]] DependencyRuntimeResultV1
+[[nodiscard]] dependency_runtime_result
 finish_external_prepared_resolution(
-    ExternalPreparedResolutionTokenV1 *token,
-    ExternalPreparedResolutionOutcomeV1 outcome) noexcept {
+    external_prepared_resolution_token *token,
+    external_prepared_resolution_outcome outcome) noexcept {
   using namespace detail;
-  DependencyRuntimeResultV1 result{};
+  dependency_runtime_result result{};
   if (token == nullptr) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.coarse_fallback_required = true;
     return result;
   }
-  if (token->state == ExternalPreparedResolutionStateV1::Finished) {
+  if (token->state == external_prepared_resolution_state::finished) {
     if (token->outcome != outcome) {
-      result.error = DependencyRuntimeErrorV1::InvalidArgument;
+      result.error = dependency_runtime_error::invalid_argument;
       result.coarse_fallback_required = true;
       return result;
     }
     result.dependency_count = 1;
     result.coarse_fallback_required =
-        outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous;
+        outcome == external_prepared_resolution_outcome::ambiguous;
     return result;
   }
   const bool outcome_valid =
-      (token->kind == ExternalPreparedResolutionKindV1::CommitPrepared &&
-       (outcome == ExternalPreparedResolutionOutcomeV1::Committed ||
-        outcome == ExternalPreparedResolutionOutcomeV1::NotResolved ||
-        outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous)) ||
-      (token->kind == ExternalPreparedResolutionKindV1::RollbackPrepared &&
-       (outcome == ExternalPreparedResolutionOutcomeV1::RolledBack ||
-        outcome == ExternalPreparedResolutionOutcomeV1::NotResolved ||
-        outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous));
+      (token->kind == external_prepared_resolution_kind::commit_prepared &&
+       (outcome == external_prepared_resolution_outcome::committed ||
+        outcome == external_prepared_resolution_outcome::not_resolved ||
+        outcome == external_prepared_resolution_outcome::ambiguous)) ||
+      (token->kind == external_prepared_resolution_kind::rollback_prepared &&
+       (outcome == external_prepared_resolution_outcome::rolled_back ||
+        outcome == external_prepared_resolution_outcome::not_resolved ||
+        outcome == external_prepared_resolution_outcome::ambiguous));
   const bool exact_active_token =
       static_cast<bool>(*token) && outcome_valid &&
       g_external_prepared_token.state ==
-          ExternalPreparedResolutionStateV1::Active &&
+          external_prepared_resolution_state::active &&
       token->claim == g_external_prepared_token.claim &&
       token->database_guard ==
           g_external_prepared_token.database_guard &&
@@ -2680,25 +2680,25 @@ finish_external_prepared_resolution(
       token->database_oid == g_external_prepared_token.database_oid &&
       token->kind == g_external_prepared_token.kind;
   if (!exact_active_token) {
-    result.error = DependencyRuntimeErrorV1::InvalidArgument;
+    result.error = dependency_runtime_error::invalid_argument;
     result.coarse_fallback_required = true;
     return result;
   }
-  const TransitionResolutionV1 resolution =
-      outcome == ExternalPreparedResolutionOutcomeV1::Committed
-      ? TransitionResolutionV1::Committed
-      : outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous
-          ? TransitionResolutionV1::Aborted
-          : TransitionResolutionV1::KnownAborted;
-  const TransitionLedgerOperationResultV1 finished =
+  const transition_resolution resolution =
+      outcome == external_prepared_resolution_outcome::committed
+      ? transition_resolution::committed
+      : outcome == external_prepared_resolution_outcome::ambiguous
+          ? transition_resolution::aborted
+          : transition_resolution::known_aborted;
+  const transition_ledger_operation_result finished =
       finish_owner_transitions(
           shared_registry::shared_transition_ledger(), token->claim,
           resolution, ledger_callbacks());
   const bool fully_drained =
-      finished.state == TransitionOwnerState::Free &&
+      finished.state == transition_owner_state::free &&
       finished.outstanding_transition_count == 0;
   bool emergency_ok = true;
-  if (outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous ||
+  if (outcome == external_prepared_resolution_outcome::ambiguous ||
       !fully_drained || !finished) {
     force_emergency_fallback();
     const bool emergency_started = begin_emergency_transition();
@@ -2708,20 +2708,20 @@ finish_external_prepared_resolution(
   result.dependency_count = 1;
   result.coarse_fallback_required =
       finished.coarse_fallback_required ||
-      outcome == ExternalPreparedResolutionOutcomeV1::Ambiguous ||
+      outcome == external_prepared_resolution_outcome::ambiguous ||
       !fully_drained || !finished || !emergency_ok;
   if (!fully_drained || !finished) {
-    result.error = DependencyRuntimeErrorV1::TransitionFinishFailed;
+    result.error = dependency_runtime_error::transition_finish_failed;
   }
   if (!emergency_ok) {
-    result.error = DependencyRuntimeErrorV1::EmergencyFallback;
+    result.error = dependency_runtime_error::emergency_fallback;
   }
   if (!fully_drained) {
     return result;
   }
   const bool global_token = token == &g_external_prepared_token;
   token->outcome = outcome;
-  token->state = ExternalPreparedResolutionStateV1::Finished;
+  token->state = external_prepared_resolution_state::finished;
   g_external_prepared_token = {};
   if (global_token) {
     return result;
@@ -2747,14 +2747,14 @@ void register_dependency_runtime_callbacks() noexcept {
 }
 
 void set_dependency_runtime_test_hooks(
-    DependencyRuntimeTestHooksV1 hooks) noexcept {
+    dependency_runtime_test_hooks hooks) noexcept {
   detail::g_test_hooks = hooks;
 }
 
-[[nodiscard]] DependencyRuntimeDiagnosticsV1
-dependency_runtime_diagnostics() noexcept {
+[[nodiscard]] dependency_runtime_diagnostics
+read_dependency_runtime_diagnostics() noexcept {
   using namespace detail;
-  DependencyRuntimeDiagnosticsV1 result = g_diagnostics;
+  dependency_runtime_diagnostics result = g_diagnostics;
   result.dirty_dependency_count = g_dirty_count;
   result.dirty_frame_count = g_dirty_frame_count;
   result.owner_active = g_owner_active;

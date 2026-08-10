@@ -58,7 +58,7 @@ inline bool g_object_access_hook_installed = false;
 }
 
 void force_database_definition_guard() noexcept {
-  const dependency_runtime::DependencyRuntimeResultV1 observed =
+  const dependency_runtime::dependency_runtime_result observed =
       dependency_runtime::observe_database_definition_dependency(
           static_cast<std::uint32_t>(MyDatabaseId));
   if (!observed) {
@@ -67,9 +67,9 @@ void force_database_definition_guard() noexcept {
 }
 
 [[nodiscard]] bool stage_object_dependency(
-    Oid class_id, Oid object_id, DependencyKind kind) noexcept {
-  const ObjectDefinitionMutationV1 mutation =
-      make_object_definition_mutation_v1(DependencyKey{
+    Oid class_id, Oid object_id, dependency_kind kind) noexcept {
+  const object_definition_mutation mutation =
+      make_object_definition_mutation(dependency_key{
           .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
           .class_oid = static_cast<std::uint32_t>(class_id),
           .object_oid = static_cast<std::uint32_t>(object_id),
@@ -77,7 +77,7 @@ void force_database_definition_guard() noexcept {
           .kind = kind,
           .reserved = 0,
       });
-  const dependency_runtime::DependencyRuntimeResultV1 observed =
+  const dependency_runtime::dependency_runtime_result observed =
       dependency_runtime::observe_object_definition_dependency(mutation);
   if (!observed) {
     dependency_runtime::force_emergency_fallback();
@@ -90,11 +90,11 @@ void force_database_definition_guard() noexcept {
     int cache_id, Oid object_id) noexcept {
   const std::uint32_t hash_value = GetSysCacheHashValue1(
       cache_id, ObjectIdGetDatum(object_id));
-  const ObjectDefinitionMutationV1 mutation =
-      make_syscache_definition_mutation_v1(
+  const object_definition_mutation mutation =
+      make_syscache_definition_mutation(
           static_cast<std::uint32_t>(MyDatabaseId),
           static_cast<std::uint32_t>(cache_id), hash_value);
-  const dependency_runtime::DependencyRuntimeResultV1 observed =
+  const dependency_runtime::dependency_runtime_result observed =
       dependency_runtime::observe_object_definition_dependency(mutation);
   if (!observed) {
     dependency_runtime::force_emergency_fallback();
@@ -105,7 +105,7 @@ void force_database_definition_guard() noexcept {
 
 void stage_procedure_definition(Oid class_id, Oid object_id) noexcept {
   static_cast<void>(stage_object_dependency(
-      class_id, object_id, DependencyKind::Procedure));
+      class_id, object_id, dependency_kind::procedure));
   static_cast<void>(stage_syscache_dependency(PROCOID, object_id));
 
   // pg_aggregate.aggfnoid is the aggregate's pg_proc OID.  Staging this for
@@ -122,22 +122,22 @@ void stage_supported_definition(Oid class_id, Oid object_id) noexcept {
       return;
     case OperatorRelationId:
       static_cast<void>(stage_object_dependency(
-          class_id, object_id, DependencyKind::Operator));
+          class_id, object_id, dependency_kind::operator_object));
       static_cast<void>(stage_syscache_dependency(OPEROID, object_id));
       return;
     case TypeRelationId:
       static_cast<void>(stage_object_dependency(
-          class_id, object_id, DependencyKind::Type));
+          class_id, object_id, dependency_kind::type));
       static_cast<void>(stage_syscache_dependency(TYPEOID, object_id));
       return;
     case CollationRelationId:
       static_cast<void>(stage_object_dependency(
-          class_id, object_id, DependencyKind::Collation));
+          class_id, object_id, dependency_kind::collation));
       static_cast<void>(stage_syscache_dependency(COLLOID, object_id));
       return;
     case AuthIdRelationId:
       static_cast<void>(stage_object_dependency(
-          class_id, object_id, DependencyKind::Role));
+          class_id, object_id, dependency_kind::role));
       static_cast<void>(stage_syscache_dependency(AUTHOID, object_id));
       // pg_authid is shared across databases.  A current-database definition
       // key cannot cover cached role-sensitive plans owned by other databases.

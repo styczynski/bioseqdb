@@ -49,7 +49,7 @@ enum class chaining_algorithm : std::uint8_t {
 
 /// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
 /// vs Highway-vectorised block aligner (single-affine). Values MUST match
-/// bioseq.aligner.base_alignment_algorithm ordinals.
+/// bioseq.aligner.base_alignment.algorithm ordinals.
 enum class base_alignment_algorithm : std::uint8_t {
     ksw2 = 0,
     block_aligner = 1,

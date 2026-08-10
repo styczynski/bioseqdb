@@ -128,7 +128,7 @@ static_assert(std::is_nothrow_move_constructible_v<shader_module_load>);
 /// @brief MoltenVK shader-module bytes retained under memory admission.
 struct moltenvk_shader_module_code {
     // Declared first so words release before the transient permit.
-    bioseq::parallelism::MemoryPermit permit;
+    bioseq::parallelism::memory_permit permit;
     std::vector<std::uint32_t> words;
     std::size_t code_size_bytes = 0;
     std::size_t header_size_bytes = sizeof(MVKMSLSPIRVHeader);
@@ -199,7 +199,7 @@ struct metal_archive_negative_error_fingerprint {
         const metal_archive_negative_error_fingerprint&) const noexcept = default;
 };
 
-/// @brief Evidence that one Metal binary archive matches its helper and metallib.
+/// @brief Contract record binding one Metal binary archive to its helper and metallib.
 struct metal_archive_qualification_receipt {
     std::uint32_t wire_revision = 0u;
     shader_variant_key shader_key{};
@@ -268,7 +268,7 @@ struct sealed_shader_cache_artifact_image {
     std::vector<std::byte> bytes;
 };
 
-/// @brief Loader-originated evidence for one complete process-local seed image.
+/// @brief Loader-generated validation receipt for one complete process-local seed image.
 /// Construction is private: runtime configuration cannot manufacture the
 /// counters or copy them from manifest metadata without executing the loader.
 class sealed_shader_cache_seed_receipt {
@@ -433,7 +433,7 @@ private:
         std::uint64_t loaded_artifact_bytes,
         std::uint64_t load_ns,
         std::uint64_t peak_admitted_bytes,
-        bioseq::parallelism::MemoryPermit permit) noexcept
+        bioseq::parallelism::memory_permit permit) noexcept
         : permit_(std::move(permit)), manifest_(std::move(manifest)),
           manifest_bytes_(std::move(manifest_bytes)),
           artifacts_(std::move(artifacts)),
@@ -455,7 +455,7 @@ private:
 
     // Declared first so reverse member destruction releases every admitted
     // allocation before returning the lifetime permit to the controller.
-    bioseq::parallelism::MemoryPermit permit_;
+    bioseq::parallelism::memory_permit permit_;
     sealed_shader_cache_manifest manifest_;
     std::vector<std::byte> manifest_bytes_;
     std::vector<sealed_shader_cache_artifact_image> artifacts_;
@@ -543,7 +543,7 @@ cache_binary_archive_qualification_path(
 [[nodiscard]] inline std::filesystem::path sealed_shader_cache_manifest_path(
     const std::filesystem::path& cache_dir)
 {
-    return cache_dir / "bioseq_shader_cache.sealed.v3";
+    return cache_dir / "bioseq_shader_cache.sealed";
 }
 
 [[nodiscard]] inline std::string system_uname_digest_component()
@@ -929,7 +929,8 @@ private:
 [[nodiscard]] inline std::string shader_cache_digest_hex(
     const shader_cache_build_inputs& inputs)
 {
-    std::uint64_t hash = bioseq::common::fnv1a_64("bioseq-shader-cache-v1");
+    std::uint64_t hash =
+        bioseq::common::fnv1a_64("bioseq-shader-cache-contract");
     hash = bioseq::common::hash_combine_64(hash, inputs.moltenvk_build);
     hash = bioseq::common::hash_combine_64(hash, inputs.device_uuid);
     hash = bioseq::common::hash_combine_64(hash, probe_metal_version());
@@ -938,13 +939,13 @@ private:
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.minor);
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(
-        hash, "bioseq-metal-binary-archive-v6-qualified-helper-device-wire-v2");
+        hash, "bioseq-metal-binary-archive-qualified-helper-device-contract");
     // SPIR-V -> MSL resource indices are pipeline ABI, even when the GLSL
-    // shader body itself is unchanged.  Keep an explicit transform revision
-    // and the concrete layout in the digest so an incompatible metallib or
-    // Metal binary archive is never reused under the old cache directory.
+    // shader body itself is unchanged. Include the resource mapping and
+    // concrete layout so cached artifacts must satisfy the current pipeline
+    // contract.
     hash = bioseq::common::hash_combine_64(
-        hash, "bioseq-spirv-to-msl-resource-abi-v2");
+        hash, "bioseq-spirv-to-msl-resource-abi");
 
     for_each_static_shader_variant(inputs.variants, [&hash](const shader_variant_key& key) {
         const shader_kind kind = checked_shader_kind(key.kind);
@@ -1445,7 +1446,7 @@ parse_cache_meta_bytes(
     shader_cache_metadata meta{};
     std::memcpy(&meta, bytes.data(), sizeof(meta));
     if (meta.magic != 0xB10C0CACu || meta.wire_revision != 1u) {
-        return std::unexpected("metadata magic or wire revision mismatch");
+        return std::unexpected("metadata serialized contract mismatch");
     }
     if (meta.entry_len > 64u
         || sizeof(shader_cache_metadata) + meta.entry_len > bytes.size()) {
@@ -1482,7 +1483,7 @@ parse_cache_meta_bytes(
 }
 
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
-compatible_cache_meta_from_bytes(
+validated_cache_meta_from_bytes(
     std::span<const std::byte> bytes,
     const shader_variant_key& key,
     std::string* entry_name)
@@ -1514,7 +1515,7 @@ compatible_cache_meta_from_bytes(
 }
 
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
-read_compatible_cache_meta(
+read_validated_cache_meta(
     const std::filesystem::path& cache_dir,
     const shader_variant_key& key,
     std::string* entry_name)
@@ -1534,7 +1535,7 @@ read_compatible_cache_meta(
     if (!input) {
         return std::unexpected("meta read failed");
     }
-    return compatible_cache_meta_from_bytes(bytes, key, entry_name);
+    return validated_cache_meta_from_bytes(bytes, key, entry_name);
 }
 
 [[nodiscard]] inline std::expected<void, std::string> require_nonempty_cache_file(
@@ -1568,9 +1569,9 @@ cache_metallib_entry_status(
     const std::filesystem::path& cache_dir,
     const shader_variant_key& key)
 {
-    if (auto meta = read_compatible_cache_meta(cache_dir, key, nullptr); !meta) {
+    if (auto meta = read_validated_cache_meta(cache_dir, key, nullptr); !meta) {
         return std::unexpected(shader_cache_message(
-            "metadata incompatible: ", meta.error()));
+            "metadata cache-contract validation failed: ", meta.error()));
     }
     return require_nonempty_cache_file(
         cache_metallib_path(cache_dir, key), "metallib");
@@ -1872,7 +1873,7 @@ private:
     int fd_ = -1;
 };
 
-[[nodiscard]] inline regular_file_identity regular_file_identity(
+[[nodiscard]] inline regular_file_identity regular_file_identity_from_stat(
     const struct stat& value) noexcept
 {
     regular_file_identity result{
@@ -1939,7 +1940,8 @@ read_stable_regular_file(
     }
     struct stat after {};
     if (::fstat(fd, &after) != 0
-        || regular_file_identity(before) != regular_file_identity(after)) {
+        || regular_file_identity_from_stat(before)
+            != regular_file_identity_from_stat(after)) {
         return fail("identity changed during stable read");
     }
     if (fd_owner.close_now() != 0) {
@@ -1947,7 +1949,7 @@ read_stable_regular_file(
             artifact, " stable close failed for ", path.string(),
             ": errno ", errno));
     }
-    image.identity = regular_file_identity(after);
+    image.identity = regular_file_identity_from_stat(after);
     return image;
 }
 
@@ -1960,7 +1962,7 @@ read_stable_regular_file(
     struct stat current {};
     const bool accepted = ::fstat(fd, &current) == 0
         && S_ISREG(current.st_mode)
-        && regular_file_identity(current) == expected;
+        && regular_file_identity_from_stat(current) == expected;
     (void)::close(fd);
     return accepted;
 }
@@ -2019,7 +2021,8 @@ stream_stable_regular_file_digest(
     }
     struct stat after {};
     if (::fstat(fd, &after) != 0
-        || regular_file_identity(before) != regular_file_identity(after)
+        || regular_file_identity_from_stat(before)
+            != regular_file_identity_from_stat(after)
         || streamed != static_cast<std::uint64_t>(after.st_size)) {
         return std::unexpected(shader_cache_message(
             artifact, " identity changed during stream for ",
@@ -2033,7 +2036,7 @@ stream_stable_regular_file_digest(
     return stable_regular_file_digest{
         .size = streamed,
         .sha256 = hasher.finalize(),
-        .identity = regular_file_identity(after),
+        .identity = regular_file_identity_from_stat(after),
     };
 }
 
@@ -2054,7 +2057,7 @@ seed_identity(
     std::span<const sealed_shader_cache_artifact> artifacts)
 {
     sha256_hasher hasher;
-    hasher.update("bioseq-sealed-shader-seed-v1");
+    hasher.update("bioseq-sealed-shader-seed-contract");
     hasher.update_little_endian(cache_digest.size());
     hasher.update(cache_digest);
     hasher.update_little_endian(keys.size());
@@ -2308,7 +2311,7 @@ parse_metal_archive_qualification_receipt(
     }
     if (*wire_revision != k_archive_qualification_wire_revision) {
         return std::unexpected(
-            "Metal archive qualification receipt wire revision is unsupported");
+            "Metal archive qualification receipt contract mismatch");
     }
     auto key_kind = reader.u32();
     auto key_tile = reader.u32();
@@ -2422,7 +2425,7 @@ parse_manifest(std::span<const std::byte> bytes)
     if (*wire_revision != k_manifest_wire_revision
         || *reserved0 != 0u || *reserved1 != 0u) {
         return std::unexpected(
-            "sealed shader cache manifest wire revision or reserved field mismatch");
+            "sealed shader cache manifest serialized contract mismatch");
     }
     if (*digest_size != 16u
         || *key_count == 0u || *key_count > k_maximum_manifest_keys
@@ -2606,7 +2609,7 @@ load_validated_artifact_bytes(
     for (const shader_variant_key& key : manifest.keys) {
         if (auto status = cache_entry_status(cache_dir, key); !status) {
             return std::unexpected(shader_cache_message(
-                "sealed shader cache entry is incompatible for ",
+                "sealed shader cache entry violates the cache contract for ",
                 cache_file_stem(key), ": ", status.error()));
         }
     }
@@ -2686,7 +2689,7 @@ load_validated_artifact_bytes(
                     && candidate.filename == stem + ".metallib";
             });
         std::string expected_entry_name;
-        auto meta = read_compatible_cache_meta(
+        auto meta = read_validated_cache_meta(
             cache_dir, key, &expected_entry_name);
         if (metallib_artifact == manifest.artifacts.end() || !meta
             || qualification->shader_key != key
@@ -2746,7 +2749,7 @@ load_validated_artifact_bytes(
     }
     if (!common_negative_error || !common_helper) {
         return std::unexpected(
-            "sealed shader cache has no Metal archive qualification evidence");
+            "sealed shader cache has no Metal archive qualification receipt");
     }
     return {};
 }
@@ -2807,11 +2810,11 @@ validate_all_artifact_images(
                 "sealed shader cache seed key image incomplete for ", stem));
         }
         std::string entry_name;
-        if (auto meta = compatible_cache_meta_from_bytes(
+        if (auto meta = validated_cache_meta_from_bytes(
                 metadata->bytes, key, &entry_name);
             !meta || entry_name.empty()) {
             return std::unexpected(shader_cache_message(
-                "sealed shader cache seed metadata incompatible for ", stem,
+                "sealed shader cache seed metadata violates the cache contract for ", stem,
                 ": ", meta ? "entry name is empty" : meta.error()));
         }
     }
@@ -2887,7 +2890,7 @@ validate_all_artifact_images(
         auto meta = metadata == nullptr
             ? std::expected<shader_cache_metadata, std::string>{
                 std::unexpected("metadata missing")}
-            : compatible_cache_meta_from_bytes(
+            : validated_cache_meta_from_bytes(
                 metadata->bytes, key, &expected_entry_name);
         if (metallib == nullptr || !meta
             || qualification->shader_key != key
@@ -2947,7 +2950,7 @@ validate_all_artifact_images(
     }
     if (!common_negative_error || !common_helper) {
         return std::unexpected(
-            "sealed shader cache seed has no Metal archive qualification evidence");
+            "sealed shader cache seed has no Metal archive qualification receipt");
     }
     return {};
 }
@@ -3212,8 +3215,8 @@ load_validated_sealed_shader_cache_seed(
         sealed_shader_cache_manifest_path(cache_dir);
     auto admission_probe = probe_manifest_for_admission(manifest_path);
     if (!admission_probe) return std::unexpected(admission_probe.error());
-    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(
             admission_probe->peak_admitted_bytes, &admission_failure);
     if (!permit) {
@@ -3310,14 +3313,14 @@ load_validated_sealed_shader_cache_seed(
         load_ns, admission_probe->peak_admitted_bytes, std::move(*permit)};
     if (!image.reconcile_admission() || !image.is_accepted()) {
         return std::unexpected(
-            "sealed shader cache seed loader produced invalid receipt evidence");
+            "sealed shader cache seed loader produced an invalid receipt");
     }
     return std::move(image);
 }
 
 /// @brief Install-once process owner for an immutable seed. Both production and
-/// focused tests use this exact store, so a second acquisition proves reuse of
-/// the original loader receipt rather than a fresh filesystem validation.
+/// focused tests use this exact store, so a second acquisition reuses the
+/// original loader receipt without repeating filesystem validation.
 class sealed_shader_cache_process_store {
 public:
     [[nodiscard]] std::expected<std::shared_ptr<
@@ -3336,7 +3339,7 @@ public:
                 || image_->manifest().cache_digest != digest
                 || image_->manifest().keys != *canonical) {
                 return std::unexpected(
-                    "process shader seed is already sealed to different evidence");
+                    "process shader seed is already sealed to a different cache contract");
             }
             return image_;
         }
@@ -3347,7 +3350,7 @@ public:
             std::move(*loaded));
         if (!retained->is_accepted()) {
             return std::unexpected(
-                "process shader seed has invalid loader-originated evidence");
+                "process shader seed has an invalid loader receipt");
         }
         cache_dir_ = normalized;
         image_ = retained;
@@ -3450,8 +3453,8 @@ seal_shader_cache_manifest_impl(
         return std::unexpected(
             "cannot seal shader cache seed because admission saturated");
     }
-    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(peak_admitted_bytes, &admission_failure);
     if (!permit) {
         return std::unexpected(shader_cache_message(
@@ -3633,11 +3636,11 @@ make_sealed_shader_cache_key_view(
     }
     sealed_shader_cache_key_view view{};
     view.key = requested_key;
-    auto meta = compatible_cache_meta_from_bytes(
+    auto meta = validated_cache_meta_from_bytes(
         metadata->bytes, requested_key, &view.entry_name);
     if (!meta) {
         return std::unexpected(shader_cache_message(
-            "sealed shader cache metadata incompatible for ", stem,
+            "sealed shader cache metadata violates the cache contract for ", stem,
             ": ", meta.error()));
     }
     view.meta = *meta;
@@ -3676,11 +3679,11 @@ load_sealed_shader_cache_key_image(
         }
         switch (artifact.descriptor.kind) {
         case sealed_shader_cache_artifact_kind::shader_meta: {
-            auto meta = compatible_cache_meta_from_bytes(
+            auto meta = validated_cache_meta_from_bytes(
                 artifact.bytes, requested_key, &image.entry_name);
             if (!meta) {
                 return std::unexpected(shader_cache_message(
-                    "sealed shader cache metadata incompatible for ",
+                    "sealed shader cache metadata violates the cache contract for ",
                     cache_file_stem(requested_key), ": ", meta.error()));
             }
             image.meta = *meta;
@@ -3721,7 +3724,7 @@ load_sealed_shader_cache_manifest_for_key(
 }
 
 struct qualified_metal_archive_helper {
-    bioseq::parallelism::MemoryPermit permit;
+    bioseq::parallelism::memory_permit permit;
     std::filesystem::path path;
     sealed_shader_cache_detail::regular_file_identity identity{};
     std::uint64_t executable_size = 0u;
@@ -3801,7 +3804,8 @@ load_qualified_metal_archive_helper()
     if (path_status.st_size <= 0
         || static_cast<std::uint64_t>(path_status.st_size)
             > sealed_shader_cache_detail::k_maximum_seed_artifact_bytes) {
-        return std::unexpected("archive helper executable size is invalid");
+        return std::unexpected(
+            std::string{"archive helper executable size is invalid"});
     }
     const std::uint64_t admission_peak =
         bioseq::common::saturating_add(
@@ -3809,8 +3813,8 @@ load_qualified_metal_archive_helper()
                 static_cast<std::uint64_t>(path_status.st_size),
                 bioseq::parallelism::k_vector_preallocation_headroom_factor),
             sizeof(qualified_metal_archive_helper) + 4096u);
-    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(admission_peak, &admission_failure);
     if (!permit) {
         return std::unexpected(
@@ -3827,7 +3831,7 @@ load_qualified_metal_archive_helper()
         || (after_status.st_mode & (S_IWGRP | S_IWOTH)) != 0
         || (after_status.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0
         || ::access(path.c_str(), X_OK) != 0
-        || sealed_shader_cache_detail::regular_file_identity(after_status)
+        || sealed_shader_cache_detail::regular_file_identity_from_stat(after_status)
             != image->identity) {
         return std::unexpected(
             "archive helper identity changed during process qualification");
@@ -4098,7 +4102,7 @@ parse_archive_helper_qualification(std::string_view transcript)
         || wire_revision != 2u || registry == 0u
         || build != "bioseq_gpu_archive_builder") {
         return std::unexpected(
-            "archive helper wire revision, build, or registry identity is invalid");
+            "archive helper contract validation failed");
     }
     return archive_helper_qualification{
         .wire_revision = wire_revision,
@@ -4186,9 +4190,9 @@ public:
             && ::lstat(helper_path_.c_str(), &path_status) == 0
             && S_ISREG(fd_status.st_mode) && S_ISREG(path_status.st_mode)
             && !S_ISLNK(path_status.st_mode)
-            && sealed_shader_cache_detail::regular_file_identity(fd_status)
+            && sealed_shader_cache_detail::regular_file_identity_from_stat(fd_status)
                 == helper_identity_
-            && sealed_shader_cache_detail::regular_file_identity(path_status)
+            && sealed_shader_cache_detail::regular_file_identity_from_stat(path_status)
                 == helper_identity_;
     }
 
@@ -4320,7 +4324,7 @@ stage_archive_helper_invocation(
             "private archive helper executable identity is invalid");
     }
     staged.helper_identity_ =
-        sealed_shader_cache_detail::regular_file_identity(helper_status);
+        sealed_shader_cache_detail::regular_file_identity_from_stat(helper_status);
     // Do not carry a writable executable descriptor across posix_spawn.
     // Darwin may reject execution while the vnode is still open for writing,
     // and the retained qualification should hold only a non-mutating descriptor.
@@ -4334,7 +4338,7 @@ stage_archive_helper_invocation(
     if (staged.helper_fd_ < 0
         || ::fstat(staged.helper_fd_, &reopened_helper_status) != 0
         || !S_ISREG(reopened_helper_status.st_mode)
-        || sealed_shader_cache_detail::regular_file_identity(
+        || sealed_shader_cache_detail::regular_file_identity_from_stat(
                reopened_helper_status)
             != staged.helper_identity_) {
         return std::unexpected(
@@ -4356,9 +4360,9 @@ stage_archive_helper_invocation(
         || ::fstat(metallib_fd, &source_metallib) != 0
         || ::fstat(staged.metallib_fd_, &inherited_metallib) != 0
         || !S_ISREG(inherited_metallib.st_mode)
-        || sealed_shader_cache_detail::regular_file_identity(
+        || sealed_shader_cache_detail::regular_file_identity_from_stat(
                source_metallib)
-            != sealed_shader_cache_detail::regular_file_identity(
+            != sealed_shader_cache_detail::regular_file_identity_from_stat(
                 inherited_metallib)
         || !staged.helper_identity_matches()) {
         return std::unexpected(
@@ -4462,8 +4466,9 @@ stage_archive_helper_invocation(
     }
     struct stat metallib_after {};
     if (::fstat(metallib_fd, &metallib_after) != 0
-        || sealed_shader_cache_detail::regular_file_identity(metallib_before)
-            != sealed_shader_cache_detail::regular_file_identity(
+        || sealed_shader_cache_detail::regular_file_identity_from_stat(
+               metallib_before)
+            != sealed_shader_cache_detail::regular_file_identity_from_stat(
                 metallib_after)
         || metallib_size != static_cast<std::uint64_t>(metallib_after.st_size)
         || ::lseek(metallib_fd, 0, SEEK_SET) < 0) {
@@ -4550,9 +4555,9 @@ stage_archive_helper_invocation(
         struct stat metallib_after_execution {};
         const bool metallib_identity_unchanged =
             ::fstat(metallib_fd, &metallib_after_execution) == 0
-            && sealed_shader_cache_detail::regular_file_identity(
+            && sealed_shader_cache_detail::regular_file_identity_from_stat(
                    metallib_after_execution)
-                == sealed_shader_cache_detail::regular_file_identity(
+                == sealed_shader_cache_detail::regular_file_identity_from_stat(
                     metallib_after);
         auto staging_finished = staged_helper->finish();
         if (!staging_finished) {
@@ -4586,7 +4591,7 @@ stage_archive_helper_invocation(
             std::filesystem::remove(tmp_path, ec);
             std::filesystem::remove(qualification_tmp, ec);
             return std::unexpected(shader_cache_message(
-                "MTLBinaryArchive helper returned invalid negative-control evidence for ",
+                "MTLBinaryArchive helper returned an invalid negative-control result for ",
                 cache_file_stem(key), ": ", negative_error.error()));
         }
         auto helper_qualification =
@@ -4710,8 +4715,8 @@ make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes)
         || peak_request == (std::numeric_limits<std::uint64_t>::max)()) {
         return std::unexpected("metallib module admission size saturated");
     }
-    bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(peak_request, &admission_failure);
     if (!permit) {
         return std::unexpected(shader_cache_message(
@@ -4940,10 +4945,10 @@ ensure_compiled_for_sealed_seed(
     // Re-read and validate metadata after the metallib bytes are resident and
     // immediately before module creation.  The earlier completeness probe is
     // only an optimization; it cannot be the trust boundary because a compile
-    // service may report success without publishing a compatible record, and
+    // service may report success without publishing a contract-valid record, and
     // cache files may be replaced between the probe and this loader.
     std::string entry;
-    auto meta = read_compatible_cache_meta(cache_dir, key, &entry);
+    auto meta = read_validated_cache_meta(cache_dir, key, &entry);
     if (!meta) {
         return std::unexpected(meta.error());
     }
@@ -5098,7 +5103,8 @@ template <is_runtime_compile_service p_service>
         }
         if (auto published = cache_entry_status(cache_dir, key); !published) {
             return std::unexpected(shader_cache_message(
-                "shader compile service returned success without a complete compatible cache entry for ",
+                "shader compile service returned success without a complete "
+                "contract-valid cache entry for ",
                 cache_file_stem(key), ": ", published.error()));
         }
     }

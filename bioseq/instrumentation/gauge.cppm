@@ -65,10 +65,10 @@ inline named_gauge& get_named_gauge(
     return *created_gauge;
 }
 
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 [[gnu::always_inline]]
 inline void set_gauge_value(named_gauge& gauge, std::int64_t value) noexcept {
-    if constexpr (configuration_type::enable_profiling) {
+    if constexpr (p_configuration_type::enable_profiling) {
         gauge.value.store(value, std::memory_order_relaxed);
     } else {
         (void)gauge;

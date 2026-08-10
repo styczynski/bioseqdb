@@ -314,8 +314,8 @@ inline void validate_bridge_array_shape(
         target.alphabet_code,
         target.storage_unit_byte_width,
         [&result, target, elements, array,
-         first, have_first]<class Instance>() {
-            using traits = typename compact_sequence_range<Instance>::traits;
+         first, have_first]<class p_instance>() {
+            using traits = typename compact_sequence_range<p_instance>::traits;
             using unit = typename traits::storage_unit;
             const std::uint64_t length = static_cast<std::uint64_t>(
                 elements.count);
@@ -323,7 +323,7 @@ inline void validate_bridge_array_shape(
                 : length / traits::letters_per_unit
                     + static_cast<std::uint64_t>(
                         length % traits::letters_per_unit != 0u);
-            const Size total = bound_flat_size<Instance>(length);
+            const Size total = bound_flat_size<p_instance>(length);
             result = pg_alloc(total);
             if (result == nullptr) {
                 ereport(ERROR,
@@ -340,7 +340,7 @@ inline void validate_bridge_array_shape(
             using sink = bioseq::sequences::
                 fixed_rank_pack_unit_sink<unit>;
             using writer_type = bioseq::sequences::checked_rank_pack_sink<
-                Instance,
+                p_instance,
                 bioseq::sequences::invalid_rank_policy::reject,
                 bioseq::sequences::pack_capacity_policy::fixed_span,
                 sink>;

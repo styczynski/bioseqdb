@@ -245,7 +245,8 @@ struct search_index_entry {
         records.push_back(std::move(object));
     }
     boost::json::object document;
-    document["schema"] = "bioseq.website.search/v2";
+    document["schema"] = "bioseq.website.search";
+    document["schema_revision"] = 2;
     document["records"] = std::move(records);
     return serialize_canonical(document);
 }

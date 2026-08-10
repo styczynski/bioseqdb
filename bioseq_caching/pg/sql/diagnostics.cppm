@@ -13,11 +13,14 @@ export module bioseq.cache.pg.sql:diagnostics;
 import bioseq.cache.pg;
 import bioseq.cache.pg.sql.rows;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_sql_boundary;
+import bioseq.postgres.sql_boundary;
 
 export namespace bioseq::cache::pg::sql_catalog {
 
-/** Return the installed sibling extension version. */
+/**
+ * @brief Return the installed cache extension version.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -32,7 +35,10 @@ export namespace bioseq::cache::pg::sql_catalog {
     return "1.0";
 }
 
-/** Return the process-wide cache counters visible to the calling role. */
+/**
+ * @brief Return process-wide cache counters visible to the calling role.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .parallel = bioseq::sql::parallel_safety::restricted,
@@ -46,12 +52,15 @@ export namespace bioseq::cache::pg::sql_catalog {
     .privileges = bioseq::sql::privileges::execute,
     .to = "pg_read_all_stats",
 })]]
-[[nodiscard]] inline bioseq::pg_utils::returns_table<sql_rows::stats_row>
-stats(bioseq::pg_utils::sql_call_context call) {
+[[nodiscard]] inline bioseq::postgres::support::table_rows<sql_rows::stats_row>
+stats(bioseq::postgres::support::function_call_context call) {
     return sql_backend::stats(call);
 }
 
-/** Return exact and reusable cache generations visible to the calling role. */
+/**
+ * @brief Return exact and reusable cache generations visible to the calling role.
+ * @ingroup bioseq_sql_public_api
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache">,
     .parallel = bioseq::sql::parallel_safety::restricted,
@@ -66,8 +75,8 @@ stats(bioseq::pg_utils::sql_call_context call) {
     .to = "pg_read_all_stats",
 })]]
 [[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::cache_entry_row>
-entries(bioseq::pg_utils::sql_call_context call) {
+bioseq::postgres::support::table_rows<sql_rows::cache_entry_row>
+entries(bioseq::postgres::support::function_call_context call) {
     return sql_backend::entries(call);
 }
 

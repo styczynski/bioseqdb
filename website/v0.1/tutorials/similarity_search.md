@@ -28,8 +28,8 @@ coordinates and the alignment's CIGAR string. Those projections come from
 
 ```sql runnable id=canonical_mmsearch timeout=15s entity="sql:function:public.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.query_start(anyelement)" entity="sql:function:bioseq.query_end(anyelement)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
-SET bioseq.update_index_on_insert = on;
-SET bioseq.enable_vectorization = on;
+SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.vectorization.enabled = on;
 CREATE TABLE tutorial_mmsearch (
   pk integer PRIMARY KEY,
   seq0 bioseq.seq('dna4', 32)

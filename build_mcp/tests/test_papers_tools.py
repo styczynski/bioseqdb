@@ -7,7 +7,8 @@ import time
 import unittest
 from unittest import mock
 
-import server
+import build_worker
+import protocol
 
 
 _MINIMAL_PNG_HEADER = (
@@ -22,7 +23,7 @@ class PapersBuildTests(unittest.TestCase):
     def test_tool_definitions_expose_both_papers_tools(self):
         definitions = {
             definition["name"]: definition
-            for definition in server.TOOL_DEFINITIONS
+            for definition in protocol.TOOL_DEFINITIONS
         }
 
         self.assertIn("papers-build", definitions)
@@ -52,7 +53,7 @@ class PapersBuildTests(unittest.TestCase):
             log_path = root / "papers.log"
             state_path = root / "state.json"
             state_path.write_text(json.dumps({
-                server.PAPERS_BUILD_STATE_KEY: {
+                build_worker.PAPERS_BUILD_STATE_KEY: {
                     "status": "running",
                     "step": "spawning",
                     "started_at": time.time(),
@@ -70,24 +71,24 @@ class PapersBuildTests(unittest.TestCase):
                 return 0
 
             patches = (
-                mock.patch.object(server, "PAPERS_DIR", papers_dir),
-                mock.patch.object(server, "PAPERS_BUILD_DIR", build_dir),
-                mock.patch.object(server, "PAPERS_PDF_PATH", pdf_path),
-                mock.patch.object(server, "STATE_FILE", state_path),
+                mock.patch.object(build_worker, "PAPERS_DIR", papers_dir),
+                mock.patch.object(build_worker, "PAPERS_BUILD_DIR", build_dir),
+                mock.patch.object(build_worker, "PAPERS_PDF_PATH", pdf_path),
+                mock.patch.object(build_worker, "STATE_FILE", state_path),
                 mock.patch.object(
-                    server, "_refuse_root_build_identity",
+                    build_worker, "_refuse_root_build_identity",
                     return_value=None,
                 ),
                 mock.patch.object(
-                    server, "_ensure_build_worker_timesharing_policy"),
+                    build_worker, "_ensure_build_worker_timesharing_policy"),
                 mock.patch.object(
-                    server.shutil, "which", return_value="/usr/bin/cmake"),
+                    build_worker.shutil, "which", return_value="/usr/bin/cmake"),
                 mock.patch.object(
-                    server, "_stream_subprocess", side_effect=run_command),
+                    build_worker, "_stream_subprocess", side_effect=run_command),
             )
             with patches[0], patches[1], patches[2], patches[3], \
                     patches[4], patches[5], patches[6], patches[7]:
-                result = server._run_papers_build_worker()
+                result = build_worker._run_papers_build_worker()
 
             self.assertEqual(result, 0)
             self.assertEqual(commands[0][0], [
@@ -102,7 +103,7 @@ class PapersBuildTests(unittest.TestCase):
             )
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                state[server.PAPERS_BUILD_STATE_KEY]["status"],
+                state[build_worker.PAPERS_BUILD_STATE_KEY]["status"],
                 "completed",
             )
 
@@ -119,8 +120,8 @@ class PapersBuildTests(unittest.TestCase):
             "isError": False,
         }
         with mock.patch.object(
-                server, "tool_papers_inspect", return_value=expected):
-            actual = server._handle_tools_call({
+                protocol, "tool_papers_inspect", return_value=expected):
+            actual = protocol._handle_tools_call({
                 "name": "papers-inspect",
                 "arguments": {},
             })
@@ -141,7 +142,7 @@ class PapersInspectTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            diagnostics = server._papers_log_diagnostics(log_path)
+            diagnostics = build_worker._papers_log_diagnostics(log_path)
 
         self.assertEqual(
             diagnostics["overfull_boxes"][0]["overflow_pt"], 12.5)
@@ -170,9 +171,9 @@ class PapersInspectTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                    server.shutil, "which",
+                    build_worker.shutil, "which",
                     return_value="/usr/bin/pdftotext"):
-                pages, command = server._papers_text_bounds(
+                pages, command = build_worker._papers_text_bounds(
                     pdf_path, output_dir)
 
         self.assertTrue(command["cached"])
@@ -199,10 +200,10 @@ class PapersInspectTests(unittest.TestCase):
                 }
 
             with mock.patch.object(
-                    server.shutil, "which",
+                    build_worker.shutil, "which",
                     return_value="/usr/bin/pdftoppm"), mock.patch.object(
-                        server, "_run_capture", side_effect=render):
-                manifest, errors = server._render_papers_pages(
+                        build_worker, "_run_capture", side_effect=render):
+                manifest, errors = build_worker._render_papers_pages(
                     pdf_path, [2, 4], 160, output_dir)
 
         self.assertEqual(errors, [])
@@ -236,15 +237,15 @@ class PapersInspectTests(unittest.TestCase):
             }
 
             with mock.patch.object(
-                    server, "PAPERS_PDF_PATH", pdf_path), mock.patch.object(
-                        server, "PAPERS_LATEX_LOG_PATH", log_path), \
+                    build_worker, "PAPERS_PDF_PATH", pdf_path), mock.patch.object(
+                        build_worker, "PAPERS_LATEX_LOG_PATH", log_path), \
                     mock.patch.object(
-                        server, "PAPERS_INSPECT_ROOT", root / "inspect"), \
+                        build_worker, "PAPERS_INSPECT_ROOT", root / "inspect"), \
                     mock.patch.object(
-                        server, "_papers_pdf_info",
+                        build_worker, "_papers_pdf_info",
                         return_value=({"Pages": "1"}, pdfinfo_result)), \
                     mock.patch.object(
-                        server, "_papers_text_bounds",
+                        build_worker, "_papers_text_bounds",
                         return_value=([{
                             "page": 1,
                             "width_pt": 100.0,
@@ -254,15 +255,15 @@ class PapersInspectTests(unittest.TestCase):
                             "outside_text_boxes": [],
                         }], {"exit_code": 0})), \
                     mock.patch.object(
-                        server, "_render_papers_pages",
+                        build_worker, "_render_papers_pages",
                         return_value=(manifest, [])), \
                     mock.patch.object(
-                        server, "_papers_source_freshness",
+                        build_worker, "_papers_source_freshness",
                         return_value={
                             "stale": False,
                             "newer_sources": [],
                         }):
-                result = server.tool_papers_inspect({})
+                result = build_worker.tool_papers_inspect({})
 
         self.assertFalse(result["isError"])
         self.assertEqual(

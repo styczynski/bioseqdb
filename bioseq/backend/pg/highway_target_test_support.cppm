@@ -8,7 +8,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 #include <hwy/targets.h>
 
@@ -21,18 +21,19 @@ export module bioseq.highway_target_test_support;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.highway.dispatch_contract;
-import bioseq.postgres.support;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.scheduler.dispatch_processor;
 
 namespace {
 
 #if defined(BIOSEQ_TEST_INDEXES)
-struct HighwayTargetTestState {
+struct highway_target_test_state_record {
 	std::int64_t baseline_runnable_targets = 0;
 };
 
-[[nodiscard]] HighwayTargetTestState& highway_target_test_state() noexcept {
-	static HighwayTargetTestState state{};
+[[nodiscard]] highway_target_test_state_record&
+highway_target_test_state() noexcept {
+	static highway_target_test_state_record state{};
 	return state;
 }
 
@@ -42,7 +43,7 @@ struct HighwayTargetTestState {
 		return state.baseline_runnable_targets;
 	}
 	const auto info = bioseq::simd_dispatch::
-		registered_highway_dispatch_info();
+		registered_highway_dispatch_plan();
 	if (info.compiled_targets == 0
 		|| info.cpu_supported_targets == 0
 		|| info.runnable_targets == 0
@@ -147,7 +148,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 
 	hwy::SetSupportedTargetsForTest(target);
 	const auto forced = bioseq::simd_dispatch::
-		registered_highway_dispatch_info();
+		registered_highway_dispatch_plan();
 	if (forced.cpu_supported_targets != target
 		|| forced.runnable_targets != target
 		|| forced.planned_target != target

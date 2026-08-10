@@ -264,11 +264,12 @@ struct crc64_ecma182_accumulator {
     }
 
     /// Add an unsigned integer in fixed little-endian byte order.
-    template <class UInt>
-    requires (std::is_unsigned_v<UInt>)
-    constexpr void update_little_endian(UInt input) noexcept {
-        for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
-            update_byte(static_cast<std::uint8_t>(input & UInt{0xff}));
+    template <class p_unsigned_integer>
+    requires (std::is_unsigned_v<p_unsigned_integer>)
+    constexpr void update_little_endian(p_unsigned_integer input) noexcept {
+        for (std::size_t byte = 0; byte < sizeof(p_unsigned_integer); ++byte) {
+            update_byte(static_cast<std::uint8_t>(
+                input & p_unsigned_integer{0xff}));
             input >>= 8u;
         }
     }
@@ -378,8 +379,11 @@ struct crc64_ecma182_accumulator {
     } else {
         std::array<std::byte, 28> encoded{};
         std::size_t offset = 0u;
-        const auto append_little_endian = [&]<class UInt>(UInt input) {
-            for (std::size_t byte = 0u; byte < sizeof(UInt); ++byte) {
+        const auto append_little_endian =
+            [&]<class p_unsigned_integer>(p_unsigned_integer input) {
+            for (std::size_t byte = 0u;
+                 byte < sizeof(p_unsigned_integer);
+                 ++byte) {
                 encoded[offset++] = static_cast<std::byte>(input & 0xffu);
                 input >>= 8u;
             }
@@ -456,7 +460,7 @@ plan_index_tuple_batch_append(
 
 /// Publication succeeds only when PostgreSQL RETURNING yields the complete
 /// proven fixed wire byte-for-byte. Decoded-field subsets are insufficient:
-/// compatibility, manifest and content checksum words are all authoritative.
+/// storage-contract, manifest, and content-checksum words are authoritative.
 [[nodiscard]] constexpr bool is_fixed_wire_returned_exactly(
         std::span<const std::byte> proven,
         std::span<const std::byte> returned) noexcept {
@@ -469,8 +473,12 @@ plan_index_tuple_batch_append(
 /// `capacity_units` **T-units** (== `chunk_bytes / sizeof(T)`; the storage guarantees
 /// `chunk_bytes % sizeof(T) == 0`). The writer fills `buf[0..n)` and returns the index
 /// of the NEXT chunk to visit (`>= chunk_no`; `== chunk_no` => the loop advances by 1).
-template <class F, class T>
-concept index_chunk_writer_fn = requires (F&& fn, std::size_t chunk_no, T* buf, std::size_t capacity_units) {
+template <class p_function, class p_value>
+concept index_chunk_writer_fn = requires (
+        p_function&& fn,
+        std::size_t chunk_no,
+        p_value* buf,
+        std::size_t capacity_units) {
     { fn(chunk_no, buf, capacity_units) } -> std::same_as<std::size_t>;
 };
 
@@ -552,9 +560,9 @@ struct index_chunk_read_stats {
 };
 
 /// Callback contract for one transient, validated qualified chunk payload.
-template <class F>
+template <class p_function>
 concept index_chunk_reader_fn = requires (
-        F&& sink,
+        p_function&& sink,
         const index_chunk_address& address,
         const char* payload,
         std::size_t payload_bytes) {
@@ -574,9 +582,10 @@ struct index_sub_key_probe {
     void operator()(index_sub_key_t) const noexcept {}
 };
 
-template <class T>
+template <class p_value>
 struct index_chunk_writer_probe {
-    std::size_t operator()(std::size_t, T*, std::size_t) const noexcept {
+    std::size_t operator()(
+            std::size_t, p_value*, std::size_t) const noexcept {
         return std::size_t{0};
     }
 };
@@ -586,26 +595,29 @@ struct index_merge_batch_probe {
 };
 
 struct index_merge_runs_probe {
-    template <class Positions>
-    void operator()(std::uint64_t, Positions&& positions) const {
+    template <class p_positions>
+    void operator()(std::uint64_t, p_positions&& positions) const {
         (void)positions.total_count();
         positions.for_each_batch(index_merge_batch_probe{});
     }
 };
 
 struct index_sequence_loader_probe {
-    template <class LazySequence>
-    void operator()(LazySequence&, std::size_t, std::size_t) const noexcept {}
+    template <class p_lazy_sequence>
+    void operator()(
+            p_lazy_sequence&, std::size_t, std::size_t) const noexcept {}
 };
 
 // primary: nothing satisfies it until specialised per sequence_index_layout
-template <class T, sequence_index_layout index_type>
+template <class p_storage, sequence_index_layout p_index_type>
 constexpr inline bool is_index_chunked_storage_for_v = false;
 
 // ---- CHUNKED_PER_FRAGMENT (per-sequence, 2-D sub_key x chunk) ----
-template <class T>
-constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::fragment_chunks> =
-    requires (T& s, const T& cs, index_sub_key_t sub_key, std::size_t chunk_no, std::size_t bytes) {
+template <class p_storage>
+constexpr inline bool is_index_chunked_storage_for_v<
+    p_storage, sequence_index_layout::fragment_chunks> =
+    requires (p_storage& s, const p_storage& cs, index_sub_key_t sub_key,
+              std::size_t chunk_no, std::size_t bytes) {
         { cs.number_of_sub_keys()                 } -> std::convertible_to<std::size_t>;
         { cs.number_of_chunks(sub_key)            } -> std::convertible_to<std::size_t>;
         { cs.chunk_byte_size(sub_key, chunk_no)   } -> std::convertible_to<std::size_t>;
@@ -641,9 +653,10 @@ constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::f
     };
 
 // ---- INLINE_PER_SEQUENCE (exactly one chunk) ----
-template <class T>
-constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::sequence_inline> =
-    requires (T& s, const T& cs, std::size_t bytes) {
+template <class p_storage>
+constexpr inline bool is_index_chunked_storage_for_v<
+    p_storage, sequence_index_layout::sequence_inline> =
+    requires (p_storage& s, const p_storage& cs, std::size_t bytes) {
         { cs.number_of_chunks()                   } -> std::convertible_to<std::size_t>;   // must == 1 (runtime-asserted)
         { cs.chunk_byte_size()                    } -> std::convertible_to<std::size_t>;
         { s.template read_chunk<std::int64_t>()   } -> std::same_as<const std::int64_t*>;
@@ -657,9 +670,11 @@ constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::s
     };
 
 // ---- CHUNKED_PER_TABLE (flat chunk space + write_to(chunk_no) + for_each_sequence) ----
-template <class T>
-constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::table_chunks> =
-    requires (T& s, const T& cs, std::size_t chunk_no, std::size_t bytes) {
+template <class p_storage>
+constexpr inline bool is_index_chunked_storage_for_v<
+    p_storage, sequence_index_layout::table_chunks> =
+    requires (p_storage& s, const p_storage& cs, std::size_t chunk_no,
+              std::size_t bytes) {
         { cs.number_of_chunks()                   } -> std::convertible_to<std::size_t>;
         { cs.chunk_byte_size(chunk_no)            } -> std::convertible_to<std::size_t>;
         { s.template read_chunk<std::int64_t>(chunk_no) } -> std::same_as<const std::int64_t*>;
@@ -676,22 +691,26 @@ constexpr inline bool is_index_chunked_storage_for_v<T, sequence_index_layout::t
         { s.clear(std::string_view{})             } -> std::same_as<void>;
     };
 
-template <class T, sequence_index_layout index_type>
-concept is_index_chunked_storage_for = is_index_chunked_storage_for_v<T, index_type>;
+template <class p_storage, sequence_index_layout p_index_type>
+concept is_index_chunked_storage_for =
+    is_index_chunked_storage_for_v<p_storage, p_index_type>;
 
-template <class T>
+template <class p_storage>
 concept is_index_chunked_storage =
-       is_index_chunked_storage_for<T, sequence_index_layout::fragment_chunks>
-    || is_index_chunked_storage_for<T, sequence_index_layout::sequence_inline>
-    || is_index_chunked_storage_for<T, sequence_index_layout::table_chunks>;
+       is_index_chunked_storage_for<
+           p_storage, sequence_index_layout::fragment_chunks>
+    || is_index_chunked_storage_for<
+           p_storage, sequence_index_layout::sequence_inline>
+    || is_index_chunked_storage_for<
+           p_storage, sequence_index_layout::table_chunks>;
 
 /// The external-sort spill sub-concept (§6.3). Only minimizers_per_sequence
 /// requires it. `IndexStorageFragmentPg` satisfies both this and the per-fragment
 /// concept; it is kept as a named sub-concept for documentation + the index's own
 /// `requires` clause.
-template <class T>
+template <class p_storage>
 concept is_external_sort_spill_storage =
-    requires (T& s) {
+    requires (p_storage& s) {
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned_admitted(

@@ -41,7 +41,7 @@ struct rendered_guc_package {
     rendered_guc_registry_module registry;
 };
 
-struct guc_profile_delta_proof {
+struct guc_profile_delta_validation {
     std::vector<std::string> added_in_test_indexes;
     std::vector<std::string> removed_from_test_indexes;
     std::vector<std::string> changed_in_test_indexes;
@@ -73,7 +73,7 @@ struct guc_profile_projection {
 };
 
 struct guc_profile_delta_evidence {
-    guc_profile_delta_proof proof;
+    guc_profile_delta_validation validation;
     std::string production_registry_content_sha256;
     std::string test_indexes_registry_content_sha256;
     std::map<
@@ -84,6 +84,29 @@ struct guc_profile_delta_evidence {
 };
 
 namespace guc_render_detail {
+
+inline constexpr std::array<std::string_view, 3>
+    k_test_indexes_only_guc_names{
+        "bioseq.testing.chunked_scanner.enabled",
+        "bioseq.testing.in_memory_scanner.enabled",
+        "bioseq.testing.persisted_index.failure_mode",
+    };
+
+inline constexpr std::size_t k_production_guc_count = 73;
+inline constexpr std::size_t k_test_indexes_guc_count = 76;
+inline constexpr std::size_t k_production_core_guc_count = 26;
+inline constexpr std::size_t k_test_indexes_core_guc_count = 29;
+
+template <typename p_indexed_gucs>
+[[nodiscard]] inline std::size_t owner_guc_count(
+    const p_indexed_gucs& gucs,
+    std::string_view owner_key) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        gucs,
+        [owner_key](const auto& entry) {
+            return entry.second->owner_key == owner_key;
+        }));
+}
 
 [[nodiscard]] inline std::string cpp_string(std::string_view value) {
     std::string result{"\""};
@@ -336,7 +359,7 @@ inline void render_hook_arguments(
     guc_profile profile,
     std::string_view owner_key,
     std::string_view generated_module_prefix =
-        "bioseq.sql.generated") {
+        "bioseq.postgres.sql.generated") {
     return std::string{generated_module_prefix} + "."
         + std::string{guc_profile_name(profile)}
         + "." + std::string{owner_key} + ".gucs";
@@ -771,7 +794,7 @@ render_primitive_guc_registration_contract_probe(
 [[nodiscard]] inline rendered_guc_package render_guc_package(
     const guc_inventory& inventory,
     std::string_view generated_module_prefix =
-        "bioseq.sql.generated",
+        "bioseq.postgres.sql.generated",
     std::string_view boundary_module =
         "bioseq.postgres.support.sql_boundary") {
     static constexpr std::string_view owner_order[] = {
@@ -881,7 +904,7 @@ make_guc_profile_projection(
     return result;
 }
 
-[[nodiscard]] inline guc_profile_delta_proof prove_guc_profile_delta(
+[[nodiscard]] inline guc_profile_delta_validation validate_guc_profile_delta(
     const guc_profile_projection& production,
     const guc_profile_projection& test_indexes) {
     if (production.profile != guc_profile::production
@@ -928,22 +951,22 @@ make_guc_profile_projection(
         test_indexes.registrations,
         test_by_name,
         "test_indexes");
-    guc_profile_delta_proof proof;
+    guc_profile_delta_validation validation;
     for (const auto& [name, row] : test_by_name) {
         const auto baseline = production_by_name.find(name);
         if (baseline == production_by_name.end()) {
-            proof.added_in_test_indexes.push_back(name);
+            validation.added_in_test_indexes.push_back(name);
         } else if (
             guc_profile_projection_row_signature(*row)
             != guc_profile_projection_row_signature(
                 *baseline->second)) {
-            proof.changed_in_test_indexes.push_back(name);
+            validation.changed_in_test_indexes.push_back(name);
         }
     }
     for (const auto& [name, row] : production_by_name) {
         static_cast<void>(row);
         if (!test_by_name.contains(name)) {
-            proof.removed_from_test_indexes.push_back(name);
+            validation.removed_from_test_indexes.push_back(name);
         }
     }
     static constexpr std::string_view owners[] = {
@@ -974,23 +997,34 @@ make_guc_profile_projection(
                 }
             }
         }
-        proof.owner_descriptor_profile_invariant.emplace(
+        validation.owner_descriptor_profile_invariant.emplace(
             std::string{owner}, invariant);
     }
-    if (proof.added_in_test_indexes
-        != std::vector<std::string>{
-                "bioseq.testing.persisted_index.failure_mode"}
-        || !proof.removed_from_test_indexes.empty()
-        || !proof.changed_in_test_indexes.empty()
-        || proof.owner_descriptor_profile_invariant.at("bioseq")
-        || !proof.owner_descriptor_profile_invariant.at("scheduler")
-        || !proof.owner_descriptor_profile_invariant.at("storage")
-        || !proof.owner_descriptor_profile_invariant.at("aligner")) {
+    if (production_by_name.size()
+            != guc_render_detail::k_production_guc_count
+        || test_by_name.size()
+            != guc_render_detail::k_test_indexes_guc_count
+        || guc_render_detail::owner_guc_count(
+               production_by_name, "bioseq")
+            != guc_render_detail::k_production_core_guc_count
+        || guc_render_detail::owner_guc_count(
+               test_by_name, "bioseq")
+            != guc_render_detail::k_test_indexes_core_guc_count
+        || !std::ranges::equal(
+            validation.added_in_test_indexes,
+            guc_render_detail::k_test_indexes_only_guc_names)
+        || !validation.removed_from_test_indexes.empty()
+        || !validation.changed_in_test_indexes.empty()
+        || validation.owner_descriptor_profile_invariant.at("bioseq")
+        || !validation.owner_descriptor_profile_invariant.at("scheduler")
+        || !validation.owner_descriptor_profile_invariant.at("storage")
+        || !validation.owner_descriptor_profile_invariant.at("aligner")) {
         throw std::runtime_error(
-            "GUC production/test_indexes projection delta is not the "
-            "single documented test-only setting");
+            "GUC production/test_indexes projection does not match the "
+            "current 73/76 registration totals, 26/29 core-owner totals, "
+            "and exact three-setting test-only delta");
     }
-    return proof;
+    return validation;
 }
 
 [[nodiscard]] inline guc_profile_delta_evidence
@@ -1004,7 +1038,7 @@ make_guc_profile_delta_evidence(
             "GUC profile projections do not seal the same four owners");
     }
     guc_profile_delta_evidence evidence{
-        .proof = prove_guc_profile_delta(
+        .validation = validate_guc_profile_delta(
             production, test_indexes),
         .production_registry_content_sha256 =
             production.registry_content_sha256,
@@ -1035,13 +1069,14 @@ make_guc_profile_delta_evidence(
     return evidence;
 }
 
-[[nodiscard]] inline guc_profile_delta_proof prove_guc_profile_delta(
+[[nodiscard]] inline guc_profile_delta_validation validate_guc_profile_delta(
     const guc_inventory& production,
     const guc_inventory& test_indexes) {
     if (production.profile != guc_profile::production
         || test_indexes.profile != guc_profile::test_indexes) {
         throw std::runtime_error(
-            "GUC profile delta proof requires production then test_indexes");
+            "GUC profile delta validation requires production then "
+            "test_indexes");
     }
     std::map<std::string, const collected_guc*, std::less<>>
         production_by_name;
@@ -1053,22 +1088,22 @@ make_guc_profile_delta_evidence(
     for (const collected_guc& guc : test_indexes.gucs) {
         test_by_name.emplace(guc.name, &guc);
     }
-    guc_profile_delta_proof proof;
+    guc_profile_delta_validation validation;
     for (const auto& [name, guc] : test_by_name) {
         const auto baseline = production_by_name.find(name);
         if (baseline == production_by_name.end()) {
-            proof.added_in_test_indexes.push_back(name);
+            validation.added_in_test_indexes.push_back(name);
         } else if (
             guc_render_detail::descriptor_signature(*guc)
             != guc_render_detail::descriptor_signature(
                 *baseline->second)) {
-            proof.changed_in_test_indexes.push_back(name);
+            validation.changed_in_test_indexes.push_back(name);
         }
     }
     for (const auto& [name, guc] : production_by_name) {
         static_cast<void>(guc);
         if (!test_by_name.contains(name)) {
-            proof.removed_from_test_indexes.push_back(name);
+            validation.removed_from_test_indexes.push_back(name);
         }
     }
     static constexpr std::string_view owners[] = {
@@ -1099,23 +1134,34 @@ make_guc_profile_delta_evidence(
                 }
             }
         }
-        proof.owner_descriptor_profile_invariant.emplace(
+        validation.owner_descriptor_profile_invariant.emplace(
             std::string{owner}, invariant);
     }
-    if (proof.added_in_test_indexes
-        != std::vector<std::string>{
-                "bioseq.testing.persisted_index.failure_mode"}
-        || !proof.removed_from_test_indexes.empty()
-        || !proof.changed_in_test_indexes.empty()
-        || proof.owner_descriptor_profile_invariant.at("bioseq")
-        || !proof.owner_descriptor_profile_invariant.at("scheduler")
-        || !proof.owner_descriptor_profile_invariant.at("storage")
-        || !proof.owner_descriptor_profile_invariant.at("aligner")) {
+    if (production_by_name.size()
+            != guc_render_detail::k_production_guc_count
+        || test_by_name.size()
+            != guc_render_detail::k_test_indexes_guc_count
+        || guc_render_detail::owner_guc_count(
+               production_by_name, "bioseq")
+            != guc_render_detail::k_production_core_guc_count
+        || guc_render_detail::owner_guc_count(
+               test_by_name, "bioseq")
+            != guc_render_detail::k_test_indexes_core_guc_count
+        || !std::ranges::equal(
+            validation.added_in_test_indexes,
+            guc_render_detail::k_test_indexes_only_guc_names)
+        || !validation.removed_from_test_indexes.empty()
+        || !validation.changed_in_test_indexes.empty()
+        || validation.owner_descriptor_profile_invariant.at("bioseq")
+        || !validation.owner_descriptor_profile_invariant.at("scheduler")
+        || !validation.owner_descriptor_profile_invariant.at("storage")
+        || !validation.owner_descriptor_profile_invariant.at("aligner")) {
         throw std::runtime_error(
-            "GUC production/test_indexes delta is not the single "
-            "documented test-only setting");
+            "GUC production/test_indexes inventory does not match the "
+            "current 73/76 registration totals, 26/29 core-owner totals, "
+            "and exact three-setting test-only delta");
     }
-    return proof;
+    return validation;
 }
 
 [[nodiscard]] inline std::string merge_guc_manifest(
@@ -1201,9 +1247,9 @@ make_guc_profile_delta_evidence(
         ? &*derived_delta
         : nullptr;
     if (delta != nullptr) {
-        const guc_profile_delta_proof& proof = delta->proof;
+        const guc_profile_delta_validation& validation = delta->validation;
         output
-            << "    \"profile_delta_proof\": {\n"
+            << "    \"profile_delta_validation\": {\n"
             << "      \"production_registry_content_sha256\": "
             << guc_render_detail::json_string(
                 delta->production_registry_content_sha256)
@@ -1214,11 +1260,11 @@ make_guc_profile_delta_evidence(
             << ",\n"
             << "      \"added_in_test_indexes\": [";
         for (std::size_t index = 0;
-             index < proof.added_in_test_indexes.size();
+             index < validation.added_in_test_indexes.size();
              ++index) {
             if (index != 0) output << ", ";
             output << guc_render_detail::json_string(
-                proof.added_in_test_indexes[index]);
+                validation.added_in_test_indexes[index]);
         }
         output << "],\n"
                << "      \"removed_from_test_indexes\": [],\n"
@@ -1226,12 +1272,12 @@ make_guc_profile_delta_evidence(
                << "      \"owner_descriptor_profile_invariant\": {\n";
         std::size_t owner_index = 0;
         for (const auto& [owner, invariant] :
-             proof.owner_descriptor_profile_invariant) {
+             validation.owner_descriptor_profile_invariant) {
             output << "        "
                    << guc_render_detail::json_string(owner)
                    << ": " << (invariant ? "true" : "false")
                    << (++owner_index
-                               == proof.owner_descriptor_profile_invariant
+                               == validation.owner_descriptor_profile_invariant
                                       .size()
                            ? "\n"
                            : ",\n");

@@ -1,6 +1,6 @@
 """Native package worker orchestration.
 
-This module owns the schema-v1 cell state machine.  Format backends construct
+This module owns the current cell state machine.  Format backends construct
 packages and repositories; the acceptance, signing, and publication services
 produce the evidence that permits each manifest transition.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 from dataclasses import dataclass
-import hashlib
 import os
 from pathlib import Path
 import platform
@@ -18,8 +17,10 @@ import re
 from typing import Any, Callable
 
 from .acceptance import AcceptanceService, verify_published_signatures
+from .artifacts import sha256_file
 from .commands import CommandRunner, Redactor
 from .config import (
+    MANIFEST_SCHEMA_REVISION,
     PACKAGE_VERSION,
     build_cells,
     native_architecture,
@@ -69,14 +70,6 @@ class _Services:
     acceptance: AcceptanceService
     publisher: Publisher
     environment: Mapping[str, str]
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _python_environment() -> dict[str, str]:
@@ -159,7 +152,7 @@ def _validate_provenance(
         or not project_file.is_file()
     ):
         raise PackageBuildError("committed Poetry project or lock file is missing")
-    if _sha256(lock_file) != request.poetry_lock_sha256:
+    if sha256_file(lock_file) != request.poetry_lock_sha256:
         raise PackageBuildError(
             "committed poetry.lock differs from --poetry-lock-sha256"
         )
@@ -169,9 +162,9 @@ def _validate_provenance(
         raise PackageBuildError(
             "BIOSEQ_POETRY_VERSION must identify the locked Poetry 1.8 runtime"
         )
-    if os.environ.get("BIOSEQ_OPTTIMIZATION_LEVEL") != "0":
+    if os.environ.get("BIOSEQ_TEMPLATE_FLATTEN_PROFILE") != "dna4_uint64":
         raise PackageBuildError(
-            "BIOSEQ_OPTTIMIZATION_LEVEL must be exactly 0 for package builds"
+            "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be dna4_uint64 for package builds"
         )
 
     actual_architecture = native_architecture()
@@ -338,7 +331,7 @@ def _bootstrap_failure_manifest(
 
     now = utc_now()
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_revision": MANIFEST_SCHEMA_REVISION,
         "package_version": PACKAGE_VERSION,
         "architecture": str(getattr(arguments, "architecture", "")),
         "status": "failed",

@@ -126,7 +126,7 @@ def template_variables(cell: CellContext) -> dict[str, object]:
         "homepage": PACKAGE_HOMEPAGE,
         "architecture": _debian_architecture(cell),
         "postgres_major": cell.postgres_major,
-        "optimization_level": 0,
+        "template_flatten_profile": "dna4_uint64",
         "build_dependencies": list(cell.distro.build_dependencies),
         "runtime_dependencies": list(_runtime_dependencies(cell)),
     }
@@ -213,7 +213,7 @@ def build_environment(cell: CellContext) -> dict[str, str]:
         "BIOSEQ_ARCHITECTURE": _enum_value(cell.request.architecture),
         "BIOSEQ_BUILD_DEPENDENCIES": "\n".join(cell.distro.build_dependencies),
         "BIOSEQ_DISTRO_ID": cell.distro.distro_id,
-        "BIOSEQ_OPTTIMIZATION_LEVEL": "0",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
         "BIOSEQ_PACKAGE_NAME": cell.package_name,
         "BIOSEQ_PACKAGE_PARALLELISM": "4",
         "BIOSEQ_PACKAGE_VERSION": cell.package_version,

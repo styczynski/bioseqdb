@@ -103,7 +103,7 @@ run_ncbi_datasets_stream(std::string_view accession, prov::query_target target,
             prov::external_error_kind::cancelled, ncbi_provider_id(),
             "datasets_download", "package download cancelled"));
       }
-      const bioseq::io::read_result result =
+      const bioseq::io::source_read_result result =
           source.read_into(buffer.data(), buffer.size());
       if (result.has_error) {
         transport_failed = true;

@@ -11,7 +11,7 @@
         "default": "minimizers_per_fragment",
         "enum": ["minimizers_per_fragment"]
       },
-      "recompute_async_persist": {
+      "recompute_async_persistence": {
         "type": "string",
         "default": "off",
         "enum": ["off"]
@@ -58,7 +58,7 @@
       "over": {
         "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced": {
           "minimizer_index": ["minimizers_per_fragment"],
-          "recompute_async_persist": ["off"],
+          "recompute_async_persistence": ["off"],
           "pipeline_mode": ["task_parallel"]
         }
       },

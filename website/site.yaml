@@ -18,5 +18,13 @@ navigation:
 cpp_public_modules:
   - module: bioseq.io.reader
     primary_interface: bioseq/io/reader.cppm
+  - module: bioseq.cache.provider_api
+    primary_interface: common/cache_provider_api/index.cppm
 required_documentation_entities:
   - sql:type:bioseq.seq
+  - sql:function:bioseq_cache.version()
+  - sql:function:bioseq_cache.stats()
+  - sql:function:bioseq_cache.entries()
+  - sql:function:bioseq_cache.invalidate_all()
+  - sql:function:bioseq_cache.invalidate_relation(regclass)
+  - sql:function:bioseq_cache.reset_stats()

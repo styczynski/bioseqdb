@@ -40,7 +40,70 @@ class ExternalAcceptanceError(RuntimeError):
     """The external-enabled package or its live evidence is incomplete."""
 
 
-RECEIPT_SCHEMA = "bioseq_external_postgres_acceptance/v1"
+RECEIPT_SCHEMA = "bioseq.external_postgres.acceptance_receipt"
+RECEIPT_SCHEMA_REVISION = 1
+STAGE_MANIFEST_SCHEMA = "bioseq.private_postgres.stage_manifest"
+STAGE_MANIFEST_SCHEMA_REVISION = 3
+ARTIFACT_SPEC_SCHEMA = "bioseq.private_postgres.artifacts"
+ARTIFACT_SPEC_SCHEMA_REVISION = 1
+GENERATED_SQL_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_revision",
+        "authority_mode",
+        "compiler_profile",
+        "clang_version",
+        "compilation_signature",
+        "extension_name",
+        "extension_schema",
+        "generated_module_prefix",
+        "fmgr_boundary_module",
+        "script_sha256",
+        "statement_count",
+        "statements",
+        "entity_count",
+        "public_entity_count",
+        "public_stable_identities",
+        "public_installed_identities",
+        "routine_entity_count",
+        "c_routine_identity_count",
+        "c_link_symbol_inventory_count",
+        "c_finfo_symbol_inventory_count",
+        "c_wrapper_entity_count",
+        "generated_wrapper_symbol_count",
+        "handwritten_fmgr_export_symbol_count",
+        "handwritten_fmgr_export_external_symbol_count",
+        "handwritten_fmgr_export_owner_count",
+        "c_symbol_sharing_group_count",
+        "generated_cpp_profile_invariant",
+        "entity_handle_count",
+        "entity_handle_module_count",
+        "entity_handle_modules",
+        "row_codec_count",
+        "row_codec_module_count",
+        "row_codec_modules",
+        "routine_boundary_contract_count",
+        "routine_boundary_contracts",
+        "result_shape_contract_count",
+        "result_shape_contracts",
+        "row_codec_contract_count",
+        "row_codec_contracts",
+        "c_routine_identities",
+        "c_link_symbols",
+        "c_finfo_symbols",
+        "generated_wrapper_symbols",
+        "handwritten_fmgr_export_symbols",
+        "handwritten_fmgr_export_external_symbols",
+        "fmgr_entrypoint_module_count",
+        "fmgr_entrypoint_modules",
+        "handwritten_fmgr_export_owners",
+        "c_symbol_owners",
+        "entity_counts_by_kind",
+        "entities",
+        "guc_generation",
+    }
+)
+RUNTIME_CLOSURE_ALGORITHM = "postgresql.materialized_package"
+RUNTIME_CLOSURE_SCHEMA_REVISION = 1
 INSTALL_SCHEMA = "external_acceptance_install"
 DENIED_ROLE = "external_acceptance_denied"
 LIFECYCLE_TABLE = f"{INSTALL_SCHEMA}.external_lifecycle_probe"
@@ -599,9 +662,17 @@ def _validate_generated_manifest(
     install_sql: Path,
     repository_root: Path,
 ) -> dict[str, object]:
-    if manifest.get("manifest_version") != 1:
+    unknown = sorted(set(manifest) - GENERATED_SQL_MANIFEST_FIELDS)
+    if unknown:
         raise ExternalAcceptanceError(
-            "generated manifest version is not exactly 1"
+            f"generated manifest has unknown fields: {unknown}"
+        )
+    if (
+        type(manifest.get("schema_revision")) is not int
+        or manifest["schema_revision"] != 1
+    ):
+        raise ExternalAcceptanceError(
+            "generated manifest schema revision is not exactly 1"
         )
     if manifest.get("authority_mode") != "annotated_cpp":
         raise ExternalAcceptanceError(
@@ -835,6 +906,342 @@ def _git_provenance(
     }
 
 
+def _artifact_spec_document(
+    *,
+    control_file: Path,
+    install_sql: Path,
+    dso: Path,
+) -> dict[str, object]:
+    return {
+        "schema": ARTIFACT_SPEC_SCHEMA,
+        "schema_revision": ARTIFACT_SPEC_SCHEMA_REVISION,
+        "artifacts": [{
+            "name": "bioseq",
+            "control": str(control_file),
+            "install_sql": str(install_sql),
+            "library": str(dso),
+        }],
+    }
+
+
+def _validate_artifact_spec(
+    value: object,
+    *,
+    control_file: Path,
+    install_sql: Path,
+    dso: Path,
+) -> dict[str, Any]:
+    spec = _exact_mapping(
+        value,
+        {"schema", "schema_revision", "artifacts"},
+        "external acceptance artifact specification",
+    )
+    revision = _nonnegative_integer(
+        spec["schema_revision"],
+        "external acceptance artifact specification schema revision",
+    )
+    if (
+        spec["schema"] != ARTIFACT_SPEC_SCHEMA
+        or revision != ARTIFACT_SPEC_SCHEMA_REVISION
+    ):
+        raise ExternalAcceptanceError(
+            "external acceptance artifact specification schema is invalid"
+        )
+    artifacts = spec["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 1:
+        raise ExternalAcceptanceError(
+            "external acceptance requires exactly one staged artifact"
+        )
+    artifact = _exact_mapping(
+        artifacts[0],
+        {"name", "control", "install_sql", "library"},
+        "external acceptance artifact",
+    )
+    expected = _artifact_spec_document(
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+    )["artifacts"][0]
+    if artifact != expected:
+        raise ExternalAcceptanceError(
+            "external acceptance artifact specification is inconsistent"
+        )
+    return spec
+
+
+def _stage_package_aggregate(
+    *,
+    control_file: Path,
+    install_sql: Path,
+    dso: Path,
+    control_sha256: str,
+    install_sql_sha256: str,
+    library_sha256: str,
+) -> str:
+    record = (
+        "artifact:bioseq\n"
+        "module_pathname_override:\n"
+        f"control:{control_file.name}:{control_sha256}\n"
+        f"install_sql:{install_sql.name}:{install_sql_sha256}\n"
+        f"library:{dso.name}:{library_sha256}\n"
+    ).encode("utf-8")
+    return _sha256_bytes(record)
+
+
+def _runtime_entry_record(entry: Mapping[str, Any]) -> str:
+    return (
+        f"root:{entry['root']}\n"
+        f"path:{entry['path']}\n"
+        f"kind:{entry['kind']}\n"
+        f"source_kind:{entry['source_kind']}\n"
+        f"source_path:{entry['source_path']}\n"
+        "source_link_target:"
+        f"{entry['source_link_target'] if entry['source_link_target'] is not None else '-'}\n"
+        f"resolved_source_path:{entry['resolved_source_path']}\n"
+        f"size:{entry['size'] if entry['size'] is not None else '-'}\n"
+        f"sha256:{entry['sha256'] if entry['sha256'] is not None else '-'}\n"
+    )
+
+
+def _loader_entry_record(entry: Mapping[str, Any]) -> str:
+    return (
+        f"source:{entry['source']}\n"
+        f"staged:{entry['staged']}\n"
+        f"size:{entry['size']}\n"
+        f"sha256:{entry['sha256']}\n"
+    )
+
+
+def _validate_runtime_closure(
+    value: object,
+    *,
+    source: Mapping[str, Any],
+    staged: Mapping[str, Any],
+) -> dict[str, object]:
+    closure = _exact_mapping(
+        value,
+        {
+            "algorithm",
+            "schema_revision",
+            "entry_count",
+            "aggregate_sha256",
+            "roots",
+            "required_sentinels",
+            "loader_dependencies",
+            "entries",
+        },
+        "stage runtime closure",
+    )
+    revision = _nonnegative_integer(
+        closure["schema_revision"], "stage runtime closure schema revision"
+    )
+    if (
+        closure["algorithm"] != RUNTIME_CLOSURE_ALGORITHM
+        or revision != RUNTIME_CLOSURE_SCHEMA_REVISION
+    ):
+        raise ExternalAcceptanceError(
+            "stage runtime closure algorithm/schema is invalid"
+        )
+    roots = _exact_mapping(
+        closure["roots"],
+        {"bindir", "sharedir", "pkglibdir"},
+        "stage runtime roots",
+    )
+    for name in ("bindir", "sharedir", "pkglibdir"):
+        root = _exact_mapping(
+            roots[name],
+            {"reported_source", "canonical_source", "staged"},
+            f"stage runtime {name} root",
+        )
+        if (
+            root["reported_source"] != source[name]
+            or root["staged"] != staged[name]
+            or not isinstance(root["canonical_source"], str)
+            or not Path(root["canonical_source"]).is_absolute()
+        ):
+            raise ExternalAcceptanceError(
+                f"stage runtime {name} root is inconsistent"
+            )
+
+    entries = closure["entries"]
+    entry_count = _nonnegative_integer(
+        closure["entry_count"], "stage runtime closure entry count"
+    )
+    if not isinstance(entries, list) or len(entries) != entry_count:
+        raise ExternalAcceptanceError(
+            "stage runtime closure entry count is inconsistent"
+        )
+    runtime_records: list[str] = []
+    runtime_keys: list[tuple[int, str]] = []
+    root_order = {"bindir": 0, "sharedir": 1, "pkglibdir": 2}
+    for index, raw_entry in enumerate(entries):
+        entry = _exact_mapping(
+            raw_entry,
+            {
+                "root",
+                "path",
+                "kind",
+                "source_kind",
+                "source_path",
+                "source_link_target",
+                "resolved_source_path",
+                "size",
+                "sha256",
+            },
+            f"stage runtime entry {index}",
+        )
+        relative = Path(entry["path"]) if isinstance(entry["path"], str) else Path()
+        if (
+            not isinstance(entry["root"], str)
+            or entry["root"] not in roots
+            or not isinstance(entry["path"], str)
+            or not entry["path"]
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or "\\" in entry["path"]
+            or not isinstance(entry["kind"], str)
+            or entry["kind"] not in {"file", "dir"}
+            or not isinstance(entry["source_kind"], str)
+            or entry["source_kind"] not in {"file", "dir", "symlink"}
+            or not isinstance(entry["source_path"], str)
+            or not Path(entry["source_path"]).is_absolute()
+            or not isinstance(entry["resolved_source_path"], str)
+            or not Path(entry["resolved_source_path"]).is_absolute()
+        ):
+            raise ExternalAcceptanceError(
+                f"stage runtime entry {index} is malformed"
+            )
+        runtime_keys.append((root_order[entry["root"]], entry["path"]))
+        if entry["kind"] == "dir":
+            if entry["size"] is not None or entry["sha256"] is not None:
+                raise ExternalAcceptanceError(
+                    f"stage runtime directory entry {index} is malformed"
+                )
+        else:
+            _nonnegative_integer(
+                entry["size"], f"stage runtime entry {index} size"
+            )
+            _digest(entry["sha256"], f"stage runtime entry {index} hash")
+        if entry["source_kind"] == "symlink":
+            if not isinstance(entry["source_link_target"], str) or not entry[
+                "source_link_target"
+            ]:
+                raise ExternalAcceptanceError(
+                    f"stage runtime symlink entry {index} is malformed"
+                )
+        elif entry["source_link_target"] is not None:
+            raise ExternalAcceptanceError(
+                f"stage runtime entry {index} has a spurious link target"
+            )
+        runtime_records.append(_runtime_entry_record(entry))
+    if len(set(runtime_keys)) != len(runtime_keys) or runtime_keys != sorted(
+        runtime_keys
+    ):
+        raise ExternalAcceptanceError(
+            "stage runtime closure entries are not canonical"
+        )
+    aggregate = _digest(
+        closure["aggregate_sha256"], "stage runtime closure aggregate"
+    )
+    if aggregate != _sha256_bytes("".join(runtime_records).encode("utf-8")):
+        raise ExternalAcceptanceError(
+            "stage runtime closure aggregate is inconsistent"
+        )
+
+    sentinels = closure["required_sentinels"]
+    if not isinstance(sentinels, dict):
+        raise ExternalAcceptanceError(
+            "stage runtime required sentinels are malformed"
+        )
+    for name, raw_sentinel in sentinels.items():
+        sentinel = _exact_mapping(
+            raw_sentinel,
+            {"root", "path", "kind", "sha256"},
+            f"stage runtime sentinel {name}",
+        )
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(sentinel["root"], str)
+            or sentinel["root"] not in roots
+            or not isinstance(sentinel["path"], str)
+            or not sentinel["path"]
+            or not isinstance(sentinel["kind"], str)
+            or sentinel["kind"] not in {"file", "dir"}
+        ):
+            raise ExternalAcceptanceError(
+                f"stage runtime sentinel {name!r} is malformed"
+            )
+        if sentinel["kind"] == "file":
+            _digest(sentinel["sha256"], f"stage runtime sentinel {name} hash")
+        elif sentinel["sha256"] is not None:
+            raise ExternalAcceptanceError(
+                f"stage runtime directory sentinel {name} has a hash"
+            )
+
+    loader = _exact_mapping(
+        closure["loader_dependencies"],
+        {"entry_count", "aggregate_sha256", "entries"},
+        "stage runtime loader closure",
+    )
+    loader_entries = loader["entries"]
+    loader_count = _nonnegative_integer(
+        loader["entry_count"], "stage runtime loader entry count"
+    )
+    if not isinstance(loader_entries, list) or len(loader_entries) != loader_count:
+        raise ExternalAcceptanceError(
+            "stage runtime loader entry count is inconsistent"
+        )
+    loader_records: list[str] = []
+    loader_keys: list[tuple[bytes, bytes]] = []
+    for index, raw_entry in enumerate(loader_entries):
+        entry = _exact_mapping(
+            raw_entry,
+            {"source", "staged", "size", "sha256"},
+            f"stage runtime loader entry {index}",
+        )
+        if (
+            not isinstance(entry["source"], str)
+            or not Path(entry["source"]).is_absolute()
+            or not isinstance(entry["staged"], str)
+            or not entry["staged"]
+        ):
+            raise ExternalAcceptanceError(
+                f"stage runtime loader entry {index} is malformed"
+            )
+        _nonnegative_integer(
+            entry["size"], f"stage runtime loader entry {index} size"
+        )
+        _digest(
+            entry["sha256"], f"stage runtime loader entry {index} hash"
+        )
+        loader_keys.append(
+            (entry["staged"].encode("utf-8"), entry["source"].encode("utf-8"))
+        )
+        loader_records.append(_loader_entry_record(entry))
+    if len(set(loader_keys)) != len(loader_keys) or loader_keys != sorted(
+        loader_keys
+    ):
+        raise ExternalAcceptanceError(
+            "stage runtime loader entries are not canonical"
+        )
+    loader_aggregate = _digest(
+        loader["aggregate_sha256"], "stage runtime loader aggregate"
+    )
+    if loader_aggregate != _sha256_bytes(
+        "".join(loader_records).encode("utf-8")
+    ):
+        raise ExternalAcceptanceError(
+            "stage runtime loader aggregate is inconsistent"
+        )
+    return {
+        "algorithm": RUNTIME_CLOSURE_ALGORITHM,
+        "schema_revision": RUNTIME_CLOSURE_SCHEMA_REVISION,
+        "entry_count": entry_count,
+        "aggregate_sha256": aggregate,
+    }
+
+
 def _stage_member(
     stage_root: Path,
     manifest: Mapping[str, Any],
@@ -868,39 +1275,153 @@ def _validate_stage_manifest(
     install_sql: Path,
     dso: Path,
 ) -> dict[str, object]:
-    if manifest.get("schema") != "stage_manifest/v1":
+    manifest = _exact_mapping(
+        manifest,
+        {
+            "schema",
+            "schema_revision",
+            "postgresql_version",
+            "postgresql_configure",
+            "source",
+            "staged",
+            "runtime_closure",
+            "extension_artifacts",
+            "expected_tool_paths",
+            "tool_signatures",
+        },
+        "external stage manifest",
+    )
+    revision = _nonnegative_integer(
+        manifest["schema_revision"], "external stage manifest schema revision"
+    )
+    if (
+        manifest["schema"] != STAGE_MANIFEST_SCHEMA
+        or revision != STAGE_MANIFEST_SCHEMA_REVISION
+    ):
         raise ExternalAcceptanceError("stage manifest schema is invalid")
-    version = manifest.get("postgresql_version")
+    version = manifest["postgresql_version"]
     if not isinstance(version, str) or not version.startswith("PostgreSQL 17"):
         raise ExternalAcceptanceError(
             f"staged server is not PostgreSQL 17: {version!r}"
         )
-    artifacts = manifest.get("bioseq_artifacts")
-    if not isinstance(artifacts, dict):
+    configure = manifest["postgresql_configure"]
+    if not isinstance(configure, str) or not configure:
         raise ExternalAcceptanceError(
-            "stage manifest has no Bioseq artifact closure"
+            "stage manifest PostgreSQL configure identity is invalid"
         )
-    expected = {
-        "control": (control_file.name, _sha256(control_file)),
-        "install_sql": (install_sql.name, _sha256(install_sql)),
-        "library": (dso.name, _sha256(dso)),
-    }
-    for name, (_, digest) in expected.items():
-        record = artifacts.get(name)
-        if not isinstance(record, dict) or record.get("sha256") != digest:
+    source = _exact_mapping(
+        manifest["source"],
+        {"bindir", "sharedir", "pkglibdir"},
+        "external stage source roots",
+    )
+    staged = _exact_mapping(
+        manifest["staged"],
+        {"bindir", "sharedir", "pkglibdir"},
+        "external staged roots",
+    )
+    for name in ("bindir", "sharedir", "pkglibdir"):
+        if (
+            not isinstance(source[name], str)
+            or not Path(source[name]).is_absolute()
+            or not isinstance(staged[name], str)
+            or not staged[name]
+            or Path(staged[name]).is_absolute()
+            or ".." in Path(staged[name]).parts
+        ):
             raise ExternalAcceptanceError(
-                f"staged {name} does not match the current build input"
+                f"stage manifest {name} root is malformed"
             )
-    aggregate_record = (
-        f"control:{expected['control'][0]}:{expected['control'][1]}\n"
-        f"install_sql:{expected['install_sql'][0]}:"
-        f"{expected['install_sql'][1]}\n"
-        f"library:{expected['library'][0]}:{expected['library'][1]}\n"
-    ).encode("utf-8")
-    expected_aggregate = _sha256_bytes(aggregate_record)
-    if artifacts.get("aggregate_sha256") != expected_aggregate:
+    runtime_summary = _validate_runtime_closure(
+        manifest["runtime_closure"], source=source, staged=staged
+    )
+
+    extension_closure = _exact_mapping(
+        manifest["extension_artifacts"],
+        {"aggregate_sha256", "artifacts"},
+        "external stage artifact closure",
+    )
+    artifacts = extension_closure["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 1:
         raise ExternalAcceptanceError(
-            "stage manifest aggregate does not bind the three package inputs"
+            "stage manifest must contain exactly one Bioseq artifact"
+        )
+    artifact = _exact_mapping(
+        artifacts[0],
+        {
+            "name",
+            "module_pathname_override",
+            "effective_module_name",
+            "control",
+            "install_sql",
+            "library",
+        },
+        "external staged artifact",
+    )
+    control = _exact_mapping(
+        artifact["control"],
+        {"source", "filename", "staged", "source_sha256", "sha256"},
+        "external staged control file",
+    )
+    sql = _exact_mapping(
+        artifact["install_sql"],
+        {"source", "filename", "staged", "version", "sha256"},
+        "external staged install SQL",
+    )
+    library = _exact_mapping(
+        artifact["library"],
+        {"source", "filename", "staged", "sha256"},
+        "external staged library",
+    )
+    package_hashes = {
+        "control": _sha256(control_file),
+        "install_sql": _sha256(install_sql),
+        "library": _sha256(dso),
+    }
+    expected_artifact = {
+        "name": "bioseq",
+        "module_pathname_override": None,
+        "effective_module_name": dso.name.split(".", 1)[0],
+        "control": {
+            "source": str(control_file),
+            "filename": control_file.name,
+            "staged": f"{staged['sharedir']}/extension/{control_file.name}",
+            "source_sha256": package_hashes["control"],
+            "sha256": package_hashes["control"],
+        },
+        "install_sql": {
+            "source": str(install_sql),
+            "filename": install_sql.name,
+            "staged": f"{staged['sharedir']}/extension/{install_sql.name}",
+            "version": "1.0",
+            "sha256": package_hashes["install_sql"],
+        },
+        "library": {
+            "source": str(dso),
+            "filename": dso.name,
+            "staged": f"{staged['pkglibdir']}/{dso.name}",
+            "sha256": package_hashes["library"],
+        },
+    }
+    if {
+        **artifact,
+        "control": control,
+        "install_sql": sql,
+        "library": library,
+    } != expected_artifact:
+        raise ExternalAcceptanceError(
+            "staged Bioseq artifact does not match the current build input"
+        )
+    expected_aggregate = _stage_package_aggregate(
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+        control_sha256=package_hashes["control"],
+        install_sql_sha256=package_hashes["install_sql"],
+        library_sha256=package_hashes["library"],
+    )
+    if extension_closure["aggregate_sha256"] != expected_aggregate:
+        raise ExternalAcceptanceError(
+            "stage manifest aggregate does not bind the current artifact set"
         )
     aggregate_text = aggregate_path.read_text(
         encoding="ascii", errors="strict"
@@ -910,17 +1431,25 @@ def _validate_stage_manifest(
             "stage aggregate file differs from the independently "
             "recomputed package closure"
         )
-    tool_paths = manifest.get("expected_tool_paths")
-    signatures = manifest.get("tool_signatures")
+    tool_paths = manifest["expected_tool_paths"]
+    signatures = manifest["tool_signatures"]
     if not isinstance(tool_paths, dict) or not isinstance(signatures, list):
         raise ExternalAcceptanceError(
             "stage manifest has no exact tool closure"
         )
-    signatures_by_name = {
-        record.get("tool"): record
-        for record in signatures
-        if isinstance(record, dict)
-    }
+    signatures_by_name: dict[str, Mapping[str, Any]] = {}
+    for index, raw_signature in enumerate(signatures):
+        signature = _exact_mapping(
+            raw_signature,
+            {"tool", "staged_path", "version", "sha256"},
+            f"external stage tool signature {index}",
+        )
+        name = signature["tool"]
+        if not isinstance(name, str) or name in signatures_by_name:
+            raise ExternalAcceptanceError(
+                "stage manifest has an invalid or duplicate tool signature"
+            )
+        signatures_by_name[name] = signature
     expected_tools = POSTGRESQL_TOOLS
     if set(tool_paths) != expected_tools or set(signatures_by_name) != expected_tools:
         raise ExternalAcceptanceError(
@@ -944,15 +1473,23 @@ def _validate_stage_manifest(
             executable=True,
         )
         digest = _sha256(tool)
-        if signatures_by_name[name].get("sha256") != digest:
+        signature = signatures_by_name[name]
+        if (
+            signature["staged_path"] != relative_text
+            or not isinstance(signature["version"], str)
+            or not signature["version"]
+            or signature["sha256"] != digest
+        ):
             raise ExternalAcceptanceError(
-                f"staged PostgreSQL {name} hash is stale"
+                f"staged PostgreSQL {name} signature is stale"
             )
         staged_tool_hashes[name] = digest
     return {
-        "schema": "stage_manifest/v1",
+        "schema": STAGE_MANIFEST_SCHEMA,
+        "schema_revision": STAGE_MANIFEST_SCHEMA_REVISION,
         "postgresql_version": version,
-        "postgresql_configure": manifest.get("postgresql_configure"),
+        "postgresql_configure": configure,
+        "runtime_closure": runtime_summary,
         "package_aggregate_sha256": expected_aggregate,
         "stage_manifest_sha256": None,
         "staged_tool_sha256": staged_tool_hashes,
@@ -1771,6 +2308,7 @@ def _validate_evidence_inventory_schema(
         )
     required = {
         "static/external-contract.stamp",
+        "stage/artifact-spec.json",
         "stage/stage-manifest.json",
         "stage/stage-artifacts.sha256",
         *(
@@ -1801,11 +2339,13 @@ def _validate_retained_stage_manifest(
         document,
         {
             "schema",
+            "schema_revision",
             "postgresql_version",
             "postgresql_configure",
             "source",
             "staged",
-            "bioseq_artifacts",
+            "runtime_closure",
+            "extension_artifacts",
             "expected_tool_paths",
             "tool_signatures",
         },
@@ -1820,8 +2360,12 @@ def _validate_retained_stage_manifest(
         key: str(value).lstrip("/")
         for key, value in source.items()
     }
+    revision = _nonnegative_integer(
+        manifest["schema_revision"], "retained stage manifest schema revision"
+    )
     if (
-        manifest["schema"] != "stage_manifest/v1"
+        manifest["schema"] != STAGE_MANIFEST_SCHEMA
+        or revision != STAGE_MANIFEST_SCHEMA_REVISION
         or manifest["postgresql_version"] != pg_config["version"]
         or manifest["postgresql_configure"] != pg_config["configure"]
         or manifest["source"] != source
@@ -1830,29 +2374,55 @@ def _validate_retained_stage_manifest(
         raise ExternalAcceptanceError(
             "retained stage manifest PostgreSQL projection is inconsistent"
         )
+    runtime_summary = _validate_runtime_closure(
+        manifest["runtime_closure"], source=source, staged=staged
+    )
+    if runtime_summary != stage["runtime_closure"]:
+        raise ExternalAcceptanceError(
+            "retained stage runtime closure does not join the receipt"
+        )
     package_hashes = stage["package_input_sha256"]
-    control_name = Path(input_files["control_file"]["path"]).name
-    install_name = Path(input_files["install_sql"]["path"]).name
-    library_name = Path(input_files["dso"]["path"]).name
+    control_path = Path(input_files["control_file"]["path"])
+    install_path = Path(input_files["install_sql"]["path"])
+    library_path = Path(input_files["dso"]["path"])
     expected_artifacts = {
         "aggregate_sha256": stage["package_aggregate_sha256"],
-        "control": {
-            "staged": (
-                f"{staged['sharedir']}/extension/{control_name}"
-            ),
-            "sha256": package_hashes["control"],
-        },
-        "install_sql": {
-            "version": "1.0",
-            "sha256": package_hashes["install_sql"],
-        },
-        "library": {
-            "filename": library_name,
-            "staged": f"{staged['pkglibdir']}/{library_name}",
-            "sha256": package_hashes["library"],
-        },
+        "artifacts": [{
+            "name": "bioseq",
+            "module_pathname_override": None,
+            "effective_module_name": library_path.name.split(".", 1)[0],
+            "control": {
+                "source": str(control_path),
+                "filename": control_path.name,
+                "staged": (
+                    f"{staged['sharedir']}/extension/{control_path.name}"
+                ),
+                "source_sha256": package_hashes["control"],
+                "sha256": package_hashes["control"],
+            },
+            "install_sql": {
+                "source": str(install_path),
+                "filename": install_path.name,
+                "staged": (
+                    f"{staged['sharedir']}/extension/{install_path.name}"
+                ),
+                "version": "1.0",
+                "sha256": package_hashes["install_sql"],
+            },
+            "library": {
+                "source": str(library_path),
+                "filename": library_path.name,
+                "staged": f"{staged['pkglibdir']}/{library_path.name}",
+                "sha256": package_hashes["library"],
+            },
+        }],
     }
-    if manifest["bioseq_artifacts"] != expected_artifacts:
+    extension_artifacts = _exact_mapping(
+        manifest["extension_artifacts"],
+        {"aggregate_sha256", "artifacts"},
+        "retained stage artifact closure",
+    )
+    if extension_artifacts != expected_artifacts:
         raise ExternalAcceptanceError(
             "retained stage manifest package closure is inconsistent"
         )
@@ -1910,8 +2480,11 @@ def _validate_receipt_stage(
         value,
         {
             "schema",
+            "schema_revision",
             "postgresql_version",
             "postgresql_configure",
+            "artifact_spec",
+            "runtime_closure",
             "package_aggregate_sha256",
             "stage_manifest_sha256",
             "staged_tool_sha256",
@@ -1925,21 +2498,55 @@ def _validate_receipt_stage(
         "install_sql": input_files["install_sql"]["sha256"],
         "library": input_files["dso"]["sha256"],
     }
-    aggregate_record = (
-        f"control:{Path(input_files['control_file']['path']).name}:"
-        f"{package_hashes['control']}\n"
-        f"install_sql:{Path(input_files['install_sql']['path']).name}:"
-        f"{package_hashes['install_sql']}\n"
-        f"library:{Path(input_files['dso']['path']).name}:"
-        f"{package_hashes['library']}\n"
-    ).encode("utf-8")
-    aggregate = _sha256_bytes(aggregate_record)
+    control_path = Path(input_files["control_file"]["path"])
+    install_path = Path(input_files["install_sql"]["path"])
+    library_path = Path(input_files["dso"]["path"])
+    aggregate = _stage_package_aggregate(
+        control_file=control_path,
+        install_sql=install_path,
+        dso=library_path,
+        control_sha256=package_hashes["control"],
+        install_sql_sha256=package_hashes["install_sql"],
+        library_sha256=package_hashes["library"],
+    )
+    revision = _nonnegative_integer(
+        stage["schema_revision"], "receipt stage schema revision"
+    )
+    artifact_spec = _exact_mapping(
+        stage["artifact_spec"],
+        {"schema", "schema_revision", "sha256"},
+        "receipt stage artifact specification",
+    )
+    artifact_revision = _nonnegative_integer(
+        artifact_spec["schema_revision"],
+        "receipt artifact specification schema revision",
+    )
+    artifact_spec_hash = _digest(
+        artifact_spec["sha256"], "receipt artifact specification hash"
+    )
+    runtime = _exact_mapping(
+        stage["runtime_closure"],
+        {"algorithm", "schema_revision", "entry_count", "aggregate_sha256"},
+        "receipt stage runtime closure",
+    )
+    runtime_revision = _nonnegative_integer(
+        runtime["schema_revision"], "receipt runtime closure schema revision"
+    )
+    _nonnegative_integer(
+        runtime["entry_count"], "receipt runtime closure entry count"
+    )
+    _digest(runtime["aggregate_sha256"], "receipt runtime closure aggregate")
     expected_tool_hashes = {
         name: postgresql["tools"][name]["sha256"]
         for name in sorted(POSTGRESQL_TOOLS)
     }
     if (
-        stage["schema"] != "stage_manifest/v1"
+        stage["schema"] != STAGE_MANIFEST_SCHEMA
+        or revision != STAGE_MANIFEST_SCHEMA_REVISION
+        or artifact_spec["schema"] != ARTIFACT_SPEC_SCHEMA
+        or artifact_revision != ARTIFACT_SPEC_SCHEMA_REVISION
+        or runtime["algorithm"] != RUNTIME_CLOSURE_ALGORITHM
+        or runtime_revision != RUNTIME_CLOSURE_SCHEMA_REVISION
         or stage["postgresql_version"] != pg_config["version"]
         or stage["postgresql_configure"] != pg_config["configure"]
         or stage["package_aggregate_sha256"] != aggregate
@@ -1956,6 +2563,10 @@ def _validate_receipt_stage(
         raise ExternalAcceptanceError(
             "receipt stage manifest hash does not join evidence"
         )
+    if evidence["stage/artifact-spec.json"]["sha256"] != artifact_spec_hash:
+        raise ExternalAcceptanceError(
+            "receipt artifact specification hash does not join evidence"
+        )
     aggregate_bytes = (aggregate + "\n").encode("ascii")
     aggregate_evidence = evidence["stage/stage-artifacts.sha256"]
     if aggregate_evidence != {
@@ -1966,6 +2577,10 @@ def _validate_receipt_stage(
             "receipt stage aggregate does not join evidence"
         )
     if bundle_root is not None:
+        artifact_spec_path = _regular_file(
+            bundle_root / "stage" / "artifact-spec.json",
+            "retained artifact specification",
+        )
         stage_manifest_path = _regular_file(
             bundle_root / "stage" / "stage-manifest.json",
             "retained stage manifest",
@@ -1978,6 +2593,14 @@ def _validate_receipt_stage(
             raise ExternalAcceptanceError(
                 "retained stage aggregate content is inconsistent"
             )
+        _validate_artifact_spec(
+            _load_json(
+                artifact_spec_path, "retained artifact specification"
+            ),
+            control_file=control_path,
+            install_sql=install_path,
+            dso=library_path,
+        )
         _validate_retained_stage_manifest(
             _load_json(stage_manifest_path, "retained stage manifest"),
             stage=stage,
@@ -1995,6 +2618,7 @@ def _validate_receipt(
         receipt,
         {
             "schema",
+            "schema_revision",
             "outcome",
             "receipt_id",
             "generated_at_utc",
@@ -2009,7 +2633,14 @@ def _validate_receipt(
         },
         "acceptance receipt",
     )
-    if receipt["schema"] != RECEIPT_SCHEMA or receipt["outcome"] != "passed":
+    revision = _nonnegative_integer(
+        receipt["schema_revision"], "acceptance receipt schema revision"
+    )
+    if (
+        receipt["schema"] != RECEIPT_SCHEMA
+        or revision != RECEIPT_SCHEMA_REVISION
+        or receipt["outcome"] != "passed"
+    ):
         raise ExternalAcceptanceError(
             "acceptance receipt outcome/schema is malformed"
         )
@@ -2088,6 +2719,30 @@ def _validate_receipt(
         _validate_evidence_files(bundle_root, evidence)
 
 
+def _stage_command(
+    *,
+    cmake: Path,
+    pg_config: Path,
+    stage_script: Path,
+    stage_root: Path,
+    stage_parent: Path,
+    artifact_spec: Path,
+    manifest_path: Path,
+    aggregate_path: Path,
+) -> list[str]:
+    return [
+        str(cmake),
+        f"-DPG_CONFIG={pg_config}",
+        f"-DSTAGE_ROOT={stage_root}",
+        f"-DSTAGE_PARENT={stage_parent}",
+        f"-DARTIFACT_SPEC={artifact_spec}",
+        f"-DMANIFEST_OUT={manifest_path}",
+        f"-DHASH_OUT={aggregate_path}",
+        "-P",
+        str(stage_script),
+    ]
+
+
 def _stage_package(
     *,
     cmake: Path,
@@ -2103,21 +2758,34 @@ def _stage_package(
     stage_root = stage_parent / "external"
     manifest_path = stage_root / "stage-manifest.json"
     aggregate_path = stage_root / "stage-artifacts.sha256"
+    artifact_spec_path = stage_parent / "external-artifact-spec.json"
+    artifact_spec = _artifact_spec_document(
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+    )
+    _validate_artifact_spec(
+        artifact_spec,
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+    )
+    _write_json(artifact_spec_path, artifact_spec)
+    _copy_file(
+        artifact_spec_path,
+        retained_root / "stage" / "artifact-spec.json",
+    )
     _run_checked(
-        [
-            str(cmake),
-            f"-DPG_CONFIG={pg_config}",
-            f"-DSTAGE_ROOT={stage_root}",
-            f"-DSTAGE_PARENT={stage_parent}",
-            f"-DCONTROL_FILE={control_file}",
-            f"-DINSTALL_SQL={install_sql}",
-            f"-DLIBRARY_FILE={dso}",
-            "-DEXTENSION_VERSION=1.0",
-            f"-DMANIFEST_OUT={manifest_path}",
-            f"-DHASH_OUT={aggregate_path}",
-            "-P",
-            str(stage_script),
-        ],
+        _stage_command(
+            cmake=cmake,
+            pg_config=pg_config,
+            stage_script=stage_script,
+            stage_root=stage_root,
+            stage_parent=stage_parent,
+            artifact_spec=artifact_spec_path,
+            manifest_path=manifest_path,
+            aggregate_path=aggregate_path,
+        ),
         timeout=timeout,
         stdout_path=retained_root / "results" / "stage.stdout",
         stderr_path=retained_root / "results" / "stage.stderr",
@@ -2145,6 +2813,11 @@ def _stage_package(
         aggregate_path,
         retained_root / "stage" / "stage-artifacts.sha256",
     )
+    summary["artifact_spec"] = {
+        "schema": ARTIFACT_SPEC_SCHEMA,
+        "schema_revision": ARTIFACT_SPEC_SCHEMA_REVISION,
+        "sha256": _sha256(artifact_spec_path),
+    }
     summary["stage_manifest_sha256"] = _sha256(manifest_path)
     return stage_root.resolve(strict=True), manifest, summary
 
@@ -2727,9 +3400,9 @@ def _run_live(args: argparse.Namespace) -> Path:
             for record in package["external_source_provenance"].values()
         ),
         "cmake/run_external_postgres_acceptance.py",
-        "cmake/BioseqExternalPostgresAcceptance.cmake",
+        "cmake/bioseq_external_postgres_acceptance.cmake",
         "build_mcp/server.py",
-        "codegen/sql/tests/verify_external_feature_contract.py",
+        "codegen/sql/tests/contract/test_external_feature.py",
     })
     git_provenance = _git_provenance(
         paths["git"],
@@ -2900,6 +3573,7 @@ def _run_live(args: argparse.Namespace) -> Path:
         evidence_files = _evidence_file_inventory(partial)
         receipt = {
             "schema": RECEIPT_SCHEMA,
+            "schema_revision": RECEIPT_SCHEMA_REVISION,
             "outcome": "passed",
             "receipt_id": receipt_id,
             "generated_at_utc": dt.datetime.now(
@@ -3064,7 +3738,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         })
     entities = [*top_level_entities, *column_entities]
     manifest = {
-        "manifest_version": 1,
+        "schema_revision": 1,
         "authority_mode": "annotated_cpp",
         "script_sha256": _sha256(install_sql),
         "statement_count": len(statements),
@@ -3074,6 +3748,19 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "handwritten_fmgr_export_external_symbol_count": 1,
         "handwritten_fmgr_export_external_symbols": ["bioseq_external_handler"],
     }
+    legacy_revision_manifest = dict(manifest)
+    legacy_revision_manifest["manifest_version"] = 1
+    try:
+        _validate_generated_manifest(
+            legacy_revision_manifest,
+            install_sql=install_sql,
+            repository_root=repository_root,
+        )
+    except ExternalAcceptanceError as error:
+        if "unknown fields: ['manifest_version']" not in str(error):
+            raise
+    else:
+        raise AssertionError("legacy manifest_version was accepted")
     manifest_path = inputs_root / "bioseq--1.0.manifest.json"
     _write_json(manifest_path, manifest)
 
@@ -3159,12 +3846,19 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "install_sql": _sha256(install_sql),
         "library": _sha256(dso),
     }
-    aggregate_record = (
-        f"control:{control_file.name}:{package_hashes['control']}\n"
-        f"install_sql:{install_sql.name}:{package_hashes['install_sql']}\n"
-        f"library:{dso.name}:{package_hashes['library']}\n"
-    ).encode("utf-8")
-    aggregate = _sha256_bytes(aggregate_record)
+    aggregate = _stage_package_aggregate(
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+        control_sha256=package_hashes["control"],
+        install_sql_sha256=package_hashes["install_sql"],
+        library_sha256=package_hashes["library"],
+    )
+    source_roots = {
+        "bindir": pg_config["bindir"],
+        "sharedir": pg_config["sharedir"],
+        "pkglibdir": pg_config["pkglibdir"],
+    }
     staged = {
         "bindir": str(pg_bindir).lstrip("/"),
         "sharedir": str(pg_sharedir).lstrip("/"),
@@ -3174,33 +3868,66 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         name: f"{staged['bindir']}/{name}"
         for name in sorted(POSTGRESQL_TOOLS)
     }
+    runtime_closure = {
+        "algorithm": RUNTIME_CLOSURE_ALGORITHM,
+        "schema_revision": RUNTIME_CLOSURE_SCHEMA_REVISION,
+        "entry_count": 0,
+        "aggregate_sha256": _sha256_bytes(b""),
+        "roots": {
+            name: {
+                "reported_source": source_roots[name],
+                "canonical_source": source_roots[name],
+                "staged": staged[name],
+            }
+            for name in ("bindir", "sharedir", "pkglibdir")
+        },
+        "required_sentinels": {},
+        "loader_dependencies": {
+            "entry_count": 0,
+            "aggregate_sha256": _sha256_bytes(b""),
+            "entries": [],
+        },
+        "entries": [],
+    }
     stage_manifest = {
-        "schema": "stage_manifest/v1",
+        "schema": STAGE_MANIFEST_SCHEMA,
+        "schema_revision": STAGE_MANIFEST_SCHEMA_REVISION,
         "postgresql_version": pg_config["version"],
         "postgresql_configure": pg_config["configure"],
-        "source": {
-            "bindir": pg_config["bindir"],
-            "sharedir": pg_config["sharedir"],
-            "pkglibdir": pg_config["pkglibdir"],
-        },
+        "source": source_roots,
         "staged": staged,
-        "bioseq_artifacts": {
+        "runtime_closure": runtime_closure,
+        "extension_artifacts": {
             "aggregate_sha256": aggregate,
-            "control": {
-                "staged": (
-                    f"{staged['sharedir']}/extension/{control_file.name}"
-                ),
-                "sha256": package_hashes["control"],
-            },
-            "install_sql": {
-                "version": "1.0",
-                "sha256": package_hashes["install_sql"],
-            },
-            "library": {
-                "filename": dso.name,
-                "staged": f"{staged['pkglibdir']}/{dso.name}",
-                "sha256": package_hashes["library"],
-            },
+            "artifacts": [{
+                "name": "bioseq",
+                "module_pathname_override": None,
+                "effective_module_name": dso.name.split(".", 1)[0],
+                "control": {
+                    "source": str(control_file),
+                    "filename": control_file.name,
+                    "staged": (
+                        f"{staged['sharedir']}/extension/{control_file.name}"
+                    ),
+                    "source_sha256": package_hashes["control"],
+                    "sha256": package_hashes["control"],
+                },
+                "install_sql": {
+                    "source": str(install_sql),
+                    "filename": install_sql.name,
+                    "staged": (
+                        f"{staged['sharedir']}/extension/{install_sql.name}"
+                    ),
+                    "version": "1.0",
+                    "sha256": package_hashes["install_sql"],
+                },
+                "library": {
+                    "source": str(dso),
+                    "filename": dso.name,
+                    "staged": f"{staged['pkglibdir']}/{dso.name}",
+                    "sha256": package_hashes["library"],
+                },
+            }],
         },
         "expected_tool_paths": expected_tool_paths,
         "tool_signatures": [
@@ -3213,14 +3940,33 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             for name in sorted(POSTGRESQL_TOOLS)
         ],
     }
+    artifact_spec = _artifact_spec_document(
+        control_file=control_file,
+        install_sql=install_sql,
+        dso=dso,
+    )
+    artifact_spec_path = root / "stage" / "artifact-spec.json"
+    _write_json(artifact_spec_path, artifact_spec)
     stage_manifest_path = root / "stage" / "stage-manifest.json"
     _write_json(stage_manifest_path, stage_manifest)
     aggregate_path = root / "stage" / "stage-artifacts.sha256"
     _write_bytes(aggregate_path, (aggregate + "\n").encode("ascii"))
     stage = {
-        "schema": "stage_manifest/v1",
+        "schema": STAGE_MANIFEST_SCHEMA,
+        "schema_revision": STAGE_MANIFEST_SCHEMA_REVISION,
         "postgresql_version": pg_config["version"],
         "postgresql_configure": pg_config["configure"],
+        "artifact_spec": {
+            "schema": ARTIFACT_SPEC_SCHEMA,
+            "schema_revision": ARTIFACT_SPEC_SCHEMA_REVISION,
+            "sha256": _sha256(artifact_spec_path),
+        },
+        "runtime_closure": {
+            "algorithm": RUNTIME_CLOSURE_ALGORITHM,
+            "schema_revision": RUNTIME_CLOSURE_SCHEMA_REVISION,
+            "entry_count": runtime_closure["entry_count"],
+            "aggregate_sha256": runtime_closure["aggregate_sha256"],
+        },
         "package_aggregate_sha256": aggregate,
         "stage_manifest_sha256": _sha256(stage_manifest_path),
         "staged_tool_sha256": {
@@ -3255,6 +4001,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
     }
     return {
         "schema": RECEIPT_SCHEMA,
+        "schema_revision": RECEIPT_SCHEMA_REVISION,
         "outcome": "passed",
         "receipt_id": receipt_id,
         "generated_at_utc": "2026-07-26T00:00:00+00:00",
@@ -3377,6 +4124,42 @@ def _expect_resealed_receipt_failure(
 
 
 def run_self_tests() -> None:
+    stage_command_paths = {
+        "cmake": Path("cmake"),
+        "pg_config": Path("pg_config"),
+        "stage_script": Path("stage_private_postgres.cmake"),
+        "stage_root": Path("stage"),
+        "stage_parent": Path("stages"),
+        "artifact_spec": Path("artifact-spec.json"),
+        "manifest_path": Path("stage-manifest.json"),
+        "aggregate_path": Path("stage-artifacts.sha256"),
+    }
+    stage_command = _stage_command(**stage_command_paths)
+    expected_stage_command = [
+        "cmake",
+        "-DPG_CONFIG=pg_config",
+        "-DSTAGE_ROOT=stage",
+        "-DSTAGE_PARENT=stages",
+        "-DARTIFACT_SPEC=artifact-spec.json",
+        "-DMANIFEST_OUT=stage-manifest.json",
+        "-DHASH_OUT=stage-artifacts.sha256",
+        "-P",
+        "stage_private_postgres.cmake",
+    ]
+    if stage_command != expected_stage_command:
+        raise AssertionError("external acceptance stage command is stale")
+    forbidden_stage_arguments = (
+        "-DCONTROL_FILE=",
+        "-DINSTALL_SQL=",
+        "-DLIBRARY_FILE=",
+        "-DEXTENSION_VERSION=",
+    )
+    if any(
+        argument.startswith(forbidden_stage_arguments)
+        for argument in stage_command
+    ):
+        raise AssertionError("legacy stage argument survived")
+
     # Raw live-catalog validators reject independent handler/AM/table mutation.
     _expect_failure(
         "handler schema",
@@ -3429,7 +4212,89 @@ def run_self_tests() -> None:
         receipt = _synthetic_receipt(evidence_root)
         _validate_receipt(receipt, bundle_root=evidence_root)
 
+        input_files = receipt["input_provenance"]["files"]
+        control_path = Path(input_files["control_file"]["path"])
+        install_path = Path(input_files["install_sql"]["path"])
+        library_path = Path(input_files["dso"]["path"])
+        artifact_spec_path = evidence_root / "stage" / "artifact-spec.json"
+        artifact_spec = _load_json(
+            artifact_spec_path, "synthetic artifact specification"
+        )
+        invalid_artifact_specs: dict[str, dict[str, Any]] = {}
+        invalid_artifact_specs["artifact specification current schema"] = (
+            copy.deepcopy(artifact_spec)
+        )
+        invalid_artifact_specs[
+            "artifact specification current schema"
+        ]["schema"] = "invalid.artifacts"
+        invalid_artifact_specs["artifact specification numeric revision"] = (
+            copy.deepcopy(artifact_spec)
+        )
+        invalid_artifact_specs[
+            "artifact specification numeric revision"
+        ]["schema_revision"] = True
+        invalid_artifact_specs["artifact specification unknown key"] = (
+            copy.deepcopy(artifact_spec)
+        )
+        invalid_artifact_specs[
+            "artifact specification unknown key"
+        ]["unexpected"] = None
+        for label, invalid_spec in invalid_artifact_specs.items():
+            _expect_failure(
+                label,
+                lambda invalid_spec=invalid_spec: _validate_artifact_spec(
+                    invalid_spec,
+                    control_file=control_path,
+                    install_sql=install_path,
+                    dso=library_path,
+                ),
+            )
+
+        stage_manifest_path = evidence_root / "stage" / "stage-manifest.json"
+        stage_manifest = _load_json(
+            stage_manifest_path, "synthetic stage manifest"
+        )
+        invalid_stage_manifests: dict[str, dict[str, Any]] = {}
+        invalid_stage_manifests["stage manifest current schema"] = (
+            copy.deepcopy(stage_manifest)
+        )
+        invalid_stage_manifests[
+            "stage manifest current schema"
+        ]["schema"] = "invalid.stage_manifest"
+        invalid_stage_manifests["stage manifest numeric revision"] = (
+            copy.deepcopy(stage_manifest)
+        )
+        invalid_stage_manifests[
+            "stage manifest numeric revision"
+        ]["schema_revision"] = True
+        invalid_stage_manifests["stage manifest runtime algorithm"] = (
+            copy.deepcopy(stage_manifest)
+        )
+        invalid_stage_manifests[
+            "stage manifest runtime algorithm"
+        ]["runtime_closure"]["algorithm"] = "invalid.runtime"
+        invalid_stage_manifests["stage manifest unknown key"] = (
+            copy.deepcopy(stage_manifest)
+        )
+        invalid_stage_manifests[
+            "stage manifest unknown key"
+        ]["unexpected"] = None
+        for label, invalid_manifest in invalid_stage_manifests.items():
+            _expect_failure(
+                label,
+                lambda invalid_manifest=invalid_manifest: (
+                    _validate_retained_stage_manifest(
+                        invalid_manifest,
+                        stage=receipt["stage"],
+                        pg_config=receipt["postgresql"]["pg_config"],
+                        input_files=input_files,
+                    )
+                ),
+            )
+
         path_mutations: dict[str, tuple[object, ...]] = {
+            "receipt schema": ("schema", "invalid.acceptance_receipt"),
+            "receipt schema revision": ("schema_revision", 2),
             "header timestamp schema": (
                 "generated_at_utc", "2026-07-26T00:00:00"
             ),
@@ -3474,7 +4339,26 @@ def run_self_tests() -> None:
             "PostgreSQL clean data path join": (
                 "postgresql", "live", "data_directory", "/mutated/data",
             ),
-            "stage schema": ("stage", "schema", "stage_manifest/v2"),
+            "stage schema": ("stage", "schema", "invalid.stage_manifest"),
+            "stage schema revision": ("stage", "schema_revision", 2),
+            "artifact specification schema": (
+                "stage", "artifact_spec", "schema", "invalid.artifacts",
+            ),
+            "artifact specification schema revision": (
+                "stage", "artifact_spec", "schema_revision", 2,
+            ),
+            "artifact specification evidence join": (
+                "stage", "artifact_spec", "sha256", "4" * 64,
+            ),
+            "runtime closure algorithm": (
+                "stage", "runtime_closure", "algorithm", "invalid.runtime",
+            ),
+            "runtime closure schema revision": (
+                "stage", "runtime_closure", "schema_revision", 2,
+            ),
+            "runtime closure aggregate": (
+                "stage", "runtime_closure", "aggregate_sha256", "5" * 64,
+            ),
             "stage PostgreSQL configure join": (
                 "stage", "postgresql_configure", "--mutated",
             ),
@@ -3564,6 +4448,14 @@ def run_self_tests() -> None:
             ("package exact schema", ("generated_package",)),
             ("PostgreSQL exact schema", ("postgresql",)),
             ("stage exact schema", ("stage",)),
+            (
+                "artifact specification exact schema",
+                ("stage", "artifact_spec"),
+            ),
+            (
+                "runtime closure exact schema",
+                ("stage", "runtime_closure"),
+            ),
             ("cluster exact schema", ("cluster",)),
             ("checks exact schema", ("checks",)),
             (

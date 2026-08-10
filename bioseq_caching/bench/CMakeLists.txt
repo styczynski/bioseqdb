@@ -4,7 +4,10 @@ add_library(bioseq_cache_benchmark_support STATIC)
 target_sources(bioseq_cache_benchmark_support
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/cache_benchmark.cppm")
+    FILES
+      "${CMAKE_CURRENT_SOURCE_DIR}/cache_benchmark.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/standalone/index.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/combined/index.cppm")
 set_target_properties(bioseq_cache_benchmark_support PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
@@ -15,20 +18,23 @@ set_target_properties(bioseq_cache_benchmark_support PROPERTIES
 target_link_libraries(bioseq_cache_benchmark_support
   PUBLIC
     bioseq_postgres_test_support
-    Threads::Threads
-  PRIVATE
-    bioseq::durable_file_io)
+    bioseq::durable_file_io
+    Threads::Threads)
 
+set_source_files_properties(
+  "${CMAKE_CURRENT_SOURCE_DIR}/standalone/main.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/combined/main.cppm"
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 add_executable(
-  bioseq_cache_bench
-  "${CMAKE_CURRENT_SOURCE_DIR}/cache_bench_main.cpp")
+  bioseq_cache_benchmark
+  "${CMAKE_CURRENT_SOURCE_DIR}/standalone/main.cppm")
 add_executable(
-  bioseq_cache_bioseq_bench
-  "${CMAKE_CURRENT_SOURCE_DIR}/cache_bioseq_bench_main.cpp")
+  bioseq_cache_bioseq_benchmark
+  "${CMAKE_CURRENT_SOURCE_DIR}/combined/main.cppm")
 
 foreach(_bioseq_cache_benchmark_target IN ITEMS
-    bioseq_cache_bench
-    bioseq_cache_bioseq_bench)
+    bioseq_cache_benchmark
+    bioseq_cache_bioseq_benchmark)
   set_target_properties(
     "${_bioseq_cache_benchmark_target}"
     PROPERTIES
@@ -46,13 +52,13 @@ foreach(_bioseq_cache_benchmark_target IN ITEMS
     postgresql_bioseq_cache)
 endforeach()
 add_dependencies(
-  bioseq_cache_bench
+  bioseq_cache_benchmark
   bioseq_cache_production_postgres_stage)
 
 find_package(Catch2 3 REQUIRED)
 add_executable(
   bioseq_cache_benchmark_report_contract_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cache_benchmark_report_tests.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../tests/contract/benchmark/cache_benchmark_report_test.cpp")
 set_target_properties(
   bioseq_cache_benchmark_report_contract_tests
   PROPERTIES
@@ -69,7 +75,12 @@ target_link_libraries(
     Catch2::Catch2WithMain)
 add_test(
   NAME bioseq_cache_benchmark_report_contract_tests
-  COMMAND bioseq_cache_benchmark_report_contract_tests)
+  COMMAND "$<TARGET_FILE:bioseq_cache_benchmark_report_contract_tests>"
+    "[component:cache][layer:contract][feature:reporting]")
+set_tests_properties(
+  bioseq_cache_benchmark_report_contract_tests
+  PROPERTIES LABELS
+    "component:cache;layer:contract;feature:reporting")
 
 # The MCP reads this generated path inventory and passes the exact source- and
 # build-tree inputs to native private-cluster executables. Forward slashes keep
@@ -152,16 +163,6 @@ if(BIOSEQ_BUILD_CORE)
   endif()
 endif()
 
-set(_bioseq_cache_migration_ledger
-  "${CMAKE_CURRENT_LIST_DIR}/../test/legacy_migration_ledger.tsv")
-set(_bioseq_cache_legacy_inventory
-  "${CMAKE_CURRENT_LIST_DIR}/../test/legacy_asset_inventory.txt")
-set(_bioseq_cache_migration_catch_cases
-  "${CMAKE_BINARY_DIR}/bioseq_caching/legacy_migration_catch_cases.txt")
-cmake_path(NORMAL_PATH _bioseq_cache_migration_ledger)
-cmake_path(NORMAL_PATH _bioseq_cache_legacy_inventory)
-cmake_path(NORMAL_PATH _bioseq_cache_migration_catch_cases)
-
 set(_bioseq_cache_native_artifacts
 "{
   \"cache_test_support_postgres_bin_dir\": \"${_bioseq_cache_test_support_postgres_bin_dir}\",
@@ -189,11 +190,7 @@ set(_bioseq_cache_native_artifacts
   \"bioseq_control\": \"${_bioseq_control}\",
   \"bioseq_install_sql\": \"${_bioseq_install_sql}\",
   \"bioseq_dso\": \"${_bioseq_dso}\",
-  \"provider_peer_test_dso\": \"${_bioseq_cache_provider_peer_test_dso}\",
-  \"migration_ledger\": \"$<SHELL_PATH:${_bioseq_cache_migration_ledger}>\",
-  \"legacy_inventory\": \"$<SHELL_PATH:${_bioseq_cache_legacy_inventory}>\",
-  \"migration_catch_cases\": \"$<SHELL_PATH:${_bioseq_cache_migration_catch_cases}>\",
-  \"legacy_retirement_gate\": \"$<SHELL_PATH:$<TARGET_FILE:bioseq_cache_legacy_retirement_gate>>\"
+  \"provider_peer_test_dso\": \"${_bioseq_cache_provider_peer_test_dso}\"
 }
 ")
 file(GENERATE

@@ -10,7 +10,7 @@ module;
 
 export module bioseq.external.io.gzip_decode_source;
 
-import bioseq.io.sources; // io_source concept, read_result
+import bioseq.io.sources; // io_source concept, source_read_result
 
 /// @brief Incrementally inflates gzip bytes from any compatible source.
 // Unlike the file-only
@@ -67,9 +67,9 @@ public:
   }
   ~gzip_decode_source() { release_zlib_state(); }
 
-  [[nodiscard]] bioseq::io::read_result read_into(std::uint8_t *destination,
+  [[nodiscard]] bioseq::io::source_read_result read_into(std::uint8_t *destination,
                                                   std::size_t capacity) {
-    bioseq::io::read_result result;
+    bioseq::io::source_read_result result;
     if (has_failed_) {
       result.has_error = true;
       return result;
@@ -83,7 +83,7 @@ public:
         static_cast<uInt>(capacity > 0xFFFFFFFFu ? 0xFFFFFFFFu : capacity);
     while (stream_.avail_out > 0 && !is_stream_finished_) {
       if (stream_.avail_in == 0 && !is_source_eof_) {
-        const bioseq::io::read_result refill =
+        const bioseq::io::source_read_result refill =
             source_.read_into(input_.data(), input_.size());
         if (refill.has_error) {
           record_failure(source_.last_error_message());

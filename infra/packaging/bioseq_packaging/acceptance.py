@@ -10,7 +10,6 @@ exact-version files downloaded and attested by :mod:`publishing`.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -19,6 +18,7 @@ import sys
 import tarfile
 from typing import Any
 
+from .artifacts import sha256_file
 from .commands import Command, CommandRunner
 from .config import PACKAGE_VERSION, PINNED_SIGNING_FINGERPRINT
 from .model import (
@@ -30,7 +30,7 @@ from .model import (
     PublishedObject,
     SignatureEvidence,
 )
-from .signing import require_pinned_fingerprint, verify_agent_free
+from .signing import require_pinned_fingerprint, verify_with_gpgv
 
 
 _PACKAGE_SUFFIXES = {
@@ -53,14 +53,6 @@ _REQUIRED_TRUE_SMOKE = (
     "fresh_container",
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _artifact_format(path: Path) -> PackageFormat:
@@ -142,7 +134,7 @@ def _parse_validation(
         "postgres_major": cell.postgres_major,
         "postgres_runtime_dependency": expected_runtime[0],
         "vulkan_runtime_dependency": expected_runtime[1],
-        "optimization_level": 0,
+        "template_flatten_profile": "dna4_uint64",
         "package_architecture": _expected_package_architecture(
             cell.distro.package_format, cell.request.architecture
         ),
@@ -283,7 +275,7 @@ class AcceptanceService:
         resolved = _checked_artifact(artifact, cell.distro.package_format)
         validation = self._validate(cell, resolved)
         size = resolved.stat().st_size
-        digest = _sha256(resolved)
+        digest = sha256_file(resolved)
         return (
             ArtifactRecord(
                 path=resolved,
@@ -313,7 +305,7 @@ class AcceptanceService:
             )
         validation = self._validate(cell, resolved)
         size = resolved.stat().st_size
-        digest = _sha256(resolved)
+        digest = sha256_file(resolved)
         if cell.distro.package_format is not PackageFormat.RPM and (
             size != built.build_size or digest != built.build_sha256
         ):
@@ -383,7 +375,7 @@ def _validate_downloaded_object(
         raise PackageBuildError(
             f"downloaded repository object size differs for {published.key}"
         )
-    digest = _sha256(resolved)
+    digest = sha256_file(resolved)
     if digest != published.sha256:
         raise PackageBuildError(
             f"downloaded repository object SHA-256 differs for {published.key}"
@@ -542,7 +534,7 @@ def _verify_pacman_database(
 
 
 def _verify_equal_downloads(left: Path, right: Path, *, label: str) -> None:
-    if left.stat().st_size != right.stat().st_size or _sha256(left) != _sha256(right):
+    if left.stat().st_size != right.stat().st_size or sha256_file(left) != sha256_file(right):
         raise PackageBuildError(f"downloaded PACMAN alias differs from {label}")
 
 
@@ -654,7 +646,7 @@ def verify_published_signatures(
         public_key = required_paths[f"{base}/repodata/repomd.xml.key"]
         repomd = required_paths[f"{base}/repodata/repomd.xml"]
         repomd_signature = required_paths[f"{base}/repodata/repomd.xml.asc"]
-        actual = verify_agent_free(
+        actual = verify_with_gpgv(
             public_key=public_key,
             signatures=((repomd_signature, repomd),),
             expected_fingerprint=fingerprint,
@@ -673,7 +665,7 @@ def verify_published_signatures(
         release = required_paths[f"{base}/Release"]
         release_signature = required_paths[f"{base}/Release.gpg"]
         inrelease = required_paths[f"{base}/InRelease"]
-        actual = verify_agent_free(
+        actual = verify_with_gpgv(
             public_key=public_key,
             signatures=((release_signature, release), (inrelease, None)),
             expected_fingerprint=fingerprint,
@@ -708,7 +700,7 @@ def verify_published_signatures(
             )
         files = remaining_paths[files_key]
         files_signature = remaining_paths[files_signature_key]
-        actual = verify_agent_free(
+        actual = verify_with_gpgv(
             public_key=public_key,
             signatures=(
                 (package_signature, package_path),
@@ -762,4 +754,3 @@ def verify_published_signatures(
 
 
 __all__ = ("AcceptanceService", "verify_published_signatures")
-

@@ -62,7 +62,7 @@ import bioseq.sequences;                   // compact_sequence_stdc_type_params:
 import bioseq.postgres.types.compact_sequence;   // bioseq::pg_types::seq, pgseq_supported_alphabets
 import bioseq.postgres.storage.manager;                     // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
                                            //   read_max_sub_table_cap_bytes,
-                                           //   kSequenceFragmentStorageUnits, sequence_stream_writer,
+                                           //   k_sequence_fragment_storage_units, sequence_stream_writer,
                                            //   flush_seq_cache_write_states, sequence_locator
 import bioseq.postgres.table.io;                    // write_column_row, get_column_write_per_tuple_context
 import bioseq.postgres.storage.indexing.admin;      // build_policy_update_on_insert_indexes
@@ -116,7 +116,7 @@ using column_mapping_codec =
     });
 }
 
-struct LoadColumns {
+struct load_columns {
     std::int16_t header_attno;   // 0 = none (header discarded)
     std::int16_t seq_attno;      // the one bioseq.seq column (always required)
     std::uint8_t alphabet_code;  // from the seq column's typmod
@@ -125,7 +125,7 @@ struct LoadColumns {
 
 // Discover the single bioseq.seq column and decode its alphabet and width from
 // the typmod. Identifier mapping handles the remaining destination columns.
-[[nodiscard]] LoadColumns resolve_load_columns(Relation rel) {
+[[nodiscard]] load_columns resolve_load_columns(Relation rel) {
     TupleDesc td = RelationGetDescr(rel);
     const Oid seq_type_oid = load_seq_type_oid();
     if (!OidIsValid(seq_type_oid)) {
@@ -156,7 +156,7 @@ struct LoadColumns {
         raise_load_error_as_cpp(
             ERRCODE_INVALID_TABLE_DEFINITION,
             fmt::format(
-                "table has {} bioseq.seq columns; exactly one is required (v1)",
+                "table has {} bioseq.seq columns; exactly one is required",
                 seq_count));
     }
 
@@ -169,7 +169,7 @@ struct LoadColumns {
             "bioseq.seq('<alphabet>', <width>))");
     }
     const auto tp = compact_sequence_stdc_type_params::decode(seq_attr->atttypmod);
-    return LoadColumns{header_attno, seq_attno, tp.alphabet_code,
+    return load_columns{header_attno, seq_attno, tp.alphabet_code,
                        tp.storage_unit_byte_width};
 }
 
@@ -178,9 +178,15 @@ struct LoadColumns {
 // --------------------------------------------------------------------------
 namespace idp = bioseq::io::identifier_parser;
 
-// TEXT_TYPMOD = varchar(n)/bpchar(n) with a length constraint -> must run the
+// text_with_typmod = varchar(n)/bpchar(n) with a length constraint -> must run the
 // input function so the length is enforced (NOT the raw cstring_to_text path).
-enum class dest_kind : std::uint8_t { TEXT, TEXT_TYPMOD, SCALAR, RANGE, MULTIRANGE };
+enum class dest_kind : std::uint8_t {
+    text,
+    text_with_typmod,
+    scalar,
+    range,
+    multirange,
+};
 
 struct dest_coercion {
     std::int16_t attno;        // 1-based
@@ -205,15 +211,15 @@ struct default_col { std::int16_t attno; ExprState* state; };
 }
 
 /// Copy `[data,len)` into a per-tuple-palloc'd NUL-terminated cstring. For a
-/// RANGE/MULTIRANGE column with exactly one `..`, rewrite `lo..hi` to the
+/// range/multirange column with exactly one `..`, rewrite `lo..hi` to the
 /// canonical inclusive `[lo,hi]` (multirange: `{[lo,hi]}`); otherwise the trimmed
 /// text is passed straight to `<type>range_in`/`<type>multirange_in`.
 [[nodiscard]] char* make_cstr(const char* data, int len,
                               const dest_coercion& dc, MemoryContext mctx) {
     while (len > 0 && data[0] == ' ') { ++data; --len; }
     while (len > 0 && data[len - 1] == ' ') { --len; }
-    const bool is_range = (dc.kind == dest_kind::RANGE ||
-                           dc.kind == dest_kind::MULTIRANGE);
+    const bool is_range = (dc.kind == dest_kind::range
+                           || dc.kind == dest_kind::multirange);
     if (is_range) {
         const char* d0 = find_substr(data, len, "..");
         const bool one_dots = d0 &&
@@ -228,7 +234,7 @@ struct default_col { std::int16_t attno; ExprState* state; };
             const char* hi = data + hb_off; int hil = hb;
             while (hil && hi[0] == ' ') { ++hi; --hil; }
             while (hil && hi[hil - 1] == ' ') --hil;
-            const bool mr = (dc.kind == dest_kind::MULTIRANGE);
+            const bool mr = (dc.kind == dest_kind::multirange);
             char* out = bioseq::postgres::support::invoke_pg_as_cpp(
                 [mctx, lol, hil] {
                     return static_cast<char*>(MemoryContextAlloc(
@@ -260,12 +266,12 @@ struct default_col { std::int16_t attno; ExprState* state; };
 // Load context
 // --------------------------------------------------------------------------
 
-struct LoadContext {
+struct load_context {
     Oid main_relid;                                  // parent table OID (for update_index)
     Oid db_oid, spc_oid; RelFileNumber main_relfilenode;
     std::uint64_t main_storage_id = 0;
     Relation parent_rel; TupleDesc parent_td;
-    LoadColumns cols;
+    load_columns cols;
     bioseq::storage::seq_caches* caches;
     column_write_state* write_state;
     sequence_size_t cap_bytes;
@@ -293,7 +299,7 @@ struct LoadContext {
 
 /// Add bounded record context to coercion, default, or constraint failures.
 void bioseq_load_error_context(void* arg) {
-    auto* ctx = static_cast<LoadContext*>(arg);
+    auto* ctx = static_cast<load_context*>(arg);
     const std::string_view h = ctx->current_header;
     const int hlen = static_cast<int>(std::min<std::size_t>(h.size(), 240));
     if (ctx->current_column_name)
@@ -306,10 +312,10 @@ void bioseq_load_error_context(void* arg) {
 }
 
 struct load_error_context_scope {
-    LoadContext& ctx;
+    load_context& ctx;
     ErrorContextCallback callback{};
 
-    load_error_context_scope(LoadContext& context, std::string_view header)
+    load_error_context_scope(load_context& context, std::string_view header)
         : ctx(context) {
         ctx.current_header = header;
         ctx.current_column_name = nullptr;
@@ -329,7 +335,7 @@ struct load_error_context_scope {
 /// PostgreSQL sink that routes each byte range through its column's cached
 /// input function.
 struct pg_identifier_writer {
-    LoadContext&                   ctx;
+    load_context&                  ctx;
     std::span<const dest_coercion> dest;       // index == slot
     std::span<const default_col>   defaults;   // unmapped/unset columns w/ default
 
@@ -347,7 +353,7 @@ struct pg_identifier_writer {
         const MemoryContext per_tuple =
             get_column_write_per_tuple_context(ctx.write_state);
         Datum v;
-        if (dc.kind == dest_kind::TEXT) {                   // plain text/varchar/bpchar, no typmod
+        if (dc.kind == dest_kind::text) { // plain text/varchar/bpchar, no typmod
             v = bioseq::postgres::support::invoke_pg_as_cpp(
                 [per_tuple, data, len] {
                     const MemoryContext old =
@@ -357,7 +363,7 @@ struct pg_identifier_writer {
                     MemoryContextSwitchTo(old);
                     return result;
                 });
-        } else {                                            // TEXT_TYPMOD/SCALAR/RANGE/MULTIRANGE
+        } else { // text_with_typmod/scalar/range/multirange
             char* cstr = make_cstr(data, len, dc, per_tuple);
             v = bioseq::postgres::support::invoke_pg_as_cpp(
                 [per_tuple, &dc, cstr] {
@@ -418,7 +424,7 @@ static_assert(idp::is_identifier_dest_writer<pg_identifier_writer>);
 
 // The non-templated parent writer keeps identifier parsing outside the
 // alphabet, storage-width, and file-type dispatch matrix.
-void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
+void write_parent_row(load_context& ctx, pg_identifier_writer& tuple_writer,
                       std::string_view header,
                       std::uint8_t alphabet_code, std::uint8_t byte_width,
                       std::uint16_t last_pad, sequence_size_t total_bp,
@@ -470,17 +476,18 @@ void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
 // Bounded packed streaming and record loading
 // --------------------------------------------------------------------------
 
-template <sequence_alphabet A, std::size_t ColBW>
+template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width>
 struct load_stream_sink {
-    using col_cfg = sequence_custom_alphabet<A,
-                       typename boost::uint_t<ColBW * 8>::least>;
+    using col_cfg = sequence_custom_alphabet<
+        p_alphabet,
+        typename boost::uint_t<p_column_byte_width * 8>::least>;
     using col_unit_t = typename col_cfg::storage_unit;
     static constexpr std::size_t col_lpu =
         compact_sequence_range<col_cfg>::traits::letters_per_unit;
-    static constexpr std::uint8_t kColAlphabetCode =
-        pgseq_supported_alphabets::index_of<A>();
+    static constexpr std::uint8_t k_column_alphabet_code =
+        pgseq_supported_alphabets::index_of<p_alphabet>();
 
-    LoadContext& ctx;
+    load_context& ctx;
     pg_identifier_writer& tuple_writer;
     std::int64_t& records;
     std::string header;
@@ -497,15 +504,15 @@ struct load_stream_sink {
         total_bp = 0;
         writer.begin(ctx.main_relid, ctx.db_oid, ctx.spc_oid,
                      ctx.main_relfilenode, ctx.main_storage_id,
-                     ctx.cols.seq_attno, ctx.parent_td, kColAlphabetCode,
-                     static_cast<std::uint8_t>(ColBW), ctx.cap_bytes,
+                     ctx.cols.seq_attno, ctx.parent_td, k_column_alphabet_code,
+                     static_cast<std::uint8_t>(p_column_byte_width), ctx.cap_bytes,
                      ctx.caches);
     }
 
     void chunk(bioseq::io::packed_sequence_chunk<col_unit_t> c) {
         const std::size_t bytes =
             ((static_cast<std::size_t>(c.logical_length) + col_lpu - 1) / col_lpu)
-            * ColBW;
+            * p_column_byte_width;
         const auto* p = reinterpret_cast<const std::uint8_t*>(c.words.data());
         writer.append_packed_bytes(
             std::span<const std::uint8_t>{p, bytes}, c.logical_length);
@@ -517,14 +524,14 @@ struct load_stream_sink {
             : static_cast<std::uint16_t>(
                   ((total_bp + col_lpu - 1) / col_lpu) * col_lpu - total_bp);
         auto pending_source = writer.finish(total_bp, last_pad);
-        write_parent_row(ctx, tuple_writer, header, kColAlphabetCode,
-                         static_cast<std::uint8_t>(ColBW), last_pad,
+        write_parent_row(ctx, tuple_writer, header, k_column_alphabet_code,
+                         static_cast<std::uint8_t>(p_column_byte_width), last_pad,
                          total_bp, std::move(pending_source));
         ++records;
     }
 };
 
-template <typename Unit>
+template <typename p_storage_unit>
 struct queued_load_event {
     enum class kind_t : std::uint8_t {
         begin_record,
@@ -534,17 +541,17 @@ struct queued_load_event {
 
     kind_t kind = kind_t::chunk;
     std::string header{};
-    std::vector<Unit> words{};
+    std::vector<p_storage_unit> words{};
     std::uint64_t bp_count = 0;
     bool end_of_record = false;
 };
 
-template <typename Unit>
+template <typename p_storage_unit>
 class load_event_queue {
 public:
     explicit load_event_queue(std::size_t capacity) : capacity_(capacity) {}
 
-    bool push(queued_load_event<Unit>&& event) {
+    bool push(queued_load_event<p_storage_unit>&& event) {
         std::unique_lock<std::mutex> lock(mu_);
         not_full_.wait(lock, [this] {
             return closed_ || queue_.size() < capacity_;
@@ -557,7 +564,7 @@ public:
         return true;
     }
 
-    bool pop(queued_load_event<Unit>& event) {
+    bool pop(queued_load_event<p_storage_unit>& event) {
         std::unique_lock<std::mutex> lock(mu_);
         not_empty_.wait(lock, [this] {
             return closed_ || !queue_.empty();
@@ -585,22 +592,23 @@ private:
     std::mutex mu_;
     std::condition_variable not_empty_;
     std::condition_variable not_full_;
-    std::deque<queued_load_event<Unit>> queue_;
+    std::deque<queued_load_event<p_storage_unit>> queue_;
     bool closed_ = false;
 };
 
 struct load_queue_closed {};
 
-template <typename Unit>
+template <typename p_storage_unit>
 struct load_queue_close_scope {
-    load_event_queue<Unit>& queue;
+    load_event_queue<p_storage_unit>& queue;
     ~load_queue_close_scope() noexcept { queue.close(); }
 };
 
-template <sequence_alphabet A, std::size_t ColBW>
+template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width>
 struct queued_load_stream_sink {
-    using col_cfg = sequence_custom_alphabet<A,
-                       typename boost::uint_t<ColBW * 8>::least>;
+    using col_cfg = sequence_custom_alphabet<
+        p_alphabet,
+        typename boost::uint_t<p_column_byte_width * 8>::least>;
     using col_unit_t = typename col_cfg::storage_unit;
 
     load_event_queue<col_unit_t>& queue;
@@ -646,14 +654,16 @@ struct queued_load_stream_sink {
     }
 };
 
-template <sequence_alphabet A, std::size_t ColBW,
-          bioseq::io::sequence_file_format FT>
+template <sequence_alphabet p_alphabet,
+          std::size_t p_column_byte_width,
+          bioseq::io::sequence_file_format p_file_format>
 [[nodiscard]] std::int64_t load_records_overlapped(
-        LoadContext& ctx,
+        load_context& ctx,
         pg_identifier_writer& tuple_writer,
         const char* file_path) {
-    using col_cfg = sequence_custom_alphabet<A,
-                       typename boost::uint_t<ColBW * 8>::least>;
+    using col_cfg = sequence_custom_alphabet<
+        p_alphabet,
+        typename boost::uint_t<p_column_byte_width * 8>::least>;
     using col_unit_t = typename col_cfg::storage_unit;
 
     load_event_queue<col_unit_t> queue{/*capacity=*/16};
@@ -669,7 +679,8 @@ template <sequence_alphabet A, std::size_t ColBW,
             &producer_records, file_path] {
         load_queue_close_scope<col_unit_t> close_scope{queue};
         try {
-            queued_load_stream_sink<A, ColBW> sink{queue};
+            queued_load_stream_sink<
+                p_alphabet, p_column_byte_width> sink{queue};
             auto on_fail = [&io_error](std::string&& msg) {
                 if (io_error.empty()) {
                     io_error = std::move(msg);
@@ -678,7 +689,8 @@ template <sequence_alphabet A, std::size_t ColBW,
             bioseq::io::reader_options opts = bioseq::io::default_reader_options;
             opts.concurrency.worker_count = 0;
             opts.concurrency.parser_count = 1;
-            auto result = bioseq::io::stream_sequences_file<A, col_unit_t, FT>(
+            auto result = bioseq::io::stream_sequences_file<
+                p_alphabet, col_unit_t, p_file_format>(
                 file_path, sink, on_fail, opts);
             if (result) {
                 producer_records = *result;
@@ -697,7 +709,8 @@ template <sequence_alphabet A, std::size_t ColBW,
     }});
 
     std::int64_t records = 0;
-    load_stream_sink<A, ColBW> sink{ctx, tuple_writer, records};
+    load_stream_sink<p_alphabet, p_column_byte_width> sink{
+        ctx, tuple_writer, records};
     queued_load_event<col_unit_t> event;
     std::exception_ptr consumer_error;
     try {
@@ -752,19 +765,21 @@ template <sequence_alphabet A, std::size_t ColBW,
     return records;
 }
 
-template <sequence_alphabet A, std::size_t ColBW,
-          bioseq::io::sequence_file_format FT>
+template <sequence_alphabet p_alphabet,
+          std::size_t p_column_byte_width,
+          bioseq::io::sequence_file_format p_file_format>
 [[nodiscard]] std::int64_t load_records(
-        LoadContext& ctx,
+        load_context& ctx,
         pg_identifier_writer& tuple_writer,
         const char* file_path) {
-    using col_cfg    = sequence_custom_alphabet<A,
-                           typename boost::uint_t<ColBW * 8>::least>;
+    using col_cfg = sequence_custom_alphabet<
+        p_alphabet,
+        typename boost::uint_t<p_column_byte_width * 8>::least>;
     using col_unit_t = typename col_cfg::storage_unit;
 
-    constexpr std::size_t kFragmentUnits =
-        bioseq::storage::kSequenceFragmentStorageUnits;
-    static_assert(kFragmentUnits * 8 <= 8192,
+    constexpr std::size_t k_fragment_units =
+        bioseq::storage::k_sequence_fragment_storage_units;
+    static_assert(k_fragment_units * 8 <= 8192,
                   "fragment payload must stay <= 8 KiB");
 
     if (bioseq::settings::load::write_overlap::enabled) {
@@ -775,14 +790,16 @@ template <sequence_alphabet A, std::size_t ColBW,
             bioseq::parallelism::has_parallel_dispatch(pool.get_mode())
             && pool.maximum_concurrency() > 1;
         if (may_overlap) {
-            return load_records_overlapped<A, ColBW, FT>(
+            return load_records_overlapped<
+                p_alphabet, p_column_byte_width, p_file_format>(
                 ctx, tuple_writer, file_path);
         }
     }
 
     std::int64_t records = 0;
     std::string io_error;
-    load_stream_sink<A, ColBW> sink{ctx, tuple_writer, records};
+    load_stream_sink<p_alphabet, p_column_byte_width> sink{
+        ctx, tuple_writer, records};
     auto on_fail = [&io_error](std::string&& msg) {
         if (io_error.empty()) io_error = std::move(msg);
     };
@@ -790,7 +807,8 @@ template <sequence_alphabet A, std::size_t ColBW,
     bioseq::io::reader_options opts = bioseq::io::default_reader_options;
     opts.concurrency.worker_count = 0;
     opts.concurrency.parser_count = 1;
-    auto result = bioseq::io::stream_sequences_file<A, col_unit_t, FT>(
+    auto result = bioseq::io::stream_sequences_file<
+        p_alphabet, col_unit_t, p_file_format>(
         file_path, sink, on_fail, opts);
 
     if (!io_error.empty()) {
@@ -809,28 +827,31 @@ template <sequence_alphabet A, std::size_t ColBW,
 namespace load_dispatch {
 namespace tpl = bioseq::common::templating;
 
-template <class A, std::size_t ColBW>
+template <class p_alphabet, std::size_t p_column_byte_width>
 struct file_format_adapter {
-    template <bioseq::io::sequence_file_format FT>
+    template <bioseq::io::sequence_file_format p_file_format>
     [[gnu::always_inline]] std::int64_t operator()(
-            std::integral_constant<bioseq::io::sequence_file_format, FT>,
-            LoadContext& ctx,
+            std::integral_constant<
+                bioseq::io::sequence_file_format, p_file_format>,
+            load_context& ctx,
             pg_identifier_writer& tuple_writer,
             const char* file_path) const {
-        return load_records<A, ColBW, FT>(ctx, tuple_writer, file_path);
+        return load_records<
+            p_alphabet, p_column_byte_width, p_file_format>(
+                ctx, tuple_writer, file_path);
     }
 };
 
-template <class A, std::size_t ColBW>
+template <class p_alphabet, std::size_t p_column_byte_width>
 struct format_dispatch {
-    LoadContext& ctx;
+    load_context& ctx;
     pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
     void run() const {
-        file_format_adapter<A, ColBW> adapter{};
+        file_format_adapter<p_alphabet, p_column_byte_width> adapter{};
         out = tpl::enum_dispatch_pack<
             std::int64_t,
             bioseq::io::sequence_file_format,
@@ -843,38 +864,40 @@ struct format_dispatch {
     }
 };
 
-template <class A>
+template <class p_alphabet>
 struct width_dispatch {
-    LoadContext& ctx;
+    load_context& ctx;
     pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
-    template <std::size_t ColBW>
+    template <std::size_t p_column_byte_width>
     void operator()() const {
-        format_dispatch<A, ColBW>{ctx, tuple_writer, file_path, format, out}.run();
+        format_dispatch<p_alphabet, p_column_byte_width>{
+            ctx, tuple_writer, file_path, format, out}.run();
     }
 };
 
 struct alphabet_dispatch {
-    LoadContext& ctx;
+    load_context& ctx;
     pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_file_format format;
     std::int64_t& out;
 
-    template <class A>
+    template <class p_alphabet>
     void operator()() const {
         dispatch_storage_unit_byte_width(ctx.cols.byte_width,
-            width_dispatch<A>{ctx, tuple_writer, file_path, format, out});
+            width_dispatch<p_alphabet>{
+                ctx, tuple_writer, file_path, format, out});
     }
 };
 }  // namespace load_dispatch
 
 // Dispatch the resolved alphabet, storage width, and file format once.
 [[nodiscard]] std::int64_t dispatch_and_stream(
-        LoadContext& ctx, pg_identifier_writer& tuple_writer,
+        load_context& ctx, pg_identifier_writer& tuple_writer,
         const char* file_path,
         bioseq::io::sequence_file_kind kind) {
     std::int64_t records_loaded = 0;
@@ -921,7 +944,7 @@ void reset_sequence_caches_after_load_storage_alloc() {
 // Open, stream, flush, close, and index
 // --------------------------------------------------------------------------
 
-void flush_pending_load_writes(LoadContext& ctx) {
+void flush_pending_load_writes(load_context& ctx) {
     // Parent rows go through ctx.write_state; fragment rows through per-subtable
     // write states opened from ctx.caches. update_index_impl uses raw columnar
     // readers + random reads, so both layers must be flushed before the same UDF
@@ -940,7 +963,7 @@ void flush_pending_load_writes(LoadContext& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
-void finish_load_write_states(LoadContext& ctx) {
+void finish_load_write_states(load_context& ctx) {
     std::vector<Oid> shard_relfilenodes;
     shard_relfilenodes.reserve(ctx.caches == nullptr ? 0 : ctx.caches->entries.size());
     if (ctx.caches != nullptr) {
@@ -1062,7 +1085,7 @@ parse_column_mapping_array(ArrayType* arr) {
 /// Resolve column mappings and prepare coercion, defaults, and constraints
 /// before streaming.
 void setup_typed_column_mapping(
-        LoadContext& ctx, const char* path, bioseq::io::sequence_file_kind kind,
+        load_context& ctx, const char* path, bioseq::io::sequence_file_kind kind,
         idp::header_format requested_fmt,
         std::span<const idp::user_column_mapping> user_maps) {
     ctx.requested_fmt = requested_fmt;
@@ -1184,13 +1207,15 @@ void setup_typed_column_mapping(
             });
         dest_kind kind;
         if (columns[ci].is_text)
-            kind = (ca.atttypmod < 0) ? dest_kind::TEXT : dest_kind::TEXT_TYPMOD;
+            kind = ca.atttypmod < 0
+                ? dest_kind::text
+                : dest_kind::text_with_typmod;
         else if (typtype == TYPTYPE_RANGE)
-            kind = dest_kind::RANGE;
+            kind = dest_kind::range;
         else if (typtype == TYPTYPE_MULTIRANGE)
-            kind = dest_kind::MULTIRANGE;
+            kind = dest_kind::multirange;
         else
-            kind = dest_kind::SCALAR;
+            kind = dest_kind::scalar;
         ctx.dest.push_back(dest_coercion{
             .attno = ca.attno,
             .column_name = std::string{columns[ci].name},
@@ -1250,7 +1275,7 @@ void setup_typed_column_mapping(
 }
 
 /// Tear down the optional per-load executor state. This is idempotent.
-void teardown_load_executor(LoadContext& ctx, MemoryContext stable_context) {
+void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
 	if (ctx.estate == nullptr) return;
 	// FreeExecutorState destroys the estate's executor contexts.  The checked
 	// PostgreSQL boundary restores the context that was current on entry, so it
@@ -1272,7 +1297,7 @@ void teardown_load_executor(LoadContext& ctx, MemoryContext stable_context) {
 }
 
 void cleanup_load_context(
-		LoadContext& ctx, bool commit, MemoryContext stable_context) {
+		load_context& ctx, bool commit, MemoryContext stable_context) {
 	MemoryContextSwitchTo(stable_context);
 	// Release the per-load executor state before
 	// closing the parent relation. Idempotent (no-op if already torn down).
@@ -1302,7 +1327,7 @@ void cleanup_load_context(
         Oid relid, const char* path, bioseq::io::sequence_file_kind kind,
         idp::header_format requested_fmt,
         std::span<const idp::user_column_mapping> user_maps) {
-	LoadContext ctx{};
+	load_context ctx{};
 	ctx.main_relid = relid;
 	const MemoryContext stable_context = CurrentMemoryContext;
 	std::int64_t n = 0;

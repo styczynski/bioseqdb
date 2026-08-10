@@ -7,8 +7,8 @@ die() {
   exit 1
 }
 
-[[ "${BIOSEQ_OPTTIMIZATION_LEVEL:-}" == "0" ]] \
-  || die "every package build must explicitly set BIOSEQ_OPTTIMIZATION_LEVEL=0"
+[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "dna4_uint64" ]] \
+  || die "every package build must select dna4_uint64 template flattening"
 
 # RPM and DEB helpers export distro compiler selectors, optimization, LTO, and
 # linker flags and GNU Make jobserver state before invoking their build hooks.
@@ -155,7 +155,7 @@ package_cmake_invariants() {
     BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "${libcxx_archive}" \
     BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE "${libcxxabi_archive}" \
     BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE "${libunwind_archive}" \
-    BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE 0 \
+    BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64 \
     BIOSEQ_BUILD_CORE ON \
     BIOSEQ_BUILD_CACHE ON \
     BIOSEQ_BUILD_PAPERS OFF \
@@ -164,7 +164,6 @@ package_cmake_invariants() {
     BIOSEQ_TEST_INDEXES OFF \
     BIOSEQ_CACHE_BUILD_TESTS OFF \
     BIOSEQ_CACHE_TESTING OFF \
-    BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK OFF \
     BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST OFF \
     BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST OFF \
     BIOSEQ_HEAVY_JOBS 1 \
@@ -202,7 +201,7 @@ require_package_cmake_profile() {
 }
 
 if [[ "${action}" == "build" ]]; then
-  python3 "${persistent_source_dir}/infra/packaging/scripts/prove_static_runtime.py" \
+  python3 "${persistent_source_dir}/infra/packaging/scripts/validate_static_runtime.py" \
     --cxx "${llvm_root}/bin/clang++" \
     --libcxx "${libcxx_archive}" \
     --libcxxabi "${libcxxabi_archive}" \
@@ -229,7 +228,7 @@ if [[ "${action}" == "build" ]]; then
       -DBIOSEQ_PACKAGE_LIBCXX_ARCHIVE="${libcxx_archive}" \
       -DBIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE="${libcxxabi_archive}" \
       -DBIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE="${libunwind_archive}" \
-      -DBIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0 \
+      -DBIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64 \
       -DBIOSEQ_BUILD_CORE=ON \
       -DBIOSEQ_BUILD_CACHE=ON \
       -DBIOSEQ_BUILD_PAPERS=OFF \
@@ -238,7 +237,6 @@ if [[ "${action}" == "build" ]]; then
       -DBIOSEQ_TEST_INDEXES=OFF \
       -DBIOSEQ_CACHE_BUILD_TESTS=OFF \
       -DBIOSEQ_CACHE_TESTING=OFF \
-      -DBIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK=OFF \
       -DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF \
       -DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF \
       -DBIOSEQ_HEAVY_JOBS=1 \

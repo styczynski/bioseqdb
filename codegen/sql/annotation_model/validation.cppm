@@ -44,21 +44,21 @@ enum class annotation_kind : std::uint8_t {
     catalog_dependencies,
 };
 
-template<class Options>
+template<class p_options>
 struct annotation_spec {
     annotation_kind kind{};
-    Options options{};
+    p_options options{};
 };
 
 struct empty_options {
 };
 
-#define BIOSEQ_SQL_CONCRETE_BUILDER(Name, Kind, Options)                    \
-    [[nodiscard]] consteval annotation_spec<Options> Name(Options options) { \
-        return {.kind = annotation_kind::Kind, .options = options};          \
+#define BIOSEQ_SQL_CONCRETE_BUILDER(p_name, p_kind, p_options)               \
+    [[nodiscard]] consteval annotation_spec<p_options> p_name(p_options options) { \
+        return {.kind = annotation_kind::p_kind, .options = options};         \
     }                                                                        \
-    [[nodiscard]] consteval annotation_spec<Options> Name() {                \
-        return {.kind = annotation_kind::Kind, .options = {}};               \
+    [[nodiscard]] consteval annotation_spec<p_options> p_name() {            \
+        return {.kind = annotation_kind::p_kind, .options = {}};             \
     }
 
 BIOSEQ_SQL_CONCRETE_BUILDER(function, function, function_options)
@@ -182,11 +182,11 @@ am_catalog_dependencies(catalog_dependencies_options options) {
     };
 }
 
-template<class... References>
+template<class... p_references>
 [[nodiscard]] consteval annotation_spec<empty_options>
-depends(References&&...) {
+depends(p_references&&...) {
     static_assert(
-        sizeof...(References) > 0,
+        sizeof...(p_references) > 0,
         "bioseq_sql::depends requires at least one declaration reference");
     return {.kind = annotation_kind::depends};
 }

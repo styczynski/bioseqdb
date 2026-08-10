@@ -53,19 +53,19 @@ struct row_descriptor_field final {
     bool nullable;
 };
 
-template<std::size_t Fields>
+template<std::size_t p_field_count>
 void validate_row_descriptor(
         TupleDesc tuple_descriptor,
         std::string_view row_name,
-        const std::array<row_descriptor_field, Fields>& expected) {
+        const std::array<row_descriptor_field, p_field_count>& expected) {
     if (tuple_descriptor == nullptr
-        || tuple_descriptor->natts != static_cast<int>(Fields)) {
+        || tuple_descriptor->natts != static_cast<int>(p_field_count)) {
         throw row_codec_error{
             std::string{row_name}
             + " tuple descriptor has the wrong arity"};
     }
 
-    for (std::size_t index = 0; index < Fields; ++index) {
+    for (std::size_t index = 0; index < p_field_count; ++index) {
         const Form_pg_attribute attribute =
             TupleDescAttr(tuple_descriptor, static_cast<int>(index));
         if (attribute->attnum != expected[index].attribute_number
@@ -156,13 +156,13 @@ struct by_reference_datum_copy_policy final {
     by_reference_datum_copy_policy policy,
     MemoryContext result_context);
 
-template<class T>
-    requires std::is_object_v<T>
-[[nodiscard]] T* copy_pg_datum_to_memory_context(
+template<class p_value>
+    requires std::is_object_v<p_value>
+[[nodiscard]] p_value* copy_pg_datum_to_memory_context(
         pg_datum value,
         by_reference_datum_copy_policy policy,
         MemoryContext result_context) {
-    return reinterpret_cast<T*>(
+    return reinterpret_cast<p_value*>(
         DatumGetPointer(
             copy_pg_datum_to_memory_context(
                 value.raw(),
@@ -209,10 +209,10 @@ struct encoded_scan_value final {
     return result;
 }
 
-template<std::size_t Fields>
+template<std::size_t p_field_count>
 class encoded_row_data final {
 public:
-    static constexpr std::size_t field_count = Fields;
+    static constexpr std::size_t field_count = p_field_count;
 
     encoded_row_data() noexcept = default;
     encoded_row_data(const encoded_row_data&) = delete;
@@ -220,9 +220,9 @@ public:
     encoded_row_data(encoded_row_data&&) noexcept = default;
     encoded_row_data& operator=(encoded_row_data&&) noexcept = default;
 
-    template<class T>
-        requires is_convertible_to_datum<T>
-    encoded_row_data& set(AttrNumber attribute_number, T value) noexcept {
+    template<class p_value>
+        requires is_convertible_to_datum<p_value>
+    encoded_row_data& set(AttrNumber attribute_number, p_value value) noexcept {
         storage_.set(attribute_number, value);
         return *this;
     }
@@ -256,14 +256,14 @@ public:
         return storage_.nulls_data();
     }
 
-    template<std::size_t ExpectedFields>
-        requires (ExpectedFields == Fields)
+    template<std::size_t p_expected_field_count>
+        requires (p_expected_field_count == p_field_count)
     [[nodiscard]] HeapTuple form_tuple(
             TupleDesc tuple_descriptor,
             std::string_view row_name,
             const std::array<
                 row_descriptor_field,
-                ExpectedFields>& expected) {
+                p_expected_field_count>& expected) {
         validate_row_descriptor(
             tuple_descriptor,
             row_name,
@@ -274,15 +274,15 @@ public:
             });
     }
 
-    template<std::size_t ExpectedFields>
-        requires (ExpectedFields == Fields)
+    template<std::size_t p_expected_field_count>
+        requires (p_expected_field_count == p_field_count)
     void put_values(
             Tuplestorestate* tuplestore,
             TupleDesc tuple_descriptor,
             std::string_view row_name,
             const std::array<
                 row_descriptor_field,
-                ExpectedFields>& expected) {
+                p_expected_field_count>& expected) {
         validate_row_descriptor(
             tuple_descriptor,
             row_name,
@@ -296,21 +296,21 @@ public:
     }
 
 private:
-    pg_datum_list<Fields> storage_{};
+    pg_datum_list<p_field_count> storage_{};
 };
 
-template<std::size_t Fields>
+template<std::size_t p_field_count>
 class deformed_row_data final {
 public:
-    static constexpr std::size_t field_count = Fields;
+    static constexpr std::size_t field_count = p_field_count;
 
     deformed_row_data(const deformed_row_data&) = delete;
     deformed_row_data& operator=(const deformed_row_data&) = delete;
     deformed_row_data(deformed_row_data&&) noexcept = default;
     deformed_row_data& operator=(deformed_row_data&&) noexcept = default;
 
-    template<std::size_t ExpectedFields>
-        requires (ExpectedFields == Fields)
+    template<std::size_t p_expected_field_count>
+        requires (p_expected_field_count == p_field_count)
     [[nodiscard]] static deformed_row_data deform(
             HeapTuple tuple,
             TupleDesc tuple_descriptor,
@@ -318,7 +318,7 @@ public:
             std::string_view row_name,
             const std::array<
                 row_descriptor_field,
-                ExpectedFields>& expected) {
+                p_expected_field_count>& expected) {
         require_row_result_context(result_context, row_name);
         validate_row_descriptor(
             tuple_descriptor,
@@ -354,14 +354,14 @@ private:
             MemoryContext result_context) noexcept
         : result_context_{result_context} {}
 
-    pg_datum_list<Fields> storage_{};
+    pg_datum_list<p_field_count> storage_{};
     MemoryContext result_context_;
 };
 
-template<std::size_t Fields>
+template<std::size_t p_field_count>
 class row_update_data final {
 public:
-    static constexpr std::size_t field_count = Fields;
+    static constexpr std::size_t field_count = p_field_count;
 
     row_update_data() noexcept = default;
     row_update_data(const row_update_data&) = delete;
@@ -369,11 +369,11 @@ public:
     row_update_data(row_update_data&&) noexcept = default;
     row_update_data& operator=(row_update_data&&) noexcept = default;
 
-    template<class T>
-        requires is_convertible_to_datum<T>
+    template<class p_value>
+        requires is_convertible_to_datum<p_value>
     row_update_data& set(
             AttrNumber attribute_number,
-            T value) noexcept {
+            p_value value) noexcept {
         storage_.set(attribute_number, value);
         return *this;
     }
@@ -391,15 +391,15 @@ public:
         return *this;
     }
 
-    template<std::size_t ExpectedFields>
-        requires (ExpectedFields == Fields)
+    template<std::size_t p_expected_field_count>
+        requires (p_expected_field_count == p_field_count)
     [[nodiscard]] HeapTuple modify(
             HeapTuple old_tuple,
             TupleDesc tuple_descriptor,
             std::string_view row_name,
             const std::array<
                 row_descriptor_field,
-                ExpectedFields>& expected) {
+                p_expected_field_count>& expected) {
         validate_row_descriptor(
             tuple_descriptor,
             row_name,
@@ -413,7 +413,7 @@ public:
     }
 
 private:
-    pg_datum_update<Fields> storage_{};
+    pg_datum_update<p_field_count> storage_{};
 };
 
 }  // namespace bioseq::postgres::support
@@ -500,10 +500,10 @@ Datum copy_pg_datum_to_memory_context(
 
 namespace bioseq::postgres::support::detail {
 
-template<class T>
+template<class p_value>
 concept publicly_default_constructible =
     requires {
-        T{};
+        p_value{};
     };
 
 using encoded_probe = encoded_row_data<2>;

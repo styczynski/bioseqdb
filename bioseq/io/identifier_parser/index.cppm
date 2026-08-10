@@ -98,9 +98,9 @@ struct identifier_mapping_result {
 /// (`pg_identifier_writer` in load.cppm) coerces each raw byte range into the
 /// destination column's type and fills the virtual-tuple slot. Modelled on
 /// `bioseq::indexing::is_index_for` / the `io_sink` concept (member-call style).
-template <typename W>
+template <typename p_writer>
 concept identifier_destination_writer = requires(
-        W& w, const W& cw, destination_slot slot, const char* data, std::int32_t len) {
+        p_writer& w, const p_writer& cw, destination_slot slot, const char* data, std::int32_t len) {
     { w.begin_tuple() }              -> std::same_as<void>;
     { w.set_field(slot, data, len) } -> std::same_as<void>;  // universal coercion
     { w.set_null(slot) }             -> std::same_as<void>;
@@ -144,19 +144,19 @@ struct identifier_writer_reference {
     [[nodiscard]] std::size_t destination_count() const { return destination_count_callback(self); }
 };
 
-template <identifier_destination_writer W>
-[[nodiscard]] identifier_writer_reference make_identifier_writer_reference(W& w) noexcept {
+template <identifier_destination_writer p_writer>
+[[nodiscard]] identifier_writer_reference make_identifier_writer_reference(p_writer& w) noexcept {
     return identifier_writer_reference{
         .self = &w,
-        .begin_tuple_callback = [](void* p) { static_cast<W*>(p)->begin_tuple(); },
+        .begin_tuple_callback = [](void* p) { static_cast<p_writer*>(p)->begin_tuple(); },
         .set_field_callback = [](void* p, destination_slot s, const char* d, std::int32_t n) {
-            static_cast<W*>(p)->set_field(s, d, n);
+            static_cast<p_writer*>(p)->set_field(s, d, n);
         },
-        .set_null_callback = [](void* p, destination_slot s) { static_cast<W*>(p)->set_null(s); },
-        .end_tuple_callback = [](void* p) { static_cast<W*>(p)->end_tuple(); },
-        .finish_callback = [](void* p) { static_cast<W*>(p)->finish(); },
+        .set_null_callback = [](void* p, destination_slot s) { static_cast<p_writer*>(p)->set_null(s); },
+        .end_tuple_callback = [](void* p) { static_cast<p_writer*>(p)->end_tuple(); },
+        .finish_callback = [](void* p) { static_cast<p_writer*>(p)->finish(); },
         .destination_count_callback = [](const void* p) {
-            return static_cast<const W*>(p)->destination_count();
+            return static_cast<const p_writer*>(p)->destination_count();
         },
     };
 }
@@ -195,7 +195,7 @@ struct header_lexer {
     }
 };
 
-/// Reusable parser scratch owned by the caller (`LoadContext` on the PG side).
+/// Reusable parser scratch owned by the caller (`load_context` on the PG side).
 /// No TLS and no per-record heap allocation in steady state.
 struct identifier_parse_state {
     header_lexer lexer;

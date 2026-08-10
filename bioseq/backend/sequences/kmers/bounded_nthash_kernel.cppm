@@ -50,12 +50,12 @@ inline constexpr std::array<std::uint32_t, 4> k_forward_table{
 /** Look up ACTG ntHash constants in one native u32 register. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> lookup_hash_table(
-    p_simd_tag d,
+    p_simd_tag simd_tag,
     hn::Vec<p_simd_tag> table,
     hn::Vec<p_simd_tag> ranks) noexcept
 {
     return hn::TableLookupLanes(
-        table, hn::IndicesFromVec(d, ranks));
+        table, hn::IndicesFromVec(simd_tag, ranks));
 }
 
 } // namespace bounded_nthash_internal
@@ -121,16 +121,16 @@ struct bounded_u32_dna4_view {
 
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
-    p_simd_tag d,
+    p_simd_tag simd_tag,
     hn::Vec<p_simd_tag> table,
     const vec_stream<p_simd_tag, std::uint32_t, p_stream_count>& ranks) noexcept
 {
     return make_vec_stream<p_simd_tag, std::uint32_t, p_stream_count>(
         [&](auto stream_constant) [[gnu::always_inline]] {
-            constexpr std::size_t stream =
+            constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
             return bounded_nthash_internal::lookup_hash_table(
-                d, table, ranks[stream]);
+                simd_tag, table, ranks[k_stream_index]);
         });
 }
 
@@ -308,15 +308,16 @@ template<class p_simd_tag, std::size_t p_stream_count>
  * production fork's explicit tail fix.
  */
 template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
-[[nodiscard]] HWY_INLINE auto corrected_live_stream(
-    p_simd_tag d,
+[[nodiscard]] HWY_INLINE auto correct_live_stream(
+    p_simd_tag simd_tag,
     hn::Mask<p_simd_tag> iterator_mask) noexcept
 {
-    const auto full = hn::FirstN(d, hn::Lanes(d));
-    return [&]<std::size_t... Streams>(
-               std::index_sequence<Streams...>) [[gnu::always_inline]] {
+    const auto full = hn::FirstN(simd_tag, hn::Lanes(simd_tag));
+    return [&]<std::size_t... p_stream_indices>(
+               std::index_sequence<p_stream_indices...>)
+               [[gnu::always_inline]] {
         return mask_stream<p_simd_tag, p_stream_count>::pack(
-            ((p_is_full || Streams + 1 < p_stream_count)
+            ((p_is_full || p_stream_indices + 1 < p_stream_count)
                 ? full
                 : iterator_mask)...);
     }(std::make_index_sequence<p_stream_count>{});
@@ -324,15 +325,17 @@ template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
 
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto load_stream_metadata(
-    p_simd_tag d,
+    p_simd_tag simd_tag,
     const std::array<std::uint32_t, 8>& values) noexcept
 {
-    const std::size_t lanes = hn::Lanes(d);
+    const std::size_t lanes = hn::Lanes(simd_tag);
     return make_vec_stream<p_simd_tag, std::uint32_t, p_stream_count>(
         [&](auto stream_constant) [[gnu::always_inline]] {
-            constexpr std::size_t stream =
+            constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
-            return hn::LoadU(d, values.data() + stream * lanes);
+            return hn::LoadU(
+                simd_tag,
+                values.data() + k_stream_index * lanes);
         });
 }
 
@@ -392,20 +395,21 @@ struct packed_iteration_state {
 
     template<bool p_is_full, class p_offsets_type>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE void step(
-        simd_tag_type d,
+        simd_tag_type simd_tag,
         const p_offsets_type& offsets,
         mask_type iterator_mask,
         vector_stream_type incoming_rank)
     {
-        const auto live = corrected_live_stream<p_is_full, simd_tag_type, p_stream_count>(
-            d, iterator_mask);
+        const auto live = correct_live_stream<
+            p_is_full, simd_tag_type, p_stream_count>(
+                simd_tag, iterator_mask);
 
         if (symbols_seen < p_kmer_size) {
             symbol_ring[symbols_seen] = incoming_rank;
             const auto forward_value = lookup_table_stream(
-                d, k_forward_table, incoming_rank);
+                simd_tag, k_forward_table, incoming_rank);
             const auto reverse_value = lookup_table_stream(
-                d, complement_table, incoming_rank);
+                simd_tag, complement_table, incoming_rank);
             const int forward_rotation = static_cast<int>(
                 ((p_kmer_size - 1 - symbols_seen) * 7) & 31u);
             const int reverse_rotation = static_cast<int>(
@@ -430,13 +434,13 @@ struct packed_iteration_state {
             if (++next_symbol_slot == p_kmer_size) next_symbol_slot = 0;
 
             const auto forward_out = lookup_table_stream(
-                d, k_forward_table, outgoing_rank);
+                simd_tag, k_forward_table, outgoing_rank);
             const auto forward_in = lookup_table_stream(
-                d, k_forward_table, incoming_rank);
+                simd_tag, k_forward_table, incoming_rank);
             const auto reverse_out = lookup_table_stream(
-                d, complement_table, outgoing_rank);
+                simd_tag, complement_table, outgoing_rank);
             const auto reverse_in = lookup_table_stream(
-                d, complement_table, incoming_rank);
+                simd_tag, complement_table, incoming_rank);
             forward_hash = Xor(
                 Xor(
                     rotate_left_stream<7>(forward_hash),
@@ -455,15 +459,15 @@ struct packed_iteration_state {
         const std::uint32_t local_kmer_position =
             static_cast<std::uint32_t>(symbols_seen - p_kmer_size);
         const vector_stream_type position = vector_stream_type::splat(
-            d, local_kmer_position);
+            simd_tag, local_kmer_position);
         const vector_stream_type canonical_hash = Add(
             forward_hash, reverse_hash);
         const mask_stream_type reverse_strand = Lt(
             reverse_hash, forward_hash);
         const vector_stream_type strand = IfThenElse(
             reverse_strand,
-            vector_stream_type::splat(d, 1u),
-            vector_stream_type::splat_zero(d));
+            vector_stream_type::splat(simd_tag, 1u),
+            vector_stream_type::splat_zero(simd_tag));
         const minimum_type entering{
             canonical_hash,
             position,
@@ -476,26 +480,29 @@ struct packed_iteration_state {
         const std::size_t written_slot = next_window_slot;
         if (++next_window_slot == p_window_size) next_window_slot = 0;
         suffix_ring[written_slot] = entering;
-        prefix_minimum = combine_minima(d, prefix_minimum, entering);
+        prefix_minimum = combine_minima(
+            simd_tag, prefix_minimum, entering);
         const bool rebuild_suffixes = next_window_slot == 0;
         if (rebuild_suffixes) {
             minimum_type suffix = suffix_ring[p_window_size - 1];
             for (std::size_t slot = p_window_size - 1; slot > 0; --slot) {
                 suffix = combine_minima(
-                    d, suffix_ring[slot - 1], suffix);
+                    simd_tag, suffix_ring[slot - 1], suffix);
                 suffix_ring[slot - 1] = suffix;
             }
             prefix_minimum = entering;
         }
         const minimum_type window_minimum = combine_minima(
-            d, prefix_minimum, suffix_ring[next_window_slot]);
+            simd_tag,
+            prefix_minimum,
+            suffix_ring[next_window_slot]);
 
         const std::size_t candidate_index = local_kmer_position;
         if (candidate_index + 1 < p_window_size) return;
         const std::uint32_t window_index = static_cast<std::uint32_t>(
             candidate_index + 1 - p_window_size);
         const vector_stream_type window_index_v = vector_stream_type::splat(
-            d, window_index);
+            simd_tag, window_index);
         const mask_stream_type owned_window = And(
             window_minimum.valid,
             Lt(window_index_v, window_limits));
@@ -505,21 +512,22 @@ struct packed_iteration_state {
                window_minimum.right_position));
 
         emit_selected(
-            d,
+            simd_tag,
             offsets,
             owned_window,
             window_minimum.hash,
             window_minimum.left_position,
             window_minimum.left_strand,
             false);
-        const auto no_ties_per_stream = AllFalsePerStream(d, tied);
+        const auto no_ties_per_stream = AllFalsePerStream(
+            simd_tag, tied);
         bool any_tie = false;
         for (const bool no_tie : no_ties_per_stream) {
             any_tie = any_tie || !no_tie;
         }
         if (any_tie) [[unlikely]] {
             emit_selected(
-                d,
+                simd_tag,
                 offsets,
                 tied,
                 window_minimum.hash,
@@ -532,7 +540,7 @@ struct packed_iteration_state {
 private:
     template<class p_offsets_type>
     [[gnu::always_inline]] HWY_INLINE void emit_selected(
-        simd_tag_type d,
+        simd_tag_type simd_tag,
         const p_offsets_type& offsets,
         mask_stream_type selected,
         const vector_stream_type& hash,
@@ -546,38 +554,47 @@ private:
                 And(Eq(position, last_emit_position),
                     Eq(strand, last_emit_strand))));
         const auto emit = AndNot(same_identity, selected);
-        const auto no_emit_per_stream = AllFalsePerStream(d, emit);
+        const auto no_emit_per_stream = AllFalsePerStream(
+            simd_tag, emit);
         bool any_emit = false;
         for (const bool no_emit : no_emit_per_stream) {
             any_emit = any_emit || !no_emit;
         }
         if (!any_emit) return;
 
-        constexpr std::size_t max_lanes = hn::MaxLanes(simd_tag_type{});
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        constexpr std::size_t k_max_lanes = hn::MaxLanes(simd_tag_type{});
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> hash_lanes;
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> position_lanes;
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> strand_lanes;
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> emit_lanes;
         for_each_stream<p_stream_count>([&](auto stream_constant) {
-            constexpr std::size_t stream =
+            constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
-            if (no_emit_per_stream[stream]) return;
-            hn::StoreU(hash[stream], d, hash_lanes[stream].data());
+            if (no_emit_per_stream[k_stream_index]) return;
             hn::StoreU(
-                position[stream], d, position_lanes[stream].data());
-            hn::StoreU(strand[stream], d, strand_lanes[stream].data());
+                hash[k_stream_index],
+                simd_tag,
+                hash_lanes[k_stream_index].data());
             hn::StoreU(
-                hn::VecFromMask(d, emit[stream]),
-                d,
-                emit_lanes[stream].data());
+                position[k_stream_index],
+                simd_tag,
+                position_lanes[k_stream_index].data());
+            hn::StoreU(
+                strand[k_stream_index],
+                simd_tag,
+                strand_lanes[k_stream_index].data());
+            hn::StoreU(
+                hn::VecFromMask(simd_tag, emit[k_stream_index]),
+                simd_tag,
+                emit_lanes[k_stream_index].data());
         });
         ++evidence.emission_mask_store_batches;
 
-        const std::size_t lanes = hn::Lanes(d);
+        const std::size_t lanes = hn::Lanes(simd_tag);
         for (std::size_t stream = 0; stream < p_stream_count; ++stream) {
             if (no_emit_per_stream[stream]) continue;
             for (std::size_t lane = 0; lane < lanes; ++lane) {
@@ -626,35 +643,37 @@ public:
      */
     template<class p_offsets_type>
     HWY_INLINE void finalize_stream_boundaries(
-        simd_tag_type d,
+        simd_tag_type simd_tag,
         const p_offsets_type& offsets) {
-        constexpr std::size_t max_lanes = hn::MaxLanes(simd_tag_type{});
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        constexpr std::size_t k_max_lanes = hn::MaxLanes(simd_tag_type{});
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> hash_lanes;
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> position_lanes;
-        HWY_ALIGN std::array<std::array<std::uint32_t, max_lanes>,
+        HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> strand_lanes;
         for_each_stream<p_stream_count>([&](auto stream_constant) {
-            constexpr std::size_t stream =
+            constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
             hn::StoreU(
-                last_emit_hash[stream], d, hash_lanes[stream].data());
+                last_emit_hash[k_stream_index],
+                simd_tag,
+                hash_lanes[k_stream_index].data());
             hn::StoreU(
-                last_emit_position[stream],
-                d,
-                position_lanes[stream].data());
+                last_emit_position[k_stream_index],
+                simd_tag,
+                position_lanes[k_stream_index].data());
             hn::StoreU(
-                last_emit_strand[stream],
-                d,
-                strand_lanes[stream].data());
+                last_emit_strand[k_stream_index],
+                simd_tag,
+                strand_lanes[k_stream_index].data());
         });
 
         bool previous_valid = false;
         std::uint32_t previous_hash = 0;
         std::uint64_t previous_position = 0;
         std::uint32_t previous_strand = 0;
-        const std::size_t lanes = hn::Lanes(d);
+        const std::size_t lanes = hn::Lanes(simd_tag);
         for (std::size_t logical_lane = 0;
              logical_lane < 8;
              ++logical_lane) {
@@ -713,14 +732,14 @@ template<
     std::size_t p_stream_count,
     class p_minimizer_type,
     class p_collector_type,
-    supports_compact_sequence_bitcast_view View,
-    class Iterator>
+    supports_compact_sequence_bitcast_view p_sequence_view,
+    class p_iterator>
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN run_packed_kernel
 [[gnu::always_inline]] [[gnu::flatten]] inline void run_packed_kernel(
     p_collector_type& collector,
-    const View& view,
-    const Iterator& begin,
-    const Iterator& end,
+    const p_sequence_view& view,
+    const p_iterator& begin,
+    const p_iterator& end,
     bounded_nthash_execution_stats& stats)
 {
     using simd_tag_type = hn::CappedTag<std::uint32_t, 8>;
@@ -729,24 +748,26 @@ template<
     using state_type = packed_iteration_state<
         p_kmer_size, p_window_size, p_stream_count, p_minimizer_type, p_collector_type>;
     using minimum_type = typename state_type::minimum_type;
-    const simd_tag_type d;
-    const std::size_t lanes = hn::Lanes(d);
-    constexpr std::size_t logical_streams = 8;
-    constexpr std::size_t letters_per_unit = 16;
-    constexpr std::size_t context_bp = p_kmer_size + p_window_size - 1;
-    constexpr std::size_t context_units =
-        (context_bp + letters_per_unit - 1) / letters_per_unit;
+    const simd_tag_type simd_tag;
+    const std::size_t lanes = hn::Lanes(simd_tag);
+    constexpr std::size_t k_logical_streams = 8;
+    constexpr std::size_t k_letters_per_unit = 16;
+    constexpr std::size_t k_context_base_pairs =
+        p_kmer_size + p_window_size - 1;
+    constexpr std::size_t k_context_units =
+        (k_context_base_pairs + k_letters_per_unit - 1)
+        / k_letters_per_unit;
     const auto [units_per_lane, offsets] =
-        calculate_iteration_offsets<logical_streams>(
-            view.size(), logical_streams, context_units);
+        calculate_iteration_offsets<k_logical_streams>(
+            view.size(), k_logical_streams, k_context_units);
     const std::size_t total_windows =
         view.bp_size() - p_kmer_size - p_window_size + 2;
 
-    std::array<std::uint32_t, logical_streams> window_limits{};
-    for (std::size_t lane = 0; lane < logical_streams; ++lane) {
-        const std::size_t start_bp = offsets[lane] * letters_per_unit;
-        const std::size_t unclamped_end_bp = lane + 1 < logical_streams
-            ? offsets[lane + 1] * letters_per_unit
+    std::array<std::uint32_t, k_logical_streams> window_limits{};
+    for (std::size_t lane = 0; lane < k_logical_streams; ++lane) {
+        const std::size_t start_bp = offsets[lane] * k_letters_per_unit;
+        const std::size_t unclamped_end_bp = lane + 1 < k_logical_streams
+            ? offsets[lane + 1] * k_letters_per_unit
             : total_windows;
         const std::size_t end_bp = std::min(
             unclamped_end_bp, total_windows);
@@ -757,17 +778,17 @@ template<
         window_limits[lane] = static_cast<std::uint32_t>(owned);
     }
 
-    constexpr std::size_t max_lanes = hn::MaxLanes(simd_tag_type{});
-    HWY_ALIGN std::array<std::uint32_t, max_lanes> table_values{};
-    HWY_ALIGN std::array<std::uint32_t, max_lanes> complement_values{};
-    for (std::size_t lane = 0; lane < max_lanes; ++lane) {
+    constexpr std::size_t k_max_lanes = hn::MaxLanes(simd_tag_type{});
+    HWY_ALIGN std::array<std::uint32_t, k_max_lanes> table_values{};
+    HWY_ALIGN std::array<std::uint32_t, k_max_lanes> complement_values{};
+    for (std::size_t lane = 0; lane < k_max_lanes; ++lane) {
         const std::size_t rank = lane & 3u;
         table_values[lane] = bounded_nthash_internal::k_forward_table[rank];
         complement_values[lane] =
             bounded_nthash_internal::k_forward_table[3u - rank];
     }
-    const auto zero = vector_stream_type::splat_zero(d);
-    const auto false_masks = mask_stream_type::splat_false(d);
+    const auto zero = vector_stream_type::splat_zero(simd_tag);
+    const auto false_masks = mask_stream_type::splat_false(simd_tag);
     const minimum_type empty_minimum{
         zero,
         zero,
@@ -786,13 +807,14 @@ template<
         .suffix_ring = {},
         .next_window_slot = 0,
         .window_limits = load_stream_metadata<simd_tag_type, p_stream_count>(
-            d, window_limits),
+            simd_tag, window_limits),
         .last_emit_hash = zero,
         .last_emit_position = zero,
         .last_emit_strand = zero,
         .last_emit_valid = false_masks,
-        .k_forward_table = hn::LoadU(d, table_values.data()),
-        .complement_table = hn::LoadU(d, complement_values.data()),
+        .k_forward_table = hn::LoadU(simd_tag, table_values.data()),
+        .complement_table = hn::LoadU(
+            simd_tag, complement_values.data()),
         .collector = collector,
         .evidence = {},
     };
@@ -804,25 +826,28 @@ template<
         view,
         begin,
         end,
-        context_bp,
+        k_context_base_pairs,
         [&]<bool p_is_full>(
             std::bool_constant<p_is_full>,
             const auto& iterator_offsets,
-            const auto& d_in,
+            const auto& iteration_simd_tag,
             hn::Mask<simd_tag_type> iterator_mask,
             vector_stream_type ranks) [[gnu::always_inline]] [[gnu::flatten]] {
             state.template step<p_is_full>(
-                d_in, iterator_offsets, iterator_mask, ranks);
+                iteration_simd_tag,
+                iterator_offsets,
+                iterator_mask,
+                ranks);
         },
         [](const auto&, const auto&, auto&) {});
-    state.finalize_stream_boundaries(d, offsets);
+    state.finalize_stream_boundaries(simd_tag, offsets);
 
     // All per-base stats values are deterministic from admitted geometry.
     // Populate them once after the kernel so telemetry adds no memory traffic
     // to the biological loop.
     const std::uint64_t callback_steps =
-        static_cast<std::uint64_t>(context_units + units_per_lane)
-        * letters_per_unit;
+        static_cast<std::uint64_t>(k_context_units + units_per_lane)
+        * k_letters_per_unit;
     const std::uint64_t initialization_batches =
         std::min<std::uint64_t>(callback_steps, p_kmer_size);
     const std::uint64_t rolling_batches = callback_steps > p_kmer_size
@@ -835,7 +860,7 @@ template<
         ? candidate_batches - p_window_size + 1
         : 0;
     const std::uint64_t bps_per_matrix =
-        static_cast<std::uint64_t>(lanes) * letters_per_unit;
+        static_cast<std::uint64_t>(lanes) * k_letters_per_unit;
     std::uint64_t partial_callbacks = callback_steps % bps_per_matrix;
     if (partial_callbacks == 0 && callback_steps != 0) {
         partial_callbacks = bps_per_matrix;
@@ -845,7 +870,7 @@ template<
         * (offsets.front() == offsets.back() ? lanes : 1u);
 
     stats.packed_decode_batches = callback_steps;
-    stats.packed_decode_lane_visits = callback_steps * logical_streams
+    stats.packed_decode_lane_visits = callback_steps * k_logical_streams
         - masked_tail_lanes;
     stats.hash_initialization_batches = initialization_batches;
     stats.rolling_hash_batches = rolling_batches;
@@ -886,15 +911,16 @@ template<
     std::size_t p_window_size = 10,
     class p_minimizer_type = minimap_sketch_data,
     supports_compact_sequence_range p_sequence_range,
-    class Iterator = decltype(compact_sequence_range<p_sequence_range>().begin()),
+    class p_iterator = decltype(
+        compact_sequence_range<p_sequence_range>().begin()),
     class p_collector_type = minimizer_sink_collector<p_minimizer_type>>
 [[nodiscard]] inline bounded_nthash_result
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_minimizers_bounded_nthash_simd_checked
 collect_minimizers_bounded_nthash_simd_checked(
     p_collector_type& collector,
     compact_sequence_range<p_sequence_range>& sequence,
-    const Iterator& begin,
-    const Iterator& end)
+    const p_iterator& begin,
+    const p_iterator& end)
 {
     using range_type = compact_sequence_range<p_sequence_range>;
     using traits = typename range_type::traits;
@@ -935,16 +961,16 @@ collect_minimizers_bounded_nthash_simd_checked(
         if (begin < whole_begin || end < begin || whole_end < end) {
             return reject(bounded_nthash_status::invalid_range);
         }
-        constexpr std::size_t base_letters_per_unit =
+        constexpr std::size_t k_base_letters_per_unit =
             traits::letters_per_unit;
         const std::size_t begin_units = static_cast<std::size_t>(
             begin - whole_begin);
         const std::size_t end_units = static_cast<std::size_t>(
             end - whole_begin);
         const std::size_t local_begin_bp =
-            begin_units * base_letters_per_unit;
+            begin_units * k_base_letters_per_unit;
         const std::size_t local_nominal_end_bp =
-            end_units * base_letters_per_unit;
+            end_units * k_base_letters_per_unit;
         const std::size_t local_end_bp = std::min(
             local_nominal_end_bp,
             static_cast<std::size_t>(sequence.bp_size()));
@@ -963,10 +989,10 @@ collect_minimizers_bounded_nthash_simd_checked(
             > static_cast<std::size_t>(p_minimizer_type::k_position_field_mask)) {
             return reject(bounded_nthash_status::unsupported_representation);
         }
-        constexpr std::size_t u32_letters_per_unit = 16;
+        constexpr std::size_t k_uint32_letters_per_unit = 16;
         const std::size_t local_view_units =
-            (local_bp_size + u32_letters_per_unit - 1)
-            / u32_letters_per_unit;
+            (local_bp_size + k_uint32_letters_per_unit - 1)
+            / k_uint32_letters_per_unit;
         const auto* local_words = reinterpret_cast<const std::uint32_t*>(
             sequence.read_cptr(begin));
         const auto* local_words_end = local_words + local_view_units;
@@ -1038,7 +1064,7 @@ collect_minimizers_bounded_nthash_simd(
 
 namespace bounded_nthash_kernel_detail {
 
-[[nodiscard]] constexpr minimizer_kernel_status transport_status_for(
+[[nodiscard]] constexpr minimizer_kernel_status map_bounded_nthash_status(
     const bounded_nthash_status status) noexcept
 {
     switch (status) {
@@ -1084,7 +1110,7 @@ template<class p_minimizer_type, class p_storage_unit>
                 result.stats.bounded_nthash = native.stats;
                 result.family_status =
                     static_cast<std::uint32_t>(native.status);
-                result.status = transport_status_for(native.status);
+                result.status = map_bounded_nthash_status(native.status);
 
                 const bool flushed = collector.flush();
                 result.emitted = collector.committed_size();

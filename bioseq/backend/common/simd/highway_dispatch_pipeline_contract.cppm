@@ -156,9 +156,6 @@ struct minimap2_parameters {
 
     /** Enable runtime execution accounting. */
     bool enable_profiling = false;
-    /** Collect KSW2 fills across queries before batched execution. */
-    bool cross_query_batched = false;
-
     /** Permit Vulkan-backed algorithms for this request. */
     bool vulkan_enabled = true;
     /** Select Vulkan seed-hit lookup. */

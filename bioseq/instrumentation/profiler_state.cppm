@@ -39,12 +39,12 @@ struct arena_counter {
 };
 
 /// Per-pipeline profiler state. Owned on the stack by the dispatch fork
-/// in BatchProcessor::process_sequences when configuration_type::enable_profiling is
+/// in BatchProcessor::process_sequences when p_configuration_type::enable_profiling is
 /// true; not constructed at all when false.
-template<profiling_configuration configuration_type>
+template<profiling_configuration p_configuration_type>
 struct profiler_state {
-    region_aggregate_table<configuration_type>          aggregates;
-    loop_aggregate_table<configuration_type>            loop_aggregates;
+    region_aggregate_table<p_configuration_type>          aggregates;
+    loop_aggregate_table<p_configuration_type>            loop_aggregates;
     arena_kind active_arena = arena_kind::none;
     std::array<arena_counter, arena_kind_count> arena_counters{};
     std::uint16_t stack_depth = 0;
@@ -63,27 +63,27 @@ struct profiler_state {
 };
 
 /// Typed thread-local pointer to the currently-installed profiler_state.
-/// One slot per distinct configuration_type type the program instantiates. When no
-/// profiler is installed for that configuration_type, the pointer is null.
-template<profiling_configuration configuration_type>
-inline thread_local profiler_state<configuration_type>* active_thread_profiler = nullptr;
+/// One slot per distinct p_configuration_type type the program instantiates. When no
+/// profiler is installed for that p_configuration_type, the pointer is null.
+template<profiling_configuration p_configuration_type>
+inline thread_local profiler_state<p_configuration_type>* active_thread_profiler = nullptr;
 
 /// RAII installer. Construct on the stack alongside a stack-local
-/// profiler_state<configuration_type>; the constructor stores the address in
-/// active_thread_profiler<configuration_type>; the destructor restores the prior value.
-template<profiling_configuration configuration_type>
+/// profiler_state<p_configuration_type>; the constructor stores the address in
+/// active_thread_profiler<p_configuration_type>; the destructor restores the prior value.
+template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] installed_profiler_scope {
-    profiler_state<configuration_type>* previous_profiler = nullptr;
+    profiler_state<p_configuration_type>* previous_profiler = nullptr;
 
     [[gnu::always_inline]]
-    explicit installed_profiler_scope(profiler_state<configuration_type>& profiler) noexcept {
-        previous_profiler = active_thread_profiler<configuration_type>;
-        active_thread_profiler<configuration_type> = &profiler;
+    explicit installed_profiler_scope(profiler_state<p_configuration_type>& profiler) noexcept {
+        previous_profiler = active_thread_profiler<p_configuration_type>;
+        active_thread_profiler<p_configuration_type> = &profiler;
     }
 
     [[gnu::always_inline]]
     ~installed_profiler_scope() noexcept {
-        active_thread_profiler<configuration_type> = previous_profiler;
+        active_thread_profiler<p_configuration_type> = previous_profiler;
     }
 
     installed_profiler_scope(const installed_profiler_scope&)            = delete;

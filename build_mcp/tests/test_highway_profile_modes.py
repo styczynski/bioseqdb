@@ -11,13 +11,36 @@ BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUILD_MCP_DIR.parent
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
+import protocol  # noqa: E402
+import process_state  # noqa: E402
+import remote  # noqa: E402
 
 
 PROFILE_MODES = {
-    "highway-profile1": ("test-opt-level1", "1"),
-    "highway-profile2": ("test-opt-level2", "2"),
+    "highway-scheduler-all-alphabets-uint64": (
+        "test-optimized-all-alphabets-uint64",
+        "all_alphabets_uint64",
+    ),
+    "highway-scheduler-all-coordinates": (
+        "test-optimized-all-coordinates",
+        "all_coordinates",
+    ),
+    "highway-scheduler-full-specialization": (
+        "test-optimized-full-specialization",
+        "full_specialization",
+    ),
 }
+REMOVED_MODE_KEYS = frozenset({
+    "unit+integration",
+    "bench",
+    "bench-fast",
+    "bench-io",
+    "bench-e2e",
+    "cache-bench",
+    "cache-bioseq-bench",
+})
 
 
 class HighwayProfilePresetContractTest(unittest.TestCase):
@@ -32,8 +55,8 @@ class HighwayProfilePresetContractTest(unittest.TestCase):
     def test_profile_presets_are_isolated_from_the_everyday_tree(self) -> None:
         self.assertEqual(
             self.presets["test-opt"]["cacheVariables"][
-                "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE"],
-            "0",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+            "dna4_uint64",
         )
         for preset_name, profile in PROFILE_MODES.values():
             with self.subTest(preset=preset_name):
@@ -45,16 +68,103 @@ class HighwayProfilePresetContractTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     preset["cacheVariables"][
-                        "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE"],
+                        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
                     profile,
                 )
 
 
 class HighwayProfileModeContractTest(unittest.TestCase):
+    def test_protocol_registers_each_loaded_tool_once(self) -> None:
+        names = [
+            definition["name"]
+            for definition in protocol.TOOL_DEFINITIONS
+        ]
+        self.assertEqual(len(names), 19)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_remote_run_schema_and_runtime_close_operation_shapes(self) -> None:
+        definitions = {
+            definition["name"]: definition
+            for definition in protocol.TOOL_DEFINITIONS
+        }
+        for tool_name in (
+            "start_build",
+            "inspect",
+            "subagent",
+            "subagent_status",
+            "remote-status",
+            "remote-debug",
+            "remote-status-ps",
+            "remote-manage",
+            "remote-ssh",
+            "remote-snapshot",
+            "remote-git",
+        ):
+            self.assertFalse(
+                definitions[tool_name]["inputSchema"][
+                    "additionalProperties"]
+            )
+        remote_schema = definitions["remote-run"]["inputSchema"]
+        for shape in remote_schema["oneOf"]:
+            self.assertFalse(shape["additionalProperties"])
+        with self.assertRaisesRegex(
+                RuntimeError, "unknown argument.*function_name"):
+            protocol._reject_unknown_tool_arguments(
+                "remote-run",
+                {
+                    "operation": "build",
+                    "mode": "cache-unit",
+                    "function_name": "cross-shape argument",
+                },
+            )
+
+    def test_removed_mode_keys_have_no_alias_or_entrypoint(self) -> None:
+        local_schema = next(
+            definition for definition in protocol.TOOL_DEFINITIONS
+            if definition["name"] == "start_build"
+        )["inputSchema"]
+        remote_schema = next(
+            definition for definition in protocol.TOOL_DEFINITIONS
+            if definition["name"] == "remote-run"
+        )["inputSchema"]
+        remote_build_shape = next(
+            shape for shape in remote_schema["oneOf"]
+            if shape.get("title") == "build"
+        )
+        local_modes = set(local_schema["properties"]["mode"]["enum"])
+        remote_modes = set(
+            remote_build_shape["properties"]["mode"]["enum"]
+        )
+        self.assertTrue(REMOVED_MODE_KEYS.isdisjoint(build_presets.MODES))
+        self.assertTrue(REMOVED_MODE_KEYS.isdisjoint(build_presets.VALID_MODES))
+        self.assertTrue(REMOVED_MODE_KEYS.isdisjoint(local_modes))
+        self.assertTrue(REMOVED_MODE_KEYS.isdisjoint(remote_modes))
+
+        with mock.patch.object(
+            build_worker, "_refuse_root_build_identity", return_value=None
+        ), mock.patch.object(
+            build_worker, "_ensure_build_worker_timesharing_policy"
+        ), mock.patch.object(
+            remote, "_current_local_branch", return_value="main"
+        ):
+            for mode in REMOVED_MODE_KEYS:
+                with self.subTest(mode=mode):
+                    self.assertIn(
+                        "Invalid mode",
+                        build_worker.tool_start_build(mode, build_only=True),
+                    )
+                    self.assertIn(
+                        "Invalid mode",
+                        remote.tool_remote_run({
+                            "operation": "build",
+                            "mode": mode,
+                        }),
+                    )
+
     def test_modes_pin_the_production_extension_compile_gate(self) -> None:
         for mode, (preset_name, profile) in PROFILE_MODES.items():
             with self.subTest(mode=mode):
-                details = server.MODES[mode]
+                details = build_presets.MODES[mode]
                 self.assertTrue(details.requires_build_only)
                 self.assertEqual(details.lock_group, "tests")
                 self.assertEqual(details.preset_family, "test")
@@ -66,26 +176,26 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                 self.assertEqual(
                     details.required_cache_variables,
                     {
-                        "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": profile,
+                        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": profile,
                         "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
                         "BIOSEQ_BUILD_WEBSITE": "OFF",
                     },
                 )
-                self.assertEqual(server.preset_for(mode, False), preset_name)
-                self.assertEqual(server.preset_for(mode, True), preset_name)
+                self.assertEqual(build_presets.preset_for(mode, False), preset_name)
+                self.assertEqual(build_presets.preset_for(mode, True), preset_name)
                 self.assertEqual(
-                    server.build_dir_for(mode, False),
+                    build_presets.build_dir_for(mode, False),
                     REPOSITORY_ROOT / "build" / preset_name,
                 )
 
     def test_modes_are_local_only_and_documented_as_build_only(self) -> None:
-        documentation = server.get_modes_short_documentation()
+        documentation = build_presets.get_modes_short_documentation()
         local_schema = next(
-            definition for definition in server.TOOL_DEFINITIONS
+            definition for definition in protocol.TOOL_DEFINITIONS
             if definition["name"] == "start_build"
         )["inputSchema"]
         remote_schema = next(
-            definition for definition in server.TOOL_DEFINITIONS
+            definition for definition in protocol.TOOL_DEFINITIONS
             if definition["name"] == "remote-run"
         )["inputSchema"]
         remote_build_shape = next(
@@ -95,9 +205,9 @@ class HighwayProfileModeContractTest(unittest.TestCase):
 
         for mode in PROFILE_MODES:
             with self.subTest(mode=mode):
-                self.assertIn(mode, server.FIXED_BUILD_ONLY_MODES)
-                self.assertIn(mode, server.REMOTE_RUN_REJECTED_MODES)
-                self.assertNotIn(mode, server.REMOTE_RUN_BUILD_MODES)
+                self.assertIn(mode, build_presets.FIXED_BUILD_ONLY_MODES)
+                self.assertIn(mode, build_presets.REMOTE_RUN_REJECTED_MODES)
+                self.assertNotIn(mode, build_presets.REMOTE_RUN_BUILD_MODES)
                 self.assertIn(
                     mode,
                     local_schema["properties"]["mode"]["enum"],
@@ -118,7 +228,6 @@ class HighwayProfileModeContractTest(unittest.TestCase):
         for field in (
             "fresh",
             "build_timeout_sec",
-            "baseline_ref",
             "run_only",
             "reuse_build_receipt",
         ):
@@ -146,7 +255,7 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                 ValueError,
                 "fixed build-only modes",
             ):
-                server.ModeDefinition(**(base | override))
+                build_presets.ModeDefinition(**(base | override))
 
 
 class HighwayProfileInputGuardTest(unittest.TestCase):
@@ -160,23 +269,19 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             {"build_only": True, "debug_report_supplied": True},
             {"build_only": True, "debug_report": True},
             {"build_only": True, "bench_e2e_config": "config.json"},
-            {
-                "build_only": True,
-                "postgres_error_safety_review_waiver": "waiver.json",
-            },
         )
         with mock.patch.object(
-            server,
+            build_worker,
             "_refuse_root_build_identity",
             return_value=None,
         ), mock.patch.object(
-            server,
+            build_worker,
             "_ensure_build_worker_timesharing_policy",
         ):
             for mode in PROFILE_MODES:
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
-                        message = server.tool_start_build(mode, **request)
+                        message = build_worker.tool_start_build(mode, **request)
                         self.assertIn("fixed local compile gate", message)
                         self.assertIn("requires build_only=true", message)
 
@@ -185,26 +290,21 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             {"build_only": True, "run_only": True},
             {
                 "build_only": True,
-                "fresh": True,
-                "baseline_ref": "refs/heads/main",
-            },
-            {
-                "build_only": True,
                 "reuse_build_receipt": "br_invalid",
             },
         )
         with mock.patch.object(
-            server,
+            build_worker,
             "_refuse_root_build_identity",
             return_value=None,
         ), mock.patch.object(
-            server,
+            build_worker,
             "_ensure_build_worker_timesharing_policy",
         ):
             for mode in PROFILE_MODES:
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
-                        message = server.tool_start_build(mode, **request)
+                        message = build_worker.tool_start_build(mode, **request)
                         self.assertTrue(
                             "run_only" in message
                             or "fixed local compile gate" in message
@@ -217,32 +317,27 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             {"build_only": True, "bench_flags": ["--debug"]},
             {"build_only": True, "test_flags": ["[index]"]},
             {"build_only": True, "bench_e2e_config": "config.json"},
-            {"build_only": True, "sql_guardrail_request_json": "{}"},
-            {
-                "build_only": True,
-                "postgres_error_safety_review_waiver_json": "{}",
-            },
         )
         with mock.patch.object(
-            server,
+            build_worker,
             "_refuse_root_build_identity",
             return_value=None,
         ), mock.patch.object(
-            server,
+            build_worker,
             "_ensure_build_worker_timesharing_policy",
         ), mock.patch.object(
-            server,
+            process_state,
             "_load_state",
             side_effect=lambda: {
                 mode: {"reserved": True}
                 for mode in PROFILE_MODES
             },
-        ), mock.patch.object(server, "_stream_subprocess") as run:
+        ), mock.patch.object(process_state, "_stream_subprocess") as run:
             for mode in PROFILE_MODES:
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
                         self.assertEqual(
-                            server._run_build_worker(mode, **request),
+                            build_worker._run_build_worker(mode, **request),
                             1,
                         )
             run.assert_not_called()
@@ -254,25 +349,20 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             {"build_only": True, "bench_flags": ["--debug"]},
             {"build_only": True, "test_flags": ["[index]"]},
             {"build_only": True, "bench_e2e_config": "config.json"},
-            {"build_only": True, "sql_guardrail_request_json": "{}"},
-            {
-                "build_only": True,
-                "postgres_error_safety_review_waiver_json": "{}",
-            },
         )
         with mock.patch.object(
-            server,
+            build_worker,
             "_refuse_root_build_identity",
             return_value=None,
         ), mock.patch.object(
-            server,
+            build_worker,
             "_ensure_build_worker_timesharing_policy",
-        ), mock.patch.object(server, "_load_state") as load_state:
-            for mode in sorted(server.FIXED_BUILD_ONLY_MODES):
+        ), mock.patch.object(process_state, "_load_state") as load_state:
+            for mode in sorted(build_presets.FIXED_BUILD_ONLY_MODES):
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
                         self.assertEqual(
-                            server._run_build_inline(mode, **request),
+                            build_worker._run_build_inline(mode, **request),
                             2,
                         )
             load_state.assert_not_called()

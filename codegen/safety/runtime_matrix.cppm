@@ -20,7 +20,7 @@ export namespace bioseq::codegen::safety {
 
 /// Reviewed runtime coverage obligations beyond ledger-derived coverage.
 struct runtime_coverage_policy {
-    std::uint32_t schema_version{2};
+    std::uint32_t schema_revision{2};
     std::vector<coverage_key> reviewed_coverage;
 };
 
@@ -191,9 +191,10 @@ inline void validate_runtime_matrix(
     std::string_view runtime_producer_executable_sha256,
     std::string_view production_test_executable_sha256,
     std::string_view test_indexes_test_executable_sha256) {
-    if (matrix.schema_version != 2 || policy.schema_version != 2) {
+    if (matrix.schema_revision != 2
+        || policy.schema_revision != 2) {
         detail::safety_failure(
-            "runtime-matrix", "unsupported schema version");
+            "runtime-matrix", "unsupported schema revision");
     }
     if (!detail::lowercase_sha256(
             matrix.production_ledger_sha256)

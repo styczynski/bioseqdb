@@ -254,8 +254,12 @@ def _configure_input(path: Path) -> dict[str, object]:
         raise QualificationError(f"cannot read configure-input stamp {path}: {error}") from error
     if (
         not isinstance(value, dict)
-        or value.get("artifact_kind") != "bioseq-build-mcp-configure-v1"
-        or value.get("schema_version") != 1
+        or set(value) != {
+            "artifact_kind", "schema_revision", "inputs", "inputs_sha256",
+        }
+        or value.get("artifact_kind") != "bioseq-build-mcp-configure"
+        or type(value.get("schema_revision")) is not int
+        or value.get("schema_revision") != 1
         or not isinstance(value.get("inputs"), dict)
         or not isinstance(value.get("inputs_sha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", value["inputs_sha256"])
@@ -433,7 +437,7 @@ def qualify(arguments: argparse.Namespace) -> dict[str, object]:
         )
 
     return _sealed({
-        "schema_version": 1,
+        "schema_revision": 1,
         "artifact_kind": "bioseq-production-dso-load-qualification",
         "platform": {
             "system_name": actual_system,

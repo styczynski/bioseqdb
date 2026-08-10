@@ -67,14 +67,17 @@ enum class fastq_parser_progress : std::uint8_t {
 /// Per-record FASTQ parser state. Aligned to a cache line
 /// so a future multi-parser pipeline can store one state per parser
 /// thread without false-sharing the partial-encoding fields.
-template <typename storage_unit_t,
-          std::size_t BitsPerChar,
-          std::size_t LettersPerUnit>
+template <typename p_storage_unit,
+          std::size_t p_bits_per_char,
+          std::size_t p_letters_per_unit>
 struct alignas(64) fastq_parser_state {
     fastq_parser_progress progress = fastq_parser_progress::at_header_sigil;
     std::size_t header_start_offset = 0;
     std::size_t quality_start_offset = 0;
-    bioseq::simd::active_target::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    bioseq::simd::active_target::encode_state<
+        p_storage_unit,
+        p_bits_per_char,
+        p_letters_per_unit> body{};
     /// Raw byte count of sequence lines after newline stripping. This
     /// is the value FASTQ qual must match — qual is one byte per
     /// position, regardless of whether the position is a canonical
@@ -99,7 +102,7 @@ struct alignas(64) fastq_parser_state {
     }
 
     void attach_to_batch(std::vector<char>& header_buf,
-                         std::vector<storage_unit_t>& seq_buf,
+                         std::vector<p_storage_unit>& seq_buf,
                          std::vector<std::uint8_t>& quality_buf) noexcept {
         header_storage = &header_buf;
         body.output_storage = &seq_buf;
@@ -115,28 +118,34 @@ struct alignas(64) fastq_parser_state {
 ///   qual_start, qual_size)` — offsets into the batch's shared
 /// storage plus the encoder's `(word_count, padding)` summary.
 template <
-    sequence_alphabet alphabet_t,
-    typename storage_unit_t = std::uint64_t,
-    typename emit_record_fn_t,
-    typename failure_fn_t>
+    sequence_alphabet p_alphabet,
+    typename p_storage_unit = std::uint64_t,
+    typename p_emit_record,
+    typename p_failure>
 [[nodiscard]] record_parse_result parse_one_fastq_record(
-    fastq_parser_state<storage_unit_t,
-        compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::bits_per_char,
-        compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::letters_per_unit>& state,
+    fastq_parser_state<p_storage_unit,
+        compact_sequence_range<sequence_custom_alphabet<
+            p_alphabet,
+            p_storage_unit>>::traits::bits_per_char,
+        compact_sequence_range<sequence_custom_alphabet<
+            p_alphabet,
+            p_storage_unit>>::traits::letters_per_unit>& state,
     const std::uint8_t* slab_data,
     std::size_t slab_size,
     bool is_eof,
     std::size_t cursor,
     std::size_t global_offset,
     bool strict_fastq,
-    emit_record_fn_t&& emit_record,
-    failure_fn_t&& failure_fn) {
+    p_emit_record&& emit_record,
+    p_failure&& failure_fn) {
 
-    using sequence_traits =
+    using sequence_traits_type =
         typename compact_sequence_range<
-            sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits;
-    constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
-    constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
+            sequence_custom_alphabet<p_alphabet, p_storage_unit>>::traits;
+    constexpr std::size_t bits_per_char =
+        sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit =
+        sequence_traits_type::letters_per_unit;
 
     DEBUG_ASSERT(state.header_storage != nullptr,
                  "fastq_parser_state must be attached to a batch via attach_to_batch");
@@ -236,9 +245,9 @@ template <
             line_size -= 1;
         }
         bioseq::simd::active_target::encode_body_chunk<
-            alphabet_t,
-            bioseq::simd::active_target::unknown_byte_policy::DROP,
-            storage_unit_t, bits_per_char, letters_per_unit>(
+            p_alphabet,
+            bioseq::simd::active_target::unknown_byte_policy::drop,
+            p_storage_unit, bits_per_char, letters_per_unit>(
                 state.body, slab_data + parse_cursor, line_size);
         state.sequence_byte_count += line_size;
         parse_cursor += newline_offset + 1;
@@ -337,7 +346,7 @@ template <
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] =
-            bioseq::simd::active_target::finalize_encode_state<storage_unit_t,
+            bioseq::simd::active_target::finalize_encode_state<p_storage_unit,
                                                   bits_per_char,
                                                   letters_per_unit>(state.body);
         const std::size_t qual_size = state.quality_storage->size()

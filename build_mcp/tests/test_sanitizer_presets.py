@@ -16,7 +16,10 @@ REPOSITORY_ROOT = BUILD_MCP_DIR.parent
 sys.path.insert(0, str(BUILD_MCP_DIR))
 sys.path.insert(0, str(REPOSITORY_ROOT / "cmake"))
 
-import server  # noqa: E402
+import build_presets  # noqa: E402
+import build_worker  # noqa: E402
+import postgres_runtime  # noqa: E402
+import process_state  # noqa: E402
 import private_postgres  # noqa: E402
 from sanitizer_runtime import (  # noqa: E402
     ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
@@ -71,7 +74,7 @@ class SanitizerPresetContractTest(unittest.TestCase):
         variables.update(preset.get("cacheVariables", {}))
         return variables
 
-    def test_presets_are_isolated_test_trees_with_profile_zero(self) -> None:
+    def test_presets_are_isolated_test_trees_with_dna4_profile(self) -> None:
         self.assertEqual(
             self.presets["test-opt"]["cacheVariables"]["BIOSEQ_TEST_INDEXES"],
             "ON",
@@ -91,7 +94,9 @@ class SanitizerPresetContractTest(unittest.TestCase):
                 self.assertEqual(
                     preset["binaryDir"], "${sourceDir}/build/${presetName}")
                 self.assertEqual(
-                    variables["BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE"], "0")
+                    variables["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
+                    "dna4_uint64",
+                )
                 self.assertEqual(
                     variables["PostgreSQL_CONFIG"],
                     "/opt/homebrew/opt/postgresql@17/bin/pg_config",
@@ -220,13 +225,13 @@ class SanitizerPresetContractTest(unittest.TestCase):
     def test_builder_override_routes_unit_integration_to_each_tree(self) -> None:
         for name in SANITIZERS:
             with self.subTest(name=name), mock.patch.multiple(
-                    server,
+                    build_presets,
                     DEFAULT_BUILD_PRESET="bench-opt",
                     TEST_BUILD_PRESET=name):
                 self.assertEqual(
-                    server.preset_for("unit+integration", debug=False), name)
+                    build_presets.preset_for("unit-integration", debug=False), name)
                 self.assertEqual(
-                    server.build_dir_for("unit+integration", debug=False),
+                    build_presets.build_dir_for("unit-integration", debug=False),
                     REPOSITORY_ROOT / "build" / name,
                 )
 
@@ -249,7 +254,7 @@ class SanitizerPresetContractTest(unittest.TestCase):
                 descendant[ASAN_OPTIONS_ENV],
                 ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
             )
-            worker = server._build_worker_descendant_environment(
+            worker = process_state._build_worker_descendant_environment(
                 base, allowed_paths=(runtime,))
             self.assertNotIn(DYLD_INSERT_ENV, worker)
             self.assertEqual(
@@ -388,32 +393,32 @@ class SanitizerPresetContractTest(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, base, clear=True), \
                 mock.patch.object(
-                    server, "_refuse_root_build_identity", return_value=None), \
+                    build_worker, "_refuse_root_build_identity", return_value=None), \
                 mock.patch.object(
-                    server, "_ensure_build_worker_timesharing_policy"), \
+                    build_worker, "_ensure_build_worker_timesharing_policy"), \
                 mock.patch.object(
-                    server, "_global_lock",
+                    build_worker, "_global_lock",
                     return_value=contextlib.nullcontext()), \
-                mock.patch.object(server, "_load_state", return_value={}), \
+                mock.patch.object(build_worker, "_load_state", return_value={}), \
                 mock.patch.object(
-                    server, "_running_in_same_group",
+                    build_worker, "_running_in_same_group",
                     return_value=(None, None)), \
                 mock.patch.object(
-                    server, "_git_commit", return_value="a" * 40), \
+                    build_worker, "_git_commit", return_value="a" * 40), \
                 mock.patch.object(
-                    server, "_source_graph_fingerprint",
+                    build_worker, "_source_graph_fingerprint",
                     return_value="source-digest"), \
                 mock.patch.object(
-                    server, "_configured_local_build_rt_priority",
+                    build_worker, "_configured_local_build_rt_priority",
                     return_value=None), \
-                mock.patch.object(server, "_preflight_local_clang_rt_launcher"), \
+                mock.patch.object(build_worker, "_preflight_local_clang_rt_launcher"), \
                 mock.patch.object(
-                    server, "_capture_process_identity", return_value=None), \
-                mock.patch.object(server, "_save_state"), \
-                mock.patch.object(server, "_log"), \
+                    build_worker, "_capture_process_identity", return_value=None), \
+                mock.patch.object(build_worker, "_save_state"), \
+                mock.patch.object(build_worker, "_log"), \
                 mock.patch.object(
-                    server.subprocess, "Popen", return_value=fake_process) as popen:
-            result = server.tool_start_build("external-api", build_only=True)
+                    build_worker.subprocess, "Popen", return_value=fake_process) as popen:
+            result = build_worker.tool_start_build("external-api", build_only=True)
 
         self.assertIn("scheduled", result)
         worker_env = popen.call_args.kwargs["env"]
@@ -427,28 +432,28 @@ class SanitizerPresetContractTest(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, base, clear=True), \
                 mock.patch.object(
-                    server, "_refuse_root_build_identity", return_value=None), \
+                    build_worker, "_refuse_root_build_identity", return_value=None), \
                 mock.patch.object(
-                    server, "_ensure_build_worker_timesharing_policy"), \
+                    build_worker, "_ensure_build_worker_timesharing_policy"), \
                 mock.patch.object(
-                    server, "_global_lock",
+                    build_worker, "_global_lock",
                     return_value=contextlib.nullcontext()), \
-                mock.patch.object(server, "_load_state", return_value={}), \
+                mock.patch.object(build_worker, "_load_state", return_value={}), \
                 mock.patch.object(
-                    server, "_running_in_same_group",
+                    build_worker, "_running_in_same_group",
                     return_value=(None, None)), \
                 mock.patch.object(
-                    server, "_git_commit", return_value="a" * 40), \
+                    build_worker, "_git_commit", return_value="a" * 40), \
                 mock.patch.object(
-                    server, "_source_graph_fingerprint",
+                    build_worker, "_source_graph_fingerprint",
                     return_value="source-digest"), \
                 mock.patch.object(
-                    server, "_configured_local_build_rt_priority",
+                    build_worker, "_configured_local_build_rt_priority",
                     return_value=None), \
                 mock.patch.object(
-                    server, "_preflight_local_clang_rt_launcher") as preflight, \
-                mock.patch.object(server.subprocess, "Popen") as popen:
-            result = server.tool_start_build("external-api", build_only=True)
+                    build_worker, "_preflight_local_clang_rt_launcher") as preflight, \
+                mock.patch.object(build_worker.subprocess, "Popen") as popen:
+            result = build_worker.tool_start_build("external-api", build_only=True)
 
         self.assertIn("Build worker environment error", result)
         preflight.assert_not_called()
@@ -501,11 +506,11 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
         postgres_app = (
             "/Applications/Postgres.app/Contents/Versions/17/bin/pg_ctl")
         self.assertEqual(
-            server._darwin_postgresql_restart_argv(homebrew, data_dir),
+            postgres_runtime._darwin_postgresql_restart_argv(homebrew, data_dir),
             [homebrew, "-D", data_dir, "restart"],
         )
         self.assertEqual(
-            server._darwin_postgresql_restart_argv(postgres_app, data_dir),
+            postgres_runtime._darwin_postgresql_restart_argv(postgres_app, data_dir),
             ["arch", "-arm64", postgres_app,
              "-D", data_dir, "restart"],
         )
@@ -515,8 +520,8 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
             runtime = (Path(temporary) /
                 "libclang_rt.tsan_osx_dynamic.dylib")
             runtime.touch()
-            with mock.patch.object(server.sys, "platform", "darwin"):
-                restart_env = server._postgresql_restart_environment(
+            with mock.patch.object(postgres_runtime.sys, "platform", "darwin"):
+                restart_env = postgres_runtime._postgresql_restart_environment(
                     {
                         SANITIZER_RUNTIME_ENV: str(runtime),
                         DYLD_INSERT_ENV: "/tmp/untrusted-interposer.dylib",

@@ -190,14 +190,14 @@ static stripe_metadata * find_stripe_metadata_by_row_number(Relation relation, u
 													  row_number_lookup_mode lookup_mode);
 static void validate_stripe_metadata(stripe_metadata *stripe);
 
-template<typename operation_type>
+template<typename p_operation>
 void record_cleanup_failure(
 	std::exception_ptr& failure,
-	operation_type&& operation)
+	p_operation&& operation)
 {
 	try
 	{
-		std::forward<operation_type>(operation)();
+		std::forward<p_operation>(operation)();
 	}
 	catch (...)
 	{

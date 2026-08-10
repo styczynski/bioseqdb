@@ -239,12 +239,26 @@ inline void require_field_count(
 [[nodiscard]] inline target_manifest parse_target_manifest(
     const std::filesystem::path& path) {
     target_manifest result;
+    bool saw_revision = false;
     bool saw_policy = false;
     bool saw_highway = false;
     bool saw_static_target = false;
     for (const auto& fields : detail::manifest_lines(
-             path, "bioseq-highway-targets-v1")) {
-        if (fields.front() == "policy") {
+             path, "bioseq-highway-targets")) {
+        if (!saw_revision && fields.front() != "revision") {
+            throw std::runtime_error(
+                path.string()
+                + ": target manifest must begin with revision 1");
+        }
+        if (fields.front() == "revision") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2);
+            if (saw_revision || fields[1] != "1") {
+                throw std::runtime_error(
+                    path.string()
+                    + ": target manifest requires revision 1 exactly once");
+            }
+            saw_revision = true;
+        } else if (fields.front() == "policy") {
             detail::require_field_count(path, fields.front(), fields.size(), 2);
             if (saw_policy) {
                 throw std::runtime_error(path.string() + ": duplicate policy record");
@@ -290,7 +304,7 @@ inline void require_field_count(
                 + std::string{fields.front()} + "'");
         }
     }
-    if (!saw_policy || !saw_highway || !saw_static_target
+    if (!saw_revision || !saw_policy || !saw_highway || !saw_static_target
         || result.targets.empty()) {
         throw std::runtime_error(
             path.string()
@@ -307,12 +321,26 @@ inline void require_field_count(
 [[nodiscard]] inline source_manifest parse_source_manifest(
     const std::filesystem::path& path) {
     source_manifest result;
+    bool saw_revision = false;
     bool saw_contract = false;
     bool saw_dispatch = false;
     bool saw_completeness = false;
     for (const auto& fields : detail::manifest_lines(
-             path, "bioseq-highway-sources-v1")) {
-        if (fields.front() == "contract") {
+             path, "bioseq-highway-sources")) {
+        if (!saw_revision && fields.front() != "revision") {
+            throw std::runtime_error(
+                path.string()
+                + ": source manifest must begin with revision 1");
+        }
+        if (fields.front() == "revision") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2);
+            if (saw_revision || fields[1] != "1") {
+                throw std::runtime_error(
+                    path.string()
+                    + ": source manifest requires revision 1 exactly once");
+            }
+            saw_revision = true;
+        } else if (fields.front() == "contract") {
             detail::require_field_count(path, fields.front(), fields.size(), 2);
             if (saw_contract) {
                 throw std::runtime_error(path.string() + ": duplicate contract record");
@@ -385,7 +413,8 @@ inline void require_field_count(
                 + std::string{fields.front()} + "'");
         }
     }
-    if (!saw_contract || !saw_dispatch || result.sources.empty()) {
+    if (!saw_revision || !saw_contract || !saw_dispatch
+        || result.sources.empty()) {
         throw std::runtime_error(
             path.string()
             + ": source manifest requires contract, dispatch, and source records");
@@ -477,7 +506,8 @@ inline void require_field_count(
 
     std::ostringstream output;
     output << "{\n"
-           << "  \"schema_version\": " << manifest_schema_version << ",\n"
+           << "  \"schema_revision\": "
+           << policy_evidence_schema_revision << ",\n"
            << "  \"policy_digest\": \""
            << detail::json_escape(plan.target_inventory.policy_digest) << "\",\n"
            << "  \"highway_version\": \""

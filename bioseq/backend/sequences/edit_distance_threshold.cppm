@@ -24,19 +24,19 @@ namespace bioseq::sequences::edit_distance_threshold_detail {
 
 /**
  * @brief Increment a dynamic-programming cell without exceeding its sentinel.
- * @tparam cell_type Unsigned cell type.
+ * @tparam p_cell_type Unsigned cell type.
  * @param value Current cell value.
  * @param cap Sentinel value representing distance beyond the threshold.
  * @return Incremented value or `cap` when already saturated.
  */
-template <class cell_type>
-[[nodiscard]] constexpr cell_type add_one_capped(
-    cell_type value,
-    cell_type cap) noexcept
+template <class p_cell_type>
+[[nodiscard]] constexpr p_cell_type add_one_capped(
+    p_cell_type value,
+    p_cell_type cap) noexcept
 {
     return value >= cap
         ? cap
-        : static_cast<cell_type>(value + cell_type{1});
+        : static_cast<p_cell_type>(value + p_cell_type{1});
 }
 
 /**
@@ -56,8 +56,8 @@ template <class cell_type>
 
 /**
  * @brief Evaluate a threshold-width global edit-distance band.
- * @tparam symbol_type Equality-comparable logical-symbol type.
- * @tparam cell_type Unsigned row-cell type.
+ * @tparam p_symbol_type Equality-comparable logical-symbol type.
+ * @tparam p_cell_type Unsigned row-cell type.
  * @param query Query symbols.
  * @param target Target symbols.
  * @param max_edits Inclusive distance threshold.
@@ -67,14 +67,14 @@ template <class cell_type>
  * @param center Slot corresponding to the main diagonal.
  * @return `true` when the exact global distance does not exceed the threshold.
  */
-template <class symbol_type, class cell_type>
+template <class p_symbol_type, class p_cell_type>
 [[nodiscard]] bool evaluate_rows(
-    std::span<const symbol_type> query,
-    std::span<const symbol_type> target,
+    std::span<const p_symbol_type> query,
+    std::span<const p_symbol_type> target,
     std::uint32_t max_edits,
-    cell_type cap,
-    std::span<cell_type> prior_row,
-    std::span<cell_type> current,
+    p_cell_type cap,
+    std::span<p_cell_type> prior_row,
+    std::span<p_cell_type> current,
     std::size_t center)
 {
     const std::size_t m = query.size();
@@ -84,7 +84,7 @@ template <class symbol_type, class cell_type>
     std::fill(prior_row.begin(), prior_row.end(), cap);
     const std::size_t initial_high = std::min(n, edits);
     for (std::size_t j = 0u; j <= initial_high; ++j) {
-        prior_row[center + j] = static_cast<cell_type>(j);
+        prior_row[center + j] = static_cast<p_cell_type>(j);
     }
 
     for (std::size_t i = 1u; i <= m; ++i) {
@@ -98,15 +98,15 @@ template <class symbol_type, class cell_type>
                 ? center + (j - i)
                 : center - (i - j);
             if (j == 0u) {
-                current[slot] = static_cast<cell_type>(std::min<std::uint64_t>(
+                current[slot] = static_cast<p_cell_type>(std::min<std::uint64_t>(
                     static_cast<std::uint64_t>(i),
                     static_cast<std::uint64_t>(cap)));
             } else {
-                const cell_type deletion = add_one_capped(
+                const p_cell_type deletion = add_one_capped(
                     prior_row[slot + 1u], cap);
-                const cell_type insertion = add_one_capped(
+                const p_cell_type insertion = add_one_capped(
                     current[slot - 1u], cap);
-                const cell_type diagonal = query[i - 1u] == target[j - 1u]
+                const p_cell_type diagonal = query[i - 1u] == target[j - 1u]
                     ? prior_row[slot]
                     : add_one_capped(prior_row[slot], cap);
                 current[slot] = std::min({
@@ -120,7 +120,7 @@ template <class symbol_type, class cell_type>
     const std::size_t final_slot = n >= m
         ? center + (n - m)
         : center - (m - n);
-    return prior_row[final_slot] <= static_cast<cell_type>(max_edits);
+    return prior_row[final_slot] <= static_cast<p_cell_type>(max_edits);
 }
 
 } // namespace bioseq::sequences::edit_distance_threshold_detail
@@ -134,17 +134,17 @@ export namespace bioseq::sequences {
  * symbol representation, so no rank conversion or sequence materialization
  * occurs inside this function.
  *
- * @tparam symbol_type Equality-comparable logical-symbol type.
+ * @tparam p_symbol_type Equality-comparable logical-symbol type.
  * @param query Query symbols.
  * @param target Target symbols.
  * @param max_edits Inclusive unit-cost edit-distance threshold.
  * @return `true` exactly when the global edit distance is at most `max_edits`.
  * @throws std::length_error If the dynamic band width cannot fit `size_t`.
  */
-template <std::equality_comparable symbol_type>
+template <std::equality_comparable p_symbol_type>
 [[nodiscard]] bool edit_distance_within_threshold(
-    std::span<const symbol_type> query,
-    std::span<const symbol_type> target,
+    std::span<const p_symbol_type> query,
+    std::span<const p_symbol_type> target,
     std::uint32_t max_edits)
 {
     const std::size_t m = query.size();

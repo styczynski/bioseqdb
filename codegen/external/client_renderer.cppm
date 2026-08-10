@@ -570,9 +570,10 @@ struct generated_pool_restore {
     }
 };
 
-TEST_CASE("generated external API client performs live requests",
-          "[external][)cpp"
-      << api.client_name << R"cpp(][integration]") {
+TEST_CASE("generated )cpp"
+      << namespace_suffix << R"cpp( external API client performs live requests",
+          "[component:external_api][layer:integration][feature:external_source]"
+          "[resource:network]") {
     bioseq::external::https_client validation_transport("example.org");
     REQUIRE_FALSE(validation_transport.get("/invalid\npath").has_value());
     const std::vector<bioseq::external::http_header> invalid_headers{
