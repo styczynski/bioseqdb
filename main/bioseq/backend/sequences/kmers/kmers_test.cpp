@@ -1,7 +1,7 @@
 // main/bioseq/backend/sequences/kmers/kmers_test.cpp
 //
-// Scalar collect_minimizers equivalence against the verbatim mm_sketch port.
-#include "common_tests.h"
+// scalar collect_minimizers equivalence against the verbatim mm_sketch port.
+#include <tests/support/common.hpp>
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
@@ -10,8 +10,8 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
-import bioseq.sequences.kmers.highway_contract;
-import bioseq.sequences.kmers.mm_sketch_baseline;
+import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.pipe;
 import bioseq.storage.lazy;
 
@@ -61,37 +61,37 @@ std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ_LONGER2{
 };
 
 // =============================================================================
-// Scalar collect_minimizers vs mm_sketch baseline
+// scalar collect_minimizers vs mm_sketch baseline
 // -----------------------------------------------------------------------------
 // `collect_minimizers` is documented as "direct scalar port of mm_sketch"
 // (`index.cppm:455-468`). Verify that on a `minimap_int_hasher` pipeline the
 // two produce the exact same (last_pos, kmer) pair set on a battery of
 // inputs — including the worst-case poly-A where every kmer ties on hash.
 // =============================================================================
-template<typename Alphabet>
+template<typename p_alphabet>
 static void check_scalar_matches_mm_sketch(
-    std::vector<Alphabet>& data,
+    std::vector<p_alphabet>& data,
     const size_t w,
     const size_t k,
     const std::string& alphabet_name)
 {
-    // Use uint64_t for both storage and hash_val_t — wide enough for any
-    // K up to 32 (dna4) or 21 (dna5). Matches the post-REPORT_COMPACT_MINIMIZERS
+    // Use uint64_t for both storage and hash_value_type — wide enough for any
+    // p_kmer_size up to 32 (dna4) or 21 (dna5). Matches the post-REPORT_COMPACT_MINIMIZERS
     // production-width default of the scalar collector.
-    using seq_type = sequence_custom_alphabet<Alphabet, uint64_t>;
+    using seq_type = sequence_custom_alphabet<p_alphabet, uint64_t>;
     auto bioseq_seq = compact_sequence_range<seq_type>(data);
     sketch_collector collector;
     collect_minimizers<minimap_int_hasher,
-                       /*MinimizerT=*/MinimapSketchData,
-                       /*R=*/seq_type,
+                       /*p_minimizer_type=*/minimap_sketch_data,
+                       /*p_sequence_range=*/seq_type,
                        /*I=*/decltype(bioseq_seq.begin()),
-                       /*hash_val_t=*/uint64_t>(
+                       /*hash_value_type=*/uint64_t>(
         collector, bioseq_seq, bioseq_seq.begin(), bioseq_seq.end(), w, k);
     const auto bioseq_pairs = collector.extract_pairs();
 
     auto baseline_seq = compact_sequence_range<seq_type>(data);
     const auto baseline_pairs =
-        mm_sketch_baseline_pairs(baseline_seq, w, k);
+        minimap2_sketch_baseline_pairs(baseline_seq, w, k);
 
     ASSERT(
         bioseq_pairs == baseline_pairs,
@@ -149,12 +149,12 @@ static void check_generated_reference_matches_mm_sketch(
 
     sketch_collector collector;
     const auto result = pipe::invoke_selected_minimizer_kernel<
-        MinimapSketchData>(
+        minimap_sketch_data>(
             &table,
             ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_reference_minimap_int,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                reference_minimap_int,
+                minimizer_minimap2_reference,
+            ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference,
             pipe::minimizer_kernel_view<seq::dna4>(*descriptor, &table),
             w,
             k,
@@ -163,7 +163,7 @@ static void check_generated_reference_matches_mm_sketch(
 
     auto baseline_sequence = compact_sequence_range<seq_type>(data);
     const auto baseline_pairs =
-        mm_sketch_baseline_pairs(baseline_sequence, w, k);
+        minimap2_sketch_baseline_pairs(baseline_sequence, w, k);
 
     ASSERT(
         generated_pairs == baseline_pairs,
@@ -175,14 +175,14 @@ static void check_generated_reference_matches_mm_sketch(
             generated_pairs.size(), baseline_pairs.size()),
         generated_pairs,
         baseline_pairs);
-    REQUIRE(result.ok());
-    REQUIRE(result.proof.algorithm
-            == ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                reference_minimap_int);
-    REQUIRE(result.proof.target == binding.target);
+    REQUIRE(result.is_ok());
+    REQUIRE(result.stats.algorithm
+            == ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference);
+    REQUIRE(result.stats.target == binding.target);
     REQUIRE(result.emitted == collector.extract_sketches_data().size());
-    REQUIRE(result.proof.reference.kernel_calls == 1u);
-    REQUIRE(result.proof.reference.last_storage_unit_bytes
+    REQUIRE(result.stats.reference.kernel_calls == 1u);
+    REQUIRE(result.stats.reference.last_storage_unit_bytes
             == sizeof(UnitType));
 }
 
@@ -204,15 +204,15 @@ TEST_CASE(
     }
 }
 
-template<typename Alphabet, typename UnitType>
-static ::bioseq::minimizers::MinimizerKernelResult
+template<typename p_alphabet, typename UnitType>
+static ::bioseq::minimizers::minimizer_kernel_result
 invoke_generated_minimizer_coordinate(
-    std::vector<Alphabet>& data,
+    std::vector<p_alphabet>& data,
     const ::bioseq::simd_dispatch::HighwayKernelId kernel,
-    const ::bioseq::minimizers::MinimizerKernelAlgorithm algorithm,
+    const ::bioseq::minimizers::minimizer_kernel_algorithm algorithm,
     sketch_collector& collector)
 {
-    using seq_type = sequence_custom_alphabet<Alphabet, UnitType>;
+    using seq_type = sequence_custom_alphabet<p_alphabet, UnitType>;
 
     auto sequence = compact_sequence_range<seq_type>(data);
     auto lazy = bioseq::storage::make_lazy_in_memory(sequence);
@@ -230,40 +230,40 @@ invoke_generated_minimizer_coordinate(
     REQUIRE(descriptor.has_value());
     REQUIRE(descriptor->storage_unit_byte_width == sizeof(UnitType));
 
-    return pipe::invoke_selected_minimizer_kernel<MinimapSketchData>(
+    return pipe::invoke_selected_minimizer_kernel<minimap_sketch_data>(
         &table,
         kernel,
         algorithm,
-        pipe::minimizer_kernel_view<Alphabet>(*descriptor, &table),
+        pipe::minimizer_kernel_view<p_alphabet>(*descriptor, &table),
         10u,
         15u,
         collector);
 }
 
-template<typename Alphabet, typename UnitType>
+template<typename p_alphabet, typename UnitType>
 static void check_generated_reference_rejects_coordinate(
-    std::vector<Alphabet>& data,
+    std::vector<p_alphabet>& data,
     const std::string& coordinate)
 {
     sketch_collector collector;
     const auto result = invoke_generated_minimizer_coordinate<
-        Alphabet, UnitType>(
+        p_alphabet, UnitType>(
             data,
             ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_reference_minimap_int,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                reference_minimap_int,
+                minimizer_minimap2_reference,
+            ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference,
             collector);
     const auto pairs = collector.extract_pairs();
 
     CAPTURE(coordinate);
     REQUIRE(result.status
-            == ::bioseq::minimizers::MinimizerKernelStatus::
+            == ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_configuration);
-    REQUIRE(result.proof.algorithm
-            == ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                reference_minimap_int);
-    REQUIRE(result.proof.target
+    REQUIRE(result.stats.algorithm
+            == ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference);
+    REQUIRE(result.stats.target
             == ::bioseq::simd_dispatch::highway_test_target_binding().target);
     REQUIRE(result.emitted == 0u);
     REQUIRE(pairs.empty());
@@ -302,78 +302,78 @@ TEST_CASE(
     }
 }
 
-template<typename Alphabet, typename UnitType>
+template<typename p_alphabet, typename UnitType>
 static void check_generated_paper_supports_coordinate(
-    std::vector<Alphabet>& data,
+    std::vector<p_alphabet>& data,
     const std::string& coordinate)
 {
     sketch_collector collector;
     const auto result = invoke_generated_minimizer_coordinate<
-        Alphabet, UnitType>(
+        p_alphabet, UnitType>(
             data,
-            ::bioseq::simd_dispatch::HighwayKernelId::minimizer_paper_nthash,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash,
+            ::bioseq::simd_dispatch::HighwayKernelId::minimizer_bounded_nthash,
+            ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
             collector);
 
     CAPTURE(coordinate);
-    REQUIRE(result.ok());
+    REQUIRE(result.is_ok());
     REQUIRE(result.family_status
             == static_cast<std::uint32_t>(
-                ::bioseq::minimizers::PackedPaperNthashStatus::ok));
-    REQUIRE(result.proof.algorithm
-            == ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash);
-    REQUIRE(result.proof.target
+                ::bioseq::minimizers::bounded_nthash_status::ok));
+    REQUIRE(result.stats.algorithm
+            == ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash);
+    REQUIRE(result.stats.target
             == ::bioseq::simd_dispatch::highway_test_target_binding().target);
     REQUIRE(result.emitted == collector.extract_sketches_data().size());
-    REQUIRE(result.proof.paper.accepted(true));
-    REQUIRE(result.proof.paper.source_storage_unit_bytes == sizeof(UnitType));
-    REQUIRE(result.proof.paper.fallback_calls == 0u);
-    REQUIRE(result.proof.paper.scalar_hash_symbols == 0u);
+    REQUIRE(result.stats.bounded_nthash.is_internally_consistent(true));
+    REQUIRE(result.stats.bounded_nthash.source_storage_unit_bytes == sizeof(UnitType));
+    REQUIRE(result.stats.bounded_nthash.fallback_calls == 0u);
+    REQUIRE(result.stats.bounded_nthash.scalar_hash_symbols == 0u);
 }
 
-template<typename Alphabet, typename UnitType>
+template<typename p_alphabet, typename UnitType>
 static void check_generated_paper_rejects_coordinate(
-    std::vector<Alphabet>& data,
+    std::vector<p_alphabet>& data,
     const std::string& coordinate)
 {
     sketch_collector collector;
     const auto result = invoke_generated_minimizer_coordinate<
-        Alphabet, UnitType>(
+        p_alphabet, UnitType>(
             data,
-            ::bioseq::simd_dispatch::HighwayKernelId::minimizer_paper_nthash,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash,
+            ::bioseq::simd_dispatch::HighwayKernelId::minimizer_bounded_nthash,
+            ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
             collector);
     const auto pairs = collector.extract_pairs();
 
     CAPTURE(coordinate);
     REQUIRE(result.status
-            == ::bioseq::minimizers::MinimizerKernelStatus::
+            == ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_configuration);
     constexpr auto expected_family = [] {
-        if constexpr (std::same_as<Alphabet, seq::dna5>) {
-            return ::bioseq::minimizers::PackedPaperNthashStatus::
+        if constexpr (std::same_as<p_alphabet, seq::dna5>) {
+            return ::bioseq::minimizers::bounded_nthash_status::
                 unsupported_alphabet;
         } else {
-            return ::bioseq::minimizers::PackedPaperNthashStatus::
+            return ::bioseq::minimizers::bounded_nthash_status::
                 unsupported_storage;
         }
     }();
     REQUIRE(result.family_status
             == static_cast<std::uint32_t>(expected_family));
-    REQUIRE(result.proof.algorithm
-            == ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash);
-    REQUIRE(result.proof.target
+    REQUIRE(result.stats.algorithm
+            == ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash);
+    REQUIRE(result.stats.target
             == ::bioseq::simd_dispatch::highway_test_target_binding().target);
-    REQUIRE(result.proof.paper.fail_closed_rejections == 1u);
-    REQUIRE(result.proof.paper.fallback_calls == 0u);
-    REQUIRE(result.proof.paper.scalar_hash_symbols == 0u);
+    REQUIRE(result.stats.bounded_nthash.fail_closed_rejections == 1u);
+    REQUIRE(result.stats.bounded_nthash.fallback_calls == 0u);
+    REQUIRE(result.stats.bounded_nthash.scalar_hash_symbols == 0u);
     REQUIRE(result.emitted == 0u);
     REQUIRE(pairs.empty());
 }
 
 TEST_CASE(
-    "generated fixed-target paper ntHash exposes exact coordinate capability",
-    "[minimizers][paper-nthash][highway][matrix][capability]"
+    "generated fixed-target bounded_nthash ntHash exposes exact coordinate capability",
+    "[minimizers][bounded_nthash-nthash][highway][matrix][capability]"
     "[invalid-configuration]")
 {
     SECTION("dna4/u32 is supported") {

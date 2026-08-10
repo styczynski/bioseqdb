@@ -9,7 +9,7 @@
 // region through the no-fragment lazy wrapper and through three chunked
 // scanners and asserts identical score + CIGAR.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <cstdint>

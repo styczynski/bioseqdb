@@ -30,7 +30,7 @@ module;
 
 export module bioseq.test.postgres:cluster;
 
-import bioseq.libpq.client;
+import bioseq.common.libpq;
 import :artifact;
 import :process;
 import :report;
@@ -40,7 +40,7 @@ import :supervision;
 export namespace bioseq::postgres_test {
 
 /// @brief Exact marker-owned paths available immediately before initdb.
-struct pre_initdb_context {
+struct pre_initdb_paths {
     const std::filesystem::path& root_directory;
     const std::filesystem::path& data_directory;
     const std::filesystem::path& socket_directory;
@@ -48,31 +48,30 @@ struct pre_initdb_context {
 };
 
 /// @brief Optional source-neutral Boolean gate after extension installation.
-struct post_extension_readiness_probe {
+struct extension_readiness_check {
     std::string sql;
     std::chrono::milliseconds deadline{60'000};
     std::chrono::milliseconds poll_interval{20};
 };
 
 /// @brief Complete source-neutral configuration for one private PostgreSQL node.
-struct cluster_options {
+struct private_cluster_options {
     std::filesystem::path postgres_bin_dir;
     std::filesystem::path preinstalled_stage_root;
     std::filesystem::path preinstalled_stage_manifest;
-    std::vector<extension_artifact> extensions;
+    std::vector<extension_install_source> extensions;
     std::set<std::string> allowed_runtime_dso_overrides;
     std::vector<std::string> preload_libraries;
     std::vector<std::pair<std::string, std::string>> startup_gucs;
     std::vector<std::pair<std::string, std::string>> process_environment;
-    std::function<void(const pre_initdb_context&)> pre_initdb;
-    std::optional<post_extension_readiness_probe>
-        post_extension_readiness;
+    std::function<void(const pre_initdb_paths&)> pre_initdb;
+    std::optional<extension_readiness_check> extension_readiness;
     std::chrono::seconds startup_timeout{60};
     std::chrono::seconds stop_timeout{30};
 };
 
 /// @brief Explicit lifecycle states for a private cluster.
-enum class cluster_state {
+enum class private_cluster_state {
     constructed,
     initialized,
     running,
@@ -80,7 +79,7 @@ enum class cluster_state {
 };
 
 /// @brief Terminal no-throw cleanup result for one owned private cluster.
-struct cluster_cleanup_result {
+struct private_cluster_cleanup_result {
     bool succeeded{};
     std::string detail;
 };
@@ -95,7 +94,7 @@ enum class process_tree_controller_fault {
 };
 
 /// @brief Trace produced by the non-signalling controller contract model.
-struct process_tree_controller_contract_trace {
+struct process_tree_controller_trace {
     bool freeze_succeeded{};
     bool resume_attempted{};
     bool resume_complete{};
@@ -111,14 +110,14 @@ struct process_tree_controller_contract_trace {
 namespace bioseq::postgres_test::cluster_detail {
 
 /// @brief Validates options before any temporary directory is allocated.
-[[nodiscard]] inline cluster_options validate_options(cluster_options options) {
+[[nodiscard]] inline private_cluster_options validate_options(private_cluster_options options) {
     if (options.startup_timeout <= std::chrono::seconds::zero()
         || options.stop_timeout <= std::chrono::seconds::zero()) {
         throw std::invalid_argument("cluster deadlines must be positive");
     }
-    if (options.post_extension_readiness) {
-        const post_extension_readiness_probe& probe =
-            *options.post_extension_readiness;
+    if (options.extension_readiness) {
+        const extension_readiness_check& probe =
+            *options.extension_readiness;
         if (probe.sql.empty()) {
             throw std::invalid_argument(
                 "post-extension readiness SQL must not be empty");
@@ -165,7 +164,7 @@ namespace bioseq::postgres_test::cluster_detail {
 }
 
 /// @brief True only when candidate is a proper descendant of root.
-[[nodiscard]] inline bool path_is_strictly_within(
+[[nodiscard]] inline bool is_path_strictly_within(
     const std::filesystem::path& root,
     const std::filesystem::path& candidate) {
     auto root_part = root.begin();
@@ -183,7 +182,7 @@ namespace bioseq::postgres_test::cluster_detail {
 
 /// @brief Revalidates the attested sharedir immediately before initdb.
 [[nodiscard]] inline std::filesystem::path
-require_initdb_shared_directory(const extension_stage& stage) {
+require_initdb_shared_directory(const extension_stage_layout& stage) {
     const auto require_canonical_directory =
         [](const std::filesystem::path& path,
            std::string_view label) -> std::filesystem::path {
@@ -219,7 +218,7 @@ require_initdb_shared_directory(const extension_stage& stage) {
     const std::filesystem::path shared_directory =
         require_canonical_directory(
             stage.shared_directory, "attested PostgreSQL shared directory");
-    if (!path_is_strictly_within(stage_root, shared_directory)) {
+    if (!is_path_strictly_within(stage_root, shared_directory)) {
         throw std::invalid_argument(
             "attested PostgreSQL shared directory is outside its stage root");
     }
@@ -380,13 +379,13 @@ inline void validate_library_name(std::string_view name) {
 
 /// @brief PID-reuse-resistant snapshot of a stable postmaster process tree.
 struct supervised_process_tree_member {
-    supervised_process_record process;
+    supervised_process_identity process;
     std::uint64_t parent_pid{};
     std::size_t depth{};
 };
 
 struct supervised_process_tree {
-    supervised_process_record postmaster;
+    supervised_process_identity postmaster;
     std::vector<supervised_process_tree_member> members;
     std::vector<std::int64_t> process_groups;
 };
@@ -402,34 +401,34 @@ struct process_tree_freeze_result {
         process_tree_freeze_outcome::failed_resumed};
     std::optional<supervised_process_tree> tree;
 
-    [[nodiscard]] bool frozen() const noexcept {
+    [[nodiscard]] bool is_frozen() const noexcept {
         return outcome == process_tree_freeze_outcome::frozen
             && tree.has_value();
     }
 };
 
 /// @brief Matches the captured run even if that process changed groups.
-[[nodiscard]] inline bool process_identity_matches(
-    const supervised_process_record& process) noexcept {
-    const auto current = capture_supervised_process(
+[[nodiscard]] inline bool is_process_identity_current(
+    const supervised_process_identity& process) noexcept {
+    const auto current = capture_supervised_process_identity(
         process.pid, {}, process.data_directory);
     return current && current->start_token == process.start_token;
 }
 
-[[nodiscard]] inline bool same_process_identity(
-    const supervised_process_record& left,
-    const supervised_process_record& right) noexcept {
+[[nodiscard]] inline bool is_same_process_identity(
+    const supervised_process_identity& left,
+    const supervised_process_identity& right) noexcept {
     return left.pid == right.pid
         && left.start_token == right.start_token
         && left.executable == right.executable;
 }
 
 inline void normalize_process_tree_snapshot(
-    std::vector<postmaster_process_tree_member>& snapshot) {
+    std::vector<postgres_process_tree_member>& snapshot) {
     std::sort(
         snapshot.begin(), snapshot.end(),
-        [](const postmaster_process_tree_member& left,
-           const postmaster_process_tree_member& right) {
+        [](const postgres_process_tree_member& left,
+           const postgres_process_tree_member& right) {
             return std::pair{left.pid, left.parent_pid}
                 < std::pair{right.pid, right.parent_pid};
         });
@@ -437,12 +436,12 @@ inline void normalize_process_tree_snapshot(
 
 [[nodiscard]] inline std::optional<std::vector<std::size_t>>
 process_tree_depths(
-    const std::vector<postmaster_process_tree_member>& snapshot,
+    const std::vector<postgres_process_tree_member>& snapshot,
     std::uint64_t root_pid) {
     std::vector<std::optional<std::size_t>> pending(snapshot.size());
     const auto root = std::find_if(
         snapshot.begin(), snapshot.end(),
-        [root_pid](const postmaster_process_tree_member& member) {
+        [root_pid](const postgres_process_tree_member& member) {
             return member.pid == root_pid;
         });
     if (root == snapshot.end()) {
@@ -459,7 +458,7 @@ process_tree_depths(
             const auto parent = std::find_if(
                 snapshot.begin(), snapshot.end(),
                 [&snapshot, index](
-                    const postmaster_process_tree_member& member) {
+                    const postgres_process_tree_member& member) {
                     return member.pid == snapshot[index].parent_pid;
                 });
             if (parent == snapshot.end()) {
@@ -491,12 +490,12 @@ process_tree_depths(
 /// @brief Captures the complete parent-linked tree twice around identities.
 [[nodiscard]] inline std::optional<supervised_process_tree>
 capture_process_tree(
-    const supervised_process_record& anchor) noexcept try {
-    if (!process_identity_matches(anchor)) {
+    const supervised_process_identity& anchor) noexcept try {
+    if (!is_process_identity_current(anchor)) {
         return std::nullopt;
     }
     for (int attempt = 0; attempt != 10; ++attempt) {
-        auto first = sample_postmaster_process_tree(anchor.pid);
+        auto first = capture_postgres_process_tree(anchor.pid);
         if (!first) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
@@ -511,9 +510,9 @@ capture_process_tree(
         tree.members.reserve(first->size());
         bool complete = true;
         for (std::size_t index = 0; index < first->size(); ++index) {
-            const postmaster_process_tree_member topology =
+            const postgres_process_tree_member topology =
                 (*first)[index];
-            const auto member = capture_supervised_process(
+            const auto member = capture_supervised_process_identity(
                 topology.pid,
                 topology.pid == anchor.pid
                     ? anchor.executable
@@ -545,7 +544,7 @@ capture_process_tree(
             continue;
         }
 
-        auto second = sample_postmaster_process_tree(anchor.pid);
+        auto second = capture_postgres_process_tree(anchor.pid);
         if (!second) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
@@ -574,7 +573,7 @@ capture_process_tree(
 [[nodiscard]] inline bool signal_owned_postmaster_group(
     const supervised_process_tree& tree,
     int signal_number,
-    spawned_process* owned_group_leader = nullptr) noexcept {
+    owned_process* owned_group_leader = nullptr) noexcept {
     return owned_group_leader != nullptr
         && owned_group_leader->process_group()
             == tree.postmaster.process_group
@@ -600,7 +599,7 @@ inline void merge_tree_member(
     const auto current = std::find_if(
         tree.members.begin(), tree.members.end(),
         [&member](const supervised_process_tree_member& candidate) {
-            return same_process_identity(
+            return is_same_process_identity(
                 candidate.process, member.process);
         });
     if (current == tree.members.end()) {
@@ -623,7 +622,7 @@ inline void merge_tree_member(
         });
 }
 
-[[nodiscard]] inline bool same_captured_tree(
+[[nodiscard]] inline bool is_same_captured_tree(
     const supervised_process_tree& left,
     const supervised_process_tree& right) noexcept {
     if (left.members.size() != right.members.size()) {
@@ -633,7 +632,7 @@ inline void merge_tree_member(
         const auto other = std::find_if(
             right.members.begin(), right.members.end(),
             [&member](const supervised_process_tree_member& candidate) {
-                return same_process_identity(
+                return is_same_process_identity(
                            member.process, candidate.process)
                     && member.parent_pid == candidate.parent_pid
                     && member.depth == candidate.depth;
@@ -645,12 +644,12 @@ inline void merge_tree_member(
     return true;
 }
 
-template <typename DescendantStop>
+template <typename p_descendant_stop>
 [[nodiscard]] inline bool stop_process_tree_parent_first(
     supervised_process_tree& tree,
-    DescendantStop&& stop_descendant) {
+    p_descendant_stop&& stop_descendant) {
     for (supervised_process_tree_member& member : tree.members) {
-        if (same_process_identity(
+        if (is_same_process_identity(
                 member.process, tree.postmaster)) {
             continue;
         }
@@ -667,14 +666,14 @@ template <typename DescendantStop>
     return true;
 }
 
-template <typename DescendantResume, typename RootResume>
+template <typename p_descendant_resume, typename p_root_resume>
 [[nodiscard]] inline bool resume_process_tree_child_first(
     const supervised_process_tree& tree,
-    DescendantResume&& resume_descendant,
-    RootResume&& resume_root) noexcept {
+    p_descendant_resume&& resume_descendant,
+    p_root_resume&& resume_root) noexcept {
     for (auto iterator = tree.members.rbegin();
          iterator != tree.members.rend(); ++iterator) {
-        if (same_process_identity(
+        if (is_same_process_identity(
                 iterator->process, tree.postmaster)) {
             continue;
         }
@@ -688,7 +687,7 @@ template <typename DescendantResume, typename RootResume>
 /// @brief Resumes children before parents and the broker-owned group last.
 [[nodiscard]] inline bool resume_process_tree(
     const supervised_process_tree& tree,
-    spawned_process* owned_group_leader = nullptr) noexcept {
+    owned_process* owned_group_leader = nullptr) noexcept {
     const bool root_resumed =
         resume_process_tree_child_first(
             tree,
@@ -699,15 +698,15 @@ template <typename DescendantResume, typename RootResume>
                 if (parent == nullptr) {
                     return false;
                 }
-                if (supervised_process_definitely_absent(
+                if (is_supervised_process_absent(
                         member.process)
-                    || supervised_child_is_terminal(
+                    || is_supervised_child_terminal(
                         parent->process, member.process)) {
                     return true;
                 }
                 return signal_supervised_child_while_parent_stopped(
                            parent->process, member.process, SIGCONT)
-                    .accepted();
+                    .is_accepted();
             },
             [&tree, owned_group_leader]() noexcept {
                 return signal_owned_postmaster_group(
@@ -719,18 +718,18 @@ template <typename DescendantResume, typename RootResume>
     const auto deadline =
         std::chrono::steady_clock::now()
         + std::chrono::milliseconds(200);
-    while (process_identity_matches(tree.postmaster)
-           && supervised_process_stopped(tree.postmaster)
+    while (is_process_identity_current(tree.postmaster)
+           && is_supervised_process_stopped(tree.postmaster)
            && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    return !process_identity_matches(tree.postmaster)
-        || !supervised_process_stopped(tree.postmaster);
+    return !is_process_identity_current(tree.postmaster)
+        || !is_supervised_process_stopped(tree.postmaster);
 }
 
 [[nodiscard]] inline process_tree_freeze_result failed_freeze(
     supervised_process_tree tree,
-    spawned_process* owned_group_leader) noexcept {
+    owned_process* owned_group_leader) noexcept {
     const bool resumed =
         resume_process_tree(tree, owned_group_leader);
     return {
@@ -743,8 +742,8 @@ template <typename DescendantResume, typename RootResume>
 /// @brief Freezes a stable anchored tree before any force-cleanup decision.
 [[nodiscard]] inline process_tree_freeze_result
 freeze_process_tree(
-    const supervised_process_record& anchor,
-    spawned_process* owned_group_leader = nullptr) noexcept {
+    const supervised_process_identity& anchor,
+    owned_process* owned_group_leader = nullptr) noexcept {
     supervised_process_tree frozen;
     try {
         frozen.postmaster = anchor;
@@ -759,13 +758,13 @@ freeze_process_tree(
         const auto root_stop_deadline =
             std::chrono::steady_clock::now()
             + std::chrono::milliseconds(200);
-        while (!supervised_process_stopped(anchor)
+        while (!is_supervised_process_stopped(anchor)
                && std::chrono::steady_clock::now()
                    < root_stop_deadline) {
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(5));
         }
-        if (!supervised_process_stopped(anchor)) {
+        if (!is_supervised_process_stopped(anchor)) {
             return failed_freeze(
                 std::move(frozen), owned_group_leader);
         }
@@ -817,14 +816,14 @@ freeze_process_tree(
                 std::chrono::milliseconds(5));
             const auto confirmation = capture_process_tree(anchor);
             if (!confirmation
-                || !same_captured_tree(*tree, *confirmation)) {
+                || !is_same_captured_tree(*tree, *confirmation)) {
                 continue;
             }
             const bool all_stopped = std::all_of(
                 confirmation->members.begin(),
                 confirmation->members.end(),
                 [](const supervised_process_tree_member& member) {
-                    return supervised_process_stopped(
+                    return is_supervised_process_stopped(
                         member.process);
                 });
             if (all_stopped) {
@@ -846,35 +845,35 @@ freeze_process_tree(
     }
 }
 
-/// @brief Refuses historical captures that cannot prove a live fixed point.
+/// @brief Refuses an unanchored capture that cannot establish a live fixed point.
 [[nodiscard]] inline process_tree_freeze_result
-freeze_captured_process_tree(
+refuse_unanchored_process_tree_freeze(
     const supervised_process_tree&,
-    spawned_process* = nullptr) noexcept {
+    owned_process* = nullptr) noexcept {
     return {
         .outcome = process_tree_freeze_outcome::failed_resumed,
         .tree = std::nullopt};
 }
 
 /// @brief True only after every exact captured identity is gone.
-[[nodiscard]] inline bool process_tree_members_absent(
+[[nodiscard]] inline bool has_no_process_tree_members(
     const supervised_process_tree& tree) noexcept {
     return std::all_of(
         tree.members.begin(), tree.members.end(),
         [](const supervised_process_tree_member& member) {
-            return !process_identity_matches(member.process);
+            return !is_process_identity_current(member.process);
         });
 }
 
 /// @brief True only after every captured identity and process group is gone.
-[[nodiscard]] inline bool process_tree_absent(
+[[nodiscard]] inline bool is_process_tree_absent(
     const supervised_process_tree& tree) noexcept {
     const bool members_absent =
-        process_tree_members_absent(tree);
+        has_no_process_tree_members(tree);
     const bool groups_absent = std::all_of(
         tree.process_groups.begin(), tree.process_groups.end(),
         [](std::int64_t group) {
-            return supervised_process_group_absent(group);
+            return is_supervised_process_group_absent(group);
         });
     return members_absent && groups_absent;
 }
@@ -886,12 +885,12 @@ freeze_captured_process_tree(
     const auto finish = std::chrono::steady_clock::now()
         + std::max(deadline, std::chrono::milliseconds::zero());
     while (std::chrono::steady_clock::now() < finish) {
-        if (process_tree_members_absent(tree)) {
+        if (has_no_process_tree_members(tree)) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    return process_tree_members_absent(tree);
+    return has_no_process_tree_members(tree);
 }
 
 /// @brief Waits a bounded interval for the captured tree and groups to vanish.
@@ -901,37 +900,37 @@ freeze_captured_process_tree(
     const auto finish = std::chrono::steady_clock::now()
         + std::max(deadline, std::chrono::milliseconds::zero());
     while (std::chrono::steady_clock::now() < finish) {
-        if (process_tree_absent(tree)) {
+        if (is_process_tree_absent(tree)) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    return process_tree_absent(tree);
+    return is_process_tree_absent(tree);
 }
 
-template <typename DescendantKill, typename RootKill>
+template <typename p_descendant_kill, typename p_root_kill>
 [[nodiscard]] inline process_tree_termination_result
 terminate_process_tree_child_first(
     const supervised_process_tree& tree,
-    DescendantKill&& kill_descendant,
-    RootKill&& kill_root) noexcept {
+    p_descendant_kill&& kill_descendant,
+    p_root_kill&& kill_root) noexcept {
     process_tree_termination_progress progress;
     for (auto iterator = tree.members.rbegin();
          iterator != tree.members.rend(); ++iterator) {
-        if (same_process_identity(
+        if (is_same_process_identity(
                 iterator->process, tree.postmaster)) {
             continue;
         }
         const supervised_child_signal_result killed =
             kill_descendant(*iterator);
-        if (killed.delivered()) {
+        if (killed.is_delivered()) {
             progress.record_kill_delivery();
-        } else if (!killed.accepted()) {
+        } else if (!killed.is_accepted()) {
             progress.record_failure();
             return progress.finish(false, false);
         }
     }
-    if (progress.failed()) {
+    if (progress.has_failed()) {
         return progress.finish(true, false);
     }
     const bool root_group_signaled = kill_root();
@@ -947,18 +946,18 @@ terminate_process_tree_child_first(
 [[nodiscard]] inline process_tree_termination_result
 force_kill_process_tree(
     const supervised_process_tree& tree,
-    spawned_process* owned_group_leader = nullptr) noexcept {
+    owned_process* owned_group_leader = nullptr) noexcept {
     process_tree_termination_progress progress;
     if (owned_group_leader == nullptr
         || owned_group_leader->process_group()
             != tree.postmaster.process_group
-        || !process_identity_matches(tree.postmaster)
-        || !supervised_process_stopped(tree.postmaster)) {
+        || !is_process_identity_current(tree.postmaster)
+        || !is_supervised_process_stopped(tree.postmaster)) {
         progress.record_failure();
         return progress.finish(false, false);
     }
     for (const supervised_process_tree_member& member : tree.members) {
-        if (same_process_identity(
+        if (is_same_process_identity(
                 member.process, tree.postmaster)) {
             continue;
         }
@@ -967,12 +966,12 @@ force_kill_process_tree(
             progress.record_failure();
             return progress.finish(false, false);
         }
-        if (supervised_process_definitely_absent(member.process)
-            || supervised_child_is_terminal(
+        if (is_supervised_process_absent(member.process)
+            || is_supervised_child_terminal(
                 parent->process, member.process)) {
             continue;
         }
-        if (!supervised_child_is_pinned(
+        if (!is_supervised_child_pinned(
                 parent->process, member.process)) {
             progress.record_failure();
             return progress.finish(false, false);
@@ -986,9 +985,9 @@ force_kill_process_tree(
             const auto* parent =
                 find_tree_member(tree, member.parent_pid);
             if (parent != nullptr
-                && (supervised_process_definitely_absent(
+                && (is_supervised_process_absent(
                         member.process)
-                    || supervised_child_is_terminal(
+                    || is_supervised_child_terminal(
                         parent->process, member.process))) {
                 return supervised_child_signal_result{
                     .outcome = supervised_child_signal_outcome::
@@ -1014,12 +1013,12 @@ export namespace bioseq::postgres_test {
 /// The caller supplies a real complete topology snapshot; injected outcomes
 /// then traverse the same `(depth, pid)` ordering and shared commit tracker as
 /// the signalling controller.
-[[nodiscard]] inline process_tree_controller_contract_trace
-evaluate_process_tree_controller_contract(
-    std::vector<postmaster_process_tree_member> topology,
+[[nodiscard]] inline process_tree_controller_trace
+simulate_process_tree_controller(
+    std::vector<postgres_process_tree_member> topology,
     std::uint64_t root_pid,
     process_tree_controller_fault fault) {
-    process_tree_controller_contract_trace trace;
+    process_tree_controller_trace trace;
     cluster_detail::normalize_process_tree_snapshot(topology);
     const auto depths =
         cluster_detail::process_tree_depths(topology, root_pid);
@@ -1050,7 +1049,7 @@ evaluate_process_tree_controller_contract(
     }
 
     cluster_detail::supervised_process_tree contract_tree;
-    contract_tree.postmaster = supervised_process_record{
+    contract_tree.postmaster = supervised_process_identity{
         .pid = root_pid,
         .start_token = "controller-contract",
         .executable = "/controller-contract",
@@ -1058,7 +1057,7 @@ evaluate_process_tree_controller_contract(
     for (std::size_t index = 0; index < topology.size(); ++index) {
         contract_tree.members.push_back(
             cluster_detail::supervised_process_tree_member{
-                .process = supervised_process_record{
+                .process = supervised_process_identity{
                     .pid = topology[index].pid,
                     .start_token = "controller-contract",
                     .executable = "/controller-contract",
@@ -1223,8 +1222,8 @@ evaluate_process_tree_controller_contract(
     return configuration;
 }
 
-/// @brief Polls PGDATA until one stable executable-bound postmaster is proven.
-[[nodiscard]] inline std::optional<supervised_process_record>
+/// @brief Polls PGDATA until one stable executable-bound postmaster is verified.
+[[nodiscard]] inline std::optional<supervised_process_identity>
 capture_supervised_postmaster_identity(
     const std::filesystem::path& expected_executable,
     const std::filesystem::path& data_directory,
@@ -1243,14 +1242,14 @@ capture_supervised_postmaster_identity(
             const std::int64_t pid =
                 cluster_detail::read_postmaster_pid(data_directory);
             if (pid > 1) {
-                auto process = capture_supervised_process(
+                auto process = capture_supervised_process_identity(
                     static_cast<std::uint64_t>(pid),
                     expected_executable, data_directory);
                 if (process
                     && cluster_detail::read_postmaster_pid(
                            data_directory)
                         == pid
-                    && supervised_postmaster_matches_data_directory(
+                    && is_supervised_postmaster_bound_to_data_directory(
                         *process)) {
                     return process;
                 }
@@ -1273,7 +1272,7 @@ capture_supervised_postmaster_identity(
 /// @brief RAII owner of a staged, private PostgreSQL cluster.
 class private_cluster {
 public:
-    explicit private_cluster(cluster_options options)
+    explicit private_cluster(private_cluster_options options)
         : options_(cluster_detail::validate_options(std::move(options))),
           root_(cluster_detail::make_private_root()),
           data_directory_(root_ / "data"),
@@ -1281,13 +1280,13 @@ public:
           log_directory_(root_ / "log"),
           port_(cluster_detail::available_port()) {
         try {
-            register_supervised_cluster(supervised_cluster_record{
+            register_supervised_cluster(supervised_cluster_identity{
                 .root = root_,
                 .data_directory = data_directory_,
                 .postmaster_executable =
                     options_.postgres_bin_dir / "postgres"});
         } catch (...) {
-            static_cast<void>(unregister_supervised_cluster(root_));
+            static_cast<void>(remove_supervised_cluster(root_));
             if (!cluster_detail::remove_preprocess_private_root(root_)) {
                 throw std::runtime_error(
                     "supervision registration failed and the marker-owned "
@@ -1304,28 +1303,28 @@ public:
     private_cluster(const private_cluster&) = delete;
     private_cluster& operator=(const private_cluster&) = delete;
 
-    /// @brief Attests the suite stage, initializes PGDATA, and writes settings.
+    /// @brief Validates the suite stage, initializes PGDATA, and writes settings.
     void initialize() {
         if (cleanup_attempted_) {
             throw std::logic_error(
                 "initialize cannot reuse a cleaned private cluster");
         }
-        require_state(cluster_state::constructed, "initialize");
+        require_state(private_cluster_state::constructed, "initialize");
         std::filesystem::create_directories(data_directory_);
         std::filesystem::create_directories(socket_directory_);
         std::filesystem::create_directories(log_directory_);
-        stage_ = attest_preinstalled_extension_stage(
+        stage_ = validate_preinstalled_extension_stage(
             options_.preinstalled_stage_root,
             options_.preinstalled_stage_manifest,
             options_.postgres_bin_dir,
             root_ / "runtime-library",
             options_.extensions,
             options_.allowed_runtime_dso_overrides);
-        if (automatic_report_collection_enabled()) {
-            record_artifact_stage(*stage_);
+        if (is_automatic_observation_collection_enabled()) {
+            record_artifact_observations(*stage_);
         }
         if (options_.pre_initdb) {
-            options_.pre_initdb(pre_initdb_context{
+            options_.pre_initdb(pre_initdb_paths{
                 .root_directory = root_,
                 .data_directory = data_directory_,
                 .socket_directory = socket_directory_,
@@ -1345,12 +1344,12 @@ public:
              "--no-sync"},
             options_.startup_timeout,
             log_directory_ / "initdb.log");
-        if (!init_exit.succeeded()) {
+        if (!init_exit.is_successful()) {
             throw process_error("initdb failed:\n"
                                 + read_file(log_directory_ / "initdb.log"));
         }
         write_configuration();
-        state_ = cluster_state::initialized;
+        state_ = private_cluster_state::initialized;
     }
 
     /// @brief Starts the initialized or previously stopped postmaster.
@@ -1359,8 +1358,8 @@ public:
             throw std::logic_error(
                 "start cannot reuse a cleaned private cluster");
         }
-        if (state_ != cluster_state::initialized
-            && state_ != cluster_state::stopped) {
+        if (state_ != private_cluster_state::initialized
+            && state_ != private_cluster_state::stopped) {
             throw std::logic_error("start requires initialized or stopped state");
         }
         cleanup_error_.clear();
@@ -1379,10 +1378,10 @@ public:
             throw process_error(
                 "refusing startup with a pre-existing postmaster pidfile");
         }
-        state_ = cluster_state::running;
+        state_ = private_cluster_state::running;
         causally_trusted_unanchored_start_ = true;
         try {
-            register_supervised_cluster(supervised_cluster_record{
+            register_supervised_cluster(supervised_cluster_identity{
                 .root = root_,
                 .data_directory = data_directory_,
                 .discover_postmaster_pid = true,
@@ -1392,7 +1391,7 @@ public:
                 program("postgres");
             postmaster_spawn_attempted_ = true;
             postmaster_process_.emplace(
-                spawned_process::spawn(process_options{
+                owned_process::spawn(process_launch_options{
                     .executable = postgres,
                     .arguments = {"-D", data_directory_.string()},
                     .environment = options_.process_environment,
@@ -1410,7 +1409,7 @@ public:
             while (std::chrono::steady_clock::now()
                    < startup_finish) {
                 if (postmaster_process_
-                    ->leader_exited_unreaped()) {
+                    ->has_unreaped_exited_leader()) {
                     throw process_error(
                         "postgres exited before readiness:\n"
                         + postmaster_process_->captured_output());
@@ -1464,7 +1463,7 @@ public:
                     + postmaster_process_->captured_output());
             }
             causally_trusted_unanchored_start_ = false;
-            register_supervised_cluster(supervised_cluster_record{
+            register_supervised_cluster(supervised_cluster_identity{
                 .root = root_,
                 .data_directory = data_directory_,
                 .postmaster_pid = postmaster_identity_->pid,
@@ -1482,9 +1481,9 @@ public:
 
     /// @brief Stops and starts the same PGDATA with a bounded lifecycle.
     void restart() {
-        require_state(cluster_state::running, "restart");
+        require_state(private_cluster_state::running, "restart");
         stop();
-        if (state_ != cluster_state::stopped) {
+        if (state_ != private_cluster_state::stopped) {
             throw process_error("private cluster restart could not stop: "
                                 + cleanup_error_);
         }
@@ -1493,12 +1492,12 @@ public:
 
     /// @brief Simulates an unclean postmaster death for crash-recovery tests.
     void crash_postmaster() {
-        require_state(cluster_state::running, "crash_postmaster");
+        require_state(private_cluster_state::running, "crash_postmaster");
         if (!postmaster_identity_) {
             throw process_error(
                 "started postmaster identity is unavailable for crash");
         }
-        spawned_process* const owned_group_leader =
+        owned_process* const owned_group_leader =
             owned_postmaster_group_leader();
         if (owned_group_leader == nullptr) {
             throw process_error(
@@ -1507,7 +1506,7 @@ public:
         auto frozen =
             cluster_detail::freeze_process_tree(
                 *postmaster_identity_, owned_group_leader);
-        if (!frozen.frozen()) {
+        if (!frozen.is_frozen()) {
             if (frozen.outcome
                     == cluster_detail::process_tree_freeze_outcome::
                         failed_resume_incomplete
@@ -1564,13 +1563,13 @@ public:
 
     /// @brief Stops the owned postmaster; never throws from cleanup paths.
     void stop() noexcept try {
-        if (state_ != cluster_state::running) {
+        if (state_ != private_cluster_state::running) {
             return;
         }
         cleanup_error_.clear();
         if (postmaster_cleanup_tree_) {
             if (postmaster_cleanup_requires_force_) {
-                spawned_process* const owned_group_leader =
+                owned_process* const owned_group_leader =
                     owned_postmaster_group_leader();
                 if (postmaster_cleanup_requires_refreeze_) {
                     if (!postmaster_identity_) {
@@ -1584,7 +1583,7 @@ public:
                         cluster_detail::freeze_process_tree(
                             *postmaster_identity_,
                             owned_group_leader);
-                    if (!refrozen.frozen()) {
+                    if (!refrozen.is_frozen()) {
                         cleanup_error_ =
                             "cannot refreeze partially resumed postmaster "
                             "tree; PGDATA retained at "
@@ -1657,7 +1656,7 @@ public:
             }
             return;
         }
-        spawned_process* const owned_group_leader =
+        owned_process* const owned_group_leader =
             owned_postmaster_group_leader();
         if (!postmaster_identity_
             && causally_trusted_unanchored_start_) {
@@ -1666,7 +1665,7 @@ public:
                     options_.postgres_bin_dir / "postgres",
                     data_directory_, std::chrono::milliseconds{400});
             if (postmaster_identity_) {
-                register_supervised_cluster(supervised_cluster_record{
+                register_supervised_cluster(supervised_cluster_identity{
                     .root = root_,
                     .data_directory = data_directory_,
                     .postmaster_pid = postmaster_identity_->pid,
@@ -1732,7 +1731,7 @@ public:
                  "stop"},
                 options_.stop_timeout + std::chrono::seconds(5),
                 log_directory_ / "pg_ctl_stop.log");
-            if (!exit.succeeded()) {
+            if (!exit.is_successful()) {
                 cleanup_error_ = "pg_ctl stop returned nonzero: "
                     + read_file(log_directory_ / "pg_ctl_stop.log");
             }
@@ -1761,13 +1760,13 @@ public:
         }
 
         cluster_detail::process_tree_freeze_result force_tree;
-        if (cluster_detail::process_identity_matches(
+        if (cluster_detail::is_process_identity_current(
                 *postmaster_identity_)) {
             force_tree = cluster_detail::freeze_process_tree(
                 *postmaster_identity_, owned_group_leader);
         } else {
             force_tree =
-                cluster_detail::freeze_captured_process_tree(
+                cluster_detail::refuse_unanchored_process_tree_freeze(
                     *initial_tree, owned_group_leader);
         }
         if (force_tree.outcome
@@ -1779,7 +1778,7 @@ public:
             postmaster_cleanup_requires_force_ = true;
             postmaster_cleanup_requires_refreeze_ = true;
         }
-        if (force_tree.frozen()) {
+        if (force_tree.is_frozen()) {
             postmaster_cleanup_tree_ =
                 std::move(*force_tree.tree);
             const auto termination =
@@ -1828,7 +1827,7 @@ public:
     }
 
     /// @brief Retries bounded stop/removal until cleanup is verified complete.
-    [[nodiscard]] const cluster_cleanup_result& cleanup() noexcept try {
+    [[nodiscard]] const private_cluster_cleanup_result& cleanup() noexcept try {
         if (cleanup_result_.succeeded) {
             return cleanup_result_;
         }
@@ -1836,13 +1835,13 @@ public:
         cleanup_result_ = {};
         cleanup_error_.clear();
         stop();
-        if (state_ != cluster_state::running) {
+        if (state_ != private_cluster_state::running) {
             remove_owned_root();
         }
         std::error_code error;
         const bool root_exists = std::filesystem::exists(root_, error);
         cleanup_result_.succeeded =
-            state_ != cluster_state::running
+            state_ != private_cluster_state::running
             && !root_exists
             && !error
             && cleanup_error_.empty();
@@ -1851,7 +1850,7 @@ public:
                 "postmaster stopped and private root removed";
         } else if (!cleanup_error_.empty()) {
             cleanup_result_.detail = cleanup_error_;
-        } else if (state_ == cluster_state::running) {
+        } else if (state_ == private_cluster_state::running) {
             cleanup_result_.detail =
                 "postmaster remains live; private root retained";
         } else if (error) {
@@ -1871,10 +1870,10 @@ public:
     }
 
     /// @brief Opens a Unix-socket connection under the caller deadline.
-    [[nodiscard]] bioseq::libpq::connection connect(
+    [[nodiscard]] bioseq::libpq::client_connection connect(
         std::chrono::milliseconds deadline) const {
-        require_state(cluster_state::running, "connect");
-        bioseq::libpq::connection connection(
+        require_state(private_cluster_state::running, "connect");
+        bioseq::libpq::client_connection connection(
             bioseq::libpq::unix_socket_conninfo(
                 socket_directory_.string(), "postgres", "postgres", port_),
             deadline);
@@ -1893,7 +1892,7 @@ public:
     }
 
     /// @brief Returns the current explicit lifecycle state.
-    [[nodiscard]] cluster_state state() const noexcept { return state_; }
+    [[nodiscard]] private_cluster_state state() const noexcept { return state_; }
 
     /// @brief Returns the exact PGDATA owned by this fixture.
     [[nodiscard]] const std::filesystem::path& data_directory() const noexcept {
@@ -1911,7 +1910,7 @@ public:
     }
 
     /// @brief Returns the staged artifact/digest inventory after initialize().
-    [[nodiscard]] const extension_stage& staged_artifacts() const {
+    [[nodiscard]] const extension_stage_layout& staged_artifacts() const {
         if (!stage_) {
             throw std::logic_error("extension artifacts have not been staged");
         }
@@ -1927,7 +1926,7 @@ public:
     [[nodiscard]] int port() const noexcept { return port_; }
 
 private:
-    [[nodiscard]] spawned_process*
+    [[nodiscard]] owned_process*
     owned_postmaster_group_leader() noexcept {
         return postmaster_process_
             ? &*postmaster_process_ : nullptr;
@@ -1988,12 +1987,12 @@ private:
                 "cannot remove the verified-dead postmaster pidfile: "
                 + pidfile_error.message());
         }
-        register_supervised_cluster(supervised_cluster_record{
+        register_supervised_cluster(supervised_cluster_identity{
             .root = root_,
             .data_directory = data_directory_,
             .postmaster_executable =
                 options_.postgres_bin_dir / "postgres"});
-        state_ = cluster_state::stopped;
+        state_ = private_cluster_state::stopped;
         postmaster_identity_.reset();
         postmaster_process_.reset();
         postmaster_cleanup_tree_.reset();
@@ -2006,7 +2005,7 @@ private:
     }
 
     /// @brief Requires one exact lifecycle state.
-    void require_state(cluster_state expected, std::string_view operation) const {
+    void require_state(private_cluster_state expected, std::string_view operation) const {
         if (state_ != expected) {
             throw std::logic_error(std::string(operation)
                                    + " called in invalid cluster state");
@@ -2026,12 +2025,12 @@ private:
     }
 
     /// @brief Runs one lifecycle executable in an owned process group.
-    [[nodiscard]] process_exit run_program(
+    [[nodiscard]] process_exit_status run_program(
         std::string_view name,
         std::vector<std::string> arguments,
         std::chrono::milliseconds deadline,
         const std::filesystem::path& output) const {
-        spawned_process child = spawned_process::spawn(process_options{
+        owned_process child = owned_process::spawn(process_launch_options{
             .executable = program(name),
             .arguments = std::move(arguments),
             .environment = options_.process_environment,
@@ -2075,17 +2074,17 @@ private:
 
     /// @brief Executes one typed backend signal and requires a true result.
     void run_backend_signal(std::string_view function, std::int32_t pid) {
-        require_state(cluster_state::running, function);
+        require_state(private_cluster_state::running, function);
         if (pid <= 0) {
             throw std::invalid_argument("backend pid must be positive");
         }
-        bioseq::libpq::connection admin = connect(std::chrono::seconds(5));
+        bioseq::libpq::client_connection admin = connect(std::chrono::seconds(5));
         const std::string sql = "SELECT " + std::string(function) + "("
             + std::to_string(pid) + ")";
-        const bioseq::libpq::result result =
-            admin.exec(sql, std::chrono::seconds(5));
-        if (result.rows() != 1 || result.columns() != 1
-            || result.is_null(0, 0) || result.value(0, 0) != "t") {
+        const bioseq::libpq::command_result result =
+            admin.execute(sql, std::chrono::seconds(5));
+        if (result.row_count() != 1 || result.column_count() != 1
+            || result.cell_is_null(0, 0) || result.text_value(0, 0) != "t") {
             throw process_error(std::string(function)
                                 + " did not signal backend "
                                 + std::to_string(pid));
@@ -2102,7 +2101,7 @@ private:
         }
     }
 
-    /// @brief Removes only a marker-proven root allocated by this instance.
+    /// @brief Removes only a marker-verified root allocated by this instance.
     void remove_owned_root() noexcept {
         try {
             if (root_.empty()
@@ -2120,7 +2119,7 @@ private:
             if (actual_parent != expected_parent) {
                 return;
             }
-            if (!unregister_supervised_cluster(root_)) {
+            if (!remove_supervised_cluster(root_)) {
                 set_cleanup_error_noexcept(
                     "failed removing private cluster from supervision; "
                     "private root retained for retry");
@@ -2140,15 +2139,15 @@ private:
         }
     }
 
-    cluster_options options_;
-    cluster_state state_{cluster_state::constructed};
+    private_cluster_options options_;
+    private_cluster_state state_{private_cluster_state::constructed};
     std::filesystem::path root_;
     std::filesystem::path data_directory_;
     std::filesystem::path socket_directory_;
     std::filesystem::path log_directory_;
-    std::optional<extension_stage> stage_;
-    std::optional<supervised_process_record> postmaster_identity_;
-    std::optional<spawned_process> postmaster_process_;
+    std::optional<extension_stage_layout> stage_;
+    std::optional<supervised_process_identity> postmaster_identity_;
+    std::optional<owned_process> postmaster_process_;
     std::optional<cluster_detail::supervised_process_tree>
         postmaster_cleanup_tree_;
     int port_{};
@@ -2159,7 +2158,7 @@ private:
     bool postmaster_spawn_attempted_{};
     bool postmaster_cleanup_requires_force_{};
     bool postmaster_cleanup_requires_refreeze_{};
-    cluster_cleanup_result cleanup_result_;
+    private_cluster_cleanup_result cleanup_result_;
 };
 
 }  // namespace bioseq::postgres_test

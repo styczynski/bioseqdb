@@ -14,17 +14,19 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 namespace {
 
-constexpr int NBASE = 10000;
-constexpr int HALF_NBASE = 5000;
-constexpr int DEC_DIGITS = 4;          /* decimal digits per NBASE digit */
-constexpr int MUL_GUARD_DIGITS = 2;    /* measured in NBASE digits */
-constexpr int DIV_GUARD_DIGITS = 4;
+constexpr int numeric_digit_base = 10'000;
+constexpr int decimal_digits_per_numeric_digit = 4;
 
-using NumericDigit = int16_t;
+using numeric_digit = std::int16_t;
 
 }
 
@@ -33,258 +35,304 @@ using NumericDigit = int16_t;
  * the digit array extends from n_data. Used when weight/dscale fit inside
  * 7 and 6 bits respectively (the common case).
  */
-struct NumericShort
+struct numeric_short
 {
-	uint16_t n_header;                         /* Sign + display scale + weight */
-	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
+	std::uint16_t n_header;                    /* Sign + display scale + weight */
+	numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
 };
 
 /*
  * Long form of an on-disk Numeric: header carries sign+dscale; weight is
  * stored in a second 16-bit field before the digit array.
  */
-struct NumericLong
+struct numeric_long
 {
-	uint16_t n_sign_dscale;                    /* Sign + display scale */
-	int16_t n_weight;                          /* Weight of 1st digit  */
-	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
+	std::uint16_t n_sign_dscale;               /* Sign + display scale */
+	std::int16_t n_weight;                     /* Weight of 1st digit  */
+	numeric_digit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
 };
 
 /*
  * Union covering both short and long on-disk forms plus a raw header view.
  */
-union NumericChoice
+union numeric_choice
 {
-	uint16_t n_header;                /* Header word */
-	struct NumericLong n_long;        /* Long form (4-byte header) */
-	struct NumericShort n_short;      /* Short form (2-byte header) */
+	std::uint16_t n_header;           /* Header word */
+	struct numeric_long n_long;       /* Long form (4-byte header) */
+	struct numeric_short n_short;     /* Short form (2-byte header) */
 };
 
 /*
- * On-disk Numeric: varlena header followed by a NumericChoice. PostgreSQL
- * forward-declares this struct in utils/numeric.h; we fill in the body
- * here to match the internal layout used by the server.
+ * On-disk Numeric: varlena header followed by the representation union.
+ * PostgreSQL forward-declares this struct in utils/numeric.h; this definition
+ * matches the server representation consumed by the adapter.
  */
 struct NumericData
 {
-	int32_t vl_len_;                  /* varlena header (do not touch directly!) */
-	union NumericChoice choice;       /* choice of format */
+	std::int32_t vl_len_;             /* varlena header (do not touch directly!) */
+	union numeric_choice choice;      /* choice of format */
 };
+
+static_assert(PG_VERSION_NUM >= 170000);
+static_assert(std::is_standard_layout_v<numeric_short>);
+static_assert(std::is_standard_layout_v<numeric_long>);
+static_assert(std::is_standard_layout_v<NumericData>);
+static_assert(offsetof(numeric_short, n_data) == sizeof(std::uint16_t));
+static_assert(
+	offsetof(numeric_long, n_data)
+	== sizeof(std::uint16_t) + sizeof(std::int16_t));
+static_assert(offsetof(NumericData, choice) == VARHDRSZ);
 
 namespace {
 
-constexpr uint16_t NUMERIC_SIGN_MASK = 0xC000;
-constexpr uint16_t NUMERIC_POS = 0x0000;
-constexpr uint16_t NUMERIC_NEG = 0x4000;
-constexpr uint16_t NUMERIC_SHORT = 0x8000;
-constexpr uint16_t NUMERIC_SPECIAL = 0xC000;
+constexpr std::uint16_t numeric_sign_mask = 0xC000;
+constexpr std::uint16_t numeric_positive = 0x0000;
+constexpr std::uint16_t numeric_negative = 0x4000;
+constexpr std::uint16_t numeric_short_marker = 0x8000;
+constexpr std::uint16_t numeric_special = 0xC000;
 
-constexpr int NUMERIC_HDRSZ = VARHDRSZ + sizeof(uint16_t) + sizeof(int16_t);
-constexpr int NUMERIC_HDRSZ_SHORT = VARHDRSZ + sizeof(uint16_t);
+constexpr int numeric_header_size_long =
+	VARHDRSZ + sizeof(std::uint16_t) + sizeof(std::int16_t);
+constexpr int numeric_header_size_short = VARHDRSZ + sizeof(std::uint16_t);
 
-constexpr uint16_t NUMERIC_EXT_SIGN_MASK = 0xF000;
-constexpr uint16_t NUMERIC_NAN = 0xC000;
-constexpr uint16_t NUMERIC_PINF = 0xD000;
-constexpr uint16_t NUMERIC_NINF = 0xF000;
-constexpr uint16_t NUMERIC_INF_SIGN_MASK = 0x2000;
+constexpr std::uint16_t numeric_nan = 0xC000;
+constexpr std::uint16_t numeric_positive_infinity = 0xD000;
+constexpr std::uint16_t numeric_negative_infinity = 0xF000;
 
-constexpr uint16_t NUMERIC_SHORT_SIGN_MASK = 0x2000;
-constexpr uint16_t NUMERIC_SHORT_DSCALE_MASK = 0x1F80;
-constexpr int NUMERIC_SHORT_DSCALE_SHIFT = 7;
-constexpr uint16_t NUMERIC_SHORT_DSCALE_MAX = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
-constexpr uint16_t NUMERIC_SHORT_WEIGHT_SIGN_MASK = 0x0040;
-constexpr uint16_t NUMERIC_SHORT_WEIGHT_MASK = 0x003F;
-constexpr int NUMERIC_SHORT_WEIGHT_MAX = NUMERIC_SHORT_WEIGHT_MASK;
-constexpr int NUMERIC_SHORT_WEIGHT_MIN = -(NUMERIC_SHORT_WEIGHT_MASK + 1);
+constexpr std::uint16_t numeric_short_sign_mask = 0x2000;
+constexpr std::uint16_t numeric_short_scale_mask = 0x1F80;
+constexpr int numeric_short_scale_shift = 7;
+constexpr std::uint16_t numeric_short_scale_maximum =
+	numeric_short_scale_mask >> numeric_short_scale_shift;
+constexpr std::uint16_t numeric_short_weight_sign_mask = 0x0040;
+constexpr std::uint16_t numeric_short_weight_mask = 0x003F;
+constexpr int numeric_short_weight_maximum = numeric_short_weight_mask;
+constexpr int numeric_short_weight_minimum = -(numeric_short_weight_mask + 1);
 
-constexpr uint16_t NUMERIC_DSCALE_MASK = 0x3FFF;
-constexpr uint16_t NUMERIC_DSCALE_MAX = NUMERIC_DSCALE_MASK;
+constexpr std::uint16_t numeric_scale_mask = 0x3FFF;
 
 /*
- * NumericVar is the in-memory working format for arithmetic. The digit
- * buffer (buf) is owned by the variable; digits points inside it so there's
+ * In-memory working format for arithmetic. The digit buffer is owned by the
+ * variable; digits points inside it so there is
  * room for carry-out at the top.
  */
-struct NumericVar
+struct numeric_variable
 {
-	int ndigits;
+	int digit_count;
 	int weight;
 	int sign;
-	int dscale;
-	NumericDigit* buf;
-	NumericDigit* digits;
+	int display_scale;
+	numeric_digit* buffer;
+	numeric_digit* digits;
 };
 
 }
 
-export module bioseq.vector.types.numeric;
+export module bioseq.postgres.vectorization.types.numeric;
 
-import bioseq.common.mlogging;
-import bioseq.pg_utils;
+import bioseq.common.logging;
+import bioseq.postgres.support;
 
 namespace {
 
 /*
- * Numeric field accessors, ported from PostgreSQL core's NUMERIC_* macros.
- * Each operates on a (possibly const) NumericData* and is always-inlined so
- * the generated code matches the original macros bit-for-bit. numeric_ndigits
- * is plain inline (not constexpr) because it reads the runtime varlena header
- * via VARSIZE.
+ * Numeric field accessors mirror the server representation consumed by this
+ * PostgreSQL-major-specific adapter. numeric_digit_count is non-constexpr
+ * because it reads the runtime varlena header through VARSIZE.
  */
-[[gnu::always_inline]] constexpr bool numeric_header_is_short(const NumericData* n) noexcept
+[[gnu::always_inline]] constexpr bool
+numeric_header_is_short(const NumericData* numeric) noexcept
 {
-	return (n->choice.n_header & 0x8000u) != 0;
+	return (numeric->choice.n_header & numeric_short_marker) != 0;
 }
 
-[[gnu::always_inline]] constexpr int numeric_header_size(const NumericData* n) noexcept
+[[gnu::always_inline]] constexpr int
+numeric_header_size(const NumericData* numeric) noexcept
 {
-	return VARHDRSZ + (int) sizeof(uint16_t) +
-		(numeric_header_is_short(n) ? 0 : (int) sizeof(int16_t));
+	return VARHDRSZ + static_cast<int>(sizeof(std::uint16_t))
+		+ (numeric_header_is_short(numeric)
+			? 0 : static_cast<int>(sizeof(std::int16_t)));
 }
 
-[[gnu::always_inline]] constexpr int numeric_dscale(const NumericData* n) noexcept
+[[gnu::always_inline]] constexpr int
+numeric_display_scale(const NumericData* numeric) noexcept
 {
-	return numeric_header_is_short(n)
-		? ((n->choice.n_short.n_header & NUMERIC_SHORT_DSCALE_MASK)
-			>> NUMERIC_SHORT_DSCALE_SHIFT)
-		: (n->choice.n_long.n_sign_dscale & NUMERIC_DSCALE_MASK);
+	return numeric_header_is_short(numeric)
+		? ((numeric->choice.n_short.n_header & numeric_short_scale_mask)
+			>> numeric_short_scale_shift)
+		: (numeric->choice.n_long.n_sign_dscale & numeric_scale_mask);
 }
 
-[[gnu::always_inline]] constexpr int numeric_weight(const NumericData* n) noexcept
+[[gnu::always_inline]] constexpr int
+numeric_weight(const NumericData* numeric) noexcept
 {
-	if (numeric_header_is_short(n))
+	if (numeric_header_is_short(numeric))
 	{
-		uint16_t h = n->choice.n_short.n_header;
-		return ((h & NUMERIC_SHORT_WEIGHT_SIGN_MASK) ? ~int(NUMERIC_SHORT_WEIGHT_MASK) : 0)
-			| (h & NUMERIC_SHORT_WEIGHT_MASK);
+		const std::uint16_t header = numeric->choice.n_short.n_header;
+		return ((header & numeric_short_weight_sign_mask)
+			? ~int(numeric_short_weight_mask) : 0)
+			| (header & numeric_short_weight_mask);
 	}
-	return n->choice.n_long.n_weight;
+	return numeric->choice.n_long.n_weight;
 }
 
-[[gnu::always_inline]] constexpr const NumericDigit* numeric_digits(const NumericData* n) noexcept
+[[gnu::always_inline]] constexpr const numeric_digit*
+numeric_digits(const NumericData* numeric) noexcept
 {
-	return numeric_header_is_short(n)
-		? n->choice.n_short.n_data : n->choice.n_long.n_data;
+	return numeric_header_is_short(numeric)
+		? numeric->choice.n_short.n_data : numeric->choice.n_long.n_data;
 }
 
-[[gnu::always_inline]] constexpr NumericDigit* numeric_digits(NumericData* n) noexcept
+[[gnu::always_inline]] constexpr numeric_digit*
+numeric_digits(NumericData* numeric) noexcept
 {
-	return numeric_header_is_short(n)
-		? n->choice.n_short.n_data : n->choice.n_long.n_data;
+	return numeric_header_is_short(numeric)
+		? numeric->choice.n_short.n_data : numeric->choice.n_long.n_data;
 }
 
-[[gnu::always_inline]] inline int numeric_ndigits(const NumericData* n) noexcept
+[[gnu::always_inline]] inline int
+numeric_digit_count(const NumericData* numeric) noexcept
 {
-	return int((VARSIZE(n) - numeric_header_size(n)) / sizeof(NumericDigit));
+	return static_cast<int>(
+		(VARSIZE(numeric) - numeric_header_size(numeric))
+		/ sizeof(numeric_digit));
 }
 
 [[gnu::always_inline]] constexpr bool numeric_can_be_short(int scale, int weight) noexcept
 {
-	return scale <= NUMERIC_SHORT_DSCALE_MAX
-		&& weight <= NUMERIC_SHORT_WEIGHT_MAX
-		&& weight >= NUMERIC_SHORT_WEIGHT_MIN;
+	return scale <= numeric_short_scale_maximum
+		&& weight <= numeric_short_weight_maximum
+		&& weight >= numeric_short_weight_minimum;
 }
 
 /*
- * alloc_var allocates a fresh digit buffer with one spare entry so carry-out
+ * Allocates a fresh digit buffer with one spare entry so carry-out
  * can be stored without reallocation. Any prior buffer is freed.
  */
 void
-alloc_var(NumericVar* var, int digit_count)
+allocate_numeric_digits(numeric_variable* variable, int digit_count)
 {
-	if (var->buf != nullptr)
-		pfree(var->buf);
-	var->buf = make_array<NumericDigit>(digit_count + 1);
-	var->buf[0] = 0;
-	var->digits = var->buf + 1;
-	var->ndigits = digit_count;
+	if (variable->buffer != nullptr)
+		pfree(variable->buffer);
+	variable->buffer =
+		bioseq::postgres::support::allocate_zeroed_array<numeric_digit>(
+			digit_count + 1);
+	variable->digits = variable->buffer + 1;
+	variable->digit_count = digit_count;
 }
 
 /*
- * free_var releases the digit buffer and leaves the var in a NaN-shaped
+ * Releases the digit buffer and leaves the variable in a NaN-shaped
  * unusable state.
  */
 void
-free_var(NumericVar* var)
+release_numeric_digits(numeric_variable* variable)
 {
-	if (var->buf != nullptr)
-		pfree(var->buf);
-	var->buf = nullptr;
-	var->digits = nullptr;
-	var->sign = NUMERIC_NAN;
+	if (variable->buffer != nullptr)
+		pfree(variable->buffer);
+	variable->buffer = nullptr;
+	variable->digits = nullptr;
+	variable->sign = numeric_nan;
 }
 
+class numeric_variable_owner final
+{
+public:
+	numeric_variable_owner() noexcept = default;
+
+	~numeric_variable_owner() noexcept
+	{
+		release_numeric_digits(&value);
+	}
+
+	numeric_variable_owner(const numeric_variable_owner&) = delete;
+	numeric_variable_owner& operator=(const numeric_variable_owner&) = delete;
+
+	[[nodiscard]] numeric_variable& get() noexcept
+	{
+		return value;
+	}
+
+private:
+	numeric_variable value{};
+};
+
 /*
- * int128_to_numericvar fills out a NumericVar from a signed 128-bit
- * integer. Zero is special-cased so make_numeric emits the canonical
+ * Fills a numeric working variable from a signed 128-bit
+ * integer. Zero is special-cased so packing emits the canonical
  * "zero with weight 0 positive" form.
  */
 void
-int128_to_numericvar(int128 value, NumericVar* var)
+assign_int128_to_numeric_variable(int128 value, numeric_variable* variable)
 {
-	alloc_var(var, 40 / DEC_DIGITS);
+	allocate_numeric_digits(
+		variable, 40 / decimal_digits_per_numeric_digit);
 	uint128 unsigned_value;
 	if (value < 0)
 	{
-		var->sign = NUMERIC_NEG;
-		unsigned_value = -value;
+		variable->sign = numeric_negative;
+		unsigned_value = static_cast<uint128>(-(value + 1));
+		++unsigned_value;
 	}
 	else
 	{
-		var->sign = NUMERIC_POS;
+		variable->sign = numeric_positive;
 		unsigned_value = value;
 	}
-	var->dscale = 0;
+	variable->display_scale = 0;
 	if (value == 0)
 	{
-		var->ndigits = 0;
-		var->weight = 0;
+		variable->digit_count = 0;
+		variable->weight = 0;
 		return;
 	}
-	NumericDigit* digit_ptr = var->digits + var->ndigits;
+	numeric_digit* digit_ptr = variable->digits + variable->digit_count;
 	int digit_count = 0;
 	do
 	{
 		digit_ptr--;
 		digit_count++;
-		uint128 next_value = unsigned_value / NBASE;
-		*digit_ptr = unsigned_value - next_value * NBASE;
+		const uint128 next_value = unsigned_value / numeric_digit_base;
+		*digit_ptr = static_cast<numeric_digit>(
+			unsigned_value - next_value * numeric_digit_base);
 		unsigned_value = next_value;
 	} while (unsigned_value);
-	var->digits = digit_ptr;
-	var->ndigits = digit_count;
-	var->weight = digit_count - 1;
+	variable->digits = digit_ptr;
+	variable->digit_count = digit_count;
+	variable->weight = digit_count - 1;
 }
 
 /*
- * make_numeric packs a NumericVar into the on-disk Numeric format. NaN /
+ * Packs a numeric working variable into the on-disk Numeric format. NaN /
  * Infinity emit the minimal short header; finite values prefer short form
- * when dscale and weight fit.
+ * when display scale and weight fit.
  */
 Numeric
-make_numeric(const NumericVar* var)
+pack_numeric(const numeric_variable* variable)
 {
 	Numeric result;
-	NumericDigit* digits = var->digits;
-	int weight = var->weight;
-	int sign = var->sign;
+	numeric_digit* digits = variable->digits;
+	int weight = variable->weight;
+	int sign = variable->sign;
 	int trimmed_digit_count;
 	Size total_length;
 
-	if ((sign & NUMERIC_SIGN_MASK) == NUMERIC_SPECIAL)
+	if ((sign & numeric_sign_mask) == numeric_special)
 	{
-		if (!(sign == NUMERIC_NAN ||
-			  sign == NUMERIC_PINF ||
-			  sign == NUMERIC_NINF))
-			bioseq_log<ERR, PG>( "invalid numeric sign value 0x{:x}", sign);
+		if (!(sign == numeric_nan ||
+			  sign == numeric_positive_infinity ||
+			  sign == numeric_negative_infinity))
+			bioseq_log<logging_level::error, logging_target::postgres>(
+				"invalid numeric sign value 0x{:x}", sign);
 
-		result = make1<NumericData>(NUMERIC_HDRSZ_SHORT);
-		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
+		result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(
+			numeric_header_size_short);
+		SET_VARSIZE(result, numeric_header_size_short);
 		result->choice.n_header = sign;
 		return result;
 	}
 
-	trimmed_digit_count = var->ndigits;
+	trimmed_digit_count = variable->digit_count;
 
 	while (trimmed_digit_count > 0 && *digits == 0)
 	{
@@ -298,39 +346,48 @@ make_numeric(const NumericVar* var)
 	if (trimmed_digit_count == 0)
 	{
 		weight = 0;
-		sign = NUMERIC_POS;
+		sign = numeric_positive;
 	}
 
-	if (numeric_can_be_short(var->dscale, weight))
+	if (numeric_can_be_short(variable->display_scale, weight))
 	{
-		total_length = NUMERIC_HDRSZ_SHORT + trimmed_digit_count * sizeof(NumericDigit);
-		result = make1<NumericData>(total_length);
+		total_length = numeric_header_size_short
+			+ trimmed_digit_count * sizeof(numeric_digit);
+		result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(
+			total_length);
 		SET_VARSIZE(result, total_length);
 		result->choice.n_short.n_header =
-			(sign == NUMERIC_NEG ? (NUMERIC_SHORT | NUMERIC_SHORT_SIGN_MASK)
-			 : NUMERIC_SHORT)
-			| (var->dscale << NUMERIC_SHORT_DSCALE_SHIFT)
-			| (weight < 0 ? NUMERIC_SHORT_WEIGHT_SIGN_MASK : 0)
-			| (weight & NUMERIC_SHORT_WEIGHT_MASK);
+			(sign == numeric_negative
+				? (numeric_short_marker | numeric_short_sign_mask)
+				: numeric_short_marker)
+			| (variable->display_scale << numeric_short_scale_shift)
+			| (weight < 0 ? numeric_short_weight_sign_mask : 0)
+			| (weight & numeric_short_weight_mask);
 	}
 	else
 	{
-		total_length = NUMERIC_HDRSZ + trimmed_digit_count * sizeof(NumericDigit);
-		result = make1<NumericData>(total_length);
+		total_length = numeric_header_size_long
+			+ trimmed_digit_count * sizeof(numeric_digit);
+		result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(
+			total_length);
 		SET_VARSIZE(result, total_length);
 		result->choice.n_long.n_sign_dscale =
-			sign | (var->dscale & NUMERIC_DSCALE_MASK);
+			sign | (variable->display_scale & numeric_scale_mask);
 		result->choice.n_long.n_weight = weight;
 	}
 
-	Assert(numeric_ndigits(result) == trimmed_digit_count);
+	Assert(numeric_digit_count(result) == trimmed_digit_count);
 	if (trimmed_digit_count > 0)
-		memcpy(numeric_digits(result), digits, trimmed_digit_count * sizeof(NumericDigit));
+		std::memcpy(
+			numeric_digits(result), digits,
+			trimmed_digit_count * sizeof(numeric_digit));
 
 	if (numeric_weight(result) != weight ||
-		numeric_dscale(result) != var->dscale)
+		numeric_display_scale(result) != variable->display_scale)
 	{
-		bioseq_report<ERR, PG>().code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE).msg("value overflows numeric format");
+		bioseq_report<logging_level::error, logging_target::postgres>()
+			.with_sql_error_code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+			.with_message("value overflows numeric format");
 	}
 
 	return result;
@@ -340,21 +397,13 @@ make_numeric(const NumericVar* var)
 
 /*
  * int128_to_numeric is the public entry point exposed to the vectorised
- * aggregate path. Delegates to int128_to_numericvar + make_numeric and
- * cleans up the working NumericVar on exit. Exported from the module (the old
- * cross-module forward-decl wrapper is dropped — module-attached export already
- * gives external linkage).
+ * aggregate path. It owns and releases its temporary digit buffer.
  */
 export Numeric int128_to_numeric(int128 value)
 {
-	NumericVar working_var;
-	memset(&working_var, 0, sizeof(NumericVar));
+	numeric_variable_owner working_variable;
 
-	int128_to_numericvar(value, &working_var);
+	assign_int128_to_numeric_variable(value, &working_variable.get());
 
-	Numeric packed_result = make_numeric(&working_var);
-
-	free_var(&working_var);
-
-	return packed_result;
+	return pack_numeric(&working_variable.get());
 }

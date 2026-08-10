@@ -1,11 +1,14 @@
-/** Canonical generator input for the exact lexic minimizer hasher. */
+/**
+ * @file highway_lexic_kernel.cppm
+ * @brief Fixed-target Highway lexicographic minimizer hasher.
+ */
 module;
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_lexic;
 
 import std;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.lexic;
@@ -16,103 +19,132 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-template<sequence_alphabet alphabet_t>
-struct lexic_hasher : ::bioseq::simd::lexic_hasher<alphabet_t> {
+template<sequence_alphabet p_alphabet>
+struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
 public:
-	template<typename input_t, typename d_t>
-	class simd_hash : public simd_hasher_base<
-        simd_hash<input_t, d_t>,
-        alphabet_t,
-        input_t,
-		d_t
-    >{
-	public:
-        using traits = simd_hash<input_t, d_t>::simd_hasher_base::traits;
-	private:
-		traits::input_vec_t mask;
-		traits::input_vec_t state_forward;
-		traits::input_vec_t state_reverse_compl;
-		size_t rev_shift;
+    /** Stateful SIMD canonical-kmer hash. */
+    template<typename p_input_type, typename p_simd_tag>
+    class simd_hash
+        : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
+    public:
+        using base_type =
+            simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
+        using traits = typename base_type::traits;
+
+    private:
+        typename traits::input_vector_type mask_;
+        typename traits::input_vector_type forward_state_;
+        typename traits::input_vector_type reverse_complement_state_;
+        std::size_t reverse_shift_;
 
 		// Compile-time complement table: index = rank, value = complement(rank).
 		// We cannot use `Xor(rank, char_mask)` in general — that works for dna4
 		// because its complement pairs are {0,3} and {1,2} (xor 3 swaps them),
 		// but for dna5 the pairs are {0 A ↔ 4 T}, {1 C ↔ 2 G}, {3 N self} and no
 		// single XOR mask covers all three cases. A static lookup table does.
-		static constexpr auto build_compl_lut() {
-			std::array<input_t, traits::alphabet_size> lut{};
-			for (size_t r = 0; r < traits::alphabet_size; ++r) {
-				lut[r] = static_cast<input_t>(traits::letter_complement(
-					static_cast<typename traits::storage_unit>(r)));
-			}
-			return lut;
-		}
-		static constexpr std::array<input_t, traits::alphabet_size> compl_lut = build_compl_lut();
+        static constexpr auto make_complement_lut() {
+            std::array<p_input_type, traits::alphabet_size> lut{};
+            for (std::size_t rank = 0; rank < traits::alphabet_size; ++rank) {
+                lut[rank] = static_cast<p_input_type>(traits::letter_complement(
+                    static_cast<typename traits::storage_unit>(rank)));
+            }
+            return lut;
+        }
+
+        static constexpr std::array<p_input_type, traits::alphabet_size>
+            k_complement_lut = make_complement_lut();
 
 		// Detect XOR-complement alphabets at compile time. dna4 is the
 		// production case: complement pairs are {0,3} and {1,2}, both of
 		// which are flipped by XOR with the value `alphabet_size - 1 = 3`.
 		// One vector XOR is dramatically cheaper than the (alphabet_size-1)
 		// chained IfThenElse cascade the LUT path falls back to — for dna4
-		// this is one of the dominant per-iteration costs of mm_sketch_simd.
+		// this is one of the dominant per-iteration costs of the SIMD sketch.
 		// dna5 fails this predicate ({0,4} flips ok, {1,2} flips ok, {3,3}
 		// — N — must stay at 3 but `3 ^ 4 = 7`) so the LUT remains the
 		// fallback for non-power-of-2 alphabets.
-		// See REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md
-		// for measurement notes.
-		static constexpr bool is_xor_complement = []() constexpr {
-			using sw = typename traits::storage_unit;
-			constexpr sw xor_mask = static_cast<sw>(traits::alphabet_size - 1);
-			for (size_t r = 0; r < traits::alphabet_size; ++r) {
-				const sw expected = static_cast<sw>(r) ^ xor_mask;
-				const sw actual = static_cast<sw>(traits::letter_complement(static_cast<sw>(r)));
-				if (expected != actual) return false;
-			}
-			return true;
-		}();
+		static constexpr bool k_is_xor_complement = []() constexpr {
+            using storage_unit = typename traits::storage_unit;
+            constexpr storage_unit k_xor_mask =
+                static_cast<storage_unit>(traits::alphabet_size - 1);
+            for (std::size_t rank = 0; rank < traits::alphabet_size; ++rank) {
+                const storage_unit expected =
+                    static_cast<storage_unit>(rank) ^ k_xor_mask;
+                const storage_unit actual = static_cast<storage_unit>(
+                    traits::letter_complement(
+                        static_cast<storage_unit>(rank)));
+                if (expected != actual) return false;
+            }
+            return true;
+        }();
 
 		// Compute `complement(outgoing)` per lane. For dna4 a single Xor with
 		// (alphabet_size - 1) suffices; for non-XOR alphabets we fall back to
 		// the IfThenElse cascade over the compile-time LUT. The branch is
 		// `if constexpr` so each instantiation gets exactly one code path.
-		[[always_inline]] static constexpr typename traits::input_vec_t
-		apply_complement(const typename traits::input_d_t& d, typename traits::input_vec_t rank) {
-			if constexpr (is_xor_complement) {
-				return hn::Xor(rank, hn::Set(d,
-					static_cast<input_t>(traits::alphabet_size - 1)));
-			} else {
-				typename traits::input_vec_t result = hn::Set(d, compl_lut[traits::alphabet_size - 1]);
-				for (int r = static_cast<int>(traits::alphabet_size) - 2; r >= 0; --r) {
-					result = hn::IfThenElse(
-						hn::Eq(rank, hn::Set(d, static_cast<input_t>(r))),
-						hn::Set(d, compl_lut[r]),
-						result
-					);
-				}
-				return result;
-			}
-		}
+        [[always_inline]] static constexpr typename traits::input_vector_type
+        apply_complement(
+            const typename traits::input_simd_tag_type& simd_tag,
+            typename traits::input_vector_type rank) {
+            if constexpr (k_is_xor_complement) {
+                return hn::Xor(
+                    rank,
+                    hn::Set(
+                        simd_tag,
+                        static_cast<p_input_type>(traits::alphabet_size - 1)));
+            } else {
+                typename traits::input_vector_type result = hn::Set(
+                    simd_tag, k_complement_lut[traits::alphabet_size - 1]);
+                for (int table_rank =
+                         static_cast<int>(traits::alphabet_size) - 2;
+                     table_rank >= 0;
+                     --table_rank) {
+                    result = hn::IfThenElse(
+                        hn::Eq(
+                            rank,
+                            hn::Set(
+                                simd_tag,
+                                static_cast<p_input_type>(table_rank))),
+                        hn::Set(simd_tag, k_complement_lut[table_rank]),
+                        result);
+                }
+                return result;
+            }
+        }
 
-	public:
-		explicit simd_hash(
-			const traits::input_d_t& d,
-			const size_t& kmer_length
-		):
-		  mask(hn::Set(d, traits::template kmer_mask<input_t>(
-			std::min(kmer_length, traits::max_kmer_length)))),
-		  state_forward(hn::Zero(d)),
-		  state_reverse_compl(hn::Zero(d)),
-		  rev_shift(traits::bits_per_char
-			* (std::min(kmer_length, traits::max_kmer_length) - 1)) {
-			(void)d;
-		}
+    public:
+        /** Initialize every rolling lane for the requested k-mer length. */
+        explicit simd_hash(
+            const typename traits::input_simd_tag_type& simd_tag,
+            std::size_t kmer_length)
+            : mask_(hn::Set(
+                  simd_tag,
+                  traits::template kmer_mask<p_input_type>(
+                      std::min(kmer_length, traits::k_max_kmer_length)))),
+              forward_state_(hn::Zero(simd_tag)),
+              reverse_complement_state_(hn::Zero(simd_tag)),
+              reverse_shift_(traits::bits_per_char
+                  * (std::min(kmer_length, traits::k_max_kmer_length) - 1u)) {}
 
-		HWY_INLINE traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
-			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
-			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(apply_complement(d, outgoing), rev_shift);
-			state_reverse_compl = hn::Or(hn::ShiftRight<traits::bits_per_char>(state_reverse_compl), new_vec);
-			return hn::Min(state_forward, state_reverse_compl);
-		}
+        /** Consume one vector of incoming and outgoing alphabet codes. */
+        HWY_INLINE typename traits::hasher_return_type next(
+            const typename traits::input_simd_tag_type& simd_tag,
+            typename traits::input_vector_type incoming,
+            typename traits::input_vector_type outgoing) {
+            forward_state_ = hn::And(
+                hn::Or(
+                    hn::ShiftLeft<traits::bits_per_char>(forward_state_),
+                    incoming),
+                mask_);
+            const typename traits::input_vector_type complement =
+                hn::ShiftLeftSame(
+                    apply_complement(simd_tag, outgoing), reverse_shift_);
+            reverse_complement_state_ = hn::Or(
+                hn::ShiftRight<traits::bits_per_char>(
+                    reverse_complement_state_),
+                complement);
+            return hn::Min(forward_state_, reverse_complement_state_);
+        }
 
 		// Returns per-lane mask where `true` means the current k-mer is palindromic
 		// (state_forward == state_reverse_compl). Minimap2 / scalar skips palindromes
@@ -120,27 +152,22 @@ public:
 		// palindromic lanes' hash with max_val so they never become window minima —
 		// matching the scalar's post-palindrome-push-max behaviour without requiring
 		// per-lane pos tracking.
-		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_palindrome_mask(const d_t& d) const {
-			return hn::Eq(state_forward, state_reverse_compl);
-		}
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> palindrome_mask(
+            const p_simd_tag&) const {
+            return hn::Eq(forward_state_, reverse_complement_state_);
+        }
 
 		// Returns per-lane mask where `true` means the reverse-complement state is the
-		// minimum (so `min(forward, rc)` chose the rc — strand=1 / SEQUENCE_STRAND_REVERSE_COMPLEMENT)
-		// and `false` means the forward state was the minimum (strand=0 / SEQUENCE_STRAND_FORWARD).
+		// minimum (so `min(forward, rc)` chose reverse-complement strand 1)
+		// and `false` means the forward state was the minimum (strand 0).
 		// Mirrors `select_min_hash_strand`'s `forward < reverse_complement ? FORWARD : REVERSE_COMPLEMENT`
 		// classification — palindromic lanes (forward == reverse_complement) report `false` here but
 		// the caller separately masks them out via `get_palindrome_mask` and pushes a sentinel hash.
-		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_strand_mask(const d_t& d) const {
-			return hn::Lt(state_reverse_compl, state_forward);
-		}
-
-
-	};
-
-	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
-	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
-
-
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> reverse_strand_mask(
+            const p_simd_tag&) const {
+            return hn::Lt(reverse_complement_state_, forward_state_);
+        }
+    };
 };
 static_assert(::bioseq::simd::supports_scalar_hash<lexic_hasher, seq::dna4>);
 static_assert(supports_simd_hash<lexic_hasher, seq::dna4>);

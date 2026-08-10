@@ -5,7 +5,7 @@
  */
 module;
 
-#include "common.h"
+#include <libassert/assert.hpp>
 
 #include <algorithm>
 #include <array>
@@ -24,8 +24,9 @@ module;
 
 export module bioseq.sequences.generation;
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.checked_arithmetic;
+import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pool;
@@ -135,8 +136,8 @@ concept packed_sequence_config =
               std::size_t{0}) } -> std::same_as<compact_sequence_range<R>>;
     };
 
-inline constexpr std::uint32_t kChunkUnits = 8;
-inline constexpr std::uint64_t kReferenceStreamSpace = 1ull << 40;
+inline constexpr std::uint32_t k_chunk_units = 8;
+inline constexpr std::uint64_t k_reference_stream_space = 1ull << 40;
 
 struct taus_lcg_state {
     std::uint32_t x = 0;
@@ -257,33 +258,33 @@ inline double next_gaussian(
     return mean + stddev * (r * std::cos(theta));
 }
 
-template <typename Traits>
-[[gnu::always_inline]] constexpr typename Traits::storage_unit pack_unit(
-    const typename Traits::letter_unit* ranks, std::size_t valid) noexcept {
-    using unit_t = typename Traits::storage_unit;
+template <typename p_traits>
+[[gnu::always_inline]] constexpr typename p_traits::storage_unit pack_unit(
+    const typename p_traits::letter_unit* ranks, std::size_t valid) noexcept {
+    using unit_t = typename p_traits::storage_unit;
     unit_t acc = 0;
     for (std::size_t slot = 0; slot < valid; ++slot) {
         acc = static_cast<unit_t>(
-            acc | (static_cast<unit_t>(ranks[slot]) << (slot * Traits::bits_per_char)));
+            acc | (static_cast<unit_t>(ranks[slot]) << (slot * p_traits::bits_per_char)));
     }
     return acc;
 }
 
-template <typename Traits>
-[[nodiscard]] std::pair<std::vector<typename Traits::storage_unit>, std::size_t>
-pack_ranks_no_sentinel(std::span<const typename Traits::letter_unit> ranks) {
-    using unit_t = typename Traits::storage_unit;
+template <typename p_traits>
+[[nodiscard]] std::pair<std::vector<typename p_traits::storage_unit>, std::size_t>
+pack_ranks_no_sentinel(std::span<const typename p_traits::letter_unit> ranks) {
+    using unit_t = typename p_traits::storage_unit;
     std::vector<unit_t> out;
     const std::size_t units =
-        (ranks.size() + Traits::letters_per_unit - 1) / Traits::letters_per_unit;
+        (ranks.size() + p_traits::letters_per_unit - 1) / p_traits::letters_per_unit;
     out.resize(units);
     for (std::size_t unit = 0; unit < units; ++unit) {
-        const std::size_t first = unit * Traits::letters_per_unit;
+        const std::size_t first = unit * p_traits::letters_per_unit;
         const std::size_t valid =
-            std::min<std::size_t>(Traits::letters_per_unit, ranks.size() - first);
-        out[unit] = pack_unit<Traits>(ranks.data() + first, valid);
+            std::min<std::size_t>(p_traits::letters_per_unit, ranks.size() - first);
+        out[unit] = pack_unit<p_traits>(ranks.data() + first, valid);
     }
-    const std::size_t padding = units == 0 ? 0 : units * Traits::letters_per_unit - ranks.size();
+    const std::size_t padding = units == 0 ? 0 : units * p_traits::letters_per_unit - ranks.size();
     return {std::move(out), padding};
 }
 
@@ -315,7 +316,7 @@ void extract_window_ranks(
         }
     } else {
         const std::size_t length = end - start;
-        auto iter = seq.template iterable<BP>().begin();
+        auto iter = seq.template iterable<logical_rank>().begin();
         for (std::size_t i = 0; i < start; ++i) {
             ++iter;
         }
@@ -339,30 +340,30 @@ void extract_window_ranks(
     }
 }
 
-template <typename Traits>
+template <typename p_traits>
 void generate_units_cpu_for_sequence(
-    std::span<typename Traits::storage_unit> out_units,
+    std::span<typename p_traits::storage_unit> out_units,
     std::uint64_t symbols_per_seq,
     std::uint64_t seq_index,
     std::uint64_t /*seq_count*/,
     std::span<const std::uint32_t> cdf,
     std::uint64_t seed) {
-    constexpr std::uint32_t lpu = Traits::letters_per_unit;
+    constexpr std::uint32_t lpu = p_traits::letters_per_unit;
     const std::uint64_t units_per_seq = (symbols_per_seq + lpu - 1) / lpu;
-    const std::uint64_t chunks_per_seq = (units_per_seq + kChunkUnits - 1) / kChunkUnits;
-    const std::uint32_t alphabet_size = Traits::alphabet_size;
+    const std::uint64_t chunks_per_seq = (units_per_seq + k_chunk_units - 1) / k_chunk_units;
+    const std::uint32_t alphabet_size = p_traits::alphabet_size;
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
 
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     pool.parallel_for(0, static_cast<std::size_t>(chunks_per_seq), 1,
         bioseq::parallelism::range_body{
             [out_units, cdf_ptr = cdf.data(), symbols_per_seq, units_per_seq,
              alphabet_size, stream_base, seed](std::size_t lo, std::size_t hi) {
-                typename Traits::letter_unit ranks[kChunkUnits * Traits::letters_per_unit];
+                typename p_traits::letter_unit ranks[k_chunk_units * p_traits::letters_per_unit];
                 for (std::size_t local_chunk = lo; local_chunk < hi; ++local_chunk) {
                     taus_lcg_state state = seed_stream(seed, stream_base + local_chunk);
-                    const std::uint64_t local_unit0 = local_chunk * kChunkUnits;
-                    for (std::uint32_t u = 0; u < kChunkUnits; ++u) {
+                    const std::uint64_t local_unit0 = local_chunk * k_chunk_units;
+                    for (std::uint32_t u = 0; u < k_chunk_units; ++u) {
                         const std::uint64_t local_unit = local_unit0 + u;
                         if (local_unit >= units_per_seq) {
                             break;
@@ -371,11 +372,11 @@ void generate_units_cpu_for_sequence(
                         const std::uint32_t valid = static_cast<std::uint32_t>(
                             std::min<std::uint64_t>(lpu, symbols_per_seq - sym0));
                         for (std::uint32_t slot = 0; slot < valid; ++slot) {
-                            ranks[slot] = static_cast<typename Traits::letter_unit>(
+                            ranks[slot] = static_cast<typename p_traits::letter_unit>(
                                 sample_rank(cdf_ptr, alphabet_size, next_u32(state)));
                         }
                         out_units[static_cast<std::size_t>(local_unit)] =
-                            pack_unit<Traits>(ranks, valid);
+                            pack_unit<p_traits>(ranks, valid);
                     }
                 }
             }});
@@ -405,9 +406,9 @@ void generate_units_cpu_for_sequence(
     return length;
 }
 
-template <typename Traits>
+template <typename p_traits>
 void apply_substitutions(
-    std::span<typename Traits::letter_unit> ranks,
+    std::span<typename p_traits::letter_unit> ranks,
     double rate,
     taus_lcg_state& state) {
     if (rate <= 0.0) {
@@ -418,8 +419,8 @@ void apply_substitutions(
         : static_cast<std::uint32_t>(rate * 4294967296.0);
     for (auto& rank : ranks) {
         if (rate >= 1.0 || next_u32(state) < threshold) {
-            rank = static_cast<typename Traits::letter_unit>(
-                next_other_rank(state, Traits::alphabet_size, rank));
+            rank = static_cast<typename p_traits::letter_unit>(
+                next_other_rank(state, p_traits::alphabet_size, rank));
         }
     }
 }
@@ -433,7 +434,7 @@ struct indel_event_counts {
 };
 
 [[noreturn]] inline void throw_vulkan_generation_unavailable(const char* operation) {
-    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     std::string message = "Vulkan sequence generation selected but ";
     message += operation;
     message += " cannot run";
@@ -450,16 +451,16 @@ struct indel_event_counts {
             runtime.features().device_name.data(),
             runtime.features().device_type);
     }
-    throw bioseq::gpu::vulkan::VulkanRuntimeError(message);
+    throw bioseq::gpu::vulkan::vulkan_runtime_error(message);
 }
 
-template <typename Traits, typename OutVec>
+template <typename p_traits, typename p_output_vector>
 void apply_indels(
-    std::span<const typename Traits::letter_unit> in_ranks,
+    std::span<const typename p_traits::letter_unit> in_ranks,
     const generator_params& params,
     std::span<const std::uint32_t> cdf,
     taus_lcg_state& state,
-    OutVec& out_ranks,
+    p_output_vector& out_ranks,
     indel_event_counts* counts = nullptr) {
     out_ranks.clear();
     out_ranks.reserve(in_ranks.size() + in_ranks.size() / 8);
@@ -483,8 +484,8 @@ void apply_indels(
             const std::size_t length = clamp_round_nonneg(
                 next_gaussian(state, params.insertion_length_mean, params.insertion_length_stddev));
             for (std::size_t i = 0; i < length; ++i) {
-                out_ranks.push_back(static_cast<typename Traits::letter_unit>(
-                    sample_rank(cdf.data(), Traits::alphabet_size, next_u32(state))));
+                out_ranks.push_back(static_cast<typename p_traits::letter_unit>(
+                    sample_rank(cdf.data(), p_traits::alphabet_size, next_u32(state))));
             }
             if (counts != nullptr) {
                 counts->insertions += 1;
@@ -541,7 +542,7 @@ public:
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
         const std::size_t padding =
             units == 0 ? 0 : static_cast<std::size_t>(units * lpu - symbols);
-        static constexpr auto kCdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
 
         std::vector<seq_t> out;
         out.reserve(count);
@@ -550,7 +551,7 @@ public:
             if constexpr (!vulkan::gpu_generatable<seq_traits>) {
                 throw_vulkan_generation_unavailable("generate_sequences");
             } else {
-                const std::uint64_t total_units = bioseq::parallelism::saturating_mul(
+                const std::uint64_t total_units = bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(count), units);
                 if (total_units != (std::numeric_limits<std::uint64_t>::max)() &&
                     total_units <=
@@ -559,12 +560,12 @@ public:
                         symbols,
                         static_cast<std::uint64_t>(count),
                         params_.seed,
-                        kChunkUnits)) {
-                    const auto cdf_span = std::span<const std::uint32_t>{kCdf.data(), kCdf.size()};
+                        k_chunk_units)) {
+                    const auto cdf_span = std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()};
                     const std::uint64_t reserve =
                         vulkan::estimate_generate_units_peak_bytes<seq_traits>(total_units, cdf_span);
                     auto permit =
-                        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
+                        bioseq::parallelism::memory_admission_controller::instance().try_reserve(reserve);
                     if (permit) {
                         std::vector<unit_t> block(static_cast<std::size_t>(total_units));
                         const bool on_gpu = vulkan::try_generate_units_vulkan<seq_traits>(
@@ -573,7 +574,7 @@ public:
                             static_cast<std::uint64_t>(count),
                             cdf_span,
                             params_.seed,
-                            kChunkUnits,
+                            k_chunk_units,
                             true);
                         if (on_gpu) {
                             const std::size_t units_size = static_cast<std::size_t>(units);
@@ -598,7 +599,7 @@ public:
             std::vector<unit_t> data(static_cast<std::size_t>(units));
             generate_units_cpu_for_sequence<seq_traits>(
                 data, symbols, seq_index, count,
-                std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()},
                 params_.seed);
             out.push_back(seq_t::from_packed(std::move(data), padding));
         }
@@ -613,22 +614,22 @@ public:
         constexpr std::uint32_t lpu = seq_traits::letters_per_unit;
         const std::uint64_t symbols = params_.reference_length;
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
-        static constexpr auto kCdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
 
         std::vector<unit_t> data(static_cast<std::size_t>(units));
         if (params_.use_vulkan) {
             if constexpr (!vulkan::gpu_generatable<seq_traits>) {
                 throw_vulkan_generation_unavailable("generate_reference");
             } else if (!vulkan::can_generate_units_vulkan<seq_traits>(
-                           symbols, 1, params_.seed, kChunkUnits)) {
+                           symbols, 1, params_.seed, k_chunk_units)) {
                 throw_vulkan_generation_unavailable("generate_reference");
             } else if (!vulkan::try_generate_units_vulkan<seq_traits>(
                            data,
                            symbols,
                            1,
-                           std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                           std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()},
                            params_.seed,
-                           kChunkUnits)) {
+                           k_chunk_units)) {
                 throw_vulkan_generation_unavailable("generate_reference");
             }
         } else {
@@ -637,7 +638,7 @@ public:
                 symbols,
                 0,
                 1,
-                std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()},
                 params_.seed);
         }
 
@@ -652,7 +653,7 @@ public:
         std::size_t count) {
         DEBUG_ASSERT(reference != nullptr, "generate_fragment_pairs: reference must not be null");
         if (reference == nullptr) {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[generation] rejected fragment generation request "
                 "(reference=false, reference_bp=0, expected_bp={}, count={})",
                 params_.reference_length,
@@ -665,7 +666,7 @@ public:
                      "generate_fragment_pairs: nonzero count requires nonempty reference");
         if (reference->bp_size() != params_.reference_length ||
             (params_.reference_length == 0 && count != 0)) {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[generation] rejected fragment generation request "
                 "(reference={}, reference_bp={}, expected_bp={}, count={})",
                 true,
@@ -674,15 +675,15 @@ public:
                 count);
             return {};
         }
-        static constexpr auto kCdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
         std::vector<query_target_pair> pairs(count);
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        auto& pool = bioseq::parallelism::global_pool::instance();
         pool.parallel_for_with_context(0, count, 1, bioseq::parallelism::range_body{
             [this, &pairs, &reference, first](std::size_t lo, std::size_t hi) {
                 for (std::size_t i = lo; i < hi; ++i) {
                     const std::size_t fragment_index = first + i;
                     taus_lcg_state state =
-                        seed_stream(params_.seed, kReferenceStreamSpace + fragment_index);
+                        seed_stream(params_.seed, k_reference_stream_space + fragment_index);
                     const std::size_t length = sample_fragment_length(
                         state,
                         params_.fragment_length_mean,
@@ -711,7 +712,7 @@ public:
                     apply_indels<seq_traits>(
                         std::span<const rank_t>{fragment.data(), fragment.size()},
                         params_,
-                        std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                        std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()},
                         state,
                         indel_ranks);
                     auto [query_units, padding] = pack_ranks_no_sentinel<seq_traits>(
@@ -738,7 +739,7 @@ public:
         const std::uint64_t units = (symbols + lpu - 1) / lpu;
         const std::size_t padding =
             units == 0 ? 0 : static_cast<std::size_t>(units * lpu - symbols);
-        static constexpr auto kCdf = make_integer_cdf(Prob::probability());
+        static constexpr auto k_cdf = make_integer_cdf(Prob::probability());
 
         std::vector<seq_t> out;
         out.reserve(count);
@@ -749,7 +750,7 @@ public:
                 symbols,
                 seq_index,
                 count,
-                std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                std::span<const std::uint32_t>{k_cdf.data(), k_cdf.size()},
                 params_.seed);
             out.push_back(seq_t::from_packed(std::move(data), padding));
         }

@@ -4,56 +4,41 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
-#include <filesystem>
-#include <limits>
-#include <span>
 #include <string>
-#include <string_view>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:cleanup;
 import :types;
 import :error;
 import :identity;
-import :open;
 import :sync;
 import :path;
 
-namespace bioseq::durable_file_io::detail {
+namespace bioseq::common::durable_file_io::detail {
 
-[[nodiscard]] inline std::expected<void, file_io_error> remove_name_at(
+[[nodiscard]] inline std::expected<void, file_error> remove_name_at(
     int directory_descriptor,
     const std::string& name,
     publication_state publication,
-    const file_io_hooks& hooks = {}) noexcept {
+    const fault_injection_hooks& hooks = {}) noexcept {
     if (directory_descriptor < 0 || !valid_leaf_name(name)) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::remove_temporary,
+            file_error_code::invalid_argument,
+            file_operation::remove_staging_file,
             EINVAL,
             0,
             publication));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::remove_temporary);
+    if (const int injected = injected_errno(
+            hooks, file_operation::remove_staging_file);
         injected != 0) {
         return std::unexpected(make_error(
-            file_io_errc::cleanup_failed,
-            file_io_operation::remove_temporary,
+            file_error_code::cleanup_failed,
+            file_operation::remove_staging_file,
             injected,
             0,
             publication));
@@ -63,8 +48,8 @@ namespace bioseq::durable_file_io::detail {
         return {};
     }
     return std::unexpected(make_error(
-        file_io_errc::cleanup_failed,
-        file_io_operation::remove_temporary,
+        file_error_code::cleanup_failed,
+        file_operation::remove_staging_file,
         errno,
         0,
         publication));
@@ -79,27 +64,27 @@ namespace bioseq::durable_file_io::detail {
  */
 [[nodiscard]] inline std::expected<
     conditional_remove_disposition,
-    file_io_error>
+    file_error>
 remove_name_if_same_inode_at(
     int directory_descriptor,
     const std::string& name,
     const regular_file_identity& expected,
     publication_state publication,
-    const file_io_hooks& hooks = {}) noexcept {
+    const fault_injection_hooks& hooks = {}) noexcept {
     if (directory_descriptor < 0 || !valid_leaf_name(name)) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::remove_temporary,
+            file_error_code::invalid_argument,
+            file_operation::remove_staging_file,
             EINVAL,
             0,
             publication));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::remove_temporary);
+    if (const int injected = injected_errno(
+            hooks, file_operation::remove_staging_file);
         injected != 0) {
         return std::unexpected(make_error(
-            file_io_errc::cleanup_failed,
-            file_io_operation::remove_temporary,
+            file_error_code::cleanup_failed,
+            file_operation::remove_staging_file,
             injected,
             0,
             publication));
@@ -118,8 +103,8 @@ remove_name_if_same_inode_at(
             return conditional_remove_disposition::already_absent;
         }
         return std::unexpected(make_error(
-            file_io_errc::cleanup_failed,
-            file_io_operation::remove_temporary,
+            file_error_code::cleanup_failed,
+            file_operation::remove_staging_file,
             errno,
             0,
             publication));
@@ -135,13 +120,14 @@ remove_name_if_same_inode_at(
     }
     return conditional_remove_disposition::removed;
 }
-[[nodiscard]] inline file_io_error cleanup_error_or(
+/** Preserve the primary failure unless safe staging cleanup fails. */
+[[nodiscard]] inline file_error staging_cleanup_error(
     int directory_descriptor,
     const std::string& name,
     const regular_file_identity& expected,
     publication_state publication,
-    file_io_error primary,
-    const file_io_hooks& hooks) noexcept {
+    file_error primary,
+    const fault_injection_hooks& hooks) noexcept {
     auto removed = remove_name_if_same_inode_at(
         directory_descriptor, name, expected, publication, hooks);
     if (!removed.has_value()) {
@@ -151,19 +137,19 @@ remove_name_if_same_inode_at(
         return primary;
     }
     return make_error(
-        file_io_errc::identity_changed,
-        file_io_operation::remove_temporary,
+        file_error_code::identity_changed,
+        file_operation::remove_staging_file,
         ESTALE,
         0,
         publication);
 }
 
-[[nodiscard]] inline std::expected<void, file_io_error>
+[[nodiscard]] inline std::expected<void, file_error>
 remove_published_staging_name(
     int directory_descriptor,
     const std::string& name,
     const regular_file_identity& expected,
-    const file_io_hooks& hooks) noexcept {
+    const fault_injection_hooks& hooks) noexcept {
     auto removed = remove_name_if_same_inode_at(
         directory_descriptor,
         name,
@@ -176,20 +162,20 @@ remove_published_staging_name(
     if (*removed == conditional_remove_disposition::removed) {
         return {};
     }
-    auto synced = sync_descriptor(
+    auto synced = fsync_descriptor(
         directory_descriptor,
-        file_io_operation::sync_directory,
+        file_operation::fsync_directory,
         hooks,
         publication_state::visible_not_durable);
     if (!synced.has_value()) {
         return std::unexpected(synced.error());
     }
     return std::unexpected(make_error(
-        file_io_errc::identity_changed,
-        file_io_operation::remove_temporary,
+        file_error_code::identity_changed,
+        file_operation::remove_staging_file,
         ESTALE,
         0,
         publication_state::durable));
 }
 
-}  // namespace bioseq::durable_file_io::detail
+}  // namespace bioseq::common::durable_file_io::detail

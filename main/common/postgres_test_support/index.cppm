@@ -1,6 +1,6 @@
 export module bioseq.test.postgres;
 
-export import bioseq.libpq.client;
+export import bioseq.common.libpq;
 export import :row_hash;
 export import :supervision;
 export import :process;
@@ -10,5 +10,4 @@ export import :qualification;
 export import :cluster;
 export import :fixture;
 export import :explain;
-export import :migration_probe;
 export import :report;

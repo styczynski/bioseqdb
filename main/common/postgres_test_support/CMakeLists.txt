@@ -53,7 +53,6 @@ target_sources(bioseq_postgres_test_support
       "${CMAKE_CURRENT_LIST_DIR}/cluster.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/fixture.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/explain.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/migration_probe.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/report.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
 target_link_libraries(bioseq_postgres_test_support

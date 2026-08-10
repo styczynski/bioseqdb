@@ -15,13 +15,13 @@ namespace bioseq::codegen::website::detail {
 /// @brief Renders a Jinja template against flat string bindings.
 /// @param template_text Jinja template source.
 /// @param bindings Ordered name/value string bindings.
-/// @param out_result Receives the rendered document on success.
-/// @param out_error Receives the diagnostic message on failure.
+/// @param rendered_output Receives the rendered output on success.
+/// @param diagnostic_output Receives the diagnostic message on failure.
 /// @return Zero on success; one on load failure; two on render failure.
-int render_jinja(const std::string& template_text,
+int render_inline_template_impl(const std::string& template_text,
                  const std::vector<std::pair<std::string, std::string>>& bindings,
-                 std::string& out_result,
-                 std::string& out_error);
+                 std::string& rendered_output,
+                 std::string& diagnostic_output);
 
 /// @brief Renders a Jinja template against a JSON object context.
 ///
@@ -31,13 +31,13 @@ int render_jinja(const std::string& template_text,
 /// leaking any Jinja2Cpp type across the module boundary.
 /// @param template_text Jinja template source.
 /// @param json_context A JSON object serialized as text.
-/// @param out_result Receives the rendered document on success.
-/// @param out_error Receives the diagnostic message on failure.
+/// @param rendered_output Receives the rendered output on success.
+/// @param diagnostic_output Receives the diagnostic message on failure.
 /// @return Zero on success; one on load, two on render, three on context failure.
-int render_jinja_json(const std::string& template_text,
+int render_inline_json_template_impl(const std::string& template_text,
                       const std::string& json_context,
-                      std::string& out_result,
-                      std::string& out_error);
+                      std::string& rendered_output,
+                      std::string& diagnostic_output);
 
 /// @brief Renders a named template from a templates root against a JSON context.
 ///
@@ -48,13 +48,13 @@ int render_jinja_json(const std::string& template_text,
 /// @param templates_dir Filesystem root of the template set.
 /// @param template_name Logical template name (for example "landing.html.j2").
 /// @param json_context A JSON object serialized as text.
-/// @param out_result Receives the rendered document on success.
-/// @param out_error Receives the diagnostic message on failure.
+/// @param rendered_output Receives the rendered output on success.
+/// @param diagnostic_output Receives the diagnostic message on failure.
 /// @return Zero on success; one on load, two on render, three on context failure.
-int render_jinja_file(const std::string& templates_dir,
+int render_template_file_impl(const std::string& templates_dir,
                       const std::string& template_name,
                       const std::string& json_context,
-                      std::string& out_result,
-                      std::string& out_error);
+                      std::string& rendered_output,
+                      std::string& diagnostic_output);
 
 }  // namespace bioseq::codegen::website::detail

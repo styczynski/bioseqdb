@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_metadata.cppm
+ * core.cppm
  *
  * Manages metadata for columnar relations in separate, shared metadata
  * tables in the "bioseq" catalog schema.
@@ -11,7 +11,6 @@
  *   * useful for fast VACUUM operations (e.g. reporting with VACUUM VERBOSE)
  *   * useful for stats/costing
  *   * maps logical row numbers to stripe IDs
- *   * TODO: visibility information
  *
  * Each metadata table is opened by oid through the per-call helpers in
  * the "bioseq.foo_relid" family further down. Lookups go through index
@@ -21,7 +20,7 @@
  *-------------------------------------------------------------------------
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include "safe_lib.h"
 
@@ -36,15 +35,17 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq.storage.metadata:core;
+export module bioseq.postgres.storage.metadata:core;
 
-import bioseq.storage.physical;
-import bioseq.common.mlogging;
-import bioseq.config;
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.sql.generated.core.storage_metadata_core.entity_handles;
-import bioseq.storage.metadata.sql_row_codecs;
+import bioseq.common.checked_arithmetic;
+import bioseq.postgres.storage.physical;
+import bioseq.postgres.storage.compression;
+import bioseq.common.logging;
+import bioseq.postgres.configuration.core;
+import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
+import bioseq.postgres.sql.generated.core.storage_metadata_core.entity_handles;
+import bioseq.postgres.storage.metadata.sql_row_codecs;
 import :types;
 import :tuple_ops;
 
@@ -69,212 +70,215 @@ using seq_sub_table_codec =
     bioseq::storage::metadata::sql_row_codecs::seq_sub_table_codec;
 using seq_sub_table_row = seq_sub_table_codec::row_type;
 
+inline constexpr std::uint64_t row_mask_chunk_row_capacity = 10'000;
+
 static_assert(
     metadata_entity_handles::row_mask_seq.schema_binding()
-    == bioseq::pg_utils::sql_schema_binding::fixed);
+    == bioseq::postgres::support::sql_schema_binding::fixed);
 
-//export ItemPointerData row_number_to_tid(uint64_t rowNumber);
-export uint64_t LookupStorageId(RelFileLocator relfilelocator);
-export StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
-															 uint64_t rowNumber,
+export uint64_t lookup_storage_id(RelFileLocator relfilelocator);
+export stripe_metadata * find_stripe_by_first_row_number(Relation relation,
+															 uint64_t row_number,
 															 Snapshot snapshot);
-export uint64_t StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
-export EState *
-create_estate_for_relation(Relation rel)
-{
-	return bioseq::metadata::tuple_ops::create_estate_for_relation(rel);
-}
-
-/*
- * GetFunctionInfoOrNull first resolves the operator for the given data type,
- * access method, and support procedure. The function then uses the resolved
- * operator's identifier to fill in a function manager object, and returns
- * this object. This function is based on a similar function from CitusDB's code.
+export uint64_t stripe_highest_row_number(stripe_metadata *stripe);
+/** @brief Resolves an access-method support function for a data type.
+ *
+ * Falls back from the datum type to the operator class input type before
+ * constructing the function manager record.
  */
 export FmgrInfo *
-GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16_t procedureId)
+find_index_support_function(Oid type_id, Oid access_method_id, int16_t procedure_id)
 {
-	FmgrInfo *functionInfo = NULL;
+	FmgrInfo *function_info = nullptr;
 
 	/* get default operator class from pg_opclass for datum type */
-	Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
-	if (operatorClassId == InvalidOid)
+	Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
+	if (operator_class_id == InvalidOid)
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	Oid operatorFamilyId = get_opclass_family(operatorClassId);
-	if (operatorFamilyId == InvalidOid)
+	Oid operator_family_id = get_opclass_family(operator_class_id);
+	if (operator_family_id == InvalidOid)
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	Oid operatorId = get_opfamily_proc(operatorFamilyId, typeId, typeId, procedureId);
+	Oid operator_id = get_opfamily_proc(operator_family_id, type_id, type_id, procedure_id);
 
-	/* No operator for typeId, search for operator class type*/
-	if (operatorId == InvalidOid)
+	/* No operator for type_id, search for operator class type*/
+	if (operator_id == InvalidOid)
 	{
-		Oid opcintype = get_opclass_input_type(operatorClassId);
-		operatorId = get_opfamily_proc(operatorFamilyId, opcintype, opcintype, procedureId);
+		Oid opcintype = get_opclass_input_type(operator_class_id);
+		operator_id = get_opfamily_proc(operator_family_id, opcintype, opcintype, procedure_id);
 	}
 
-	if (operatorId != InvalidOid)
+	if (operator_id != InvalidOid)
 	{
-		functionInfo = make0<FmgrInfo>();
+		function_info =
+			bioseq::postgres::support::allocate_zeroed_object<FmgrInfo>();
 
-		/* fill in the FmgrInfo struct using the operatorId */
-		fmgr_info(operatorId, functionInfo);
+		/* fill in the FmgrInfo struct using the operator_id */
+		fmgr_info(operator_id, function_info);
 	}
 
-	return functionInfo;
+	return function_info;
 }
 
-Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
-	//elog(NOTICE, "BioseqColumn [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
-	//elog(NOTICE, relname);
-	const Oid relid = get_relname_relid(relname, relnamespace);
-	//elog(NOTICE, "BioseqColumn [safe_safe_get_relname_relid] [SUCCESS]" __FILE__ ":" TOSTRING(__LINE__));
-	return relid;
-}
-
-/* RowNumberLookupMode to be used in StripeMetadataLookupRowNumber */
-enum RowNumberLookupMode
+/// @brief Directional relation between a row number and a stripe boundary.
+enum class row_number_lookup_mode
 {
 	/*
-	 * Find the stripe whose firstRowNumber is less than or equal to given
-	 * input rowNumber.
+	 * Find the stripe whose first_row_number is less than or equal to given
+	 * input row_number.
 	 */
-	FIND_LESS_OR_EQUAL,
+	less_or_equal,
 
 	/*
-	 * Find the stripe whose firstRowNumber is greater than input rowNumber.
+	 * Find the stripe whose first_row_number is greater than input row_number.
 	 */
-	FIND_GREATER
+	greater
 };
 
-static void InsertEmptyStripeMetadataRow(uint64_t storageId, uint64_t stripeId,
-										 uint32_t columnCount, uint32_t chunkGroupRowCount,
-										 uint64_t firstRowNumber);
-static void GetHighestUsedAddressAndId(uint64_t storageId,
-									   uint64_t *highestUsedAddress,
-									   uint64_t *highestUsedId);
-static StripeMetadata * UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId,
+static void insert_empty_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id,
+										 uint32_t column_count, uint32_t chunk_group_row_count,
+										 uint64_t first_row_number);
+static void find_highest_used_address_and_id(uint64_t storage_id,
+									   uint64_t *highest_used_address,
+									   uint64_t *highest_used_id);
+static stripe_metadata * update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id,
 												stripe_codec::update &update);
-static List * ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot,
-									 ScanDirection scanDirection);
-export StripeMetadata * BuildStripeMetadata(Relation bioseqColumnStripes,
-											HeapTuple heapTuple);
-static void ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe,
-									uint32_t chunkGroupCount,
-									uint32_t **chunkGroupRowCounts,
-									uint32_t **chunkGroupDeletedRows,
+static List * read_data_file_stripes(uint64_t storage_id, Snapshot snapshot,
+									 ScanDirection scan_direction);
+export stripe_metadata * build_stripe_metadata(Relation bioseq_column_stripes,
+											HeapTuple heap_tuple);
+static void read_chunk_group_row_counts(uint64_t storage_id, uint64_t stripe,
+									uint32_t chunk_group_count,
+									uint32_t **chunk_group_row_counts,
+									uint32_t **chunk_group_deleted_rows,
 									Snapshot snapshot);
-static Oid BioseqColumnStorageIdSequenceRelationId(void);
-export Oid BioseqColumnStripeRelationId(void);
-export Oid BioseqColumnStripePKeyIndexRelationId(void);
-static Oid BioseqColumnStripeFirstRowNumberIndexRelationId(void);
-static Oid BioseqColumnOptionsRelationId(void);
-static Oid BioseqColumnOptionsIndexRegclass(void);
-static Oid BioseqColumnChunkRelationId(void);
-static Oid BioseqColumnChunkGroupRelationId(void);
-// DOC0322 §7.1 — UpdateRowMask relocates to storage_metadata:write_state_row_mask
-// and calls these two resolvers, so they are exported (sibling partitions cannot
-// reach module-internal `static` functions).
-export Oid BioseqColumnRowMaskRelationId(void);
-static Oid BioseqColumnRowMaskSeqId(void);
-static Oid BioseqColumnChunkIndexRelationId(void);
-static Oid BioseqColumnChunkGroupIndexRelationId(void);
-export Oid BioseqColumnRowMaskIndexRelationId(void);
-static Oid BioseqColumnRowMaskStripeIndexRelationId(void);
-Oid BioseqColumnNamespaceId(void);
-static uint64_t GetHighestUsedRowNumber(uint64_t storageId);
-static void DeleteStorageFromBioseqColumnMetadataTable(Oid metadataTableId,
-												   AttrNumber storageIdAtrrNumber,
-												   Oid storageIdIndexId,
-												   uint64_t storageId);
-static void DeleteStripeFromBioseqColumnMetadataTable(Oid metadataTableId,
-												  AttrNumber storageIdAtrrNumber,
-												  AttrNumber stripeIdAttrNumber,
-												  Oid storageIdIndexId,
-												  uint64_t storageId,
-												  uint64_t stripeId);
-static bool WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwrite);
-static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber,
+static Oid column_storage_id_sequence_oid(void);
+export Oid column_stripe_relation_oid(void);
+export Oid column_stripe_primary_key_index_oid(void);
+static Oid stripe_first_row_number_index_oid(void);
+static Oid column_options_relation_oid(void);
+static Oid column_options_index_oid(void);
+static Oid column_chunk_relation_oid(void);
+static Oid column_chunk_group_relation_oid(void);
+// Row-mask write state consumes these catalog identities across partitions.
+export Oid column_row_mask_relation_oid(void);
+static Oid column_row_mask_sequence_oid(void);
+static Oid column_chunk_index_oid(void);
+static Oid column_chunk_group_index_oid(void);
+export Oid column_row_mask_index_oid(void);
+static Oid column_row_mask_stripe_index_oid(void);
+Oid column_namespace_oid(void);
+static uint64_t find_highest_used_row_number(uint64_t storage_id);
+static void delete_storage_metadata_rows(Oid metadata_table_id,
+												   AttrNumber storage_id_attribute_number,
+												   Oid storage_id_index_id,
+												   uint64_t storage_id);
+static void delete_stripe_metadata_rows(Oid metadata_table_id,
+												  AttrNumber storage_id_attribute_number,
+												  AttrNumber stripe_id_attr_number,
+												  Oid storage_id_index_id,
+												  uint64_t storage_id,
+												  uint64_t stripe_id);
+static bool write_column_options(Oid regclass, column_options *options, bool overwrite);
+static stripe_metadata * find_stripe_metadata_by_row_number(Relation relation, uint64_t row_number,
 													  Snapshot snapshot,
-													  RowNumberLookupMode lookupMode);
-static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
+													  row_number_lookup_mode lookup_mode);
+static void validate_stripe_metadata(stripe_metadata *stripe);
+
+template<typename operation_type>
+void record_cleanup_failure(
+	std::exception_ptr& failure,
+	operation_type&& operation)
+{
+	try
+	{
+		std::forward<operation_type>(operation)();
+	}
+	catch (...)
+	{
+		if (failure == nullptr)
+		{
+			failure = std::current_exception();
+		}
+	}
+}
 
 
-[[nodiscard]] static BioseqColumnOptions
+[[nodiscard]] static column_options
 options_to_domain(const options_row& row)
 {
-	return BioseqColumnOptions{
-		.stripeRowCount = static_cast<uint64>(row.stripe_row_limit),
-		.chunkRowCount =
+	return column_options{
+		.stripe_row_limit = static_cast<uint64>(row.stripe_row_limit),
+		.chunk_group_row_limit =
 			static_cast<uint32>(row.chunk_group_row_limit),
-		.compressionType = ParseCompressionType(NameStr(row.compression)),
-		.compressionLevel = row.compression_level,
+		.compression_algorithm = parse_compression_algorithm(NameStr(row.compression)),
+		.compression_level = row.compression_level,
 	};
 }
 
 /*
- * read_bioseq_column_options returns the stored options for a relation,
+ * read_column_options returns the stored options for a relation,
  * GUC-derived defaults when no row exists, or std::nullopt when the options
  * catalog is unavailable during database or extension removal.
  */
-export std::optional<BioseqColumnOptions>
-read_bioseq_column_options(Oid regclass)
+export std::optional<column_options>
+read_column_options(Oid regclass)
 {
-	ScanKeyData scanKey[1];
-	scanKey[0] =
+	ScanKeyData scan_keys[1];
+	scan_keys[0] =
 		options_codec::scan_key<&options_row::regclass>(regclass);
 
-	Relation bioseqColumnOptions = bioseq::pg_utils::invoke_pg_as_cpp([] {
-		return try_safe_relation_open(
-			BioseqColumnOptionsRelationId(), AccessShareLock);
+	Relation bioseq_column_options = bioseq::postgres::support::invoke_pg_as_cpp([] {
+		return bioseq::postgres::support::try_open_postgres_relation(
+			column_options_relation_oid(), AccessShareLock);
 	});
-	if (bioseqColumnOptions == NULL)
+	if (bioseq_column_options == nullptr)
 	{
 		/* Extension has been dropped (e.g. during DROP EXTENSION/DATABASE). */
 		return std::nullopt;
 	}
 
 	Relation index = nullptr;
-	SysScanDesc scanDescriptor = nullptr;
-	std::optional<BioseqColumnOptions> result;
+	SysScanDesc scan_descriptor = nullptr;
+	std::optional<column_options> result;
 	std::exception_ptr failure;
 	try {
-		index = bioseq::pg_utils::invoke_pg_as_cpp([] {
-			return try_safe_relation_open(
-				BioseqColumnOptionsIndexRegclass(), AccessShareLock);
+		index = bioseq::postgres::support::invoke_pg_as_cpp([] {
+			return bioseq::postgres::support::try_open_postgres_relation(
+				column_options_index_oid(), AccessShareLock);
 		});
 		if (index != nullptr) {
-			scanDescriptor = bioseq::pg_utils::invoke_pg_as_cpp(
-				[bioseqColumnOptions, index, &scanKey] {
+			scan_descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
+				[bioseq_column_options, index, &scan_keys] {
 					return systable_beginscan_ordered(
-						bioseqColumnOptions, index, NULL, 1, scanKey);
+						bioseq_column_options, index, nullptr, 1, scan_keys);
 				});
-			HeapTuple heapTuple = bioseq::pg_utils::invoke_pg_as_cpp(
-				[scanDescriptor] {
+			HeapTuple heap_tuple = bioseq::postgres::support::invoke_pg_as_cpp(
+				[scan_descriptor] {
 					return systable_getnext_ordered(
-						scanDescriptor, ForwardScanDirection);
+						scan_descriptor, ForwardScanDirection);
 				});
-			if (HeapTupleIsValid(heapTuple)) {
+			if (HeapTupleIsValid(heap_tuple)) {
 				const options_row row = options_codec::deform(
-					heapTuple,
-					RelationGetDescr(bioseqColumnOptions),
+					heap_tuple,
+					RelationGetDescr(bioseq_column_options),
 					CurrentMemoryContext);
 				result = options_to_domain(row);
 			} else {
 				/* Populate options with system defaults. */
-				result = BioseqColumnOptions{
-					.stripeRowCount = static_cast<uint32_t>(
-						bioseq::settings::stripe_row_limit),
-					.chunkRowCount = static_cast<uint32_t>(
-						bioseq::settings::chunk_group_row_limit),
-					.compressionType = static_cast<CompressionType>(
-						static_cast<int>(bioseq::settings::compression.value())),
-					.compressionLevel = bioseq::settings::compression_level,
+				result = column_options{
+					.stripe_row_limit = static_cast<uint32_t>(
+						bioseq::settings::storage::stripe::row_limit),
+					.chunk_group_row_limit = static_cast<uint32_t>(
+						bioseq::settings::storage::chunk_group::row_limit),
+					.compression_algorithm = static_cast<bioseq::compression_algorithm>(
+						static_cast<int>(bioseq::settings::storage::compression::algorithm.get_value())),
+					.compression_level = bioseq::settings::storage::compression::level,
 				};
 			}
 		}
@@ -282,32 +286,23 @@ read_bioseq_column_options(Oid regclass)
 		failure = std::current_exception();
 	}
 
-	const auto cleanup = [&failure](auto&& operation) {
-		try {
-			operation();
-		} catch (...) {
-			if (failure == nullptr) {
-				failure = std::current_exception();
-			}
-		}
-	};
-	if (scanDescriptor != nullptr) {
-		cleanup([scanDescriptor] {
-			bioseq::pg_utils::invoke_pg_as_cpp([scanDescriptor] {
-				systable_endscan_ordered(scanDescriptor);
+	if (scan_descriptor != nullptr) {
+		record_cleanup_failure(failure, [scan_descriptor] {
+			bioseq::postgres::support::invoke_pg_as_cpp([scan_descriptor] {
+				systable_endscan_ordered(scan_descriptor);
 			});
 		});
 	}
 	if (index != nullptr) {
-		cleanup([index] {
-			bioseq::pg_utils::invoke_pg_as_cpp([index] {
+		record_cleanup_failure(failure, [index] {
+			bioseq::postgres::support::invoke_pg_as_cpp([index] {
 				index_close(index, AccessShareLock);
 			});
 		});
 	}
-	cleanup([bioseqColumnOptions] {
-		bioseq::pg_utils::invoke_pg_as_cpp([bioseqColumnOptions] {
-			relation_close(bioseqColumnOptions, AccessShareLock);
+	record_cleanup_failure(failure, [bioseq_column_options] {
+		bioseq::postgres::support::invoke_pg_as_cpp([bioseq_column_options] {
+			relation_close(bioseq_column_options, AccessShareLock);
 		});
 	});
 	if (failure != nullptr) {
@@ -319,11 +314,11 @@ read_bioseq_column_options(Oid regclass)
 
 
 /*
- * InitBioseqColumnOptions initialized the columnar table options. Meaning it writes the
+ * initialize_column_options initialized the columnar table options. Meaning it writes the
  * default options to the options table if not already existing.
  */
 export void
-InitBioseqColumnOptions(Oid regclass)
+initialize_column_options(Oid regclass)
 {
 	/*
 	 * When upgrading we retain options for all columnar tables by upgrading
@@ -334,107 +329,95 @@ InitBioseqColumnOptions(Oid regclass)
 		return;
 	}
 
-	BioseqColumnOptions defaultOptions = {
-		.stripeRowCount = static_cast<uint32_t>(bioseq::settings::stripe_row_limit),
-		.chunkRowCount = static_cast<uint32_t>(bioseq::settings::chunk_group_row_limit),
-		.compressionType = static_cast<CompressionType>(static_cast<int>(bioseq::settings::compression.value())),
-		.compressionLevel = bioseq::settings::compression_level
+	column_options default_options = {
+		.stripe_row_limit = static_cast<uint32_t>(bioseq::settings::storage::stripe::row_limit),
+		.chunk_group_row_limit = static_cast<uint32_t>(bioseq::settings::storage::chunk_group::row_limit),
+		.compression_algorithm = static_cast<bioseq::compression_algorithm>(static_cast<int>(bioseq::settings::storage::compression::algorithm.get_value())),
+		.compression_level = bioseq::settings::storage::compression::level
 	};
 
-	WriteBioseqColumnOptions(regclass, &defaultOptions, false);
+	write_column_options(regclass, &default_options, false);
 }
 
 
-/*
- * SetBioseqColumnOptions writes the passed table options as the authoritive options to the
- * table irregardless of the optiones already existing or not. This can be used to put a
- * table in a certain state.
- */
+/// @brief Replaces the authoritative column options for a relation.
 export void
-SetBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
+set_column_options(Oid regclass, column_options *options)
 {
-	WriteBioseqColumnOptions(regclass, options, true);
+	write_column_options(regclass, options, true);
 }
 
 
-/*
- * WriteBioseqColumnOptions writes the options to the catalog table for a given regclass.
- *  - If overwrite is false it will only write the values if there is not already a record
- *    found.
- *  - If overwrite is true it will always write the settings
- *
- * The return value indicates if the record has been written.
+/** @brief Writes relation options subject to an overwrite policy.
+ * @return True when the catalog row was inserted or replaced.
  */
 static bool
-WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwrite)
+write_column_options(Oid regclass, column_options *options, bool overwrite)
 {
-	/*
-	 * When upgrading we should retain the options from the previous
-	 * cluster and don't write new options.
-	 */
+	/* Binary-upgrade restores own the catalog rows and must not replace them. */
 	Assert(!IsBinaryUpgrade);
 
 	bool written = false;
 
-	NameData compressionName = { 0 };
-	namestrcpy(&compressionName, CompressionTypeStr(options->compressionType));
+	NameData compression_name = { 0 };
+	namestrcpy(&compression_name, compression_algorithm_name(options->compression_algorithm));
 
-	auto encoded = options_codec::encode(
+	options_codec::encoded_row encoded = options_codec::encode(
 		options_row{
 			.regclass = regclass,
 			.chunk_group_row_limit =
-				static_cast<std::int32_t>(options->chunkRowCount),
+				static_cast<std::int32_t>(options->chunk_group_row_limit),
 			.stripe_row_limit =
-				static_cast<std::int32_t>(options->stripeRowCount),
+				static_cast<std::int32_t>(options->stripe_row_limit),
 			.compression_level =
-				static_cast<std::int32_t>(options->compressionLevel),
-			.compression = compressionName,
+				static_cast<std::int32_t>(options->compression_level),
+			.compression = compression_name,
 		},
 		CurrentMemoryContext);
 
 	/* create heap tuple and insert into catalog table */
-	Relation bioseqColumnOptions = safe_relation_open(BioseqColumnOptionsRelationId(),
+	Relation bioseq_column_options =
+		bioseq::postgres::support::open_postgres_relation(column_options_relation_oid(),
 											 RowExclusiveLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnOptions);
+	TupleDesc tuple_descriptor = RelationGetDescr(bioseq_column_options);
 
 	/* find existing item to perform update if exist */
-	ScanKeyData scanKey[1] = { 0 };
-	scanKey[0] =
+	ScanKeyData scan_keys[1] = { 0 };
+	scan_keys[0] =
 		options_codec::scan_key<&options_row::regclass>(regclass);
 
-	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
-															1, scanKey);
+	Relation index = index_open(column_options_index_oid(), AccessShareLock);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_options, index, nullptr,
+															1, scan_keys);
 
-	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
-	if (HeapTupleIsValid(heapTuple))
+	HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
+	if (HeapTupleIsValid(heap_tuple))
 	{
 		if (overwrite)
 		{
-			/* TODO check if the options are actually different, skip if not changed */
-			/* update existing record */
+			/* overwrite requests authoritatively replace the stored record */
 			options_codec::update update{};
 			update
 				.set<&options_row::chunk_group_row_limit>(
-					static_cast<std::int32_t>(options->chunkRowCount))
+					static_cast<std::int32_t>(options->chunk_group_row_limit))
 				.set<&options_row::stripe_row_limit>(
-					static_cast<std::int32_t>(options->stripeRowCount))
+					static_cast<std::int32_t>(options->stripe_row_limit))
 				.set<&options_row::compression_level>(
-					static_cast<std::int32_t>(options->compressionLevel))
+					static_cast<std::int32_t>(options->compression_level))
 				.set<&options_row::compression>(
-					compressionName, CurrentMemoryContext);
+					compression_name, CurrentMemoryContext);
 
 			HeapTuple tuple = update.modify(
-				heapTuple, tupleDescriptor);
-			CatalogTupleUpdate(bioseqColumnOptions, &tuple->t_self, tuple);
+				heap_tuple, tuple_descriptor);
+			CatalogTupleUpdate(bioseq_column_options, &tuple->t_self, tuple);
 			written = true;
 		}
 	}
 	else
 	{
 		/* inserting new record */
-		HeapTuple newTuple = encoded.form_tuple(tupleDescriptor);
-		CatalogTupleInsert(bioseqColumnOptions, newTuple);
+		HeapTuple new_tuple = encoded.form_tuple(tuple_descriptor);
+		CatalogTupleInsert(bioseq_column_options, new_tuple);
 		written = true;
 	}
 
@@ -443,799 +426,796 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 		CommandCounterIncrement();
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	relation_close(bioseqColumnOptions, RowExclusiveLock);
+	relation_close(bioseq_column_options, RowExclusiveLock);
 
 	return written;
 }
 
 
 /*
- * DeleteBioseqColumnTableOptions removes the columnar table options for a regclass. When
- * missingOk is false it will throw an error when no table options can be found.
+ * delete_column_table_options removes the columnar table options for a regclass. When
+ * missing_ok is false it will throw an error when no table options can be found.
  *
  * Returns whether a record has been removed.
  */
 export bool
-DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
+delete_column_table_options(Oid regclass, bool missing_ok)
 {
 	bool result = false;
 
-	/*
-	 * When upgrading we shouldn't delete or modify table options and
-	 * retain options from the previous cluster.
-	 */
+	/* Binary-upgrade restores own the catalog rows and must not delete them. */
 	Assert(!IsBinaryUpgrade);
 
-	Relation bioseqColumnOptions = try_safe_relation_open(BioseqColumnOptionsRelationId(),
+	Relation bioseq_column_options =
+		bioseq::postgres::support::try_open_postgres_relation(column_options_relation_oid(),
 												 RowExclusiveLock);
-	if (bioseqColumnOptions == NULL)
+	if (bioseq_column_options == nullptr)
 	{
 		/* extension has been dropped */
 		return false;
 	}
 
 	/* find existing item to remove */
-	ScanKeyData scanKey[1] = { 0 };
-	scanKey[0] =
+	ScanKeyData scan_keys[1] = { 0 };
+	scan_keys[0] =
 		options_codec::scan_key<&options_row::regclass>(regclass);
 
-	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
-															1, scanKey);
+	Relation index = index_open(column_options_index_oid(), AccessShareLock);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_options, index, nullptr,
+															1, scan_keys);
 
-	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
-	if (HeapTupleIsValid(heapTuple))
+	HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
+	if (HeapTupleIsValid(heap_tuple))
 	{
-		CatalogTupleDelete(bioseqColumnOptions, &heapTuple->t_self);
+		CatalogTupleDelete(bioseq_column_options, &heap_tuple->t_self);
 		CommandCounterIncrement();
 
 		result = true;
 	}
-	else if (!missingOk)
+	else if (!missing_ok)
 	{
-		bioseq_log<ERR, PG>( "missing options for regclass: {}", regclass);
+		bioseq_log<logging_level::error, logging_target::postgres>( "missing options for regclass: {}", regclass);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	relation_close(bioseqColumnOptions, RowExclusiveLock);
+	relation_close(bioseq_column_options, RowExclusiveLock);
 
 	return result;
 }
 
 
 /*
- * SaveStripeSkipList saves chunkList for a given stripe as rows
+ * save_stripe_skip_list saves chunk_list for a given stripe as rows
  * of bioseq.chunk.
  */
 export void
-SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipList *chunkList,
-				   TupleDesc tupleDescriptor)
+save_stripe_skip_list(RelFileLocator relfilelocator, uint64_t stripe, stripe_skip_list *chunk_list,
+				   TupleDesc tuple_descriptor)
 {
-	uint32_t columnIndex = 0;
-	uint32_t chunkIndex = 0;
-	uint32_t columnCount = chunkList->columnCount;
+	uint32_t column_index = 0;
+	uint32_t chunk_index = 0;
+	uint32_t column_count = chunk_list->column_count;
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
-	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
-	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, RowExclusiveLock);
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnChunk);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
+	Oid bioseq_column_chunk_oid = column_chunk_relation_oid();
+	Relation bioseq_column_chunk = table_open(bioseq_column_chunk_oid, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(bioseq_column_chunk);
 
-	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	for (column_index = 0; column_index < column_count; column_index++)
 	{
-		for (chunkIndex = 0; chunkIndex < chunkList->chunkCount; chunkIndex++)
+		for (chunk_index = 0; chunk_index < chunk_list->chunk_count; chunk_index++)
 		{
-			ColumnChunkSkipNode *chunk =
-				&chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
+			chunk_skip_node *chunk =
+				&chunk_list->chunk_skip_nodes[column_index][chunk_index];
 
 			std::optional<bytea*> minimum_value;
 			std::optional<bytea*> maximum_value;
-			if (chunk->hasMinMax)
+			if (chunk->has_min_max)
 			{
-				minimum_value = bioseq::pg_utils::pg_datum::from_raw(chunk->minimumValue)
-					.to_bytea(TupleDescAttr(tupleDescriptor, columnIndex));
-				maximum_value = bioseq::pg_utils::pg_datum::from_raw(chunk->maximumValue)
-					.to_bytea(TupleDescAttr(tupleDescriptor, columnIndex));
+				minimum_value = bioseq::postgres::support::pg_datum::from_raw(chunk->minimum_value)
+					.to_bytea(TupleDescAttr(tuple_descriptor, column_index));
+				maximum_value = bioseq::postgres::support::pg_datum::from_raw(chunk->maximum_value)
+					.to_bytea(TupleDescAttr(tuple_descriptor, column_index));
 			}
-			auto encoded = chunk_codec::encode(
+			chunk_codec::encoded_row encoded = chunk_codec::encode(
 				chunk_row{
-					.storage_id = static_cast<std::int64_t>(storageId),
+					.storage_id = static_cast<std::int64_t>(storage_id),
 					.stripe_num = static_cast<std::int64_t>(stripe),
 					.attr_num =
-						static_cast<std::int32_t>(columnIndex + 1),
+						static_cast<std::int32_t>(column_index + 1),
 					.chunk_group_num =
-						static_cast<std::int32_t>(chunkIndex),
+						static_cast<std::int32_t>(chunk_index),
 					.minimum_value = minimum_value,
 					.maximum_value = maximum_value,
 					.value_stream_offset =
-						static_cast<std::int64_t>(chunk->valueChunkOffset),
+						static_cast<std::int64_t>(chunk->value_stream_offset),
 					.value_stream_length =
-						static_cast<std::int64_t>(chunk->valueLength),
+						static_cast<std::int64_t>(chunk->value_stream_length),
 					.exists_stream_offset =
-						static_cast<std::int64_t>(chunk->existsChunkOffset),
+						static_cast<std::int64_t>(chunk->exists_stream_offset),
 					.exists_stream_length =
-						static_cast<std::int64_t>(chunk->existsLength),
+						static_cast<std::int64_t>(chunk->exists_stream_length),
 					.value_compression_type =
 						static_cast<std::int32_t>(
-							chunk->valueCompressionType),
+							chunk->value_compression_algorithm),
 					.value_compression_level =
 						static_cast<std::int32_t>(
-							chunk->valueCompressionLevel),
+							chunk->value_compression_level),
 					.value_decompressed_length =
 						static_cast<std::int64_t>(
-							chunk->decompressedValueSize),
+							chunk->value_decompressed_length),
 					.value_count =
-						static_cast<std::int64_t>(chunk->rowCount),
+						static_cast<std::int64_t>(chunk->row_count),
 				},
 				CurrentMemoryContext);
-			auto tuple_data = encoded.tuple_data(
-				RelationGetDescr(bioseqColumnChunk));
+			const chunk_codec::encoded_tuple_data tuple_data = encoded.tuple_data(
+				RelationGetDescr(bioseq_column_chunk));
 
-			bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
-				modifyState, tuple_data.values, tuple_data.nulls);
+			bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
+				relation_modification_state, tuple_data.values, tuple_data.nulls);
 		}
 	}
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
-	table_close(bioseqColumnChunk, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
+	table_close(bioseq_column_chunk, RowExclusiveLock);
 }
 
 
 /*
- * SaveChunkGroups saves the metadata for given chunk groups in bioseq.chunk_group.
+ * save_chunk_groups saves the metadata for given chunk groups in bioseq.chunk_group.
  */
 export void
-SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
-				List *chunkGroupRowCounts)
+save_chunk_groups(RelFileLocator relfilelocator, uint64_t stripe,
+				List *chunk_group_row_counts)
 {
-	uint64_t storageId = LookupStorageId(relfilelocator);
-	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, RowExclusiveLock);
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnChunkGroup);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
+	Oid bioseq_column_chunk_group_oid = column_chunk_group_relation_oid();
+	Relation bioseq_column_chunk_group = table_open(bioseq_column_chunk_group_oid, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(bioseq_column_chunk_group);
 
-	int chunkId = 0;
+	int chunk_id = 0;
 
-	for (auto rowCount : PIntList{chunkGroupRowCounts})
+	for (int row_count :
+		 bioseq::postgres::support::postgres_integer_list{chunk_group_row_counts})
 	{
-		auto encoded = chunk_group_codec::encode(chunk_group_row{
-			.storage_id = static_cast<std::int64_t>(storageId),
+		chunk_group_codec::encoded_row encoded =
+			chunk_group_codec::encode(chunk_group_row{
+			.storage_id = static_cast<std::int64_t>(storage_id),
 			.stripe_num = static_cast<std::int64_t>(stripe),
-			.chunk_group_num = static_cast<std::int32_t>(chunkId),
-			.row_count = static_cast<std::int64_t>(rowCount),
+			.chunk_group_num = static_cast<std::int32_t>(chunk_id),
+			.row_count = static_cast<std::int64_t>(row_count),
 		});
-		const auto tupleData = encoded.tuple_data(
-			RelationGetDescr(bioseqColumnChunkGroup));
+		const chunk_group_codec::encoded_tuple_data tuple_data = encoded.tuple_data(
+			RelationGetDescr(bioseq_column_chunk_group));
 
-		bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
-			modifyState, tupleData.values, tupleData.nulls);
-		chunkId++;
+		bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
+			relation_modification_state, tuple_data.values, tuple_data.nulls);
+		chunk_id++;
 	}
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
-	table_close(bioseqColumnChunkGroup, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
+	table_close(bioseq_column_chunk_group, RowExclusiveLock);
 }
 
 
 /*
- * SaveEmptyRowMask saves the metadata for inserted rows in bioseq.mask_row
+ * save_empty_row_mask saves the metadata for inserted rows in bioseq.mask_row
  */
-export bool 
-SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
-				 uint64_t stripeStartRowNumber, List *chunkGroupRowCounts)
+export bool
+save_empty_row_mask(uint64_t storage_id, uint64_t stripe_id,
+				 uint64_t stripe_start_row_number, List *chunk_group_row_counts)
 {
-	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
-	Oid bioseqColumnRowMaskSeq = BioseqColumnRowMaskSeqId();
-	Relation bioseqColumnRowMask = table_open(bioseqColumnRowMaskOid, RowExclusiveLock);
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnRowMask);
+	Oid row_mask_relation_oid = column_row_mask_relation_oid();
+	Oid bioseq_column_row_mask_seq = column_row_mask_sequence_oid();
+	Relation row_mask_relation = table_open(row_mask_relation_oid, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(row_mask_relation);
 
-	uint64_t chunkIterationStartRowNumber = stripeStartRowNumber;
-	uint64_t chunkIterationEndRowNumber = stripeStartRowNumber -  1;
+	uint64_t chunk_iteration_start_row_number = stripe_start_row_number;
+	uint64_t chunk_iteration_end_row_number = stripe_start_row_number -  1;
 
-	int chunkId = 0;
+	int chunk_id = 0;
 
-	bool chunkInserted = true;
+	bool chunk_inserted = true;
 
-	for (auto rowCount : PIntList{chunkGroupRowCounts})
+	for (int row_count :
+		 bioseq::postgres::support::postgres_integer_list{chunk_group_row_counts})
 	{
-		if (!chunkInserted)
+		if (!chunk_inserted)
 			break;
 
-		uint16_t rowMaskIterations =
-			(rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE) ? 
-				(rowCount / BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE + 1) :
-				(rowCount / BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE);
+		uint16_t row_mask_iterations =
+			(row_count % row_mask_chunk_row_capacity) ?
+				(row_count / row_mask_chunk_row_capacity + 1) :
+				(row_count / row_mask_chunk_row_capacity);
 
-		for(uint16_t n = 0; n < rowMaskIterations; n++)
+		for(uint16_t n = 0; n < row_mask_iterations; n++)
 		{
-			uint16_t maskSize;
+			uint16_t mask_size;
 
 			/* Last iteration */
-			if (n == (rowMaskIterations - 1))
+			if (n == (row_mask_iterations - 1))
 			{
-				uint16_t lastIterationRowSize = rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE ? 
-						rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE : BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE;
-				chunkIterationEndRowNumber += lastIterationRowSize;
-				maskSize = (lastIterationRowSize) % 8 ? 
-								lastIterationRowSize / 8 + 1 :
-								lastIterationRowSize / 8;
+				uint16_t last_iteration_row_size = row_count % row_mask_chunk_row_capacity ?
+						row_count % row_mask_chunk_row_capacity : row_mask_chunk_row_capacity;
+				chunk_iteration_end_row_number += last_iteration_row_size;
+				mask_size = (last_iteration_row_size) % 8 ?
+								last_iteration_row_size / 8 + 1 :
+								last_iteration_row_size / 8;
 			}
 			else
 			{
-				chunkIterationEndRowNumber += BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE;
-				maskSize = BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE / 8;
+				chunk_iteration_end_row_number += row_mask_chunk_row_capacity;
+				mask_size = row_mask_chunk_row_capacity / 8;
 			}
 
-			bytea *initialLookupRecord = make1<bytea>(maskSize + VARHDRSZ);
-			SET_VARSIZE(initialLookupRecord, maskSize + VARHDRSZ);
+			bytea *initial_lookup_record =
+				bioseq::postgres::support::allocate_zeroed_storage<bytea>(
+					mask_size + VARHDRSZ);
+			SET_VARSIZE(initial_lookup_record, mask_size + VARHDRSZ);
 
-			int64_t nextSeqId = nextval_internal(bioseqColumnRowMaskSeq, false);
+			int64_t next_seq_id = nextval_internal(bioseq_column_row_mask_seq, false);
 
-			auto encoded = row_mask_codec::encode(
+			row_mask_codec::encoded_row encoded = row_mask_codec::encode(
 				row_mask_row{
-					.id = static_cast<std::int64_t>(nextSeqId),
-					.storage_id = static_cast<std::int64_t>(storageId),
-					.stripe_id = static_cast<std::int64_t>(stripeId),
-					.chunk_id = static_cast<std::int32_t>(chunkId),
+					.id = static_cast<std::int64_t>(next_seq_id),
+					.storage_id = static_cast<std::int64_t>(storage_id),
+					.stripe_id = static_cast<std::int64_t>(stripe_id),
+					.chunk_id = static_cast<std::int32_t>(chunk_id),
 					.start_row_number = static_cast<std::int64_t>(
-						chunkIterationStartRowNumber),
+						chunk_iteration_start_row_number),
 					.end_row_number = static_cast<std::int64_t>(
-						chunkIterationEndRowNumber),
+						chunk_iteration_end_row_number),
 					.deleted_rows = 0,
-					.mask = initialLookupRecord,
+					.mask = initial_lookup_record,
 				},
 				CurrentMemoryContext);
-			auto tuple_data = encoded.tuple_data(
-				RelationGetDescr(bioseqColumnRowMask));
+			const row_mask_codec::encoded_tuple_data tuple_data = encoded.tuple_data(
+				RelationGetDescr(row_mask_relation));
 
-			/*
-			 * bioseq.row_mask has UNIQUE constraint which can throw
-			 * error so we need to catch this and return to function caller
-			 * if saving empty row mask was succesful or not.
-			 */
+			/* A conflicting UNIQUE row means another writer owns this range. */
 			PG_TRY();
 			{
-				bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
-					modifyState, tuple_data.values, tuple_data.nulls);
+				bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
+					relation_modification_state, tuple_data.values, tuple_data.nulls);
 			}
-			
+
 			PG_CATCH();
 			{
 				FlushErrorState();
-				chunkInserted = false;
+				chunk_inserted = false;
 				break;
 			}
 
 			PG_END_TRY();
 
-			chunkIterationStartRowNumber += BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE;
+			chunk_iteration_start_row_number += row_mask_chunk_row_capacity;
 		}
 
-		chunkIterationStartRowNumber = chunkIterationEndRowNumber + 1;
-		chunkId++;
+		chunk_iteration_start_row_number = chunk_iteration_end_row_number + 1;
+		chunk_id++;
 	}
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
-	table_close(bioseqColumnRowMask, RowExclusiveLock);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
+	table_close(row_mask_relation, RowExclusiveLock);
 
-	return chunkInserted;
+	return chunk_inserted;
 }
 
 
 /*
- * ReadStripeSkipList fetches chunk metadata for a given stripe.
+ * read_stripe_skip_list fetches chunk metadata for a given stripe.
  */
-export StripeSkipList *
-ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tupleDescriptor,
-				   uint32_t chunkCount, Snapshot snapshot)
+export stripe_skip_list *
+read_stripe_skip_list(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tuple_descriptor,
+				   uint32_t chunk_count, Snapshot snapshot)
 {
-	int32_t columnIndex = 0;
-	int32_t chunkGroupIndex = 0;
-	int32_t chunkGroupRowOffsetAcc = 0;
-	HeapTuple heapTuple = NULL;
-	uint32_t columnCount = tupleDescriptor->natts;
-	ScanKeyData scanKey[2];
+	int32_t column_index = 0;
+	int32_t chunk_group_index = 0;
+	int32_t chunk_group_row_offset_acc = 0;
+	HeapTuple heap_tuple = nullptr;
+	uint32_t column_count = tuple_descriptor->natts;
+	ScanKeyData scan_keys[2];
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
-	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, AccessShareLock);
-	Relation index = index_open(BioseqColumnChunkIndexRelationId(), AccessShareLock);
+	Oid bioseq_column_chunk_oid = column_chunk_relation_oid();
+	Relation bioseq_column_chunk = table_open(bioseq_column_chunk_oid, AccessShareLock);
+	Relation index = index_open(column_chunk_index_oid(), AccessShareLock);
 
-	scanKey[0] =
+	scan_keys[0] =
 		chunk_codec::scan_key<&chunk_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
-	scanKey[1] =
+			static_cast<std::int64_t>(storage_id));
+	scan_keys[1] =
 		chunk_codec::scan_key<&chunk_row::stripe_num>(
 			static_cast<std::int64_t>(stripe));
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnChunk, index,
-															snapshot, 2, scanKey);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_chunk, index,
+															snapshot, 2, scan_keys);
 
-	StripeSkipList *chunkList = make0<StripeSkipList>();
-	chunkList->chunkCount = chunkCount;
-	chunkList->columnCount = columnCount;
-	chunkList->chunkSkipNodeArray = make_array<ColumnChunkSkipNode*>(columnCount);
-	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	stripe_skip_list *chunk_list =
+		bioseq::postgres::support::allocate_zeroed_object<stripe_skip_list>();
+	chunk_list->chunk_count = chunk_count;
+	chunk_list->column_count = column_count;
+	chunk_list->chunk_skip_nodes =
+		bioseq::postgres::support::allocate_zeroed_array<chunk_skip_node*>(
+			column_count);
+	for (column_index = 0; column_index < column_count; column_index++)
 	{
-		chunkList->chunkSkipNodeArray[columnIndex] =
-			make_array<ColumnChunkSkipNode>(chunkCount);
+		chunk_list->chunk_skip_nodes[column_index] =
+			bioseq::postgres::support::allocate_zeroed_array<chunk_skip_node>(
+				chunk_count);
 	}
 
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																 ForwardScanDirection)))
 	{
 		const chunk_row row = chunk_codec::deform(
-			heapTuple,
-			RelationGetDescr(bioseqColumnChunk),
+			heap_tuple,
+			RelationGetDescr(bioseq_column_chunk),
 			CurrentMemoryContext);
 		const int32_t attr = row.attr_num;
-		const int32_t chunkIndex = row.chunk_group_num;
+		const int32_t chunk_index = row.chunk_group_num;
 
-		if (attr <= 0 || attr > columnCount)
+		if (attr <= 0 || attr > column_count)
 		{
-			bioseq_report<ERR, PG>().msg("invalid columnar chunk entry").detail("Attribute number out of range: {}", attr);
+			bioseq_report<logging_level::error, logging_target::postgres>().with_message("invalid columnar chunk entry").with_detail("Attribute number out of range: {}", attr);
 		}
 
-		if (chunkIndex < 0 || chunkIndex >= chunkCount)
+		if (chunk_index < 0 || chunk_index >= chunk_count)
 		{
-			bioseq_report<ERR, PG>().msg("invalid columnar chunk entry").detail("Chunk number out of range: {}", chunkIndex);
+			bioseq_report<logging_level::error, logging_target::postgres>().with_message("invalid columnar chunk entry").with_detail("Chunk number out of range: {}", chunk_index);
 		}
 
-		columnIndex = attr - 1;
+		column_index = attr - 1;
 
-		ColumnChunkSkipNode *chunk =
-			&chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
-		chunk->rowCount = row.value_count;
-		chunk->valueChunkOffset = row.value_stream_offset;
-		chunk->valueLength = row.value_stream_length;
-		chunk->existsChunkOffset = row.exists_stream_offset;
-		chunk->existsLength = row.exists_stream_length;
-		chunk->valueCompressionType =
-			static_cast<CompressionType>(row.value_compression_type);
-		chunk->valueCompressionLevel = row.value_compression_level;
-		chunk->decompressedValueSize = row.value_decompressed_length;
+		chunk_skip_node *chunk =
+			&chunk_list->chunk_skip_nodes[column_index][chunk_index];
+		chunk->row_count = row.value_count;
+		chunk->value_stream_offset = row.value_stream_offset;
+		chunk->value_stream_length = row.value_stream_length;
+		chunk->exists_stream_offset = row.exists_stream_offset;
+		chunk->exists_stream_length = row.exists_stream_length;
+		chunk->value_compression_algorithm =
+			static_cast<bioseq::compression_algorithm>(row.value_compression_type);
+		chunk->value_compression_level = row.value_compression_level;
+		chunk->value_decompressed_length = row.value_decompressed_length;
 
 		if (!row.minimum_value.has_value()
 			|| !row.maximum_value.has_value())
 		{
-			chunk->hasMinMax = false;
+			chunk->has_min_max = false;
 		}
 		else
 		{
-			bytea *minValue = *row.minimum_value;
-			bytea *maxValue = *row.maximum_value;
+			bytea *min_value = *row.minimum_value;
+			bytea *max_value = *row.maximum_value;
 
-			chunk->minimumValue =
-				bioseq::pg_utils::pg_datum::from_bytea(minValue, TupleDescAttr(tupleDescriptor, columnIndex)).raw();
-			chunk->maximumValue =
-				bioseq::pg_utils::pg_datum::from_bytea(maxValue, TupleDescAttr(tupleDescriptor, columnIndex)).raw();
+			chunk->minimum_value =
+				bioseq::postgres::support::pg_datum::from_bytea(min_value, TupleDescAttr(tuple_descriptor, column_index)).raw();
+			chunk->maximum_value =
+				bioseq::postgres::support::pg_datum::from_bytea(max_value, TupleDescAttr(tuple_descriptor, column_index)).raw();
 
-			chunk->hasMinMax = true;
+			chunk->has_min_max = true;
 		}
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnChunk, AccessShareLock);
+	table_close(bioseq_column_chunk, AccessShareLock);
 
-	ReadChunkGroupRowCounts(storageId, stripe, chunkCount,
-							&chunkList->chunkGroupRowCounts,
-							&chunkList->chunkGroupDeletedRows,
+	read_chunk_group_row_counts(storage_id, stripe, chunk_count,
+							&chunk_list->chunk_group_row_counts,
+							&chunk_list->chunk_group_deleted_rows,
 							snapshot);
 
-	chunkList->chunkGroupRowOffset = make_array<uint32_t>(chunkCount);
+	chunk_list->chunk_group_row_offsets =
+		bioseq::postgres::support::allocate_zeroed_array<uint32_t>(chunk_count);
 
-	for (chunkGroupIndex = 0; chunkGroupIndex < chunkCount; chunkGroupIndex++)
+	for (chunk_group_index = 0; chunk_group_index < chunk_count; chunk_group_index++)
 	{
-		chunkList->chunkGroupRowOffset[chunkGroupIndex] = chunkGroupRowOffsetAcc;
-		chunkGroupRowOffsetAcc += chunkList->chunkGroupRowCounts[chunkGroupIndex];
+		chunk_list->chunk_group_row_offsets[chunk_group_index] = chunk_group_row_offset_acc;
+		chunk_group_row_offset_acc += chunk_list->chunk_group_row_counts[chunk_group_index];
 	}
 
-	return chunkList;
+	return chunk_list;
 }
 
 
 /*
- * ReadChunkRowMask fetches chunk row mask for columnar relation.
+ * read_chunk_row_mask fetches chunk row mask for columnar relation.
  */
 export bytea *
-ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
+read_chunk_row_mask(RelFileLocator relfilelocator, Snapshot snapshot,
 				 MemoryContext cxt,
-				 uint64_t stripeFirstRowNumber, int rowCount)
+				 uint64_t stripe_first_row_number, int row_count)
 {
 	if (snapshot == nullptr)
 	{
-		bioseq_log<ERR, PG>(
-			"ReadChunkRowMask requires the caller's registered snapshot");
+		bioseq_log<logging_level::error, logging_target::postgres>(
+			"read_chunk_row_mask requires the caller's registered snapshot");
 	}
-	HeapTuple heapTuple = NULL;
-	ScanKeyData scanKey[3];
+	HeapTuple heap_tuple = nullptr;
+	ScanKeyData scan_keys[3];
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
-	Relation bioseqColumnRowMask = table_open(bioseqColumnRowMaskOid, AccessShareLock);
-	Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
+	Oid row_mask_relation_oid = column_row_mask_relation_oid();
+	Relation row_mask_relation = table_open(row_mask_relation_oid, AccessShareLock);
+	Relation index = index_open(column_row_mask_index_oid(), AccessShareLock);
 
-	bytea *chunkRowMaskBytea = nullptr;
-	SysScanDesc scanDescriptor = nullptr;
+	bytea *chunk_row_mask_bytea = nullptr;
+	SysScanDesc scan_descriptor = nullptr;
 	{
-		bioseq::pg_support::MemoryContextScope ctx_guard{cxt};
+		bioseq::postgres::support::memory_context_scope context_guard{cxt};
 
-		Size chunkMaskSize =
-			(rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE) ?
-				(rowCount / 8 + 1) :
-				(rowCount / 8);
+		Size chunk_mask_size =
+			(row_count % row_mask_chunk_row_capacity) ?
+				(row_count / 8 + 1) :
+				(row_count / 8);
 
-		chunkRowMaskBytea = make1<bytea>(chunkMaskSize + VARHDRSZ);
-		SET_VARSIZE(chunkRowMaskBytea, chunkMaskSize + VARHDRSZ);
+		chunk_row_mask_bytea =
+			bioseq::postgres::support::allocate_zeroed_storage<bytea>(
+				chunk_mask_size + VARHDRSZ);
+		SET_VARSIZE(chunk_row_mask_bytea, chunk_mask_size + VARHDRSZ);
 
-		scanKey[0] =
+		scan_keys[0] =
 			row_mask_codec::scan_key<&row_mask_row::storage_id>(
-				static_cast<std::int64_t>(storageId));
-		scanKey[1] =
+				static_cast<std::int64_t>(storage_id));
+		scan_keys[1] =
 			row_mask_codec::scan_key<
 				&row_mask_row::start_row_number,
-				bioseq::pg_utils::scan_comparison::greater_equal>(
-					static_cast<std::int64_t>(stripeFirstRowNumber));
-		scanKey[2] =
+				bioseq::postgres::support::scan_comparison::greater_equal>(
+					static_cast<std::int64_t>(stripe_first_row_number));
+		scan_keys[2] =
 			row_mask_codec::scan_key<
 				&row_mask_row::end_row_number,
-				bioseq::pg_utils::scan_comparison::less_equal>(
+				bioseq::postgres::support::scan_comparison::less_equal>(
 					static_cast<std::int64_t>(
-						stripeFirstRowNumber + rowCount - 1));
+						stripe_first_row_number + row_count - 1));
 
-			scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
+			scan_descriptor = systable_beginscan_ordered(row_mask_relation,
 												index,
-												snapshot, 3, scanKey);
+												snapshot, 3, scan_keys);
 
 		Size pos = 0;
-		while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+		while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																	 ForwardScanDirection)))
 		{
 			const row_mask_row row = row_mask_codec::deform(
-				heapTuple,
-				RelationGetDescr(bioseqColumnRowMask),
+				heap_tuple,
+				RelationGetDescr(row_mask_relation),
 				cxt);
 			if (!row.mask.has_value() || *row.mask == nullptr)
 			{
-				throw bioseq::pg_utils::row_codec_error{
+				throw bioseq::postgres::support::row_codec_error{
 					"row mask catalog entry has a NULL mask"};
 			}
-			bytea *currentRowMask = *row.mask;
+			bytea *current_row_mask = *row.mask;
 
 			if (row.start_row_number < 0
 				|| row.end_row_number < row.start_row_number)
 			{
-				throw bioseq::pg_utils::row_codec_error{
+				throw bioseq::postgres::support::row_codec_error{
 					"bioseq_internal.row_mask has an invalid row range"};
 			}
 
-			const std::uint64_t logicalRows =
+			const std::uint64_t logical_rows =
 				static_cast<std::uint64_t>(row.end_row_number)
 				- static_cast<std::uint64_t>(row.start_row_number) + 1;
-			const std::uint64_t logicalBytes =
-				logicalRows / 8 + (logicalRows % 8 != 0 ? 1 : 0);
-			const Size remaining = chunkMaskSize - pos;
-			const Size boundedLogicalBytes = static_cast<Size>(
-				std::min<std::uint64_t>(logicalBytes, remaining));
-			const Size copyBytes = std::min(
-				static_cast<Size>(VARSIZE_ANY_EXHDR(currentRowMask)),
-				boundedLogicalBytes);
+			const std::uint64_t logical_bytes =
+				logical_rows / 8 + (logical_rows % 8 != 0 ? 1 : 0);
+			const Size remaining = chunk_mask_size - pos;
+			const Size bounded_logical_bytes = static_cast<Size>(
+				std::min<std::uint64_t>(logical_bytes, remaining));
+			const Size copy_bytes = std::min(
+				static_cast<Size>(VARSIZE_ANY_EXHDR(current_row_mask)),
+				bounded_logical_bytes);
 
-			if (copyBytes > 0)
+			if (copy_bytes > 0)
 			{
-				memcpy(VARDATA(chunkRowMaskBytea) + pos,
-					   VARDATA(currentRowMask),
-					   copyBytes);
+				memcpy(VARDATA(chunk_row_mask_bytea) + pos,
+					   VARDATA(current_row_mask),
+					   copy_bytes);
 			}
 
-			pos += boundedLogicalBytes;
-			if (pos == chunkMaskSize)
+			pos += bounded_logical_bytes;
+			if (pos == chunk_mask_size)
 			{
 				break;
 			}
 		}
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnRowMask, AccessShareLock);
+	table_close(row_mask_relation, AccessShareLock);
 
-	return chunkRowMaskBytea;
+	return chunk_row_mask_bytea;
 }
 
 
-export void FlushRowMaskCache(
-	bioseq::storage::metadata::catalog_rows::row_mask *rowMaskEntry)
+export void flush_row_mask_cache(
+	bioseq::storage::metadata::catalog_rows::row_mask *row_mask_entry)
 {
-	HeapTuple oldHeapTuple = NULL;
+	HeapTuple old_heap_tuple = nullptr;
 
-	ScanKeyData scanKey;
+	ScanKeyData scan_keys;
 
-	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
-	Relation bioseqColumnRowMask =
-		table_open(bioseqColumnRowMaskOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnRowMask);
+	Oid row_mask_relation_oid = column_row_mask_relation_oid();
+	Relation row_mask_relation =
+		table_open(row_mask_relation_oid, AccessShareLock);
+	TupleDesc tuple_descriptor = RelationGetDescr(row_mask_relation);
 
-	Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
+	Relation index = index_open(column_row_mask_index_oid(), AccessShareLock);
 
-	scanKey =
-		row_mask_codec::scan_key<&row_mask_row::id>(rowMaskEntry->id);
+	scan_keys =
+		row_mask_codec::scan_key<&row_mask_row::id>(row_mask_entry->id);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(row_mask_relation,
 															index,
-															NULL, 1, &scanKey);
+														nullptr, 1, &scan_keys);
 
-	oldHeapTuple = systable_getnext_ordered(scanDescriptor, BackwardScanDirection);
+	old_heap_tuple = systable_getnext_ordered(scan_descriptor, BackwardScanDirection);
 
 	index_close(index, AccessShareLock);
 
-	if (HeapTupleIsValid(oldHeapTuple))
+	if (HeapTupleIsValid(old_heap_tuple))
 	{
 		row_mask_codec::update update{};
 		update
 			.set<&row_mask_row::deleted_rows>(
-				rowMaskEntry->deleted_rows)
+				row_mask_entry->deleted_rows)
 			.set<&row_mask_row::mask>(
-				rowMaskEntry->mask, CurrentMemoryContext);
+				row_mask_entry->mask, CurrentMemoryContext);
 
-		HeapTuple newHeapTuple = update.modify(
-			oldHeapTuple, tupleDescriptor);
+		HeapTuple new_heap_tuple = update.modify(
+			old_heap_tuple, tuple_descriptor);
 
-		CatalogTupleUpdate(bioseqColumnRowMask, &oldHeapTuple->t_self, newHeapTuple);
+		CatalogTupleUpdate(row_mask_relation, &old_heap_tuple->t_self, new_heap_tuple);
 
-		heap_freetuple(newHeapTuple);
+		heap_freetuple(new_heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
-	table_close(bioseqColumnRowMask, AccessShareLock);
+	systable_endscan_ordered(scan_descriptor);
+	table_close(row_mask_relation, AccessShareLock);
 
 	CommandCounterIncrement();
 }
 
 
 /*
- * FindStripeByRowNumber returns StripeMetadata for the stripe whose
- * firstRowNumber is greater than given rowNumber. If no such stripe
- * exists, then returns NULL.
+ * find_stripe_by_row_number returns stripe_metadata for the stripe whose
+ * first_row_number is greater than given row_number. If no such stripe
+ * exists, then returns null.
  */
-export StripeMetadata *
-FindNextStripeByRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapshot)
+export stripe_metadata *
+find_next_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot)
 {
-	return StripeMetadataLookupRowNumber(relation, rowNumber, snapshot, FIND_GREATER);
+	return find_stripe_metadata_by_row_number(relation, row_number, snapshot, row_number_lookup_mode::greater);
 }
 
 
 /*
- * FindStripeByRowNumber returns StripeMetadata for the stripe that contains
- * the row with rowNumber. If no such stripe exists, then returns NULL.
+ * find_stripe_by_row_number returns stripe_metadata for the stripe that contains
+ * the row with row_number. If no such stripe exists, then returns null.
  */
-export StripeMetadata *
-FindStripeByRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapshot)
+export stripe_metadata *
+find_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot)
 {
-	StripeMetadata *stripeMetadata =
-		FindStripeWithMatchingFirstRowNumber(relation, rowNumber, snapshot);
-	if (!stripeMetadata)
+	stripe_metadata *stripe =
+		find_stripe_by_first_row_number(relation, row_number, snapshot);
+	if (!stripe)
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	if (rowNumber > StripeGetHighestRowNumber(stripeMetadata))
+	if (row_number > stripe_highest_row_number(stripe))
 	{
-		return NULL;
+		return nullptr;
 	}
 
-	return stripeMetadata;
+	return stripe;
 }
 
 
 /*
- * FindStripeWithMatchingFirstRowNumber returns a StripeMetadata object for
- * the stripe that has the greatest firstRowNumber among the stripes whose
- * firstRowNumber is smaller than or equal to given rowNumber. If no such
- * stripe exists, then returns NULL.
+ * find_stripe_by_first_row_number returns a stripe_metadata object for
+ * the stripe that has the greatest first_row_number among the stripes whose
+ * first_row_number is smaller than or equal to given row_number. If no such
+ * stripe exists, then returns null.
  *
  * Note that this doesn't mean that found stripe certainly contains the tuple
- * with given rowNumber. This is because, it also needs to be verified if
+ * with given row_number. This is because, it also needs to be verified if
  * highest row number that found stripe contains is greater than or equal to
- * given rowNumber. For this reason, unless that additional check is done,
+ * given row_number. For this reason, unless that additional check is done,
  * this function is mostly useful for checking against "possible" constraint
  * violations due to concurrent writes that are not flushed by other backends
  * yet.
  */
-StripeMetadata *
-FindStripeWithMatchingFirstRowNumber(Relation relation, uint64_t rowNumber,
+stripe_metadata *
+find_stripe_by_first_row_number(Relation relation, uint64_t row_number,
 									 Snapshot snapshot)
 {
-	return StripeMetadataLookupRowNumber(relation, rowNumber, snapshot,
-										 FIND_LESS_OR_EQUAL);
+	return find_stripe_metadata_by_row_number(relation, row_number, snapshot,
+										 row_number_lookup_mode::less_or_equal);
 }
 
-/* FindNextStripeForParallelWorker returns next stripe that should be assigned
+/* find_next_stripe_for_parallel_worker returns next stripe that should be assigned
  * for worker. Approach here is to calculate module of stripe id with total number
- * of workers that are running for execution. 
+ * of workers that are running for execution.
  */
 
-export StripeMetadata * 
-FindNextStripeForParallelWorker(Relation relation,
+export stripe_metadata *
+find_next_stripe_for_parallel_worker(Relation relation,
 								Snapshot snapshot,
-								uint64_t nextStripeId,
-								uint64_t * nextHigherStripeId)
+								uint64_t next_stripe_id,
+								uint64_t * next_higher_stripe_id)
 {
-	StripeMetadata *foundStripeMetadata = NULL;
+	stripe_metadata *found_stripe_metadata = nullptr;
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
-	ScanKeyData scanKey[2];
+	uint64_t storage_id = column_storage_id(relation, false);
+	ScanKeyData scan_keys[2];
 
-	scanKey[0] =
+	scan_keys[0] =
 		stripe_codec::scan_key<&stripe_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
-	scanKey[1] =
+			static_cast<std::int64_t>(storage_id));
+	scan_keys[1] =
 		stripe_codec::scan_key<
 			&stripe_row::stripe_num,
-			bioseq::pg_utils::scan_comparison::greater_equal>(
-				static_cast<std::int64_t>(nextStripeId));
+			bioseq::postgres::support::scan_comparison::greater_equal>(
+				static_cast<std::int64_t>(next_stripe_id));
 
-	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
+	Relation bioseq_column_stripes = table_open(column_stripe_relation_oid(), AccessShareLock);
 
-	Relation index = index_open(BioseqColumnStripePKeyIndexRelationId(),
+	Relation index = index_open(column_stripe_primary_key_index_oid(),
 								AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_stripes, index,
 															snapshot, 2,
-															scanKey);
+															scan_keys);
 
-	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
-	if (HeapTupleIsValid(heapTuple))
+	HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
+	if (HeapTupleIsValid(heap_tuple))
 	{
-		foundStripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
-		*nextHigherStripeId = foundStripeMetadata->id;
+		found_stripe_metadata = build_stripe_metadata(bioseq_column_stripes, heap_tuple);
+		*next_higher_stripe_id = found_stripe_metadata->id;
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnStripes, AccessShareLock);
+	table_close(bioseq_column_stripes, AccessShareLock);
 
-	return foundStripeMetadata;
+	return found_stripe_metadata;
 }
 
 
 /*
- * StripeWriteState returns write state of given stripe.
+ * stripe_write_state_for returns write state of given stripe.
  */
-export StripeWriteStateEnum
-StripeWriteState(StripeMetadata *stripeMetadata)
+export stripe_write_state
+stripe_write_state_for(stripe_metadata *stripe)
 {
-	if (stripeMetadata->aborted)
+	if (stripe->aborted)
 	{
-		return STRIPE_WRITE_ABORTED;
+		return stripe_write_state::aborted;
 	}
-	else if (stripeMetadata->rowCount > 0)
+	else if (stripe->row_count > 0)
 	{
-		return STRIPE_WRITE_FLUSHED;
+		return stripe_write_state::flushed;
 	}
 	else
 	{
-		return STRIPE_WRITE_IN_PROGRESS;
+		return stripe_write_state::in_progress;
 	}
 }
 
 
 /*
- * StripeGetHighestRowNumber returns rowNumber of the row with highest
- * rowNumber in given stripe.
+ * stripe_highest_row_number returns row_number of the row with highest
+ * row_number in given stripe.
  */
 uint64_t
-StripeGetHighestRowNumber(StripeMetadata *stripeMetadata)
+stripe_highest_row_number(stripe_metadata *stripe)
 {
-	return stripeMetadata->firstRowNumber + stripeMetadata->rowCount - 1;
+	return stripe->first_row_number + stripe->row_count - 1;
 }
 
 
 /*
- * StripeMetadataLookupRowNumber returns StripeMetadata for the stripe whose
- * firstRowNumber is less than or equal to (FIND_LESS_OR_EQUAL), or is
- * greater than (FIND_GREATER) given rowNumber by doing backward index
+ * find_stripe_metadata_by_row_number returns stripe_metadata for the stripe whose
+ * first_row_number is less than or equal to (row_number_lookup_mode::less_or_equal), or is
+ * greater than (row_number_lookup_mode::greater) given row_number by doing backward index
  * scan on stripe_first_row_number_idx.
- * If no such stripe exists, then returns NULL.
+ * If no such stripe exists, then returns null.
  */
-static StripeMetadata *
-StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapshot,
-							  RowNumberLookupMode lookupMode)
+static stripe_metadata *
+find_stripe_metadata_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot,
+							  row_number_lookup_mode lookup_mode)
 {
-	Assert(lookupMode == FIND_LESS_OR_EQUAL || lookupMode == FIND_GREATER);
+	Assert(lookup_mode == row_number_lookup_mode::less_or_equal || lookup_mode == row_number_lookup_mode::greater);
 
-	StripeMetadata *foundStripeMetadata = NULL;
+	stripe_metadata *found_stripe_metadata = nullptr;
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
-	ScanKeyData scanKey[2];
-	scanKey[0] =
+	uint64_t storage_id = column_storage_id(relation, false);
+	ScanKeyData scan_keys[2];
+	scan_keys[0] =
 		stripe_codec::scan_key<&stripe_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
+			static_cast<std::int64_t>(storage_id));
 
-	if (lookupMode == FIND_LESS_OR_EQUAL)
+	if (lookup_mode == row_number_lookup_mode::less_or_equal)
 	{
-		scanKey[1] =
+		scan_keys[1] =
 			stripe_codec::scan_key<
 				&stripe_row::first_row_number,
-				bioseq::pg_utils::scan_comparison::less_equal>(
-					static_cast<std::int64_t>(rowNumber));
+				bioseq::postgres::support::scan_comparison::less_equal>(
+					static_cast<std::int64_t>(row_number));
 	}
-	else if (lookupMode == FIND_GREATER)
+	else if (lookup_mode == row_number_lookup_mode::greater)
 	{
-		scanKey[1] =
+		scan_keys[1] =
 			stripe_codec::scan_key<
 				&stripe_row::first_row_number,
-				bioseq::pg_utils::scan_comparison::greater>(
-					static_cast<std::int64_t>(rowNumber));
+				bioseq::postgres::support::scan_comparison::greater>(
+					static_cast<std::int64_t>(row_number));
 	}
 
 
-	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
-	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
+	Relation bioseq_column_stripes = table_open(column_stripe_relation_oid(), AccessShareLock);
+	Relation index = index_open(stripe_first_row_number_index_oid(),
 								AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_stripes, index,
 															snapshot, 2,
-															scanKey);
+															scan_keys);
 
-	ScanDirection scanDirection = NoMovementScanDirection;
-	if (lookupMode == FIND_LESS_OR_EQUAL)
+	ScanDirection scan_direction = NoMovementScanDirection;
+	if (lookup_mode == row_number_lookup_mode::less_or_equal)
 	{
-		scanDirection = BackwardScanDirection;
+		scan_direction = BackwardScanDirection;
 	}
-	else if (lookupMode == FIND_GREATER)
+	else if (lookup_mode == row_number_lookup_mode::greater)
 	{
-		scanDirection = ForwardScanDirection;
+		scan_direction = ForwardScanDirection;
 	}
-	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, scanDirection);
-	if (HeapTupleIsValid(heapTuple))
+	HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, scan_direction);
+	if (HeapTupleIsValid(heap_tuple))
 	{
-		foundStripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
+		found_stripe_metadata = build_stripe_metadata(bioseq_column_stripes, heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnStripes, AccessShareLock);
+	table_close(bioseq_column_stripes, AccessShareLock);
 
-	return foundStripeMetadata;
+	return found_stripe_metadata;
 }
 
 
-/*
- * CheckStripeMetadataConsistency first decides if stripe write operation for
- * given stripe is "flushed", "aborted" or "in-progress", then errors out if
- * its metadata entry contradicts with this fact.
- *
- * Checks performed here are just to catch bugs, so it is encouraged to call
- * this function whenever a StripeMetadata object is built from an heap tuple
- * of bioseq.stripe. Currently, BuildStripeMetadata is the only function
- * that does this.
- */
+/// @brief Rejects catalog fields that contradict a stripe's write state.
 static void
-CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata)
+validate_stripe_metadata(stripe_metadata *stripe)
 {
-	bool stripeLooksInProgress =
-		stripeMetadata->rowCount == 0 && stripeMetadata->chunkCount == 0 &&
-		stripeMetadata->fileOffset == BioseqColumnInvalidLogicalOffset &&
-		stripeMetadata->dataLength == 0;
+	bool stripe_looks_in_progress =
+		stripe->row_count == 0 && stripe->chunk_count == 0 &&
+		stripe->file_offset == invalid_logical_offset &&
+		stripe->data_length == 0;
 
 	/*
-	 * Even if stripe is flushed, fileOffset and dataLength might be equal
+	 * Even if stripe is flushed, file_offset and data_length might be equal
 	 * to 0 for zero column tables, but those two should still be consistent
 	 * with respect to each other.
 	 */
-	bool stripeLooksFlushed =
-		stripeMetadata->rowCount > 0 && stripeMetadata->chunkCount > 0 &&
-		((stripeMetadata->fileOffset != BioseqColumnInvalidLogicalOffset &&
-		  stripeMetadata->dataLength > 0) ||
-		 (stripeMetadata->fileOffset == BioseqColumnInvalidLogicalOffset &&
-		  stripeMetadata->dataLength == 0));
+	bool stripe_looks_flushed =
+		stripe->row_count > 0 && stripe->chunk_count > 0 &&
+		((stripe->file_offset != invalid_logical_offset &&
+		  stripe->data_length > 0) ||
+		 (stripe->file_offset == invalid_logical_offset &&
+		  stripe->data_length == 0));
 
-	StripeWriteStateEnum stripeWriteState = StripeWriteState(stripeMetadata);
-	if (stripeWriteState == STRIPE_WRITE_FLUSHED && stripeLooksFlushed)
+	const stripe_write_state write_state = stripe_write_state_for(stripe);
+	if (write_state == stripe_write_state::flushed && stripe_looks_flushed)
 	{
 		/*
 		 * If stripe was flushed to disk, then we expect stripe to store
@@ -1243,17 +1223,17 @@ CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata)
 		 */
 		return;
 	}
-	else if (stripeWriteState == STRIPE_WRITE_IN_PROGRESS && stripeLooksInProgress)
+	else if (write_state == stripe_write_state::in_progress && stripe_looks_in_progress)
 	{
 		/*
 		 * If stripe was not flushed to disk, then values of given four
 		 * fields should match the columns inserted by
-		 * InsertEmptyStripeMetadataRow.
+		 * insert_empty_stripe_metadata_row.
 		 */
 		return;
 	}
-	else if (stripeWriteState == STRIPE_WRITE_ABORTED && (stripeLooksInProgress ||
-														  stripeLooksFlushed))
+	else if (write_state == stripe_write_state::aborted && (stripe_looks_in_progress ||
+														  stripe_looks_flushed))
 	{
 		/*
 		 * Stripe metadata entry for an aborted write can be complete or
@@ -1263,79 +1243,83 @@ CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata)
 		return;
 	}
 
-	bioseq_log<ERR, PG>( "unexpected stripe state, stripe metadata entry for stripe with id={} is not consistent", stripeMetadata->id);
+	bioseq_log<logging_level::error, logging_target::postgres>( "unexpected stripe state, stripe metadata entry for stripe with id={} is not consistent", stripe->id);
 }
 
 
 /*
- * FindStripeWithHighestRowNumber returns StripeMetadata for the stripe that
- * has the row with highest rowNumber by doing backward index scan on
- * stripe_first_row_number_idx. If given relation is empty, then returns NULL.
+ * find_highest_row_number_stripe returns stripe_metadata for the stripe that
+ * has the row with highest row_number by doing backward index scan on
+ * stripe_first_row_number_idx. If given relation is empty, then returns null.
  */
-export StripeMetadata *
-FindStripeWithHighestRowNumber(Relation relation, Snapshot snapshot)
+export stripe_metadata *
+find_highest_row_number_stripe(Relation relation, Snapshot snapshot)
 {
-	StripeMetadata *stripeWithHighestRowNumber = NULL;
+	stripe_metadata *stripe_with_highest_row_number = nullptr;
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
-	ScanKeyData scanKey[1];
-	scanKey[0] =
+	uint64_t storage_id = column_storage_id(relation, false);
+	ScanKeyData scan_keys[1];
+	scan_keys[0] =
 		stripe_codec::scan_key<&stripe_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
+			static_cast<std::int64_t>(storage_id));
 
-	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
-	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
+	Relation bioseq_column_stripes = table_open(column_stripe_relation_oid(), AccessShareLock);
+	Relation index = index_open(stripe_first_row_number_index_oid(),
 								AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
-															snapshot, 1, scanKey);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_stripes, index,
+															snapshot, 1, scan_keys);
 
-	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, BackwardScanDirection);
-	if (HeapTupleIsValid(heapTuple))
+	HeapTuple heap_tuple = systable_getnext_ordered(scan_descriptor, BackwardScanDirection);
+	if (HeapTupleIsValid(heap_tuple))
 	{
-		stripeWithHighestRowNumber = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
+		stripe_with_highest_row_number = build_stripe_metadata(bioseq_column_stripes, heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnStripes, AccessShareLock);
+	table_close(bioseq_column_stripes, AccessShareLock);
 
-	return stripeWithHighestRowNumber;
+	return stripe_with_highest_row_number;
 }
 
 
 /*
- * ReadChunkGroupRowCounts returns an array of row counts of chunk groups and 
+ * read_chunk_group_row_counts returns an array of row counts of chunk groups and
  * deleted rows count for each chunk group for given stripe.
  * Arrays that are updated will be allocated in this function.
  */
 static void
-ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroupCount,
-						uint32_t **chunkGroupRowCounts, uint32_t **chunkGroupDeletedRows,
+read_chunk_group_row_counts(uint64_t storage_id, uint64_t stripe, uint32_t chunk_group_count,
+						uint32_t **chunk_group_row_counts, uint32_t **chunk_group_deleted_rows,
 						Snapshot snapshot)
 {
-	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, AccessShareLock);
-	Relation index = index_open(BioseqColumnChunkGroupIndexRelationId(), AccessShareLock);
+	Oid bioseq_column_chunk_group_oid = column_chunk_group_relation_oid();
+	Relation bioseq_column_chunk_group = table_open(bioseq_column_chunk_group_oid, AccessShareLock);
+	Relation index = index_open(column_chunk_group_index_oid(), AccessShareLock);
 
-	std::array<ScanKeyData, 2> scanKey{
+	std::array<ScanKeyData, 2> scan_keys{
 		chunk_group_codec::scan_key<&chunk_group_row::storage_id>(
-			static_cast<std::int64_t>(storageId)),
+			static_cast<std::int64_t>(storage_id)),
 		chunk_group_codec::scan_key<&chunk_group_row::stripe_num>(
 			static_cast<std::int64_t>(stripe)),
 	};
 
-	SysScanDesc scanDescriptor =
+	SysScanDesc scan_descriptor =
 		systable_beginscan_ordered(
-			bioseqColumnChunkGroup,
+			bioseq_column_chunk_group,
 			index,
 			snapshot,
-			static_cast<int>(scanKey.size()),
-			scanKey.data());
+			static_cast<int>(scan_keys.size()),
+			scan_keys.data());
 
-	HeapTuple heapTuple = NULL;
+	HeapTuple heap_tuple = nullptr;
 
-	*chunkGroupRowCounts = make_array<uint32_t>(chunkGroupCount);
-	*chunkGroupDeletedRows = make_array<uint32_t>(chunkGroupCount);
+	*chunk_group_row_counts =
+		bioseq::postgres::support::allocate_zeroed_array<uint32_t>(
+			chunk_group_count);
+	*chunk_group_deleted_rows =
+		bioseq::postgres::support::allocate_zeroed_array<uint32_t>(
+			chunk_group_count);
 
 	/*
 	 * The caller's snapshot selects the one visible version of each chunk-group
@@ -1343,244 +1327,238 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 	 * to an older REPEATABLE READ snapshot; filtering it by the physical
 	 * HEAP_HOT_UPDATED flag would incorrectly hide pre-update source rows.
 	 */
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																 ForwardScanDirection)))
 	{
 		const chunk_group_row row = chunk_group_codec::deform(
-			heapTuple,
-			RelationGetDescr(bioseqColumnChunkGroup),
+			heap_tuple,
+			RelationGetDescr(bioseq_column_chunk_group),
 			CurrentMemoryContext);
-		const uint32_t tupleChunkGroupIndex =
+		const uint32_t tuple_chunk_group_index =
 			static_cast<uint32_t>(row.chunk_group_num);
 
-		if (tupleChunkGroupIndex >= chunkGroupCount)
+		if (tuple_chunk_group_index >= chunk_group_count)
 		{
-			bioseq_log<WRN, PG>( "Tuple chunk group higher than chunk group count: {}, {} (storage_id = {}, stripe_id = {})", tupleChunkGroupIndex, chunkGroupCount, storageId, stripe);
+			bioseq_log<logging_level::warning, logging_target::postgres>( "Tuple chunk group higher than chunk group count: {}, {} (storage_id = {}, stripe_id = {})", tuple_chunk_group_index, chunk_group_count, storage_id, stripe);
 			continue;
 		}
 
-		(*chunkGroupRowCounts)[tupleChunkGroupIndex] =
+		(*chunk_group_row_counts)[tuple_chunk_group_index] =
 			static_cast<uint32_t>(row.row_count);
 
-		(*chunkGroupDeletedRows)[tupleChunkGroupIndex] =
+		(*chunk_group_deleted_rows)[tuple_chunk_group_index] =
 			static_cast<uint32_t>(row.deleted_rows);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnChunkGroup, AccessShareLock);
+	table_close(bioseq_column_chunk_group, AccessShareLock);
 }
 
 
 /*
- * UpdateChunkGroupDeletedRows updates `deleted_rows` column for each chunk group.
+ * update_chunk_group_deleted_rows updates `deleted_rows` column for each chunk group.
  */
 export void
-UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe, 
-							uint32_t chunkGroupId, uint32_t deletedRowNumber)
+update_chunk_group_deleted_rows(uint64_t storage_id, uint64_t stripe,
+							uint32_t chunk_group_id, uint32_t deleted_row_number)
 {
 
-	HeapTuple oldHeapTuple = NULL;
+	HeapTuple old_heap_tuple = nullptr;
 
-	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnChunkGroup);
-	Relation index = index_open(BioseqColumnChunkGroupIndexRelationId(), AccessShareLock);
+	Oid bioseq_column_chunk_group_oid = column_chunk_group_relation_oid();
+	Relation bioseq_column_chunk_group = table_open(bioseq_column_chunk_group_oid, AccessShareLock);
+	TupleDesc tuple_descriptor = RelationGetDescr(bioseq_column_chunk_group);
+	Relation index = index_open(column_chunk_group_index_oid(), AccessShareLock);
 
-	std::array<ScanKeyData, 3> scanKey{
+	std::array<ScanKeyData, 3> scan_keys{
 		chunk_group_codec::scan_key<&chunk_group_row::storage_id>(
-			static_cast<std::int64_t>(storageId)),
+			static_cast<std::int64_t>(storage_id)),
 		chunk_group_codec::scan_key<&chunk_group_row::stripe_num>(
 			static_cast<std::int64_t>(stripe)),
 		chunk_group_codec::scan_key<&chunk_group_row::chunk_group_num>(
-			static_cast<std::int32_t>(chunkGroupId)),
+			static_cast<std::int32_t>(chunk_group_id)),
 	};
 
-	SysScanDesc scanDescriptor =
+	SysScanDesc scan_descriptor =
 		systable_beginscan_ordered(
-			bioseqColumnChunkGroup,
+			bioseq_column_chunk_group,
 			index,
-			NULL,
-			static_cast<int>(scanKey.size()),
-			scanKey.data());
+			nullptr,
+			static_cast<int>(scan_keys.size()),
+			scan_keys.data());
 
-	oldHeapTuple = systable_getnext_ordered(scanDescriptor, BackwardScanDirection);
+	old_heap_tuple = systable_getnext_ordered(scan_descriptor, BackwardScanDirection);
 
 	index_close(index, AccessShareLock);
 
-	if (HeapTupleIsValid(oldHeapTuple))
+	if (HeapTupleIsValid(old_heap_tuple))
 	{
 		chunk_group_codec::update update{};
 		update.set<&chunk_group_row::deleted_rows>(
-			static_cast<std::int64_t>(deletedRowNumber));
+			static_cast<std::int64_t>(deleted_row_number));
 
-		HeapTuple newHeapTuple =
-			update.modify(oldHeapTuple, tupleDescriptor);
+		HeapTuple new_heap_tuple =
+			update.modify(old_heap_tuple, tuple_descriptor);
 
-		CatalogTupleUpdate(bioseqColumnChunkGroup, &oldHeapTuple->t_self, newHeapTuple);
+		CatalogTupleUpdate(bioseq_column_chunk_group, &old_heap_tuple->t_self, new_heap_tuple);
 
-		heap_freetuple(newHeapTuple);
+		heap_freetuple(new_heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
-	table_close(bioseqColumnChunkGroup, AccessShareLock);
+	systable_endscan_ordered(scan_descriptor);
+	table_close(bioseq_column_chunk_group, AccessShareLock);
 
 	CommandCounterIncrement();
 }
 
 
 /*
- * InsertEmptyStripeMetadataRow adds a row to bioseq.stripe for the empty
- * stripe reservation made for stripeId.
+ * insert_empty_stripe_metadata_row adds a row to bioseq.stripe for the empty
+ * stripe reservation made for stripe_id.
  */
 static void
-InsertEmptyStripeMetadataRow(uint64_t storageId, uint64_t stripeId, uint32_t columnCount,
-							 uint32_t chunkGroupRowCount, uint64_t firstRowNumber)
+insert_empty_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, uint32_t column_count,
+							 uint32_t chunk_group_row_count, uint64_t first_row_number)
 {
-	auto encoded = stripe_codec::encode(stripe_row{
-		.storage_id = static_cast<std::int64_t>(storageId),
-		.stripe_num = static_cast<std::int64_t>(stripeId),
+	stripe_codec::encoded_row encoded = stripe_codec::encode(stripe_row{
+		.storage_id = static_cast<std::int64_t>(storage_id),
+		.stripe_num = static_cast<std::int64_t>(stripe_id),
 		.file_offset = static_cast<std::int64_t>(
-			BioseqColumnInvalidLogicalOffset),
+			invalid_logical_offset),
 		.data_length = 0,
-		.column_count = static_cast<std::int32_t>(columnCount),
+		.column_count = static_cast<std::int32_t>(column_count),
 		.chunk_row_count =
-			static_cast<std::int32_t>(chunkGroupRowCount),
+			static_cast<std::int32_t>(chunk_group_row_count),
 		.row_count = 0,
 		.chunk_group_count = 0,
-		.first_row_number = static_cast<std::int64_t>(firstRowNumber),
+		.first_row_number = static_cast<std::int64_t>(first_row_number),
 	});
 
-	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
-	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, RowExclusiveLock);
+	Oid bioseq_column_stripes_oid = column_stripe_relation_oid();
+	Relation bioseq_column_stripes = table_open(bioseq_column_stripes_oid, RowExclusiveLock);
 
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnStripes);
-	auto tuple_data = encoded.tuple_data(
-		RelationGetDescr(bioseqColumnStripes));
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(bioseq_column_stripes);
+	const stripe_codec::encoded_tuple_data tuple_data = encoded.tuple_data(
+		RelationGetDescr(bioseq_column_stripes));
 
-	bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
-		modifyState, tuple_data.values, tuple_data.nulls);
+	bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
+		relation_modification_state, tuple_data.values, tuple_data.nulls);
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
 
-	table_close(bioseqColumnStripes, RowExclusiveLock);
+	table_close(bioseq_column_stripes, RowExclusiveLock);
 }
 
 
 /*
- * StripesForRelfilenode returns a list of StripeMetadata for stripes
+ * list_stripes_for_relation returns a list of stripe_metadata for stripes
  * of the given relfilelocator.
  */
 export List *
-StripesForRelfilenode(RelFileLocator relfilelocator, ScanDirection scanDirection)
+list_stripes_for_relation(RelFileLocator relfilelocator, ScanDirection scan_direction)
 {
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	return ReadDataFileStripeList(storageId, GetTransactionSnapshot(), scanDirection);
+	return read_data_file_stripes(storage_id, GetTransactionSnapshot(), scan_direction);
 }
 
 
-/*
- * BioseqColumnTableRowCount returns the exact row count of a table using skiplists.
- *
- * DOC0322 §7.4 — moved here from table/columnar_customscan.cppm (where it was an
- * `extern "C++"` reach). Its body iterates StripesForRelfilenode + the
- * PList<StripeMetadata> view, both owned by storage_metadata:core, so it lives
- * here and is reached by callers via `import storage_metadata;`.
- */
+/// @brief Returns the exact row count represented by a relation's stripes.
 export uint64_t
-BioseqColumnTableRowCount(Relation relation)
+column_table_row_count(Relation relation)
 {
-	uint64_t totalRowCount = 0;
-	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
+	uint64_t total_row_count = 0;
+	List *stripe_list = list_stripes_for_relation(relation->rd_locator, ForwardScanDirection);
 
-	for (auto stripeMetadata : PList<StripeMetadata>(stripeList))
+	for (stripe_metadata* stripe :
+		 bioseq::postgres::support::postgres_list<stripe_metadata>{stripe_list})
 	{
-		totalRowCount += stripeMetadata->rowCount;
+		total_row_count += stripe->row_count;
 	}
 
-	return totalRowCount;
+	return total_row_count;
 }
 
 
 /*
- * DeletedRowsForStripe returns number of deleted rows for stripe
+ * deleted_rows_for_stripe returns number of deleted rows for stripe
  * of the given relfilelocator.
  */
 export uint32_t
-DeletedRowsForStripe(RelFileLocator relfilelocator, uint32_t chunkCount, uint64_t stripeId)
+deleted_rows_for_stripe(RelFileLocator relfilelocator, uint32_t chunk_count, uint64_t stripe_id)
 {
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	uint32_t *chunkGroupRowCounts;
-	uint32_t *chunkGroupDeletedRows;
+	uint32_t *chunk_group_row_counts;
+	uint32_t *chunk_group_deleted_rows;
 	int i;
 
-	uint32_t deletedRows = 0;
-	
-	ReadChunkGroupRowCounts(storageId, stripeId, chunkCount,
-							&chunkGroupRowCounts, &chunkGroupDeletedRows,
+	uint32_t deleted_rows = 0;
+
+	read_chunk_group_row_counts(storage_id, stripe_id, chunk_count,
+							&chunk_group_row_counts, &chunk_group_deleted_rows,
 							GetTransactionSnapshot());
 
-	for (i = 0; i < chunkCount; i++)
+	for (i = 0; i < chunk_count; i++)
 	{
-		deletedRows += chunkGroupDeletedRows[i];
+		deleted_rows += chunk_group_deleted_rows[i];
 	}
 
-	pfree(chunkGroupRowCounts);
-	pfree(chunkGroupDeletedRows);
+	pfree(chunk_group_row_counts);
+	pfree(chunk_group_deleted_rows);
 
-	return deletedRows;
+	return deleted_rows;
 }
 
 /*
- * DecompressedLengthForStripe returns total size of all decompressed rows and chunk
+ * decompressed_length_for_stripe returns total size of all decompressed rows and chunk
  * for given stripe
  */
 export Size
-DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
+decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id)
 {
-	HeapTuple heapTuple = NULL;
-	ScanKeyData scanKey[2];
+	HeapTuple heap_tuple = nullptr;
+	ScanKeyData scan_keys[2];
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
-	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, AccessShareLock);
-	Relation index = index_open(BioseqColumnChunkIndexRelationId(), AccessShareLock);
+	Oid bioseq_column_chunk_oid = column_chunk_relation_oid();
+	Relation bioseq_column_chunk = table_open(bioseq_column_chunk_oid, AccessShareLock);
+	Relation index = index_open(column_chunk_index_oid(), AccessShareLock);
 
-	scanKey[0] =
+	scan_keys[0] =
 		chunk_codec::scan_key<&chunk_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
-	scanKey[1] =
+			static_cast<std::int64_t>(storage_id));
+	scan_keys[1] =
 		chunk_codec::scan_key<&chunk_row::stripe_num>(
-			static_cast<std::int64_t>(stripeId));
+			static_cast<std::int64_t>(stripe_id));
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnChunk, index,
-															GetTransactionSnapshot(), 2, scanKey);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_chunk, index,
+															GetTransactionSnapshot(), 2, scan_keys);
 
-	Size decompressedChunkSize = 0;
+	Size decompressed_chunk_size = 0;
 
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																 ForwardScanDirection)))
 	{
 		const chunk_row row = chunk_codec::deform(
-			heapTuple,
-			RelationGetDescr(bioseqColumnChunk),
+			heap_tuple,
+			RelationGetDescr(bioseq_column_chunk),
 			CurrentMemoryContext);
-		decompressedChunkSize += row.value_decompressed_length;
+		decompressed_chunk_size += row.value_decompressed_length;
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnChunk, AccessShareLock);
+	table_close(bioseq_column_chunk, AccessShareLock);
 
-	return decompressedChunkSize;
+	return decompressed_chunk_size;
 }
 
 
 /*
- * GetHighestUsedAddress returns the highest used address for the given
+ * find_highest_used_address returns the highest used address for the given
  * relfilelocator across all active and inactive transactions.
  *
  * This is used by truncate stage of VACUUM, and VACUUM can be called
@@ -1588,242 +1566,235 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
  * returns 0.
  */
 export uint64_t
-GetHighestUsedAddress(RelFileLocator relfilelocator)
+find_highest_used_address(RelFileLocator relfilelocator)
 {
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	uint64_t highestUsedAddress = 0;
-	uint64_t highestUsedId = 0;
-	GetHighestUsedAddressAndId(storageId, &highestUsedAddress, &highestUsedId);
+	uint64_t highest_used_address = 0;
+	uint64_t highest_used_id = 0;
+	find_highest_used_address_and_id(storage_id, &highest_used_address, &highest_used_id);
 
-	return highestUsedAddress;
+	return highest_used_address;
 }
 
 
 /*
- * GetHighestUsedAddressAndId returns the highest used address and id for
+ * find_highest_used_address_and_id returns the highest used address and id for
  * the given relfilelocator across all active and inactive transactions.
  */
 static void
-GetHighestUsedAddressAndId(uint64_t storageId,
-						   uint64_t *highestUsedAddress,
-						   uint64_t *highestUsedId)
+find_highest_used_address_and_id(uint64_t storage_id,
+						   uint64_t *highest_used_address,
+						   uint64_t *highest_used_id)
 {
-	ListCell *stripeMetadataCell = NULL;
+	SnapshotData snapshot_dirty;
+	InitDirtySnapshot(snapshot_dirty);
 
-	SnapshotData SnapshotDirty;
-	InitDirtySnapshot(SnapshotDirty);
-
-	List *stripeMetadataList = ReadDataFileStripeList(storageId, &SnapshotDirty,
+	List *stripe_metadata_list = read_data_file_stripes(storage_id, &snapshot_dirty,
 													  ForwardScanDirection);
 
-	*highestUsedId = 0;
+	*highest_used_id = 0;
 
 	/* file starts with metapage */
-	*highestUsedAddress = BIOSEQ_COLUMN_BYTES_PER_PAGE;
+	*highest_used_address = usable_column_bytes_per_page;
 
-	for (auto stripe : PList<StripeMetadata>(stripeMetadataList))
+	for (stripe_metadata* stripe :
+		 bioseq::postgres::support::postgres_list<stripe_metadata>{
+			 stripe_metadata_list})
 	{
-		uint64_t lastByte = stripe->fileOffset + stripe->dataLength - 1;
-		*highestUsedAddress = std::max(*highestUsedAddress, lastByte);
-		*highestUsedId = std::max(*highestUsedId, static_cast<uint64_t>(stripe->id));
+		uint64_t last_byte = stripe->file_offset + stripe->data_length - 1;
+		*highest_used_address = std::max(*highest_used_address, last_byte);
+		*highest_used_id = std::max(*highest_used_id, static_cast<uint64_t>(stripe->id));
 	}
 }
 
 
 /*
- * ReserveEmptyStripe reserves an empty stripe for given relation
+ * reserve_empty_stripe reserves an empty stripe for given relation
  * and inserts it into bioseq.stripe. It is guaranteed that concurrent
  * writes won't overwrite the returned stripe.
  */
-export EmptyStripeReservation *
-ReserveEmptyStripe(Relation rel, uint64_t columnCount, uint64_t chunkGroupRowCount,
-				   uint64_t stripeRowCount)
+export empty_stripe_reservation *
+reserve_empty_stripe(Relation rel, uint64_t column_count, uint64_t chunk_group_row_count,
+				   uint64_t stripe_row_limit)
 {
-	EmptyStripeReservation *stripeReservation = make0<EmptyStripeReservation>();
+	empty_stripe_reservation *stripe_reservation =
+		bioseq::postgres::support::allocate_zeroed_object<
+			empty_stripe_reservation>();
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, false);
+	uint64_t storage_id = column_storage_id(rel, false);
 
-	stripeReservation->stripeId = BioseqColumnStorageReserveStripeId(rel);
-	stripeReservation->stripeFirstRowNumber =
-		BioseqColumnStorageReserveRowNumber(rel, stripeRowCount);
+	stripe_reservation->stripe_id = reserve_column_stripe_id(rel);
+	stripe_reservation->stripe_first_row_number =
+		reserve_column_row_numbers(rel, stripe_row_limit);
 
-	/*
-	 * XXX: Instead of inserting a dummy entry to bioseq.stripe and
-	 * updating it when flushing the stripe, we could have a hash table
-	 * in shared memory for the bookkeeping of ongoing writes.
-	 */
-	InsertEmptyStripeMetadataRow(storageId, stripeReservation->stripeId,
-								 columnCount, chunkGroupRowCount,
-								 stripeReservation->stripeFirstRowNumber);
+	/* The catalog reservation is the concurrency-visible owner record and is
+	 * completed in place when buffered stripe data is flushed. */
+	insert_empty_stripe_metadata_row(storage_id, stripe_reservation->stripe_id,
+								 column_count, chunk_group_row_count,
+								 stripe_reservation->stripe_first_row_number);
 
-	return stripeReservation;
+	return stripe_reservation;
 }
 
 
 /*
- * CompleteStripeReservation completes reservation of the stripe with
- * stripeId for given size and in-place updates related stripe metadata tuple
+ * complete_stripe_reservation completes reservation of the stripe with
+ * stripe_id for given size and in-place updates related stripe metadata tuple
  * to complete reservation.
  */
-export StripeMetadata *
-CompleteStripeReservation(Relation rel, uint64_t stripeId, uint64_t sizeBytes,
-						  uint64_t rowCount, uint64_t chunkCount)
+export stripe_metadata *
+complete_stripe_reservation(Relation rel, uint64_t stripe_id, uint64_t size_bytes,
+						  uint64_t row_count, uint64_t chunk_count)
 {
-	uint64_t resLogicalStart = BioseqColumnStorageReserveData(rel, sizeBytes);
-	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, false);
+	uint64_t res_logical_start = reserve_column_storage_bytes(rel, size_bytes);
+	uint64_t storage_id = column_storage_id(rel, false);
 
 	stripe_codec::update update{};
 	update
 		.set<&stripe_row::file_offset>(
-			static_cast<std::int64_t>(resLogicalStart))
+			static_cast<std::int64_t>(res_logical_start))
 		.set<&stripe_row::data_length>(
-			static_cast<std::int64_t>(sizeBytes))
+			static_cast<std::int64_t>(size_bytes))
 		.set<&stripe_row::row_count>(
-			static_cast<std::int64_t>(rowCount))
+			static_cast<std::int64_t>(row_count))
 		.set<&stripe_row::chunk_group_count>(
-			static_cast<std::int32_t>(chunkCount));
+			static_cast<std::int32_t>(chunk_count));
 
-	return UpdateStripeMetadataRow(storageId, stripeId, update);
+	return update_stripe_metadata_row(storage_id, stripe_id, update);
 }
 
 
-/*
- * UpdateStripeMetadataRow updates stripe metadata tuple for the stripe with
- * stripeId according to the provided update row.
- * Note that this function shouldn't be used for the cases where any indexes
- * of stripe metadata should be updated according to modifications done.
+/** @brief Updates non-indexed fields of one stripe catalog row in place.
  *
- * This was originally implemented on top of heap_inplace_update(), which was
- * removed in PG-18. The systable_inplace_update_* API is available in both
- * PG-17 and PG-18 and is the upstream-recommended replacement, so we use it
- * unconditionally rather than maintaining two versions of the function body.
+ * The caller must not use this path for fields covered by a catalog index.
  */
-static StripeMetadata *
-UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId,
+static stripe_metadata *
+update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id,
 						stripe_codec::update &update)
 {
-	ScanKeyData scanKey[2];
-	scanKey[0] =
+	ScanKeyData scan_keys[2];
+	scan_keys[0] =
 		stripe_codec::scan_key<&stripe_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
-	scanKey[1] =
+			static_cast<std::int64_t>(storage_id));
+	scan_keys[1] =
 		stripe_codec::scan_key<&stripe_row::stripe_num>(
-			static_cast<std::int64_t>(stripeId));
+			static_cast<std::int64_t>(stripe_id));
 
-	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
-	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnStripes);
+	Oid bioseq_column_stripes_oid = column_stripe_relation_oid();
+	Relation bioseq_column_stripes = table_open(bioseq_column_stripes_oid, AccessShareLock);
+	TupleDesc tuple_descriptor = RelationGetDescr(bioseq_column_stripes);
 
-	Oid indexId = BioseqColumnStripePKeyIndexRelationId();
-	bool indexOk = OidIsValid(indexId);
+	Oid index_id = column_stripe_primary_key_index_oid();
+	bool index_ok = OidIsValid(index_id);
 
 	void *state = nullptr;
-	HeapTuple oldTuple = nullptr;
-	systable_inplace_update_begin(bioseqColumnStripes, indexId, indexOk,
+	HeapTuple old_tuple = nullptr;
+	systable_inplace_update_begin(bioseq_column_stripes, index_id, index_ok,
 								  /* snapshot */ nullptr,
-								  2, scanKey, &oldTuple, &state);
+								  2, scan_keys, &old_tuple, &state);
 
-	if (!HeapTupleIsValid(oldTuple))
+	if (!HeapTupleIsValid(old_tuple))
 	{
 		systable_inplace_update_cancel(state);
-		table_close(bioseqColumnStripes, AccessShareLock);
-		bioseq::pg_utils::raise_sql_error(
+		table_close(bioseq_column_stripes, AccessShareLock);
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = fmt::format(
 					"attempted to modify an unexpected stripe, columnar "
 					"storage with id={} does not have stripe with id={}",
-					storageId,
-					stripeId),
+					storage_id,
+					stripe_id),
 			});
 	}
 
-	HeapTuple modifiedTuple = update.modify(oldTuple, tupleDescriptor);
+	HeapTuple modified_tuple = update.modify(old_tuple, tuple_descriptor);
 
-	systable_inplace_update_finish(state, modifiedTuple);
+	systable_inplace_update_finish(state, modified_tuple);
 
 	/*
-	 * BuildStripeMetadata expects a real heap tuple with MVCC fields, which
-	 * is what oldTuple is — the in-place update preserved its header.
+	 * build_stripe_metadata expects a real heap tuple with MVCC fields, which
+	 * is what old_tuple is — the in-place update preserved its header.
 	 */
-	StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(bioseqColumnStripes,
-																 modifiedTuple);
+	stripe_metadata *modified_stripe_metadata = build_stripe_metadata(bioseq_column_stripes,
+																 modified_tuple);
 
 	CommandCounterIncrement();
 
-	heap_freetuple(modifiedTuple);
-	table_close(bioseqColumnStripes, AccessShareLock);
+	heap_freetuple(modified_tuple);
+	table_close(bioseq_column_stripes, AccessShareLock);
 
-	/* return StripeMetadata object built from modified tuple */
-	return modifiedStripeMetadata;
+	/* return stripe_metadata object built from modified tuple */
+	return modified_stripe_metadata;
 }
 
 
 /*
- * ReadDataFileStripeList reads the stripe list for a given storageId
+ * read_data_file_stripes reads the stripe list for a given storage_id
  * in the given snapshot.
  */
 static List *
-ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot, ScanDirection scanDirection)
+read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction)
 {
-	PList<StripeMetadata> stripeMetadataList;
-	ScanKeyData scanKey[1];
-	HeapTuple heapTuple;
+	bioseq::postgres::support::postgres_list<stripe_metadata> stripe_metadata_list;
+	ScanKeyData scan_keys[1];
+	HeapTuple heap_tuple;
 
-	scanKey[0] =
+	scan_keys[0] =
 		stripe_codec::scan_key<&stripe_row::storage_id>(
-			static_cast<std::int64_t>(storageId));
+			static_cast<std::int64_t>(storage_id));
 
-	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
+	Oid bioseq_column_stripes_oid = column_stripe_relation_oid();
 
-	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, AccessShareLock);
-	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
+	Relation bioseq_column_stripes = table_open(bioseq_column_stripes_oid, AccessShareLock);
+	Relation index = index_open(stripe_first_row_number_index_oid(),
 								AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(bioseq_column_stripes, index,
 															snapshot, 1,
-															scanKey);
+															scan_keys);
 
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
-																 scanDirection)))
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
+																 scan_direction)))
 	{
-		StripeMetadata *stripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
-		stripeMetadataList.append(stripeMetadata);
+		stripe_metadata *stripe = build_stripe_metadata(bioseq_column_stripes, heap_tuple);
+		stripe_metadata_list.append(stripe);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 	index_close(index, AccessShareLock);
-	table_close(bioseqColumnStripes, AccessShareLock);
+	table_close(bioseq_column_stripes, AccessShareLock);
 
-	return stripeMetadataList;
+	return stripe_metadata_list.release();
 }
 
 
 /*
- * BuildStripeMetadata builds a StripeMetadata object from given heap tuple.
+ * build_stripe_metadata builds a stripe_metadata object from given heap tuple.
  *
- * NB: heapTuple must be a proper heap tuple with MVCC fields.
+ * NB: heap_tuple must be a proper heap tuple with MVCC fields.
  */
-StripeMetadata *
-BuildStripeMetadata(Relation bioseqColumnStripes, HeapTuple heapTuple)
+stripe_metadata *
+build_stripe_metadata(Relation bioseq_column_stripes, HeapTuple heap_tuple)
 {
-	Assert(RelationGetRelid(bioseqColumnStripes) == BioseqColumnStripeRelationId());
+	Assert(RelationGetRelid(bioseq_column_stripes) == column_stripe_relation_oid());
 
 	const stripe_row row = stripe_codec::deform(
-		heapTuple,
-		RelationGetDescr(bioseqColumnStripes),
+		heap_tuple,
+		RelationGetDescr(bioseq_column_stripes),
 		CurrentMemoryContext);
 
-	StripeMetadata *stripeMetadata = make0<StripeMetadata>();
-	stripeMetadata->id = row.stripe_num;
-	stripeMetadata->fileOffset = row.file_offset;
-	stripeMetadata->dataLength = row.data_length;
-	stripeMetadata->columnCount = row.column_count;
-	stripeMetadata->chunkCount = row.chunk_group_count;
-	stripeMetadata->chunkGroupRowCount = row.chunk_row_count;
-	stripeMetadata->rowCount = row.row_count;
-	stripeMetadata->firstRowNumber =
+	stripe_metadata *stripe =
+		bioseq::postgres::support::allocate_zeroed_object<stripe_metadata>();
+	stripe->id = row.stripe_num;
+	stripe->file_offset = row.file_offset;
+	stripe->data_length = row.data_length;
+	stripe->column_count = row.column_count;
+	stripe->chunk_count = row.chunk_group_count;
+	stripe->chunk_group_row_count = row.chunk_row_count;
+	stripe->row_count = row.row_count;
+	stripe->first_row_number =
 		static_cast<std::uint64_t>(row.first_row_number);
 
 	/*
@@ -1833,492 +1804,539 @@ BuildStripeMetadata(Relation bioseqColumnStripes, HeapTuple heapTuple)
 	 * have been flushed already. For this reason, we don't care about
 	 * subtransaction id here.
 	 */
-	TransactionId entryXmin = HeapTupleHeaderGetXmin(heapTuple->t_data);
-	stripeMetadata->aborted = !TransactionIdIsInProgress(entryXmin) &&
-							  TransactionIdDidAbort(entryXmin);
-	stripeMetadata->insertedByCurrentXact =
-		TransactionIdIsCurrentTransactionId(entryXmin);
+	TransactionId entry_xmin = HeapTupleHeaderGetXmin(heap_tuple->t_data);
+	stripe->aborted = !TransactionIdIsInProgress(entry_xmin) &&
+								  TransactionIdDidAbort(entry_xmin);
+	stripe->inserted_by_current_transaction =
+		TransactionIdIsCurrentTransactionId(entry_xmin);
 
-	CheckStripeMetadataConsistency(stripeMetadata);
+	validate_stripe_metadata(stripe);
 
-	return stripeMetadata;
+	return stripe;
 }
 
 
 /*
- * DeleteMetadataRows removes the rows with given relfilelocator from columnar
+ * delete_metadata_rows removes the rows with given relfilelocator from columnar
  * metadata tables.
  */
 export void
-DeleteMetadataRows(RelFileLocator relfilelocator)
+delete_metadata_rows(RelFileLocator relfilelocator)
 {
-	/*
-	 * During a restore for binary upgrade, metadata tables and indexes may or
-	 * may not exist.
-	 */
+	/* Binary-upgrade restore order does not guarantee catalog availability. */
 	if (IsBinaryUpgrade)
 	{
 		return;
 	}
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	DeleteStorageFromBioseqColumnMetadataTable(BioseqColumnStripeRelationId(),
+	delete_storage_metadata_rows(column_stripe_relation_oid(),
 										   stripe_codec::attribute_number<
 											   &stripe_row::storage_id>(),
-										   BioseqColumnStripePKeyIndexRelationId(),
-										   storageId);
-	DeleteStorageFromBioseqColumnMetadataTable(BioseqColumnChunkGroupRelationId(),
+										   column_stripe_primary_key_index_oid(),
+										   storage_id);
+	delete_storage_metadata_rows(column_chunk_group_relation_oid(),
 										   chunk_group_codec::attribute_number<
 											   &chunk_group_row::storage_id>(),
-										   BioseqColumnChunkGroupIndexRelationId(),
-										   storageId);
-	DeleteStorageFromBioseqColumnMetadataTable(BioseqColumnChunkRelationId(),
+										   column_chunk_group_index_oid(),
+										   storage_id);
+	delete_storage_metadata_rows(column_chunk_relation_oid(),
 										   chunk_codec::attribute_number<
 											   &chunk_row::storage_id>(),
-										   BioseqColumnChunkIndexRelationId(),
-										   storageId);
-	DeleteStorageFromBioseqColumnMetadataTable(BioseqColumnRowMaskRelationId(),
+										   column_chunk_index_oid(),
+										   storage_id);
+	delete_storage_metadata_rows(column_row_mask_relation_oid(),
 										   row_mask_codec::attribute_number<
 											   &row_mask_row::storage_id>(),
-										   BioseqColumnRowMaskIndexRelationId(),
-										   storageId);
+										   column_row_mask_index_oid(),
+										   storage_id);
 }
 
 
 /*
- * DeleteMetadataRowsForStripeId removes the rows with given relfilelocator and 
+ * delete_metadata_rows_for_stripe removes the rows with given relfilelocator and
  * stripe id from columnar metadata tables.
  */
 export void
-DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64_t stripeId)
+delete_metadata_rows_for_stripe(RelFileLocator relfilelocator, uint64_t stripe_id)
 {
-	/*
-	 * During a restore for binary upgrade, metadata tables and indexes may or
-	 * may not exist.
-	 */
+	/* Binary-upgrade restore order does not guarantee catalog availability. */
 	if (IsBinaryUpgrade)
 	{
 		return;
 	}
 
-	uint64_t storageId = LookupStorageId(relfilelocator);
+	uint64_t storage_id = lookup_storage_id(relfilelocator);
 
-	DeleteStripeFromBioseqColumnMetadataTable(
-		BioseqColumnStripeRelationId(),
+	delete_stripe_metadata_rows(
+		column_stripe_relation_oid(),
 		stripe_codec::attribute_number<&stripe_row::storage_id>(),
 		stripe_codec::attribute_number<&stripe_row::stripe_num>(),
-		BioseqColumnStripePKeyIndexRelationId(),
-		storageId, stripeId);
-	DeleteStripeFromBioseqColumnMetadataTable(
-		BioseqColumnChunkGroupRelationId(),
+		column_stripe_primary_key_index_oid(),
+		storage_id, stripe_id);
+	delete_stripe_metadata_rows(
+		column_chunk_group_relation_oid(),
 		chunk_group_codec::attribute_number<
 			&chunk_group_row::storage_id>(),
 		chunk_group_codec::attribute_number<
 			&chunk_group_row::stripe_num>(),
-		BioseqColumnChunkGroupIndexRelationId(),
-		storageId, stripeId);
-	DeleteStripeFromBioseqColumnMetadataTable(
-		BioseqColumnChunkRelationId(),
+		column_chunk_group_index_oid(),
+		storage_id, stripe_id);
+	delete_stripe_metadata_rows(
+		column_chunk_relation_oid(),
 		chunk_codec::attribute_number<&chunk_row::storage_id>(),
 		chunk_codec::attribute_number<&chunk_row::stripe_num>(),
-		BioseqColumnChunkIndexRelationId(),
-		storageId, stripeId);
-	DeleteStripeFromBioseqColumnMetadataTable(
-		BioseqColumnRowMaskRelationId(),
+		column_chunk_index_oid(),
+		storage_id, stripe_id);
+	delete_stripe_metadata_rows(
+		column_row_mask_relation_oid(),
 		row_mask_codec::attribute_number<&row_mask_row::storage_id>(),
 		row_mask_codec::attribute_number<&row_mask_row::stripe_id>(),
-		BioseqColumnRowMaskStripeIndexRelationId(),
-		storageId, stripeId);
+		column_row_mask_stripe_index_oid(),
+		storage_id, stripe_id);
 }
 
 
 /*
- * DeleteStorageFromBioseqColumnMetadataTable removes the rows with given
- * storageId from given columnar metadata table.
+ * delete_storage_metadata_rows removes the rows with given
+ * storage_id from given columnar metadata table.
  */
 static void
-DeleteStorageFromBioseqColumnMetadataTable(Oid metadataTableId,
-									   AttrNumber storageIdAtrrNumber,
-									   Oid storageIdIndexId, uint64_t storageId)
+delete_storage_metadata_rows(Oid metadata_table_id,
+									   AttrNumber storage_id_attribute_number,
+									   Oid storage_id_index_id, uint64_t storage_id)
 {
-	ScanKeyData scanKey[1];
-	ScanKeyInit(&scanKey[0], storageIdAtrrNumber, BTEqualStrategyNumber,
-				F_INT8EQ, UInt64GetDatum(storageId));
+	ScanKeyData scan_keys[1];
+	ScanKeyInit(&scan_keys[0], storage_id_attribute_number, BTEqualStrategyNumber,
+				F_INT8EQ, UInt64GetDatum(storage_id));
 
-	Relation metadataTable = try_safe_relation_open(metadataTableId, AccessShareLock);
-	if (metadataTable == NULL)
+	Relation metadata_table =
+		bioseq::postgres::support::try_open_postgres_relation(
+			metadata_table_id, AccessShareLock);
+	if (metadata_table == nullptr)
 	{
 		/* extension has been dropped */
 		return;
 	}
 
-	Relation index = index_open(storageIdIndexId, AccessShareLock);
+	Relation index = index_open(storage_id_index_id, AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(metadataTable, index, NULL,
-															1, scanKey);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(metadata_table, index, nullptr,
+															1, scan_keys);
 
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(metadataTable);
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(metadata_table);
 
-	HeapTuple heapTuple;
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+	HeapTuple heap_tuple;
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																 ForwardScanDirection)))
 	{
-		bioseq::metadata::tuple_ops::delete_tuple_and_enforce_constraints(modifyState, heapTuple);
+		bioseq::storage::metadata::tuple_ops::delete_catalog_tuple(relation_modification_state, heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
 
 	index_close(index, AccessShareLock);
-	table_close(metadataTable, AccessShareLock);
+	table_close(metadata_table, AccessShareLock);
 }
 
 
 /*
- * DeleteStripeFromBioseqColumnMetadataTable removes the rows in columnar
- * metadata table that match storageId and stripeId.
+ * delete_stripe_metadata_rows removes the rows in columnar
+ * metadata table that match storage_id and stripe_id.
  */
 static void
-DeleteStripeFromBioseqColumnMetadataTable(Oid metadataTableId,
-									  AttrNumber storageIdAtrrNumber,
-									  AttrNumber stripeIdAttrNumber,
-									  Oid storageIdIndexId,
-									  uint64_t storageId,
-									  uint64_t stripeId)
+delete_stripe_metadata_rows(Oid metadata_table_id,
+									  AttrNumber storage_id_attribute_number,
+									  AttrNumber stripe_id_attr_number,
+									  Oid storage_id_index_id,
+									  uint64_t storage_id,
+									  uint64_t stripe_id)
 {
-	ScanKeyData scanKey[2];
-	ScanKeyInit(&scanKey[0], storageIdAtrrNumber, BTEqualStrategyNumber,
-				F_INT8EQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], stripeIdAttrNumber, BTEqualStrategyNumber,
-				F_INT8EQ, UInt64GetDatum(stripeId));
+	ScanKeyData scan_keys[2];
+	ScanKeyInit(&scan_keys[0], storage_id_attribute_number, BTEqualStrategyNumber,
+				F_INT8EQ, UInt64GetDatum(storage_id));
+	ScanKeyInit(&scan_keys[1], stripe_id_attr_number, BTEqualStrategyNumber,
+				F_INT8EQ, UInt64GetDatum(stripe_id));
 
-	Relation metadataTable = try_safe_relation_open(metadataTableId, RowShareLock);
-	if (metadataTable == NULL)
+	Relation metadata_table =
+		bioseq::postgres::support::try_open_postgres_relation(
+			metadata_table_id, RowShareLock);
+	if (metadata_table == nullptr)
 	{
 		/* extension has been dropped */
 		return;
 	}
 
-	Relation index = index_open(storageIdIndexId, RowShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(metadataTable, index, NULL,
-															2, scanKey);
+	Relation index = index_open(storage_id_index_id, RowShareLock);
+	SysScanDesc scan_descriptor = systable_beginscan_ordered(metadata_table, index, nullptr,
+															2, scan_keys);
 
-	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(metadataTable);
+	bioseq::storage::metadata::tuple_ops::relation_modification_state *relation_modification_state = bioseq::storage::metadata::tuple_ops::begin_relation_modification(metadata_table);
 
-	HeapTuple heapTuple;
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+	HeapTuple heap_tuple;
+	while (HeapTupleIsValid(heap_tuple = systable_getnext_ordered(scan_descriptor,
 																 ForwardScanDirection)))
 	{
-		bioseq::metadata::tuple_ops::delete_tuple_and_enforce_constraints(modifyState, heapTuple);
+		bioseq::storage::metadata::tuple_ops::delete_catalog_tuple(relation_modification_state, heap_tuple);
 	}
 
-	systable_endscan_ordered(scanDescriptor);
+	systable_endscan_ordered(scan_descriptor);
 
-	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	bioseq::storage::metadata::tuple_ops::finish_relation_modification(relation_modification_state);
 
 	index_close(index, RowShareLock);
-	table_close(metadataTable, RowShareLock);
+	table_close(metadata_table, RowShareLock);
 }
 
 
 /* Resolve bioseq_internal.storageid_seq, or return InvalidOid if missing. */
 static Oid
-BioseqColumnStorageIdSequenceRelationId(void)
+column_storage_id_sequence_oid(void)
 {
 	return metadata_entity_handles::storageid_seq.resolve_oid(
-		bioseq::pg_utils::catalog_missing_policy::return_invalid);
+		bioseq::postgres::support::catalog_missing_policy::return_invalid);
 }
 
 
 /*
- * BioseqColumnStripeRelationId returns relation id of bioseq.stripe.
- * TODO: should we cache this similar to citus?
+ * column_stripe_relation_oid returns relation id of bioseq.stripe.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 Oid
-BioseqColumnStripeRelationId(void)
+column_stripe_relation_oid(void)
 {
-	return safe_get_relname_relid("stripe", BioseqColumnNamespaceId());
+	return get_relname_relid("stripe", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnStripePKeyIndexRelationId returns relation id of bioseq.stripe_pkey.
- * TODO: should we cache this similar to citus?
+ * column_stripe_primary_key_index_oid returns relation id of bioseq.stripe_pkey.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 Oid
-BioseqColumnStripePKeyIndexRelationId(void)
+column_stripe_primary_key_index_oid(void)
 {
-	return safe_get_relname_relid("stripe_pkey", BioseqColumnNamespaceId());
+	return get_relname_relid("stripe_pkey", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnStripeFirstRowNumberIndexRelationId returns relation id of
+ * stripe_first_row_number_index_oid returns relation id of
  * bioseq.stripe_first_row_number_idx.
- * TODO: should we cache this similar to citus?
+ * Resolved per call so catalog recreation observes the current OID.
  */
 static Oid
-BioseqColumnStripeFirstRowNumberIndexRelationId(void)
+stripe_first_row_number_index_oid(void)
 {
-	return safe_get_relname_relid("stripe_first_row_number_idx", BioseqColumnNamespaceId());
+	return get_relname_relid("stripe_first_row_number_idx", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnOptionsRelationId returns relation id of bioseq.options.
+ * column_options_relation_oid returns relation id of bioseq.options.
  */
 static Oid
-BioseqColumnOptionsRelationId(void)
+column_options_relation_oid(void)
 {
 
-	return safe_get_relname_relid("options", BioseqColumnNamespaceId());
+	return get_relname_relid("options", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnOptionsIndexRegclass returns relation id of bioseq.options_pkey.
+ * column_options_index_oid returns relation id of bioseq.options_pkey.
  */
 static Oid
-BioseqColumnOptionsIndexRegclass(void)
+column_options_index_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnOptionsIndexRegclass() entered");
-	return safe_get_relname_relid("options_pkey", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_options_index_oid() entered");
+	return get_relname_relid("options_pkey", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnChunkRelationId returns relation id of bioseq.chunk.
- * TODO: should we cache this similar to citus?
+ * column_chunk_relation_oid returns relation id of bioseq.chunk.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 static Oid
-BioseqColumnChunkRelationId(void)
+column_chunk_relation_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnChunkRelationId() entered");
-	return safe_get_relname_relid("chunk", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_relation_oid() entered");
+	return get_relname_relid("chunk", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnChunkGroupRelationId returns relation id of bioseq.chunk_group.
- * TODO: should we cache this similar to citus?
+ * column_chunk_group_relation_oid returns relation id of bioseq.chunk_group.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 static Oid
-BioseqColumnChunkGroupRelationId(void)
+column_chunk_group_relation_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnChunkGroupRelationId() entered");
-	return safe_get_relname_relid("chunk_group", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_group_relation_oid() entered");
+	return get_relname_relid("chunk_group", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnRowMaskRelationId returns relation id of bioseq.row_mask.
+ * column_row_mask_relation_oid returns relation id of bioseq.row_mask.
  */
 Oid
-BioseqColumnRowMaskRelationId(void)
+column_row_mask_relation_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnRowMaskRelationId() entered");
-	return safe_get_relname_relid("row_mask", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_relation_oid() entered");
+	return get_relname_relid("row_mask", column_namespace_oid());
 }
 
 
 /* Resolve bioseq_internal.row_mask_seq, or return InvalidOid if missing. */
 static Oid
-BioseqColumnRowMaskSeqId(void)
+column_row_mask_sequence_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnRowMaskSeqId() entered");
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_sequence_oid() entered");
 	return metadata_entity_handles::row_mask_seq.resolve_oid(
-		bioseq::pg_utils::catalog_missing_policy::return_invalid);
+		bioseq::postgres::support::catalog_missing_policy::return_invalid);
 }
 
 
 
 /*
- * BioseqColumnChunkIndexRelationId returns relation id of bioseq.chunk_pkey.
- * TODO: should we cache this similar to citus?
+ * column_chunk_index_oid returns relation id of bioseq.chunk_pkey.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 static Oid
-BioseqColumnChunkIndexRelationId(void)
+column_chunk_index_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnChunkIndexRelationId() entered");
-	return safe_get_relname_relid("chunk_pkey", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_index_oid() entered");
+	return get_relname_relid("chunk_pkey", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnChunkGroupIndexRelationId returns relation id of bioseq.chunk_group_pkey.
- * TODO: should we cache this similar to citus?
+ * column_chunk_group_index_oid returns relation id of bioseq.chunk_group_pkey.
+ * Resolved per call so catalog recreation observes the current OID.
  */
 static Oid
-BioseqColumnChunkGroupIndexRelationId(void)
+column_chunk_group_index_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnChunkGroupIndexRelationId() entered");
-	return safe_get_relname_relid("chunk_group_pkey", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_chunk_group_index_oid() entered");
+	return get_relname_relid("chunk_group_pkey", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnRowMaskIndexRelationId returns relation id 
+ * column_row_mask_index_oid returns relation id
  * of bioseq.row_mask_pkey
  */
 Oid
-BioseqColumnRowMaskIndexRelationId(void)
+column_row_mask_index_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnRowMaskIndexRelationId() entered");
-	return safe_get_relname_relid("row_mask_pkey", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_index_oid() entered");
+	return get_relname_relid("row_mask_pkey", column_namespace_oid());
 }
 
 /*
- * BioseqColumnRowMaskStripeIndexRelationId returns relation id 
+ * column_row_mask_stripe_index_oid returns relation id
  * of bioseq.bioseq_row_mask_stripe_unique
  */
 static Oid
-BioseqColumnRowMaskStripeIndexRelationId(void)
+column_row_mask_stripe_index_oid(void)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnRowMaskStripeIndexRelationId() entered");
-	return safe_get_relname_relid("row_mask_stripe_unique", BioseqColumnNamespaceId());
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_row_mask_stripe_index_oid() entered");
+	return get_relname_relid("row_mask_stripe_unique", column_namespace_oid());
 }
 
 
 /*
- * BioseqColumnNamespaceId returns namespace id of the schema we store columnar
+ * column_namespace_oid returns namespace id of the schema we store columnar
  * related tables.
  */
 Oid
-BioseqColumnNamespaceId(void)
+column_namespace_oid(void)
 {
 	Oid nspace = get_namespace_oid("bioseq_internal", false);
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnNamespaceId() looking up bioseq_internal namespace");
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnNamespaceId() returning oid");
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_namespace_oid() looking up bioseq_internal namespace");
+	bioseq_log<logging_level::debug>("[bioseq] pg: column_namespace_oid() returning oid");
 	return nspace;
 }
 
 
 /*
- * LookupStorageId reads storage metapage to find the storage ID for the given relfilelocator. It returns
+ * lookup_storage_id reads storage metapage to find the storage ID for the given relfilelocator. It returns
  * false if the relation doesn't have a meta page yet.
  */
 uint64_t
-LookupStorageId(RelFileLocator relfilelocator)
+lookup_storage_id(RelFileLocator relfilelocator)
 {
-	bioseq_log<DBG>("[bioseq] pg: LookupStorageId() entered");
-	Oid relationId = RelidByRelfilenumber(RelationTablespace_compat(relfilelocator),
-										  RelationPhysicalIdentifierNumber_compat(
-											  relfilelocator));
+	bioseq_log<logging_level::debug>("[bioseq] pg: lookup_storage_id() entered");
+	Oid relation_oid = RelidByRelfilenumber(
+		relfilelocator.spcOid, relfilelocator.relNumber);
 
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
+	Relation relation = bioseq::postgres::support::open_postgres_relation(
+		relation_oid, AccessShareLock);
+	uint64_t storage_id = column_storage_id(relation, false);
 	table_close(relation, AccessShareLock);
 
-	return storageId;
+	return storage_id;
 }
 
 
 /*
- * BioseqColumnMetadataNewStorageId - create a new, unique storage id and return
+ * allocate_column_storage_id - create a new, unique storage id and return
  * it.
  */
 export uint64_t
-BioseqColumnMetadataNewStorageId()
+allocate_column_storage_id()
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnMetadataNewStorageId() entered");
-	return nextval_internal(BioseqColumnStorageIdSequenceRelationId(), false);
+	bioseq_log<logging_level::debug>("[bioseq] pg: allocate_column_storage_id() entered");
+	return nextval_internal(column_storage_id_sequence_oid(), false);
 }
 
 
-/*
- * BioseqColumnStorageUpdateIfNeeded - upgrade columnar storage to the current version by
- * using information from the metadata tables.
+/** @brief Ensures the relation metapage uses the current column storage format.
+ *
+ * Empty relations receive a new metapage. Existing incompatible metapages are
+ * reconstructed from the authoritative stripe metadata before their format
+ * identity is updated.
  */
 export void
-BioseqColumnStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
+ensure_current_column_storage_format(Relation rel, bool is_upgrade)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageUpdateIfNeeded() entered");
-	if (BioseqColumnStorageIsCurrent(rel))
+	bioseq_log<logging_level::debug>("[bioseq] pg: ensure_current_column_storage_format() entered");
+	if (column_storage_uses_current_format(rel))
 	{
 		return;
 	}
 
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageUpdateIfNeeded() checking nblocks<2");
+	bioseq_log<logging_level::debug>("[bioseq] pg: ensure_current_column_storage_format() checking nblocks<2");
 	if (nblocks < 2)
 	{
-		BioseqColumnStorageInit(rel->rd_smgr, BioseqColumnMetadataNewStorageId());
+		initialize_column_storage(rel->rd_smgr, allocate_column_storage_id());
 		return;
 	}
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, true);
+	uint64_t storage_id = column_storage_id(rel, true);
 
-	uint64_t highestId;
-	uint64_t highestOffset;
-	GetHighestUsedAddressAndId(storageId, &highestOffset, &highestId);
+	uint64_t highest_id;
+	uint64_t highest_offset;
+	find_highest_used_address_and_id(storage_id, &highest_offset, &highest_id);
 
-	uint64_t reservedStripeId = highestId + 1;
-	uint64_t reservedOffset = highestOffset + 1;
-	uint64_t reservedRowNumber = GetHighestUsedRowNumber(storageId) + 1;
-	BioseqColumnStorageUpdateCurrent(rel, isUpgrade, reservedStripeId,
-								 reservedRowNumber, reservedOffset);
+	const uint64_t highest_row_number =
+		find_highest_used_row_number(storage_id);
+	const std::optional<uint64_t> next_stripe_id =
+		bioseq::common::checked_add(highest_id, static_cast<uint64_t>(1));
+	const std::optional<uint64_t> next_row_number =
+		bioseq::common::checked_add(
+			highest_row_number, static_cast<uint64_t>(1));
+
+	std::optional<uint64_t> next_logical_offset = first_logical_offset;
+	if (highest_id != 0)
+	{
+		if (highest_offset < first_logical_offset)
+		{
+			bioseq::postgres::support::raise_sql_error(
+				ERRCODE_DATA_CORRUPTED,
+				{
+					.message = fmt::format(
+						"cannot reconstruct column storage counters for relation {}",
+						rel->rd_id),
+					.detail = fmt::format(
+						"Stripe metadata ends at logical offset {}, below the "
+						"first valid offset {}.",
+						highest_offset,
+						first_logical_offset),
+				});
+		}
+		next_logical_offset = bioseq::common::checked_add(
+			highest_offset, static_cast<uint64_t>(1));
+	}
+
+	if (!next_stripe_id.has_value() || !next_row_number.has_value()
+		|| !next_logical_offset.has_value())
+	{
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+			{
+				.message = fmt::format(
+					"cannot reconstruct column storage counters for relation {}",
+					rel->rd_id),
+				.detail = "A reconstructed stripe, row, or logical-offset "
+						  "counter would overflow its 64-bit storage field.",
+			});
+	}
+
+	update_column_storage_format(
+		rel,
+		is_upgrade,
+		*next_stripe_id,
+		*next_row_number,
+		*next_logical_offset);
 }
 
 
 /*
- * GetHighestUsedRowNumber returns the highest used rowNumber for given
- * storageId. Returns BIOSEQ_COLUMN_INVALID_ROW_NUMBER if storage with
- * storageId has no stripes.
- * Note that normally we would use BioseqColumnStorageGetReservedRowNumber
+ * find_highest_used_row_number returns the highest used row_number for given
+ * storage_id. Returns invalid_column_row_number if storage with
+ * storage_id has no stripes.
+ * Note that normally we would use column_storage_reserved_row_number
  * to decide that. However, this function is designed to be used when
  * building the metapage itself during upgrades.
  */
 static uint64_t
-GetHighestUsedRowNumber(uint64_t storageId)
+find_highest_used_row_number(uint64_t storage_id)
 {
-	uint64_t highestRowNumber = BIOSEQ_COLUMN_INVALID_ROW_NUMBER;
+	uint64_t highest_row_number = invalid_column_row_number;
 
-	List *stripeMetadataList = ReadDataFileStripeList(storageId,
+	List *stripe_metadata_list = read_data_file_stripes(storage_id,
 													  GetTransactionSnapshot(),
 													  ForwardScanDirection);
-	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
+	for (stripe_metadata* stripe :
+		 bioseq::postgres::support::postgres_list<stripe_metadata>{
+			 stripe_metadata_list})
 	{
-		highestRowNumber = std::max(highestRowNumber,
-							   StripeGetHighestRowNumber(stripeMetadata));
+		highest_row_number = std::max(highest_row_number,
+							   stripe_highest_row_number(stripe));
 	}
 
-	return highestRowNumber;
+	return highest_row_number;
 }
 
 /*
  * RewriteMetadataRowWithNewValues rewrites a given metadata entry
- * for a storageId and a stripeId in place with a new offset,
- * rowCount, sizeBytes, and chunkCount.
+ * for a storage_id and a stripe_id in place with a new offset,
+ * row_count, size_bytes, and chunk_count.
  *
  * This is used in the vacuum UDF to fill any existing holes
  * if possible.
  */
-export StripeMetadata *
-RewriteStripeMetadataRowWithNewValues(Relation rel, uint64_t stripeId,
-              uint64_t sizeBytes, uint64_t fileOffset, uint64_t rowCount, uint64_t chunkCount)
+export stripe_metadata *
+rewrite_stripe_metadata(Relation rel, uint64_t stripe_id,
+              uint64_t size_bytes, uint64_t file_offset, uint64_t row_count, uint64_t chunk_count)
 {
-	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, false);
+	uint64_t storage_id = column_storage_id(rel, false);
 
 	stripe_codec::update update{};
 	update
 		.set<&stripe_row::file_offset>(
-			static_cast<std::int64_t>(fileOffset))
+			static_cast<std::int64_t>(file_offset))
 		.set<&stripe_row::data_length>(
-			static_cast<std::int64_t>(sizeBytes))
+			static_cast<std::int64_t>(size_bytes))
 		.set<&stripe_row::row_count>(
-			static_cast<std::int64_t>(rowCount))
+			static_cast<std::int64_t>(row_count))
 		.set<&stripe_row::chunk_group_count>(
-			static_cast<std::int32_t>(chunkCount));
+			static_cast<std::int32_t>(chunk_count));
 
-	return UpdateStripeMetadataRow(storageId, stripeId, update);
+	return update_stripe_metadata_row(storage_id, stripe_id, update);
 }
 
 // bioseq_internal.seq_sub_table access uses the systable API so MVCC and
 // transactional semantics match the other metadata catalogs.
 
-export struct SubTableRow {
+export struct sequence_sub_table_row {
 	Oid             database_oid        = InvalidOid;
 	Oid             tablespace_oid      = InvalidOid;
 	Oid             main_relfilenode    = InvalidOid;
@@ -2331,12 +2349,12 @@ export struct SubTableRow {
 	bool            is_full             = false;
 	std::uint64_t   total_payload_bytes = 0;
 
-	SubTableRow() = default;
+	sequence_sub_table_row() = default;
 
-	SubTableRow(HeapTuple heapTuple, TupleDesc td) {
+	sequence_sub_table_row(HeapTuple heap_tuple, TupleDesc td) {
 		const seq_sub_table_row row =
 			seq_sub_table_codec::deform(
-				heapTuple, td, CurrentMemoryContext);
+				heap_tuple, td, CurrentMemoryContext);
 		database_oid = row.database_oid;
 		tablespace_oid = row.tablespace_oid;
 		main_relfilenode = row.main_relfilenode;
@@ -2353,20 +2371,20 @@ export struct SubTableRow {
 	}
 };
 
-export struct SubTableManager {
+export struct sequence_sub_table_manager {
 	// Relation-id resolvers (trivial, hot) — drop the redundant SubTableMetadata
 	// prefix; it is obvious these resolve seq_sub_table relations.
 	[[gnu::always_inline]] static inline Oid relid() {
-		return safe_get_relname_relid("seq_sub_table", BioseqColumnNamespaceId());
+		return get_relname_relid("seq_sub_table", column_namespace_oid());
 	}
 	[[gnu::always_inline]] static inline Oid pkey_index_relid() {
-		return safe_get_relname_relid("seq_sub_table_pkey", BioseqColumnNamespaceId());
+		return get_relname_relid("seq_sub_table_pkey", column_namespace_oid());
 	}
 	[[gnu::always_inline]] static inline Oid active_shard_index_relid() {
-		return safe_get_relname_relid("seq_sub_table_active_shard_idx", BioseqColumnNamespaceId());
+		return get_relname_relid("seq_sub_table_active_shard_idx", column_namespace_oid());
 	}
 
-	[[nodiscard]] static std::optional<SubTableRow>
+	[[nodiscard]] static std::optional<sequence_sub_table_row>
 	lookup_active_shard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
 	                    int16_t column_attno, int16_t bucket_idx)
 	{
@@ -2374,7 +2392,8 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return std::nullopt;
 		}
-		Relation rel = safe_relation_open(rel_oid, AccessShareLock);
+		Relation rel = bioseq::postgres::support::open_postgres_relation(
+			rel_oid, AccessShareLock);
 		TupleDesc td = RelationGetDescr(rel);
 
 		const Oid idx_oid = active_shard_index_relid();
@@ -2396,10 +2415,10 @@ export struct SubTableManager {
 		SysScanDesc scan = systable_beginscan(
 			rel, idx_oid, idx_ok, nullptr,
 			static_cast<int>(keys.size()), keys.data());
-		std::optional<SubTableRow> result;
+		std::optional<sequence_sub_table_row> result;
 		HeapTuple tup = nullptr;
 		while (HeapTupleIsValid(tup = systable_getnext(scan))) {
-			SubTableRow row(tup, td);
+			sequence_sub_table_row row(tup, td);
 			if (!row.is_full) {
 				result = row;
 				break;
@@ -2410,7 +2429,7 @@ export struct SubTableManager {
 		return result;
 	}
 
-	[[nodiscard]] static std::optional<SubTableRow>
+	[[nodiscard]] static std::optional<sequence_sub_table_row>
 	lookup_shard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
 	             int16_t column_attno, int16_t bucket_idx, int32_t shard_idx)
 	{
@@ -2418,7 +2437,8 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return std::nullopt;
 		}
-		Relation rel = safe_relation_open(rel_oid, AccessShareLock);
+		Relation rel = bioseq::postgres::support::open_postgres_relation(
+			rel_oid, AccessShareLock);
 		TupleDesc td = RelationGetDescr(rel);
 
 		const Oid idx_oid = pkey_index_relid();
@@ -2442,24 +2462,24 @@ export struct SubTableManager {
 		SysScanDesc scan = systable_beginscan(
 			rel, idx_oid, idx_ok, nullptr,
 			static_cast<int>(keys.size()), keys.data());
-		std::optional<SubTableRow> result;
+		std::optional<sequence_sub_table_row> result;
 		HeapTuple tup = systable_getnext(scan);
 		if (HeapTupleIsValid(tup)) {
-			result = SubTableRow(tup, td);
+			result = sequence_sub_table_row(tup, td);
 		}
 		systable_endscan(scan);
 		table_close(rel, AccessShareLock);
 		return result;
 	}
 
-	[[nodiscard]] static SubTableRow
+	[[nodiscard]] static sequence_sub_table_row
 	insert_shard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
 	             int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
 	             Oid sub_table_relid, Oid sidecar_relid)
 	{
 		const Oid rel_oid = relid();
 		if (!OidIsValid(rel_oid)) {
-			bioseq::pg_utils::raise_sql_error(
+			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_INTERNAL_ERROR,
 				{
 					.message =
@@ -2471,7 +2491,7 @@ export struct SubTableManager {
 		// row for the same (db, spc, relfilenode, attno, bucket) with
 		// is_full=FALSE, return the winner instead of trying to insert a duplicate.
 		{
-			auto existing = lookup_active_shard(
+			std::optional<sequence_sub_table_row> existing = lookup_active_shard(
 				database_oid, tablespace_oid, main_relfilenode,
 				column_attno, bucket_idx);
 			if (existing.has_value() && existing->shard_idx == shard_idx) {
@@ -2482,7 +2502,8 @@ export struct SubTableManager {
 			}
 		}
 
-		Relation rel = safe_relation_open(rel_oid, RowExclusiveLock);
+		Relation rel = bioseq::postgres::support::open_postgres_relation(
+			rel_oid, RowExclusiveLock);
 		TupleDesc td = RelationGetDescr(rel);
 
 		const seq_sub_table_row catalog_row{
@@ -2505,7 +2526,7 @@ export struct SubTableManager {
 		table_close(rel, RowExclusiveLock);
 		CommandCounterIncrement();
 
-		SubTableRow row;
+		sequence_sub_table_row row;
 		row.database_oid       = database_oid;
 		row.tablespace_oid     = tablespace_oid;
 		row.main_relfilenode   = main_relfilenode;
@@ -2520,7 +2541,7 @@ export struct SubTableManager {
 		return row;
 	}
 
-	static SubTableRow
+	static sequence_sub_table_row
 	update_shard_bytes_written(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
 	                           int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
 	                           std::uint64_t delta_bytes,
@@ -2529,7 +2550,7 @@ export struct SubTableManager {
 		const Oid rel_oid = relid();
 		const Oid idx_oid = pkey_index_relid();
 		if (!OidIsValid(rel_oid)) {
-			bioseq::pg_utils::raise_sql_error(
+			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_INTERNAL_ERROR,
 				{
 					.message =
@@ -2537,7 +2558,8 @@ export struct SubTableManager {
 				});
 		}
 
-		Relation rel = safe_relation_open(rel_oid, RowExclusiveLock);
+		Relation rel = bioseq::postgres::support::open_postgres_relation(
+			rel_oid, RowExclusiveLock);
 		TupleDesc td = RelationGetDescr(rel);
 
 		std::array<ScanKeyData, 6> keys{
@@ -2558,11 +2580,11 @@ export struct SubTableManager {
 		SysScanDesc scan = systable_beginscan(
 			rel, idx_oid, OidIsValid(idx_oid), nullptr,
 			static_cast<int>(keys.size()), keys.data());
-		HeapTuple oldTuple = systable_getnext(scan);
-		if (!HeapTupleIsValid(oldTuple)) {
+		HeapTuple old_tuple = systable_getnext(scan);
+		if (!HeapTupleIsValid(old_tuple)) {
 			systable_endscan(scan);
 			table_close(rel, RowExclusiveLock);
-			bioseq::pg_utils::raise_sql_error(
+			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_INTERNAL_ERROR,
 				{
 					.message = fmt::format(
@@ -2578,13 +2600,13 @@ export struct SubTableManager {
 				});
 		}
 
-		SubTableRow current(oldTuple, td);
+		sequence_sub_table_row current(old_tuple, td);
 		const std::uint64_t new_bytes_written =
 			current.bytes_written + delta_bytes;
 		const std::uint64_t new_total_payload =
 			current.total_payload_bytes + delta_bytes;
-		// DOC0260 §10.2 — is_full is driven only by a real byte cap. The cap=0
-		// shard-per-insert sentinel is implemented entirely by the insert_payload
+		// is_full is driven only by a real byte cap. The zero-cap
+		// shard-per-insert sentinel is implemented entirely by insert_payload
 		// rollover (which, when the active shard already holds a row, marks it full
 		// and allocates the next shard, passing cap_bytes=1 so this branch flips
 		// is_full). We deliberately do NOT mark a shard full here merely because
@@ -2604,10 +2626,10 @@ export struct SubTableManager {
 				static_cast<std::int64_t>(new_total_payload))
 			.set<&seq_sub_table_row::is_full>(now_full);
 
-		HeapTuple newTuple = update.modify(oldTuple, td);
-		CatalogTupleUpdate(rel, &oldTuple->t_self, newTuple);
+		HeapTuple new_tuple = update.modify(old_tuple, td);
+		CatalogTupleUpdate(rel, &old_tuple->t_self, new_tuple);
 		systable_endscan(scan);
-		heap_freetuple(newTuple);
+		heap_freetuple(new_tuple);
 		table_close(rel, RowExclusiveLock);
 		CommandCounterIncrement();
 
@@ -2617,18 +2639,19 @@ export struct SubTableManager {
 		return current;
 	}
 
-	[[nodiscard]] static std::vector<SubTableRow>
+	[[nodiscard]] static std::vector<sequence_sub_table_row>
 	list_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode)
 	{
-		std::vector<SubTableRow> out;
-		const Oid rel_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+		std::vector<sequence_sub_table_row> out;
+		const Oid rel_oid = bioseq::postgres::support::invoke_pg_as_cpp(
 			[] { return relid(); });
 		if (!OidIsValid(rel_oid)) {
 			return out;
 		}
-		Relation rel = bioseq::pg_utils::invoke_pg_as_cpp(
+		Relation rel = bioseq::postgres::support::invoke_pg_as_cpp(
 			[rel_oid] {
-				return try_safe_relation_open(rel_oid, AccessShareLock);
+				return bioseq::postgres::support::try_open_postgres_relation(
+					rel_oid, AccessShareLock);
 			});
 		if (rel == nullptr) {
 			return out;
@@ -2648,37 +2671,30 @@ export struct SubTableManager {
 					&seq_sub_table_row::main_relfilenode>(
 						main_relfilenode),
 			};
-			scan = bioseq::pg_utils::invoke_pg_as_cpp([rel, &keys] {
+			scan = bioseq::postgres::support::invoke_pg_as_cpp([rel, &keys] {
 				return systable_beginscan(
 					rel, InvalidOid, false, nullptr,
 					static_cast<int>(keys.size()), keys.data());
 			});
 			for (;;) {
-				HeapTuple tuple = bioseq::pg_utils::invoke_pg_as_cpp(
+				HeapTuple tuple = bioseq::postgres::support::invoke_pg_as_cpp(
 					[scan] { return systable_getnext(scan); });
 				if (!HeapTupleIsValid(tuple)) break;
-				SubTableRow row = bioseq::pg_utils::invoke_pg_as_cpp(
-					[tuple, td] { return SubTableRow(tuple, td); });
+				sequence_sub_table_row row = bioseq::postgres::support::invoke_pg_as_cpp(
+					[tuple, td] { return sequence_sub_table_row(tuple, td); });
 				out.push_back(std::move(row));
 			}
 		} catch (...) {
 			failure = std::current_exception();
 		}
-		const auto cleanup = [&failure](auto&& operation) {
-			try {
-				operation();
-			} catch (...) {
-				if (failure == nullptr) failure = std::current_exception();
-			}
-		};
 		if (scan != nullptr) {
-			cleanup([scan] {
-				bioseq::pg_utils::invoke_pg_as_cpp(
+			record_cleanup_failure(failure, [scan] {
+				bioseq::postgres::support::invoke_pg_as_cpp(
 					[scan] { systable_endscan(scan); });
 			});
 		}
-		cleanup([rel] {
-			bioseq::pg_utils::invoke_pg_as_cpp(
+		record_cleanup_failure(failure, [rel] {
+			bioseq::postgres::support::invoke_pg_as_cpp(
 				[rel] { table_close(rel, AccessShareLock); });
 		});
 		if (failure != nullptr) std::rethrow_exception(failure);
@@ -2692,7 +2708,8 @@ export struct SubTableManager {
 		if (!OidIsValid(rel_oid)) {
 			return;
 		}
-		Relation rel = try_safe_relation_open(rel_oid, RowExclusiveLock);
+		Relation rel = bioseq::postgres::support::try_open_postgres_relation(
+			rel_oid, RowExclusiveLock);
 		if (rel == nullptr) {
 			return;
 		}

@@ -6,16 +6,16 @@ module;
 #include <cstdint>
 #include <type_traits>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:tree_types;
+export module bioseq.postgres.types.compact_sequence:tree_types;
 
 import :flat_abi;
 import :source_abi;
-import bioseq.storage.bucket_math;
+import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
 
@@ -106,7 +106,7 @@ export enum class literal_validation : std::uint8_t {
 
 export struct source_piece {
     pg_sequence_source_handle source;
-    bioseq::storage::seq_locator locator;
+    bioseq::storage::sequence_locator locator;
     compact_sequence_stdc_type_params stored_type_params;
     std::uint16_t last_padding_letters;
     std::uint64_t from;

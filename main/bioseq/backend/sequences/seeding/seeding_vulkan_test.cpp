@@ -8,7 +8,7 @@
  * hardware Vulkan device exists.
  */
 #include "common_simd.h"   // provides the HWY_NAMESPACE macro for collect_seed_hits
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>
@@ -23,7 +23,7 @@
 
 #include <vulkan/vulkan_core.h>
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.common.context;
 import bioseq.sequences.kmers;
 import bioseq.sequences.minimap_port;        // collect_seed_hits

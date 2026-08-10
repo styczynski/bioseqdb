@@ -24,9 +24,9 @@ module bioseq.codegen.external:openapi_parser;
 
 import :model;
 import bioseq.codegen.support;
-import bioseq.external.http_validation;
+import bioseq.common.http.validation;
 
-namespace http_validation = bioseq::external::http_validation;
+namespace http_validation = bioseq::common::http::validation;
 
 namespace bioseq::codegen::external {
 
@@ -131,7 +131,7 @@ namespace bioseq::codegen::external {
     const std::string name = parameter["name"].as<std::string>();
     const auto location = parse_location(parameter["in"].as<std::string>());
     if (location == parameter_location::header
-        && !http_validation::valid_header_name(name)) {
+        && !http_validation::is_valid_header_name(name)) {
         throw std::runtime_error("OpenAPI header parameter name is not an HTTP token");
     }
     const bool required = location == parameter_location::path
@@ -315,7 +315,7 @@ struct api_key_requirement {
         };
         if (candidate.name.empty()
             || (candidate.location == parameter_location::header
-                && !http_validation::valid_header_name(candidate.name))) {
+                && !http_validation::is_valid_header_name(candidate.name))) {
             throw std::runtime_error(
                 "OpenAPI API-key name is invalid: " + scheme_name);
         }
@@ -478,7 +478,7 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
             }
             parsed.accept = node["accept"].as<std::string>();
             if (parsed.accept.empty()
-                || !http_validation::valid_header_value(parsed.accept)) {
+                || !http_validation::is_valid_header_value(parsed.accept)) {
                 throw std::runtime_error("integration Accept override is invalid");
             }
         }
@@ -612,9 +612,9 @@ void parse_integration_cases(const YAML::Node& document, openapi_document& resul
                     .name = header_marker["name"].as<std::string>(),
                     .value_contains = header_marker["valueContains"].as<std::string>(),
                 };
-                if (!http_validation::valid_header_name(parsed_header.name)
+                if (!http_validation::is_valid_header_name(parsed_header.name)
                     || parsed_header.value_contains.empty()
-                    || !http_validation::valid_header_value(
+                    || !http_validation::is_valid_header_value(
                         parsed_header.value_contains)) {
                     throw std::runtime_error(
                         "integration header expectation is invalid");
@@ -713,7 +713,7 @@ struct parsed_https_server {
         port = static_cast<std::uint16_t>(parsed_port);
     }
     if (!host.empty() && host.back() == '.') host.remove_suffix(1);
-    if (!http_validation::valid_dns_host(host)) {
+    if (!http_validation::is_valid_dns_host(host)) {
         throw std::runtime_error(
             "OpenAPI HTTPS server DNS host is invalid or an unsupported IP literal");
     }
@@ -729,7 +729,7 @@ struct parsed_https_server {
     result.base_path = std::string(remainder.substr(delimiter));
     if (result.base_path.find_first_of("?#{}") != std::string::npos
         || std::ranges::any_of(
-            result.base_path, http_validation::invalid_request_target_byte)) {
+            result.base_path, http_validation::is_invalid_request_target_byte)) {
         throw std::runtime_error("OpenAPI HTTPS server base path is invalid");
     }
     while (!result.base_path.empty() && result.base_path.back() == '/') {
@@ -806,7 +806,7 @@ struct parsed_https_server {
         }
         if (path.find_first_of("?#") != std::string::npos
             || std::ranges::any_of(
-                path, http_validation::invalid_request_target_byte)) {
+                path, http_validation::is_invalid_request_target_byte)) {
             throw std::runtime_error("OpenAPI path key is not a valid request path: " + path);
         }
         const YAML::Node path_item = path_entry.second;

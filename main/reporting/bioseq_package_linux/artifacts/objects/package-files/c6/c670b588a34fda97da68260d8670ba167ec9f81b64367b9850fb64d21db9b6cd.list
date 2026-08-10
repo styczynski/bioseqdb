@@ -1,6 +1,0 @@
-/usr/lib/postgresql/17/lib/bioseq.so
-/usr/lib/postgresql/17/lib/bioseq_cache.so
-/usr/share/postgresql/17/extension/bioseq--1.0.sql
-/usr/share/postgresql/17/extension/bioseq.control
-/usr/share/postgresql/17/extension/bioseq_cache--1.0.sql
-/usr/share/postgresql/17/extension/bioseq_cache.control

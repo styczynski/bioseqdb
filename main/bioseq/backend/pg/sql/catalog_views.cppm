@@ -1,4 +1,4 @@
-export module bioseq.sql.catalog_views;
+export module bioseq.postgres.sql.catalog_views;
 
 import bioseq.codegen.sql.annotation_model;
 

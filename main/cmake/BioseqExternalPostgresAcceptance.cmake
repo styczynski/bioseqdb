@@ -47,10 +47,6 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
     "${CMAKE_CURRENT_LIST_DIR}/private_postgresql.conf.in")
   set(_bioseq_external_acceptance_static_contract
     "${CMAKE_SOURCE_DIR}/codegen/sql/tests/verify_external_feature_contract.py")
-  set(_bioseq_external_acceptance_base_golden
-    "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq--1.0.sql")
-  set(_bioseq_external_acceptance_ledger
-    "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq-external-physical-ledger.tsv")
   set(_bioseq_external_acceptance_output
     "${CMAKE_BINARY_DIR}/bioseq/generated/sql/external-postgres-acceptance")
 
@@ -78,8 +74,6 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       --dso "$<TARGET_FILE:postgresql_bioseq>"
       --static-contract-script
         "${_bioseq_external_acceptance_static_contract}"
-      --base-golden "${_bioseq_external_acceptance_base_golden}"
-      --external-ledger "${_bioseq_external_acceptance_ledger}"
       --cmake-fragment "${CMAKE_CURRENT_LIST_FILE}"
       --mode-source "${CMAKE_SOURCE_DIR}/build_mcp/server.py"
       --timeout-seconds 180
@@ -93,8 +87,6 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       "${_bioseq_external_acceptance_sql}"
       "${_bioseq_external_acceptance_manifest}"
       "${_bioseq_external_acceptance_static_contract}"
-      "${_bioseq_external_acceptance_base_golden}"
-      "${_bioseq_external_acceptance_ledger}"
       "${CMAKE_CURRENT_LIST_FILE}"
       "${CMAKE_SOURCE_DIR}/build_mcp/server.py"
       "${CMAKE_CURRENT_LIST_DIR}/private_postgres.py"

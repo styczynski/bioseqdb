@@ -15,7 +15,8 @@ import bioseq.external.provider.budget;
 
 using namespace bioseq::external::provider;
 
-TEST_CASE("bounded_string enforces its compile-time cap", "[external][provider][unit]") {
+TEST_CASE("bounded_string enforces its compile-time cap",
+          "[component:external_api][layer:unit][feature:external_source]") {
     const auto ok = bounded_string<8>::make("abc");
     REQUIRE(ok.has_value());
     REQUIRE(ok->view() == "abc");
@@ -29,7 +30,8 @@ TEST_CASE("bounded_string enforces its compile-time cap", "[external][provider][
     REQUIRE(clamped.view() == "abc");
 }
 
-TEST_CASE("checked/saturating arithmetic is overflow-safe", "[external][provider][unit]") {
+TEST_CASE("checked/saturating arithmetic is overflow-safe",
+          "[component:external_api][layer:unit][feature:external_source]") {
     using namespace bioseq::common;
     REQUIRE(checked_add(1U, 2U).value() == 3U);
     REQUIRE_FALSE(checked_add(UINT64_MAX, 1U).has_value());
@@ -46,7 +48,8 @@ TEST_CASE("checked/saturating arithmetic is overflow-safe", "[external][provider
     REQUIRE_FALSE(scaled_limit(100U, zero_den).has_value());
 }
 
-TEST_CASE("external_error is built through checked factories", "[external][provider][unit]") {
+TEST_CASE("external_error is built through checked factories",
+          "[component:external_api][layer:unit][feature:external_source]") {
     const auto err = make_external_error(external_error_kind::parse, "bad json");
     REQUIRE(err.kind == external_error_kind::parse);
     REQUIRE(err.message.view() == "bad json");
@@ -63,7 +66,8 @@ TEST_CASE("external_error is built through checked factories", "[external][provi
     REQUIRE(with_provider.operation.view() == "genome_dataset_report");
 }
 
-TEST_CASE("identity views and enum text mapping", "[external][provider][unit]") {
+TEST_CASE("identity views and enum text mapping",
+          "[component:external_api][layer:unit][feature:external_source]") {
     REQUIRE(bioseq::sink_control::continue_ != bioseq::sink_control::stop);
     REQUIRE(to_string(molecule_kind::protein) == "protein");
     REQUIRE(to_string(entity_kind::assembly) == "assembly");
@@ -96,7 +100,7 @@ external_budget_request make_budget_request(std::span<const provider_id> provide
 }  // namespace
 
 TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
-          "[external][provider][unit][budget]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     const std::array<provider_id, 1> one{provider_id{.value = "ncbi"}};
     const std::array<provider_id, 2> two{provider_id{.value = "ncbi"},
                                          provider_id{.value = "ucsc"}};
@@ -165,7 +169,7 @@ TEST_CASE("external_execution_budget::make sums the full simultaneous peak",
 }
 
 TEST_CASE("owning_external_budget_allocation::make keeps reserves disjoint",
-          "[external][provider][unit][budget]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     const std::array<provider_id, 2> providers{provider_id{.value = "ncbi"},
                                                provider_id{.value = "ucsc"}};
     const auto request =

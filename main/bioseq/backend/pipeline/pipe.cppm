@@ -1,46 +1,43 @@
 /**
  * @file pipe.cppm
- * @brief Templated minimap_port pipeline API v2 (DOC0249).
+ * @brief Compile-time dispatched sequence-alignment pipeline.
  *
- * This module implements the constexpr-dispatched stage pipeline described in
- * `TEMPLATED_MINIMAP_PORT_PIPELINE_API_V2_CONSTEXPR_DISPATCHED_STAGES_AND_METADATA__DOC0249.md`.
- * It is a parallel API layer that sits above the existing kernel functions in
+ * This module implements the compile-time dispatched stage graph used by the
+ * scheduler-facing mapping entry points. It sits above kernel functions in
  * the target-neutral `bioseq::simd` namespace and provides:
  *
- *   - Compile-time parameter packs (`ConstexprAlignerParams<W,K,L>` /
- *     `ConstexprAlignerFallbackParams<L>`).
- *   - Stage skeletons (`BareStage<Self>`, `StageBase<Self,Out>`,
- *     `Stage<Cep,Self,Sink>`).
- *   - `make_pipeline<Cep>` variadic composer.
- *   - `BatchT<E,StorageKind>` storage wrappers backed by `std::span` or the
- *     per-pipeline arena context.
- *   - Concrete stages — every pipeline phase exposed as a stand-alone struct
- *     whose `process<Cep>` body forwards to the existing kernel function
+ *   - Compile-time parameter packs (`static_aligner_parameters<p_window_size,p_kmer_size,p_bucket_width>` /
+ *     `fallback_aligner_parameters<p_bucket_width>`).
+ *   - stage skeletons (`bare_stage<p_self>`, `stage_base<p_self,p_output>`,
+ *     `stage<p_aligner_parameters,p_self,p_sink>`).
+ *   - `make_pipeline<p_aligner_parameters>` variadic composer.
+ *   - Concrete stages — every pipeline stage exposed as a stand-alone struct
+ *     whose `process<p_aligner_parameters>` body forwards to the existing kernel function
  *     (collect_seed_hits, chain_anchors_*, generate_regions, etc.).
- *   - Top-level `dispatch_pipeline(...)` cascade that fixes (Cep, BAA, CA,
- *     MA, EP) at compile time before driving the pipeline.
- *   - `PipelineDescription` metadata surface for the Postgres EXPLAIN
+ *   - Top-level `dispatch_pipeline(...)` cascade that fixes (p_aligner_parameters, p_alignment_algorithm, p_chaining_algorithm,
+ *     p_minimizer_algorithm, p_entry_point) at compile time before driving the pipeline.
+ *   - `pipeline_description` metadata surface for the Postgres EXPLAIN
  *     renderer.
  *
- * The pipeline calls into the existing kernels directly; no kernel rename is
- * performed here.  Stages adapt span-based I/O to the kernel's `std::vector`
+ * The pipeline calls into the existing kernels directly. Stages adapt
+ * span-based I/O to the kernel's `std::vector`
  * signatures by materialising the kernel's output into arena-backed slabs
- * after the kernel returns.  The wire type between stages is `std::span<E>`
+ * after the kernel returns.  The wire type between stages is `std::span<p_element>`
  * (with mutating stages taking non-const elements and read-only stages
  * taking const).
  */
 module;
 
-#include "headers/pg_build_config.h"
+#include <bioseq/pg_build_profile.h>
 
-// DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
+// The chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
 // gcc and clang honour the attribute at -O1+, but downgrade silently at -O0.
 // Build configs that compile this module without optimisation produce
 // stack-spilled adaptor frames that defeat the point of the cascade; refuse
 // to compile in that mode.
 #if !defined(__OPTIMIZE__) && !defined(BIOSEQ_PACKAGE_O0_PROFILE)
-# error "DOC0256 chain primitive requires -O1 or higher (see DOC0256 §R17). " \
+# error "pipeline chain primitive requires -O1 or higher. " \
         "Use -Og or -O1 -g for debug builds of pipe.cppm; only the explicit " \
         "distribution package O0 profile may disable this guard."
 #endif
@@ -64,8 +61,6 @@ module;
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard]]
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
 #endif
-
-#include "common.h"
 
 #include <bit>
 #include <chrono>
@@ -91,54 +86,57 @@ module;
 #include <utility>
 #include <vector>
 #include <boost/unordered/unordered_flat_set.hpp>
+#include <libassert/assert.hpp>
 
-export module bioseq.sequences.pipe;
+export module bioseq.pipeline.pipe;
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.common.templating;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
+import bioseq.common.checked_arithmetic;
+import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.alignment.ksw2_batched;
 import bioseq.alignment.block_aligner;
-import bioseq.sequences.chaining.utils;
-import bioseq.sequences.chaining.scalar;
-import bioseq.sequences.chaining.simd;
-import bioseq.sequences.chaining.rmq;
-import bioseq.sequences.chaining.vulkan;
-import bioseq.sequences.minimap_port;
-import bioseq.sequences.prefilters.prefilter_types;
-import bioseq.sequences.prefilters.sneaky_snake;
-import bioseq.sequences.prefilters.sneaky_snake_vulkan;
-import bioseq.sequences.prefilters.gatekeeper;
-import bioseq.sequences.prefilters.gatekeeper_vulkan;
+import bioseq.chaining.core;
+import bioseq.chaining.scalar;
+import bioseq.chaining.simd;
+import bioseq.chaining.rmq;
+import bioseq.chaining.vulkan;
+import bioseq.pipeline.minimap_port;
+import bioseq.prefilter.types;
+import bioseq.prefilter.sneaky_snake;
+import bioseq.prefilter.sneaky_snake.vulkan;
+import bioseq.prefilter.gatekeeper;
+import bioseq.prefilter.gatekeeper.vulkan;
 import bioseq.common.context;
-import bioseq.instr;
+import bioseq.instrumentation;
 import bioseq.storage.scanner;
-import bioseq.storage.lazy;
-import bioseq.storage.size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
 import bioseq.indexing.type;
-import bioseq.indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq.indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
-import bioseq.gpu.vulkan.runtime;           // Runtime::instance() for GPU sketch/seed paths
-import bioseq.sequences.kmers.vulkan;       // DOC0351 Phase C — Vulkan minimizer sketch + device span
-import bioseq.indexing.minimizer_vulkan;    // DOC0307 Phase B — GPU-resident index view + cache
-import bioseq.sequences.seeding.vulkan;     // DOC0307 Phase B — Vulkan seed-hit lookup
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_index;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.sequences.kmers.vulkan_minimizers;
+import bioseq.indexing.gpu_minimizer_index;
+import bioseq.seeding.vulkan;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 
-// DOC0371 §5.1 — one target-independent execution-attestation value.  This
-// namespace deliberately precedes Highway target toggling: these types describe
-// a whole statement and must have one ABI regardless of the compiled SIMD
-// target.  Algorithm-local proof values are mapped into this model at dispatch
+// This target-independent execution value deliberately precedes Highway
+// target toggling: these types describe
+// a whole statement and must have one ABI regardless of the compiled simd
+// target. algorithm_type-local statistics are mapped into this model at dispatch
 // boundaries; no Highway namespace owns an alias of it.
 export import bioseq.pipeline.stats;
 
@@ -146,43 +144,42 @@ export {
 
 namespace bioseq::simd::pipe {
 
-namespace prefilters = ::bioseq::sequences::prefilters;
-// DOC0279 §9 — bring the relocated index into this namespace so the prior
-// `TargetIndex` spellings resolve to `MinimizerHashmapFragmentIndex`.
-using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::MinimizerLookupIndex;
-using bioseq::indexing::MinimizerSeedIndex;
+namespace prefilter = ::bioseq::prefilter;
+// Keep the canonical minimizer-index concepts visible to stage templates.
+using bioseq::indexing::minimizer_hashmap_fragment_index;
+using bioseq::indexing::minimizer_lookup_index;
+using bioseq::indexing::minimizer_seed_index;
 
 // Export exception aliases through the pipeline module so PG importers do not
 // redundantly import the Highway-heavy implementation modules.
-using ExactSimdRuntimeError =
-    ::bioseq::minimizers::ExactSimdRuntimeError;
-using SimdChainingRuntimeError =
-    ::bioseq::chaining::SimdChainingRuntimeError;
-using SimdChainingStatus =
-    ::bioseq::chaining::SimdChainingStatus;
+using exact_simd_runtime_error =
+    ::bioseq::minimizers::exact_simd_runtime_error;
+using simd_chaining_runtime_error =
+    ::bioseq::chaining::simd_chaining_runtime_error;
+using simd_chaining_status =
+    ::bioseq::chaining::simd_chaining_status;
 
-/// Fail-closed error for the selected Paper-ntHash route.  PostgreSQL-facing
+/// Fail-closed error for the selected bounded ntHash route.  PostgreSQL-facing
 /// callers catch this concrete type before entering the longjmp ERROR boundary;
-/// no Paper rejection is allowed to escape the C++ frame or select another
+/// no bounded ntHash rejection is allowed to escape the C++ frame or select another
 /// minimizer implementation.
-class PaperNtHashRuntimeError final : public std::runtime_error {
+class bounded_nthash_runtime_error final : public std::runtime_error {
 public:
-    explicit PaperNtHashRuntimeError(std::string detail)
+    explicit bounded_nthash_runtime_error(std::string detail)
         : std::runtime_error(
               std::string{
-                  "PaperNtHashSimd minimizer execution rejected: "}
+                  "bounded_nthash_simd minimizer execution rejected: "}
               + std::move(detail)) {}
 };
 
-// DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
+// — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
 
-using HostStageClock = std::chrono::steady_clock;
+using host_stage_clock = std::chrono::steady_clock;
 
 [[nodiscard]] inline std::uint64_t host_stage_now_ns() noexcept {
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        HostStageClock::now().time_since_epoch()).count();
+        host_stage_clock::now().time_since_epoch()).count();
     return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
 }
 
@@ -191,7 +188,7 @@ using HostStageClock = std::chrono::steady_clock;
     const std::uint64_t finished_ns = host_stage_now_ns();
     const std::uint64_t elapsed = finished_ns >= started_ns
         ? finished_ns - started_ns : 0u;
-    // A stage that executed is positive evidence even on a platform whose
+    // A stage that executed is a positive observation even on a platform whose
     // steady-clock tick is coarser than one nanosecond. The clamp can add at
     // most one nanosecond and keeps focused tests independent of clock
     // resolution without sleeping.
@@ -199,7 +196,7 @@ using HostStageClock = std::chrono::steady_clock;
 }
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
-    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    auto& runtime = bioseq::gpu::vulkan::runtime::instance();
     const std::string detail = !runtime.usable()
         ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
         : runtime.features().software_device
@@ -209,13 +206,13 @@ using HostStageClock = std::chrono::steady_clock;
                   runtime.features().device_name.data(),
                   runtime.features().device_type)
             : "GPU path declined";
-    throw bioseq::gpu::vulkan::VulkanRuntimeError(
+    throw bioseq::gpu::vulkan::vulkan_runtime_error(
         fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
 }
 
 [[noreturn]] inline void throw_vulkan_sketch_declined(
     std::string_view stage,
-    const bioseq::gpu::vulkan::VulkanSketchDecline& decline)
+    const bioseq::gpu::vulkan::vulkan_sketch_decline& decline)
 {
     if (!decline.declined()) {
         throw_vulkan_declined(stage);
@@ -223,46 +220,46 @@ using HostStageClock = std::chrono::steady_clock;
     bioseq::gpu::vulkan::throw_vulkan_strict_decline(stage, decline);
 }
 
-// DOC0256 §2.1 — the chain primitive is load-bearing on relaxed
+// — the chain primitive is load-bearing on relaxed
 // template-template parameter matching (P0522R0) and C++20 class-type
 // NTTPs (carrying `auto...` packs that interleave enum NTTPs with
 // `std::size_t`).  Guard the build mode so a misconfigured build fails
 // loudly rather than producing subtly-wrong codegen.
 static_assert(__cplusplus >= 202302L,
-    "DOC0256 requires C++23 — see DOC0256 §2.1.");
+    " requires C++23 — see");
 
 // Import types from the surrounding modules so the stage bodies can refer
 // to them by short name.
-using ::bioseq::chaining::Anchor;
-using ::bioseq::chaining::Chain;
-using ::bioseq::chaining::ChainingParams;
-using ::bioseq::chaining::ArenaSlab;
+using ::bioseq::chaining::anchor;
+using ::bioseq::chaining::chain;
+using ::bioseq::chaining::chaining_parameters;
+using ::bioseq::chaining::arena_slab;
 using ::bioseq::chaining::make_arena_slab;
 using ::bioseq::chaining::chain_anchors_scalar;
 using ::bioseq::chaining::chain_anchors_rmq;
 
 // =============================================================================
-// 4. Compile-time parameter packs (DOC0249 §4)
+// 4. Compile-time parameter packs
 // =============================================================================
 
 /**
  * @brief Type-level parameter pack for a fully specialised pipeline instance.
  *
- * @tparam W           Minimizer window size (must be > 0).
- * @tparam K           K-mer length (must match the MinimizerRepr's KmerLen).
- * @tparam SeqLenLog2  ceil(log2(max(query_bp, target_bp))).  Selects the
- *                     `MinimizerRepr<SeqLenLog2, K>` storage bucket — same
+ * @tparam p_window_size           Minimizer window size (must be > 0).
+ * @tparam p_kmer_size           p_kmer_size-mer length (must match the minimizer_representation's KmerLen).
+ * @tparam p_sequence_length_log2  ceil(log2(max(query_bp, target_bp))).  Selects the
+ *                     `minimizer_representation<p_sequence_length_log2, p_kmer_size>` storage bucket — same
  *                     dispatch already happens at runtime in `minimap_port`.
  */
-template <std::size_t W, std::size_t K, std::size_t SeqLenLog2>
-struct ConstexprAlignerParams {
-    static constexpr std::size_t window_len        = W;
-    static constexpr std::size_t kmer_len          = K;
-    static constexpr std::size_t sequence_len_log2 = SeqLenLog2;
+template <std::size_t p_window_size, std::size_t p_kmer_size, std::size_t p_sequence_length_log2>
+struct static_aligner_parameters {
+    static constexpr std::size_t window_len        = p_window_size;
+    static constexpr std::size_t kmer_len          = p_kmer_size;
+    static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
     static constexpr bool        generic_fallback  = false;
 
     using minimizer_repr_t =
-        ::bioseq::minimizers::MinimizerRepr<SeqLenLog2, K>;
+        ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2, p_kmer_size>;
 
     [[nodiscard]] static constexpr std::string_view label() noexcept {
         return "specialised";
@@ -270,59 +267,59 @@ struct ConstexprAlignerParams {
 };
 
 /**
- * @brief Fallback parameter pack for non-canonical (W, K).
+ * @brief Fallback parameter pack for non-canonical (p_window_size, p_kmer_size).
  *
  * Stages branch on `generic_fallback` to read window/kmer from runtime params
  * instead of the type-level constants.
  */
-template <std::size_t SeqLenLog2>
-struct ConstexprAlignerFallbackParams {
+template <std::size_t p_sequence_length_log2>
+struct fallback_aligner_parameters {
     static constexpr std::size_t window_len        = 0;
     static constexpr std::size_t kmer_len          = 0;
-    static constexpr std::size_t sequence_len_log2 = SeqLenLog2;
+    static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
     static constexpr bool        generic_fallback  = true;
 
     using minimizer_repr_t =
-        ::bioseq::minimizers::MinimizerRepr<SeqLenLog2, 15u>;
+        ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2, 15u>;
 
     [[nodiscard]] static constexpr std::string_view label() noexcept {
         return "fallback(generic w/k)";
     }
 };
 
-template <class T>
+template <class p_type>
 concept is_constexpr_aligner_params = requires {
-    { T::window_len }        -> std::convertible_to<std::size_t>;
-    { T::kmer_len }          -> std::convertible_to<std::size_t>;
-    { T::sequence_len_log2 } -> std::convertible_to<std::size_t>;
-    { T::generic_fallback }  -> std::convertible_to<bool>;
-    typename T::minimizer_repr_t;
-    { T::label() }           -> std::convertible_to<std::string_view>;
+    { p_type::window_len }        -> std::convertible_to<std::size_t>;
+    { p_type::kmer_len }          -> std::convertible_to<std::size_t>;
+    { p_type::sequence_len_log2 } -> std::convertible_to<std::size_t>;
+    { p_type::generic_fallback }  -> std::convertible_to<bool>;
+    typename p_type::minimizer_repr_t;
+    { p_type::label() }           -> std::convertible_to<std::string_view>;
 };
 
-static_assert(is_constexpr_aligner_params<ConstexprAlignerParams<10u, 15u, 28u>>);
-static_assert(is_constexpr_aligner_params<ConstexprAlignerFallbackParams<28u>>);
+static_assert(is_constexpr_aligner_params<static_aligner_parameters<10u, 15u, 28u>>);
+static_assert(is_constexpr_aligner_params<fallback_aligner_parameters<28u>>);
 
 /**
- * @brief Pipeline-builder entry-point tag (DOC0249 §9.4).
+ * @brief Pipeline-builder entry-point tag.
  *
- * `WithPrebuiltMinimizers` — pipeline accepts a `std::span<const MinimizerT>`
- * directly; the IndexStage is at the head.
- * `FromSequence` — pipeline accepts the query sequence range and a
- * `MinimizerStage` is front-loaded to sketch on the fly.
+ * `with_prebuilt_minimizers` — pipeline accepts a `std::span<const p_minimizer>`
+ * directly; the index_stage is at the head.
+ * `from_sequence` — pipeline accepts the query sequence range and a
+ * `minimizer_stage` is front-loaded to sketch on the fly.
  */
-enum class EntryPoint : std::uint8_t {
-    WithPrebuiltMinimizers,
-    FromSequence,
+enum class pipeline_entry_point : std::uint8_t {
+    with_prebuilt_minimizers,
+    from_sequence,
 };
 
 // =============================================================================
-// 5/6. Concepts and Stage skeleton (DOC0249 §5, §6)
+// 5/6. Concepts and stage skeleton (,)
 // =============================================================================
 
 namespace detail {
-    template <class S>
-    concept IsBareStage = requires { typename S::bare_stage_marker; };
+    template <class p_sink_type>
+    concept is_bare_stage = requires { typename p_sink_type::bare_stage_marker; };
 }
 
 /**
@@ -331,281 +328,281 @@ namespace detail {
  * Lets `make_pipeline` distinguish bare-stage arguments from the terminal
  * sink via the `bare_stage_marker` typedef.
  */
-template <class Derived>
-struct BareStage {
+template <class p_derived>
+struct bare_stage {
     using bare_stage_marker = void;
 };
 
-// Forward declaration so StageBase::attach can refer to Stage.
-template <is_constexpr_aligner_params Cep, class Self, class Sink>
-struct Stage;
+// Forward declaration so stage_base::attach can refer to stage.
+template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
+struct stage;
 
-// Metadata types (defined fully in §11; forward-declared here so describe()
+// Metadata types (defined fully in; forward-declared here so describe()
 // has a return type).
-struct StageDescription;
-struct PipelineDescription;
+struct stage_description;
+struct pipeline_description;
 
 // =============================================================================
-// DOC0307 §5.2 — narrow minimizer-batch shape carrying an optional device span.
+// — narrow minimizer-batch shape carrying an optional device span.
 // =============================================================================
 //
-// One additional stage-shape on top of the DOC0254 matrix. It borrows the host
+// One additional stage-shape on top of the  matrix. It borrows the host
 // minimizers from the arena slab and owns the optional GPU device minimizer
-// handle through `VulkanDeviceMinimizerSpan::owner`, so the all-Vulkan
+// handle through `vulkan_device_minimizer_span::owner`, so the all-Vulkan
 // sketch+seed path avoids a second query-minimizer upload. CPU minimizer
-// kernels keep using the existing `std::span<const MinimizerT>` path.
-template <class MinimizerT>
-struct MinimizerBatchView {
-    using value_type = MinimizerT;
+// kernels keep using the existing `std::span<const p_minimizer>` path.
+template <class p_minimizer>
+struct minimizer_batch_view {
+    using value_type = p_minimizer;
 
-    std::span<const MinimizerT> host{};
-    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device{};
+    std::span<const p_minimizer> host{};
+    std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device{};
 
-    [[nodiscard]] const MinimizerT* data() const noexcept { return host.data(); }
+    [[nodiscard]] const p_minimizer* data() const noexcept { return host.data(); }
     [[nodiscard]] std::size_t size() const noexcept { return host.size(); }
-    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept { return host; }
+    [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept { return host; }
     [[nodiscard]] auto begin() const noexcept { return host.begin(); }
     [[nodiscard]] auto end() const noexcept { return host.end(); }
 };
 
-template <class T>
+template <class p_type>
 struct is_minimizer_batch_view : std::false_type {};
-template <class M>
-struct is_minimizer_batch_view<MinimizerBatchView<M>> : std::true_type {};
-template <class T>
+template <class p_minimizer_type>
+struct is_minimizer_batch_view<minimizer_batch_view<p_minimizer_type>> : std::true_type {};
+template <class p_type>
 inline constexpr bool is_minimizer_batch_view_v =
-    is_minimizer_batch_view<std::remove_cvref_t<T>>::value;
+    is_minimizer_batch_view<std::remove_cvref_t<p_type>>::value;
 
 // =============================================================================
-// DOC0254 §7 — Concept-driven sink validation.
+// — Concept-driven sink validation.
 // =============================================================================
 
 /**
- * @brief Single-batch sink concept.  Required by EmitToken::emit_batch.
+ * @brief Single-batch sink concept.  Required by emit_token::emit_batch.
  *
- * Matched by every concrete sink that consumes a `std::span<E>` (most
- * pipeline tails).  Substitution failures inside `EmitToken::emit_batch`
+ * Matched by every concrete sink that consumes a `std::span<p_element>` (most
+ * pipeline tails).  Substitution failures inside `emit_token::emit_batch`
  * name the concept and the missing method.
  */
-template <class S, class E>
-concept BatchSink = requires (S& sink, std::span<E> batch) {
+template <class p_sink_type, class p_element>
+concept batch_sink = requires (p_sink_type& sink, std::span<p_element> batch) {
     { sink.on_batch(batch) } -> std::same_as<void>;
     { sink.on_completed() }  -> std::same_as<void>;
 };
 
 /**
- * @brief Pair-batch sink concept.  Required by EmitToken::emit_batch_pair.
+ * @brief Pair-batch sink concept.  Required by emit_token::emit_batch_pair.
  *
  * The pair shape is used by the chain → region → primary/secondary →
  * filter → divergence → align cascade where each stage forwards both the
  * regions span and the (read-only) anchors span downstream.
  */
-template <class S, class E1, class E2>
-concept PairBatchSink = requires (S& sink, std::span<E1> a, std::span<E2> b) {
+template <class p_sink_type, class p_first_element, class p_second_element>
+concept pair_batch_sink = requires (p_sink_type& sink, std::span<p_first_element> a, std::span<p_second_element> b) {
     { sink.on_batch_pair(a, b) } -> std::same_as<void>;
     { sink.on_completed() }      -> std::same_as<void>;
 };
 
 /**
  * @brief Index-decorated batch sink concept.  Required by
- * EmitToken::emit_batch_with_index.
+ * emit_token::emit_batch_with_index.
  *
- * Used by IndexStage to hand a sketches span downstream alongside a
- * (const-reference) target index.  SeedHitStage is the canonical consumer.
+ * Used by index_stage to hand a sketches span downstream alongside a
+ * (const-reference) target index.  seed_hit_stage is the canonical consumer.
  */
-template <class S, class E, class IndexT>
-concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx,
-                                     bioseq::indexing::GpuIndexCacheIdentity identity) {
+template <class p_sink_type, class p_element, class p_index>
+concept indexed_batch_sink = requires (p_sink_type& sink, std::span<p_element> a, const p_index& idx,
+                                     bioseq::indexing::gpu_index_cache_identity identity) {
     { sink.on_batch_with_index(a, idx, identity) } -> std::same_as<void>;
     { sink.on_completed() }                        -> std::same_as<void>;
 };
 
-/// DOC0307 §5.2 — minimizer-batch sink (MinimizerStage → IndexStage hand-off).
-template <class S, class MinimizerT>
-concept MinimizerBatchSink = requires (S& sink, MinimizerBatchView<MinimizerT> batch) {
+/// — minimizer-batch sink (minimizer_stage → index_stage hand-off).
+template <class p_sink_type, class p_minimizer>
+concept minimizer_batch_sink = requires (p_sink_type& sink, minimizer_batch_view<p_minimizer> batch) {
     { sink.on_minimizer_batch(batch) } -> std::same_as<void>;
     { sink.on_completed() }            -> std::same_as<void>;
 };
 
-/// DOC0307 §5.2 — index-decorated minimizer-batch sink (IndexStage →
-/// SeedHitStage hand-off carrying the GPU index cache identity).
-template <class S, class MinimizerT, class IndexT>
-concept IndexedMinimizerBatchSink =
-requires (S& sink, MinimizerBatchView<MinimizerT> batch, const IndexT& idx,
-          bioseq::indexing::GpuIndexCacheIdentity identity) {
+/// — index-decorated minimizer-batch sink (index_stage →
+/// seed_hit_stage hand-off carrying the GPU index cache identity).
+template <class p_sink_type, class p_minimizer, class p_index>
+concept indexed_minimizer_batch_sink =
+requires (p_sink_type& sink, minimizer_batch_view<p_minimizer> batch, const p_index& idx,
+          bioseq::indexing::gpu_index_cache_identity identity) {
     { sink.on_minimizer_batch_with_index(batch, idx, identity) } -> std::same_as<void>;
     { sink.on_completed() }                                      -> std::same_as<void>;
 };
 
 // =============================================================================
-// DOC0254 §4 — Compile-time single-emission enforcement (EmitToken /
-// EmittedToken).
+// — Compile-time single-emission enforcement (emit_token /
+// emitted_token).
 // =============================================================================
 
-template <class Sink> class EmittedToken;
+template <class p_sink> class emitted_token;
 
 /**
  * @brief Move-only, single-use, friend-constructible-only token granting
  * downstream-emission permission.  The `emit_batch*` family of
  * rvalue-qualified methods consumes the token (nulling its internal
- * pointer) and returns the friend-only-constructible `EmittedToken<Sink>`
- * proof.
+ * pointer) and returns the friend-only-constructible `emitted_token<p_sink>`
+ * stats.
  *
- * The token's only constructor is private; only `Stage<Cep, Self, Sink>`
- * is befriended, which means concrete-stage `process*<Cep>` bodies see
+ * The token's only constructor is private; only `stage<p_aligner_parameters, p_self, p_sink>`
+ * is befriended, which means concrete-stage `process*<p_aligner_parameters>` bodies see
  * the token by rvalue reference but cannot manufacture one themselves —
  * the type system rules out skipping the emit (no way to construct the
- * required `EmittedToken<Sink>` return value).
+ * required `emitted_token<p_sink>` return value).
  *
- * Single-emission enforcement (DOC0254 R7):
- *   - At least once: HARD compile-time.  `process*<Cep>` must return
- *     `EmittedToken<Sink>`; the only way to construct one is to call
- *     `EmitToken<Sink>::emit_batch*`.
+ * Single-emission enforcement ( R7):
+ *   - At least once: HARD compile-time.  `process*<p_aligner_parameters>` must return
+ *     `emitted_token<p_sink>`; the only way to construct one is to call
+ *     `emit_token<p_sink>::emit_batch*`.
  *   - At most once: soft compile-time + runtime trip-wire.  `[[nodiscard]]`
  *     makes the ergonomic shape `return std::move(token).emit_batch*(...)`;
  *     emitting twice trips the `DEBUG_ASSERT(sink_ptr_ != nullptr)` in debug.
  */
-template <class Sink>
-class EmitToken {
+template <class p_sink>
+class emit_token {
 public:
-    template <is_constexpr_aligner_params, class, class> friend struct Stage;
+    template <is_constexpr_aligner_params, class, class> friend struct stage;
 
-    EmitToken()                            = delete;
-    EmitToken(const EmitToken&)            = delete;
-    EmitToken(EmitToken&&)                 = delete;
-    EmitToken& operator=(const EmitToken&) = delete;
-    EmitToken& operator=(EmitToken&&)      = delete;
+    emit_token()                            = delete;
+    emit_token(const emit_token&)            = delete;
+    emit_token(emit_token&&)                 = delete;
+    emit_token& operator=(const emit_token&) = delete;
+    emit_token& operator=(emit_token&&)      = delete;
 
-    template <class E>
+    template <class p_element>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_batch(std::span<E> data) && {
-        static_assert(BatchSink<Sink, E>,
-            "EmitToken::emit_batch: downstream sink does not implement "
-            "on_batch(std::span<E>). See DOC0249 §8.12 stage-shape matrix.");
+    emitted_token<p_sink> emit_batch(std::span<p_element> data) && {
+        static_assert(batch_sink<p_sink, p_element>,
+            "emit_token::emit_batch: downstream sink does not implement "
+            "on_batch(std::span<p_element>). See stage-shape matrix.");
         DEBUG_ASSERT(sink_ptr_ != nullptr,
-            "EmitToken consumed twice; the first emit_batch* call nulled the "
-            "sink pointer (see R7 in DOC0254 §3).");
+            "emit_token consumed twice; the first emit_batch* call nulled the "
+            "sink pointer (see R7 in).");
         sink_ptr_->on_batch(data);
         sink_ptr_ = nullptr;
-        return EmittedToken<Sink>::make();
+        return emitted_token<p_sink>::make();
     }
 
-    template <class E1, class E2>
+    template <class p_first_element, class p_second_element>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_batch_pair(std::span<E1> first_batch,
-                                       std::span<E2> second_batch) && {
-        static_assert(PairBatchSink<Sink, E1, E2>,
-            "EmitToken::emit_batch_pair: downstream sink does not implement "
-            "on_batch_pair(std::span<E1>, std::span<E2>).");
-        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+    emitted_token<p_sink> emit_batch_pair(std::span<p_first_element> first_batch,
+                                       std::span<p_second_element> second_batch) && {
+        static_assert(pair_batch_sink<p_sink, p_first_element, p_second_element>,
+            "emit_token::emit_batch_pair: downstream sink does not implement "
+            "on_batch_pair(std::span<p_first_element>, std::span<p_second_element>).");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "emit_token consumed twice.");
         sink_ptr_->on_batch_pair(first_batch, second_batch);
         sink_ptr_ = nullptr;
-        return EmittedToken<Sink>::make();
+        return emitted_token<p_sink>::make();
     }
 
-    template <class E, class IndexT>
+    template <class p_element, class p_index>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_batch_with_index(
-        std::span<E>  data,
-        const IndexT& index_ref,
-        bioseq::indexing::GpuIndexCacheIdentity identity) && {
-        static_assert(IndexedBatchSink<Sink, E, IndexT>,
-            "EmitToken::emit_batch_with_index: downstream sink does not "
-            "implement on_batch_with_index(std::span<E>, IndexT const&, identity).");
-        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+    emitted_token<p_sink> emit_batch_with_index(
+        std::span<p_element>  data,
+        const p_index& index_ref,
+        bioseq::indexing::gpu_index_cache_identity identity) && {
+        static_assert(indexed_batch_sink<p_sink, p_element, p_index>,
+            "emit_token::emit_batch_with_index: downstream sink does not "
+            "implement on_batch_with_index(std::span<p_element>, p_index const&, identity).");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "emit_token consumed twice.");
         sink_ptr_->on_batch_with_index(data, index_ref, identity);
         sink_ptr_ = nullptr;
-        return EmittedToken<Sink>::make();
+        return emitted_token<p_sink>::make();
     }
 
-    // DOC0307 §5.2 — narrow minimizer-batch emit (carries optional device span).
-    template <class MinimizerT>
+    // — narrow minimizer-batch emit (carries optional device span).
+    template <class p_minimizer>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_minimizer_batch(MinimizerBatchView<MinimizerT> batch) && {
-        static_assert(MinimizerBatchSink<Sink, MinimizerT>,
-            "EmitToken::emit_minimizer_batch: downstream sink does not implement "
+    emitted_token<p_sink> emit_minimizer_batch(minimizer_batch_view<p_minimizer> batch) && {
+        static_assert(minimizer_batch_sink<p_sink, p_minimizer>,
+            "emit_token::emit_minimizer_batch: downstream sink does not implement "
             "on_minimizer_batch.");
-        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "emit_token consumed twice.");
         sink_ptr_->on_minimizer_batch(batch);
         sink_ptr_ = nullptr;
-        return EmittedToken<Sink>::make();
+        return emitted_token<p_sink>::make();
     }
 
-    template <class MinimizerT, class IndexT>
+    template <class p_minimizer, class p_index>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_minimizer_batch_with_index(
-        MinimizerBatchView<MinimizerT> batch,
-        const IndexT& index_ref,
-        bioseq::indexing::GpuIndexCacheIdentity identity) && {
-        static_assert(IndexedMinimizerBatchSink<Sink, MinimizerT, IndexT>,
-            "EmitToken::emit_minimizer_batch_with_index: downstream sink does not "
+    emitted_token<p_sink> emit_minimizer_batch_with_index(
+        minimizer_batch_view<p_minimizer> batch,
+        const p_index& index_ref,
+        bioseq::indexing::gpu_index_cache_identity identity) && {
+        static_assert(indexed_minimizer_batch_sink<p_sink, p_minimizer, p_index>,
+            "emit_token::emit_minimizer_batch_with_index: downstream sink does not "
             "implement on_minimizer_batch_with_index.");
-        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "emit_token consumed twice.");
         sink_ptr_->on_minimizer_batch_with_index(batch, index_ref, identity);
         sink_ptr_ = nullptr;
-        return EmittedToken<Sink>::make();
+        return emitted_token<p_sink>::make();
     }
 
 private:
-    Sink* sink_ptr_;
-    explicit constexpr EmitToken(Sink& sink_ref) noexcept
+    p_sink* sink_ptr_;
+    explicit constexpr emit_token(p_sink& sink_ref) noexcept
         : sink_ptr_(&sink_ref) {}
 };
 
 /**
- * @brief Proof-of-emission token.  Returned by
- * `EmitToken<Sink>::emit_batch*`; every concrete stage's `process*<Cep>`
+ * @brief Stats-of-emission token.  Returned by
+ * `emit_token<p_sink>::emit_batch*`; every concrete stage's `process*<p_aligner_parameters>`
  * must return one.  The only path to constructing one is the
  * friend-accessible `make()` factory.
  */
-template <class Sink>
-class [[nodiscard]] EmittedToken {
+template <class p_sink>
+class [[nodiscard]] emitted_token {
 public:
-    EmittedToken(const EmittedToken&)             = delete;
-    EmittedToken& operator=(const EmittedToken&)  = delete;
-    EmittedToken& operator=(EmittedToken&&)       = delete;
+    emitted_token(const emitted_token&)             = delete;
+    emitted_token& operator=(const emitted_token&)  = delete;
+    emitted_token& operator=(emitted_token&&)       = delete;
 
     /// Move constructor exists only for mandatory-copy-elision worst-case
     /// materialisation.  The canonical path is direct-return from
     /// emit_batch*, where C++17 copy elision skips it entirely.
-    EmittedToken(EmittedToken&&) noexcept = default;
+    emitted_token(emitted_token&&) noexcept = default;
 
 private:
-    friend class EmitToken<Sink>;
+    friend class emit_token<p_sink>;
     /// Friend-only default constructor — the public surface is
     /// non-default-constructible because the only call site of this
     /// ctor lives behind the `make()` factory below.
-    constexpr EmittedToken() noexcept = default;
-    [[nodiscard, gnu::always_inline]] static constexpr EmittedToken make() noexcept {
-        return EmittedToken{};
+    constexpr emitted_token() noexcept = default;
+    [[nodiscard, gnu::always_inline]] static constexpr emitted_token make() noexcept {
+        return emitted_token{};
     }
 };
 
 // =============================================================================
-// DOC0254 §5 — Input-side kernel-to-arena adapter.
+// — Input-side kernel-to-arena adapter.
 // =============================================================================
 
 /**
- * @brief Drop-in `sketch_collector_t<E>`-shaped adapter that routes the
+ * @brief Drop-in `sketch_collector_t<p_element>`-shaped adapter that routes the
  * kernel's `collect(...)` traffic into a caller-provided
- * `ArenaSlab<E>`.  Implements the minimal surface the kernels rely on
- * (`collect(E&&)`, `collect(const E&)`, `reserve(size_t)`).
+ * `arena_slab<p_element>`.  Implements the minimal surface the kernels rely on
+ * (`collect(p_element&&)`, `collect(const p_element&)`, `reserve(size_t)`).
  *
- * `ArenaSlab<E>::push_back` requires `std::is_trivially_copyable_v<E>` —
- * satisfied by every `MinimizerRepr<L, K>`.  The existing slab
+ * `arena_slab<p_element>::push_back` requires `std::is_trivially_copyable_v<p_element>` —
+ * satisfied by every `minimizer_representation<p_bucket_width, p_kmer_size>`.  The existing slab
  * `static_assert` (`chaining_utils.cppm:236`) covers the constraint and
  * would fire if a non-trivial minimizer type were ever introduced.
  */
-template <class E>
+template <class p_element>
 struct sketch_collector_arena_adapter {
-    using minimizer_type = E;
+    using minimizer_type = p_element;
 
-    ::bioseq::chaining::ArenaSlab<E>* slab_;
+    ::bioseq::chaining::arena_slab<p_element>* slab_;
 
-    [[gnu::always_inline]] void collect(E sketch) {
+    [[gnu::always_inline]] void collect(p_element sketch) {
         slab_->push_back(std::move(sketch));
     }
-    [[gnu::always_inline]] void collect(const E& sketch) {
+    [[gnu::always_inline]] void collect(const p_element& sketch) {
         slab_->push_back(sketch);
     }
     [[gnu::always_inline]] void reserve(std::size_t expected_count) {
@@ -616,44 +613,44 @@ struct sketch_collector_arena_adapter {
     }
 
     [[nodiscard, gnu::always_inline]] bool append_records(
-            const std::span<const E> records) {
+            const std::span<const p_element> records) {
         return slab_->append_trivial_records(records);
     }
 
-    template<class M = E>
+    template<class p_minimizer_type = p_element>
     [[nodiscard, gnu::always_inline]] bool append_raw_storage(
-        const typename M::storage_t* raw,
+        const typename p_minimizer_type::storage_type* raw,
         std::size_t count)
         requires (
-            std::same_as<M, E>
-            && requires { typename M::storage_t; }
-            && std::is_trivially_copyable_v<M>
-            && sizeof(M) == sizeof(typename M::storage_t))
+            std::same_as<p_minimizer_type, p_element>
+            && requires { typename p_minimizer_type::storage_type; }
+            && std::is_trivially_copyable_v<p_minimizer_type>
+            && sizeof(p_minimizer_type) == sizeof(typename p_minimizer_type::storage_type))
     {
         return slab_->append_trivial_storage(
-            std::span<const typename M::storage_t>{raw, count});
+            std::span<const typename p_minimizer_type::storage_type>{raw, count});
     }
 };
 
 /**
  * @brief CRTP helper absorbing the boilerplate shared by every concrete stage.
  *
- * `Derived` must define `static constexpr std::string_view stage_name`.  The
- * default `attach<Cep, Sink>(...)` returns a bound `Stage<Cep, Derived, Sink>`
+ * `p_derived` must define `static constexpr std::string_view stage_name`.  The
+ * default `attach<p_aligner_parameters, p_sink>(...)` returns a bound `stage<p_aligner_parameters, p_derived, p_sink>`
  * value owning `*this` and the downstream sink.
  */
-template <class Derived, class Out>
-struct StageBase : BareStage<Derived> {
-    using out_element_type = Out;
+template <class p_derived, class p_output>
+struct stage_base : bare_stage<p_derived> {
+    using out_element_type = p_output;
 
-    template <is_constexpr_aligner_params Cep, class Sink>
-    [[gnu::always_inline]] auto attach(Sink sink) noexcept {
-        return Stage<Cep, Derived, Sink>{
-            std::move(sink), std::move(static_cast<Derived&>(*this))};
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
+    [[gnu::always_inline]] auto attach(p_sink sink) noexcept {
+        return stage<p_aligner_parameters, p_derived, p_sink>{
+            std::move(sink), std::move(static_cast<p_derived&>(*this))};
     }
 
-    template <class Sink>
-    [[gnu::always_inline]] void finalize(Sink&) noexcept {
+    template <class p_sink>
+    [[gnu::always_inline]] void finalize(p_sink&) noexcept {
         /* default: no-op */
     }
 };
@@ -661,59 +658,59 @@ struct StageBase : BareStage<Derived> {
 /**
  * @brief Bound stage — owns its downstream sink and bare-stage config by value.
  *
- * `Cep` is fixed at `make_pipeline<Cep>(...)` time and identical across every
+ * `p_aligner_parameters` is fixed at `make_pipeline<p_aligner_parameters>(...)` time and identical across every
  * stage in a given pipeline instance.  The bound stage's `on_batch*` members
- * forward to the bare stage's `process*<Cep>` body; both are
+ * forward to the bare stage's `process*<p_aligner_parameters>` body; both are
  * `[[gnu::always_inline]]` so the chain collapses to a straight-line sequence
  * of kernel calls at `-O3`.
  */
-template <is_constexpr_aligner_params Cep, class Self, class Sink>
-struct Stage {
-    using cep_t = Cep;
+template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
+struct stage {
+    using cep_t = p_aligner_parameters;
 
-    Sink sink_;
-    Self self_;
+    p_sink sink_;
+    p_self self_;
 
-    constexpr Stage(Sink sink_arg, Self self_arg) noexcept
+    constexpr stage(p_sink sink_arg, p_self self_arg) noexcept
         : sink_(std::move(sink_arg)), self_(std::move(self_arg)) {}
 
-    // DOC0254 §4.2: the bound stage constructs an `EmitToken<Sink>` on its
-    // own stack and hands it to `process*<Cep>` by rvalue reference; the
-    // concrete-stage body returns the (discarded) `EmittedToken<Sink>` proof
-    // type whose construction is friend-private to `EmitToken<Sink>`.
-    template <class B>
-    [[gnu::always_inline]] void on_batch(B&& batch) {
-        (void) self_.template process<Cep>(
-            std::forward<B>(batch), EmitToken<Sink>{sink_});
+    //: the bound stage constructs an `emit_token<p_sink>` on its
+    // own stack and hands it to `process*<p_aligner_parameters>` by rvalue reference; the
+    // concrete-stage body returns the (discarded) `emitted_token<p_sink>` stats
+    // type whose construction is friend-private to `emit_token<p_sink>`.
+    template <class p_batch>
+    [[gnu::always_inline]] void on_batch(p_batch&& batch) {
+        (void) self_.template process<p_aligner_parameters>(
+            std::forward<p_batch>(batch), emit_token<p_sink>{sink_});
     }
 
-    template <class B1, class B2>
-    [[gnu::always_inline]] void on_batch_pair(B1&& first_batch, B2&& second_batch) {
-        (void) self_.template process_pair<Cep>(
-            std::forward<B1>(first_batch), std::forward<B2>(second_batch),
-            EmitToken<Sink>{sink_});
+    template <class p_first_batch, class p_second_batch>
+    [[gnu::always_inline]] void on_batch_pair(p_first_batch&& first_batch, p_second_batch&& second_batch) {
+        (void) self_.template process_pair<p_aligner_parameters>(
+            std::forward<p_first_batch>(first_batch), std::forward<p_second_batch>(second_batch),
+            emit_token<p_sink>{sink_});
     }
 
-    template <class B, class IndexT>
+    template <class p_batch, class p_index>
     [[gnu::always_inline]] void on_batch_with_index(
-        B&& batch, const IndexT& index_ref,
-        bioseq::indexing::GpuIndexCacheIdentity identity) {
-        (void) self_.template process_with_index<Cep>(
-            std::forward<B>(batch), index_ref, identity, EmitToken<Sink>{sink_});
+        p_batch&& batch, const p_index& index_ref,
+        bioseq::indexing::gpu_index_cache_identity identity) {
+        (void) self_.template process_with_index<p_aligner_parameters>(
+            std::forward<p_batch>(batch), index_ref, identity, emit_token<p_sink>{sink_});
     }
 
-    // DOC0307 §5.2 — forwarders for the narrow minimizer-batch shape.
-    template <class MinimizerT>
-    [[gnu::always_inline]] void on_minimizer_batch(MinimizerBatchView<MinimizerT> batch) {
-        (void) self_.template process<Cep>(batch, EmitToken<Sink>{sink_});
+    // — forwarders for the narrow minimizer-batch shape.
+    template <class p_minimizer>
+    [[gnu::always_inline]] void on_minimizer_batch(minimizer_batch_view<p_minimizer> batch) {
+        (void) self_.template process<p_aligner_parameters>(batch, emit_token<p_sink>{sink_});
     }
 
-    template <class MinimizerT, class IndexT>
+    template <class p_minimizer, class p_index>
     [[gnu::always_inline]] void on_minimizer_batch_with_index(
-        MinimizerBatchView<MinimizerT> batch, const IndexT& index_ref,
-        bioseq::indexing::GpuIndexCacheIdentity identity) {
-        (void) self_.template process_with_index<Cep>(
-            batch, index_ref, identity, EmitToken<Sink>{sink_});
+        minimizer_batch_view<p_minimizer> batch, const p_index& index_ref,
+        bioseq::indexing::gpu_index_cache_identity identity) {
+        (void) self_.template process_with_index<p_aligner_parameters>(
+            batch, index_ref, identity, emit_token<p_sink>{sink_});
     }
 
     [[gnu::always_inline]] void on_completed() noexcept {
@@ -721,68 +718,68 @@ struct Stage {
         sink_.on_completed();
     }
 
-    [[nodiscard]] PipelineDescription describe() const;
+    [[nodiscard]] pipeline_description describe() const;
 };
 
 /**
- * @brief Variadic pipeline composer — fixes `Cep` once for the whole chain.
+ * @brief Variadic pipeline composer — fixes `p_aligner_parameters` once for the whole chain.
  *
  * The base case (terminal sink) returns the sink unchanged; the recursive case
  * peels one bare stage off the front, builds the downstream pipeline from the
  * remaining arguments, and attaches.
  */
-template <is_constexpr_aligner_params Cep, class Sink>
-[[gnu::always_inline]] constexpr auto make_pipeline(Sink sink) noexcept {
-    static_assert(!detail::IsBareStage<Sink>,
+template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
+[[gnu::always_inline]] constexpr auto make_pipeline(p_sink sink) noexcept {
+    static_assert(!detail::is_bare_stage<p_sink>,
         "make_pipeline's last argument must be a terminal sink, "
-        "not a BareStage.  Append your terminal sink at the end.");
+        "not a bare_stage.  Append your terminal sink at the end.");
     return sink;
 }
 
-template <is_constexpr_aligner_params Cep, class Bare0, class... Rest>
-    requires detail::IsBareStage<Bare0>
-[[gnu::always_inline]] constexpr auto make_pipeline(Bare0 head, Rest... rest) noexcept {
-    auto downstream = make_pipeline<Cep>(std::move(rest)...);
-    return std::move(head).template attach<Cep>(std::move(downstream));
+template <is_constexpr_aligner_params p_aligner_parameters, class p_first_stage, class... p_remaining_stages>
+    requires detail::is_bare_stage<p_first_stage>
+[[gnu::always_inline]] constexpr auto make_pipeline(p_first_stage head, p_remaining_stages... rest) noexcept {
+    auto downstream = make_pipeline<p_aligner_parameters>(std::move(rest)...);
+    return std::move(head).template attach<p_aligner_parameters>(std::move(downstream));
 }
 
 // =============================================================================
-// 7. Batch storage — owning arena slab (DOC0249 §7)
+// 7. Batch storage — owning arena slab
 // =============================================================================
 //
-// `ArenaSlab<E>` itself lives in `bioseq_sequences.chaining.utils` so the
+// `arena_slab<p_element>` itself lives in `bioseq.chaining.core` so the
 // chaining kernels (chain_anchors_*) and the seed/region kernels in
-// `minimap_port.cppm` can take it as an output parameter — see DOC0249 §13
+// `minimap_port.cppm` can take it as an output parameter — see
 // follow-up "output-side kernel-to-arena refactor".  The `using` declarations
 // at the top of this namespace re-export both the slab type and the
-// `make_arena_slab<E>()` helper so stage bodies refer to them by short name.
+// `make_arena_slab<p_element>()` helper so stage bodies refer to them by short name.
 
 // =============================================================================
-// 11. Metadata surface (DOC0249 §11) — forward types for algorithm_traits
+// 11. Metadata surface — forward types for algorithm_traits
 // =============================================================================
 //
-// The full `StageDescription` / `PipelineDescription` definitions live after
-// the algorithm_traits block (they reference `NamedProperty` too).  The
-// `NamedProperty` POD itself is the only piece the traits' `computed_properties_default()`
+// The full `stage_description` / `pipeline_description` definitions live after
+// the algorithm_traits block (they reference `named_property` too).  The
+// `named_property` POD itself is the only piece the traits' `computed_properties_default()`
 // signature needs, so we hoist it here ahead of the traits.
 
-struct NamedProperty {
+struct named_property {
     std::string name;
     std::string value;
 };
 
 // =============================================================================
-// 8.0 Kernel-trait pattern (DOC0249 §8.0, R5)
+// 8.0 p_kernel-trait pattern (, R5)
 // =============================================================================
 //
-// `algorithm_traits<AlgoEnumValue>` maps an algorithm enum value to
+// `algorithm_traits<p_algorithm>` maps an algorithm enum value to
 //   - a `kernel_type` struct exposing the call surface used by the stage,
 //   - a `static constexpr std::string_view algorithm_label()` for EXPLAIN,
-//   - a `static std::vector<NamedProperty> computed_properties_default()`
+//   - a `static std::vector<named_property> computed_properties_default()`
 //     for the EXPLAIN renderer's `[name: value]` properties.
 //
 // Stages take the `kernel_type` as a template argument (via `kernel_t<X>`)
-// and call `Kernel::call(...)` once — no `if constexpr` ladders inside the
+// and call `p_kernel::call(...)` once — no `if constexpr` ladders inside the
 // stage body.  Adding a new algorithm is a single trait specialisation in
 // the kernel's own module.
 
@@ -794,222 +791,222 @@ inline constexpr bool no_kernel_for_v = false;
 /// Primary template — unspecialised.  Substitution failure here produces a
 /// readable diagnostic naming the offending enum value.
 ///
-/// Specialisations live below for `ChainingAlgorithmType` and
-/// `MinimizerAlgorithmType`; `BaseAlignmentAlgorithmType` is still dispatched
-/// inside `AlignStage::process_pair` via `align_regions<BAA>` because that
-/// kernel's signature is templated on both `BAA` and the per-stage sequence
+/// Specialisations live below for `chaining_algorithm` and
+/// `minimizer_algorithm`; `base_alignment_algorithm` is still dispatched
+/// inside `align_stage::process_pair` via `align_regions<p_alignment_algorithm>` because that
+/// kernel's signature is templated on both `p_alignment_algorithm` and the per-stage sequence
 /// ranges `(QR, TR)` — a trait specialisation would still need to forward
 /// `QR`/`TR`, so the direct call is preferred for clarity.  A future
-/// iteration can move `AlignStage` to the trait pattern once the kernel
+/// iteration can move `align_stage` to the trait pattern once the kernel
 /// surface is refactored to take a uniform-shape output adapter.
-template <auto AlgoEnumValue>
+template <auto p_algorithm>
 struct algorithm_traits {
-    static_assert(no_kernel_for_v<AlgoEnumValue>,
+    static_assert(no_kernel_for_v<p_algorithm>,
         "algorithm_traits<X>: no specialisation for this algorithm enum value. "
-        "Declare one in pipe.cppm next to the ChainingAlgorithmType / "
-        "MinimizerAlgorithmType blocks.");
+        "Declare one in pipe.cppm next to the chaining_algorithm / "
+        "minimizer_algorithm blocks.");
 };
 
 /// Helper alias — `kernel_t<X>` gives the kernel type directly.
-template <auto AlgoEnumValue>
-using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
+template <auto p_algorithm>
+using kernel_t = typename algorithm_traits<p_algorithm>::kernel_type;
 
 // ---------------------------------------------------------------------------
-// 8.0.1 ChainingAlgorithmType kernel traits
+// 8.0.1 chaining_algorithm kernel traits
 // ---------------------------------------------------------------------------
 
-/// Scalar DP chaining — `chain_anchors_scalar` from
-/// `bioseq_sequences.chaining.scalar`.
+/// scalar DP chaining — `chain_anchors_scalar` from
+/// `bioseq.chaining.scalar`.
 template <>
-struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2> {
+struct algorithm_traits<::bioseq::simd::chaining_algorithm::scalar_minimap2> {
     struct kernel_type {
-        static constexpr bool emits_scalar_chaining_execution_proof = true;
-        static constexpr bool emits_simd_chaining_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_chaining_execution_stats = true;
+        static constexpr bool emits_simd_chaining_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         [[gnu::always_inline]] inline static void call(
-            std::span<const Anchor> anchors,
-            const ChainingParams&   params,
-            ArenaSlab<Chain>&       chains_out,
-            ArenaSlab<Anchor>&      reordered_anchors_out,
-            ScalarPipelineExecutionProof* proof)
+            std::span<const anchor> anchors,
+            const chaining_parameters&   params,
+            arena_slab<chain>&       chains_out,
+            arena_slab<anchor>&      reordered_anchors_out,
+            scalar_pipeline_execution_stats* stats)
         {
             ::bioseq::chaining::chain_anchors_scalar(
                 anchors, params, chains_out, reordered_anchors_out);
-            if (proof != nullptr && !anchors.empty()) {
-                proof->record_scalar_chain(
+            if (stats != nullptr && !anchors.empty()) {
+                stats->record_scalar_chain(
                     static_cast<std::uint64_t>(anchors.size()));
             }
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::chaining_algorithm_name(
-                ::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2);
+                ::bioseq::simd::chaining_algorithm::scalar_minimap2);
         }
         static void populate_runtime_params(
-            const ChainingParams&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const chaining_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "false"},
                 {"complexity", "O(n * max_iter)"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// SIMD DP chaining — `chain_anchors_simd` from
+/// simd DP chaining — `chain_anchors_simd` from
 /// the selected fixed-target chaining table.
 template <>
-struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::SIMD_MM2> {
+struct algorithm_traits<::bioseq::simd::chaining_algorithm::simd_minimap2> {
     struct kernel_type {
-        static constexpr bool emits_scalar_chaining_execution_proof = false;
-        static constexpr bool emits_simd_chaining_execution_proof = true;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_chaining_execution_stats = false;
+        static constexpr bool emits_simd_chaining_execution_stats = true;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 chaining_chain_anchors_simd;
         [[gnu::always_inline]] inline static void call(
-            const ::bioseq::simd_dispatch::HighwayKernelTable* highway,
-            std::span<const Anchor> anchors,
-            const ChainingParams&   params,
-            ArenaSlab<Chain>&       chains_out,
-            ArenaSlab<Anchor>&      reordered_anchors_out,
-            ::bioseq::chaining::SimdChainingExecutionProof* proof)
+            const ::bioseq::simd_dispatch::highway_kernel_table* highway,
+            std::span<const anchor> anchors,
+            const chaining_parameters&   params,
+            arena_slab<chain>&       chains_out,
+            arena_slab<anchor>&      reordered_anchors_out,
+            ::bioseq::chaining::simd_chaining_execution_stats* stats)
         {
             if (highway == nullptr
-                || !highway->contains(highway_kernel_id)) {
-                throw SimdChainingRuntimeError(
-                    SimdChainingStatus::unsupported_simd_target,
+                || !highway->has_kernel(highway_kernel_id)) {
+                throw simd_chaining_runtime_error(
+                    simd_chaining_status::unsupported_simd_target,
                     "selected Highway table has no chaining kernel");
             }
             ::bioseq::chaining::chain_anchors_simd(
                 highway->chaining.chain_anchors_simd,
                 anchors, params, chains_out, reordered_anchors_out,
-                proof, /*aggregate_proof=*/true);
+                stats, /*aggregate_stats=*/true);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::chaining_algorithm_name(
-                ::bioseq::simd::ChainingAlgorithmType::SIMD_MM2);
+                ::bioseq::simd::chaining_algorithm::simd_minimap2);
         }
         static void populate_runtime_params(
-            const ChainingParams& params,
-            std::vector<NamedProperty>& properties) {
+            const chaining_parameters& params,
+            std::vector<named_property>& properties) {
             properties.push_back({
                 "simd_chaining_policy",
                 std::string{::bioseq::chaining::simd_chaining_policy_name(
                     params.simd_policy)}});
         }
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "true"},
                 {"requires_zero_skip_penalty", "false"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// RMQ tree-based chaining — `chain_anchors_rmq` from
-/// `bioseq_sequences.chaining.rmq`.
+/// range_minimum_query tree-based chaining — `chain_anchors_rmq` from
+/// `bioseq.chaining.rmq`.
 template <>
-struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::RMQ> {
+struct algorithm_traits<::bioseq::simd::chaining_algorithm::range_minimum_query> {
     struct kernel_type {
-        static constexpr bool emits_scalar_chaining_execution_proof = false;
-        static constexpr bool emits_simd_chaining_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_chaining_execution_stats = false;
+        static constexpr bool emits_simd_chaining_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         [[gnu::always_inline]] inline static void call(
-            std::span<const Anchor> anchors,
-            const ChainingParams&   params,
-            ArenaSlab<Chain>&       chains_out,
-            ArenaSlab<Anchor>&      reordered_anchors_out)
+            std::span<const anchor> anchors,
+            const chaining_parameters&   params,
+            arena_slab<chain>&       chains_out,
+            arena_slab<anchor>&      reordered_anchors_out)
         {
             ::bioseq::chaining::chain_anchors_rmq(
                 anchors, params, chains_out, reordered_anchors_out);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::chaining_algorithm_name(
-                ::bioseq::simd::ChainingAlgorithmType::RMQ);
+                ::bioseq::simd::chaining_algorithm::range_minimum_query);
         }
         static void populate_runtime_params(
-            const ChainingParams&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const chaining_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "false"},
                 {"complexity", "O(n log n)"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// Vulkan tiled-DP chaining (DOC0304 Phase A) — `chain_anchors_vulkan` from
-/// `bioseq_sequences.chaining.vulkan`. G3SA-style tiled DP score generation on
+/// Vulkan tiled-DP chaining ( Stage A) — `chain_anchors_vulkan` from
+/// `bioseq.chaining.vulkan`. G3SA-style tiled DP score generation on
 /// Vulkan + bioseq CPU `backtrack_chains`; selected Vulkan execution is
-/// mandatory and failures throw `VulkanRuntimeError`.
+/// mandatory and failures throw `vulkan_runtime_error`.
 template <>
-struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP> {
+struct algorithm_traits<::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming> {
     struct kernel_type {
-        static constexpr bool emits_scalar_chaining_execution_proof = false;
-        static constexpr bool emits_simd_chaining_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = true;
+        static constexpr bool emits_scalar_chaining_execution_stats = false;
+        static constexpr bool emits_simd_chaining_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = true;
         [[nodiscard, gnu::always_inline]] inline static bool call(
-            std::span<const Anchor> anchors,
-            const ChainingParams&   params,
-            ArenaSlab<Chain>&       chains_out,
-            ArenaSlab<Anchor>&      reordered_anchors_out)
+            std::span<const anchor> anchors,
+            const chaining_parameters&   params,
+            arena_slab<chain>&       chains_out,
+            arena_slab<anchor>&      reordered_anchors_out)
         {
             return ::bioseq::chaining::chain_anchors_vulkan(
                 anchors, params, chains_out, reordered_anchors_out);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::chaining_algorithm_name(
-                ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP);
+                ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming);
         }
         static void populate_runtime_params(
-            const ChainingParams& params,
-            std::vector<NamedProperty>& props) noexcept
+            const chaining_parameters& params,
+            std::vector<named_property>& props) noexcept
         {
-            props.push_back({"phase", "A"});
+            props.push_back({"stage", "A"});
             props.push_back({"fallback", "none"});
             props.push_back({"uses_max_chain_skip", "false"});
             props.push_back({"vulkan_enabled", params.vulkan_enabled ? "true" : "false"});
         }
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"accelerator", "vulkan"},
                 {"score_generation", "g3sa-tiled-dp"},
                 {"backtrack", "bioseq-cpu"},
                 {"uses_max_chain_skip", "false"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
 // ---------------------------------------------------------------------------
-// DOC0263 — Scanner-aware minimizer dispatch.
+//  — Scanner-aware minimizer dispatch.
 // For a plain compact_sequence_range or a no-fragment lazy wrapper, runs the
 // requested in-RAM kernel (scalar / reference-simd / exact-simd) on contiguous storage
 // (zero overhead — the no-fragment lazy forwards to its underlying range). For
 // a fragmented lazy wrapper, streams fragments through the bit-identical scalar
-// kernel (`collect_minimizers_view`) — see DOC0263 §8.4 for why the scalar path
-// is used instead of the SIMD lane-replay.
+// kernel (`collect_minimizers_view`) — see for why the scalar path
+// is used instead of the simd lane-replay.
 // ---------------------------------------------------------------------------
-enum class MinKernelKind { Scalar, Simd, ExactSimd };
+enum class minimizer_kernel_kind { scalar, simd, exact_simd };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline const ::bioseq::simd_dispatch::
-    HighwayAlphabetIdentityEntry&
+    highway_alphabet_identity_entry&
 resolved_highway_alphabet_identity(
-    const ::bioseq::simd_dispatch::HighwayKernelTable* table)
+    const ::bioseq::simd_dispatch::highway_kernel_table* table)
 {
-    const auto* identity = table == nullptr || !table->complete()
-        ? nullptr : table->template resolve_alphabet_identity<Alphabet>();
+    const auto* identity = table == nullptr || !table->is_complete()
+        ? nullptr : table->template resolve_alphabet_identity<p_alphabet>();
     if (identity == nullptr
         || table->resolve_alphabet_identity(identity->alphabet_code)
             != identity) {
@@ -1019,42 +1016,42 @@ resolved_highway_alphabet_identity(
     return *identity;
 }
 
-template <sequence_alphabet Alphabet, class Descriptor>
-[[nodiscard]] inline ::bioseq::minimizers::PackedSequenceKernelView
+template <sequence_alphabet p_alphabet, class p_descriptor>
+[[nodiscard]] inline ::bioseq::minimizers::packed_sequence_kernel_view
 minimizer_kernel_view(
-    const Descriptor& descriptor,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway)
+    const p_descriptor& descriptor,
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway)
 {
-    if (descriptor.bp_length > static_cast<sequence_size_t>(
+    if (descriptor.logical_length > static_cast<sequence_size_t>(
             (std::numeric_limits<std::size_t>::max)())
         || descriptor.leading_symbol_offset
             > (std::numeric_limits<std::size_t>::max)()
-                - static_cast<std::size_t>(descriptor.bp_length)) {
+                - static_cast<std::size_t>(descriptor.logical_length)) {
         throw std::overflow_error(
             "packed minimizer descriptor exceeds the neutral ABI");
     }
     const std::size_t begin = descriptor.leading_symbol_offset;
     const std::size_t length =
-        static_cast<std::size_t>(descriptor.bp_length);
-    return ::bioseq::minimizers::PackedSequenceKernelView{
+        static_cast<std::size_t>(descriptor.logical_length);
+    return ::bioseq::minimizers::packed_sequence_kernel_view{
         .storage = static_cast<const std::byte*>(descriptor.units),
         .storage_units = descriptor.unit_count,
         .begin_symbol = begin,
         .end_symbol = begin + length,
-        .alphabet_code = resolved_highway_alphabet_identity<Alphabet>(
+        .alphabet_code = resolved_highway_alphabet_identity<p_alphabet>(
             highway).alphabet_code,
         .bits_per_symbol = descriptor.bits_per_symbol,
-        .storage_unit_bytes = descriptor.storage_unit_byte_width,
+        .storage_unit_bytes = descriptor.storage_unit_width,
         .final_segment = true,
     };
 }
 
 /** Preserve any genuinely vectorized resident packing before materialising. */
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::optional<typename bioseq::storage::
-    basic_lazy_sequence_view<Alphabet>::resident_packed_region>
+    lazy_sequence_view<p_alphabet>::resident_packed_sequence>
 try_minimizer_resident_packed(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
     sequence_size_t from,
     sequence_size_t to)
 {
@@ -1069,12 +1066,12 @@ try_minimizer_resident_packed(
     return std::nullopt;
 }
 
-/** Reference SIMD retains its established resident u32/u64 contract. */
-template <sequence_alphabet Alphabet>
+/** Reference simd retains its established resident u32/u64 contract. */
+template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline std::optional<typename bioseq::storage::
-    basic_lazy_sequence_view<Alphabet>::resident_packed_region>
+    lazy_sequence_view<p_alphabet>::resident_packed_sequence>
 try_word_minimizer_resident_packed(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
     sequence_size_t from,
     sequence_size_t to)
 {
@@ -1095,13 +1092,13 @@ try_word_minimizer_resident_packed(
  * callback, so they are captured and rethrown immediately after the one
  * coarse fixed-target call returns.
  */
-template <class MinimizerT, class Collector>
-class HighwayMinimizerSinkState final {
+template <class p_minimizer, class p_collector>
+class highway_minimizer_sink_state final {
 public:
-    explicit HighwayMinimizerSinkState(Collector& collector) noexcept
+    explicit highway_minimizer_sink_state(p_collector& collector) noexcept
         : collector_(&collector) {}
 
-    [[nodiscard]] ::bioseq::minimizers::MinimizerSink sink() noexcept {
+    [[nodiscard]] ::bioseq::minimizers::minimizer_sink sink() noexcept {
         return {
             .state = this,
             .acquire = &acquire,
@@ -1110,19 +1107,19 @@ public:
         };
     }
 
-    void validate(const ::bioseq::minimizers::MinimizerKernelResult& result) {
+    void validate(const ::bioseq::minimizers::minimizer_kernel_result& result) {
         if (exception_ != nullptr) {
             std::rethrow_exception(exception_);
         }
         // An acquired-but-uncommitted batch is always a transport protocol
         // violation.  It cannot be reclassified as a caller-owned allocation
         // failure because the target never completed the batch lifetime.
-        if (acquired_) {
+        if (is_acquired_) {
             throw std::runtime_error(
                 "selected Highway minimizer sink left a batch uncommitted");
         }
         if (rejected_ || result.emitted != committed_) {
-            if constexpr (requires (const Collector& value) {
+            if constexpr (requires (const p_collector& value) {
                 { value.ok() } -> std::convertible_to<bool>;
             }) {
                 // Admission-aware collectors deliberately expose their
@@ -1143,43 +1140,43 @@ public:
 private:
     static constexpr std::size_t batch_capacity = 256u;
     static constexpr auto output_layout =
-        ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>;
+        ::bioseq::minimizers::k_minimizer_output_layout<p_minimizer>;
 
     static_assert(
         output_layout
-        != ::bioseq::minimizers::MinimizerOutputLayout::unsupported);
-    static_assert(std::is_standard_layout_v<MinimizerT>);
-    static_assert(std::is_trivially_copyable_v<MinimizerT>);
-    static_assert(std::is_trivially_destructible_v<MinimizerT>);
+        != ::bioseq::minimizers::minimizer_output_layout::unsupported);
+    static_assert(std::is_standard_layout_v<p_minimizer>);
+    static_assert(std::is_trivially_copyable_v<p_minimizer>);
+    static_assert(std::is_trivially_destructible_v<p_minimizer>);
 
-    [[nodiscard]] static ::bioseq::minimizers::MinimizerSinkBatchView
+    [[nodiscard]] static ::bioseq::minimizers::minimizer_sink_batch_view
     acquire(void* opaque, std::size_t minimum) {
-        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
-        if (self.rejected_ || self.acquired_ || minimum > batch_capacity) {
+        auto& self = *static_cast<highway_minimizer_sink_state*>(opaque);
+        if (self.rejected_ || self.is_acquired_ || minimum > batch_capacity) {
             self.rejected_ = true;
             return {};
         }
-        self.acquired_ = true;
+        self.is_acquired_ = true;
         return {
             .data = self.batch_.data(),
             .capacity = batch_capacity,
             .layout = output_layout,
-            .record_size = sizeof(MinimizerT),
-            .record_alignment = alignof(MinimizerT),
+            .record_size = sizeof(p_minimizer),
+            .record_alignment = alignof(p_minimizer),
         };
     }
 
     static void commit(void* opaque, std::size_t initialized) noexcept {
-        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
-        if (!self.acquired_ || initialized > batch_capacity) {
+        auto& self = *static_cast<highway_minimizer_sink_state*>(opaque);
+        if (!self.is_acquired_ || initialized > batch_capacity) {
             self.rejected_ = true;
             return;
         }
         auto* records = std::launder(
-            reinterpret_cast<MinimizerT*>(self.batch_.data()));
+            reinterpret_cast<p_minimizer*>(self.batch_.data()));
         const auto destroy_records = [&self, records, initialized]() noexcept {
             std::destroy_n(records, initialized);
-            self.acquired_ = false;
+            self.is_acquired_ = false;
         };
         if (self.rejected_) {
             destroy_records();
@@ -1187,8 +1184,8 @@ private:
         }
         try {
             bool accepted = static_cast<bool>(self.collector_->append_records(
-                std::span<const MinimizerT>{records, initialized}));
-            if constexpr (requires (Collector& value) {
+                std::span<const p_minimizer>{records, initialized}));
+            if constexpr (requires (p_collector& value) {
                 { value.ok() } -> std::convertible_to<bool>;
             }) {
                 accepted = accepted
@@ -1209,32 +1206,32 @@ private:
 
     [[nodiscard]] static bool append_raw_u64(
             void* opaque,
-            ::bioseq::minimizers::MinimizerOutputLayout layout,
+            ::bioseq::minimizers::minimizer_output_layout layout,
             const std::uint64_t* raw,
             std::size_t count) noexcept {
-        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
+        auto& self = *static_cast<highway_minimizer_sink_state*>(opaque);
         constexpr auto expected_layout =
-            ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>;
-        if (self.rejected_ || self.acquired_ || layout != expected_layout
+            ::bioseq::minimizers::k_minimizer_output_layout<p_minimizer>;
+        if (self.rejected_ || self.is_acquired_ || layout != expected_layout
             || expected_layout
-                == ::bioseq::minimizers::MinimizerOutputLayout::unsupported
+                == ::bioseq::minimizers::minimizer_output_layout::unsupported
             || (count != 0u && raw == nullptr)) {
             self.rejected_ = true;
             return false;
         }
         if constexpr (!::bioseq::minimizers::
                 exact_simd_minimizer_representation<
-                    std::remove_cv_t<MinimizerT>>) {
+                    std::remove_cv_t<p_minimizer>>) {
             // A raw-u64 batch is an exact representation fast path, never a
             // conversion path. In particular, do not truncate it into a
-            // u32-backed MinimizerRepr.
+            // u32-backed minimizer_representation.
             self.rejected_ = true;
             return false;
         } else {
             try {
                 bool accepted = true;
                 if constexpr (requires (
-                        Collector& value,
+                        p_collector& value,
                         const std::uint64_t* values,
                         std::size_t value_count) {
                     { value.append_raw_storage(values, value_count) }
@@ -1245,10 +1242,10 @@ private:
                 } else {
                     for (std::size_t i = 0u; i < count; ++i) {
                         self.collector_->collect(
-                            MinimizerT::from_raw_storage(raw[i]));
+                            p_minimizer::from_raw_storage(raw[i]));
                     }
                 }
-                if constexpr (requires (Collector& value) {
+                if constexpr (requires (p_collector& value) {
                     { value.ok() } -> std::convertible_to<bool>;
                 }) {
                     accepted = accepted
@@ -1268,34 +1265,34 @@ private:
         }
     }
 
-    Collector* collector_ = nullptr;
-    alignas(MinimizerT)
-        std::array<std::byte, batch_capacity * sizeof(MinimizerT)> batch_;
+    p_collector* collector_ = nullptr;
+    alignas(p_minimizer)
+        std::array<std::byte, batch_capacity * sizeof(p_minimizer)> batch_;
     std::exception_ptr exception_{};
     std::size_t committed_ = 0u;
-    bool acquired_ = false;
+    bool is_acquired_ = false;
     bool rejected_ = false;
 };
 
-[[nodiscard]] inline ::bioseq::minimizers::MinimizerKernelFunction
+[[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_function
 selected_minimizer_kernel(
-    const ::bioseq::simd_dispatch::HighwayKernelTable* table,
-    ::bioseq::simd_dispatch::HighwayKernelId id)
+    const ::bioseq::simd_dispatch::highway_kernel_table* table,
+    ::bioseq::simd_dispatch::highway_kernel id)
 {
-    if (table == nullptr || !table->contains(id)) {
+    if (table == nullptr || !table->has_kernel(id)) {
         throw std::runtime_error(
             "selected Highway table does not contain the minimizer kernel");
     }
     switch (id) {
-        case ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_reference_minimap_int:
-            return table->minimizers.reference_minimap_int;
-        case ::bioseq::simd_dispatch::HighwayKernelId::
+        case ::bioseq::simd_dispatch::highway_kernel::
+                minimizer_minimap2_reference:
+            return table->minimizers.minimap2_reference;
+        case ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_two_stack_nthash:
             return table->minimizers.two_stack_nthash;
-        case ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_paper_nthash:
-            return table->minimizers.paper_nthash;
+        case ::bioseq::simd_dispatch::highway_kernel::
+                minimizer_bounded_nthash:
+            return table->minimizers.bounded_nthash;
         default:
             break;
     }
@@ -1303,21 +1300,21 @@ selected_minimizer_kernel(
         "requested Highway kernel is not a minimizer kernel");
 }
 
-template <class MinimizerT, class Collector>
-[[nodiscard]] inline ::bioseq::minimizers::MinimizerKernelResult
+template <class p_minimizer, class p_collector>
+[[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_result
 invoke_selected_minimizer_kernel(
-    const ::bioseq::simd_dispatch::HighwayKernelTable* table,
-    ::bioseq::simd_dispatch::HighwayKernelId id,
-    ::bioseq::minimizers::MinimizerKernelAlgorithm expected_algorithm,
-    ::bioseq::minimizers::PackedSequenceKernelView sequence,
+    const ::bioseq::simd_dispatch::highway_kernel_table* table,
+    ::bioseq::simd_dispatch::highway_kernel id,
+    ::bioseq::minimizers::minimizer_kernel_algorithm expected_algorithm,
+    ::bioseq::minimizers::packed_sequence_kernel_view sequence,
     std::size_t window,
     std::size_t kmer,
-    Collector& collector,
-    ::bioseq::minimizers::TwoStackRoute two_stack_route =
-        ::bioseq::minimizers::TwoStackRoute::chronological_continuation)
+    p_collector& collector,
+    ::bioseq::minimizers::two_stack_route two_stack_route =
+        ::bioseq::minimizers::two_stack_route::chronological_continuation)
 {
     static_assert(std::constructible_from<
-        std::remove_cv_t<MinimizerT>,
+        std::remove_cv_t<p_minimizer>,
         std::uint64_t,
         std::uint64_t,
         std::uint64_t>);
@@ -1327,71 +1324,71 @@ invoke_selected_minimizer_kernel(
         throw std::runtime_error(
             "selected Highway minimizer table contains a null slot");
     }
-    HighwayMinimizerSinkState<MinimizerT, Collector> sink_state{collector};
-    ::bioseq::minimizers::MinimizerKernelInvocation invocation{
+    highway_minimizer_sink_state<p_minimizer, p_collector> sink_state{collector};
+    ::bioseq::minimizers::minimizer_kernel_invocation invocation{
         .sequence = sequence,
         .window = window,
         .kmer = kmer,
         .output_layout =
-            ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
+            ::bioseq::minimizers::k_minimizer_output_layout<p_minimizer>,
         .output_hash_mask = static_cast<std::uint64_t>(
-            std::remove_cv_t<MinimizerT>::hash_field_mask),
+            std::remove_cv_t<p_minimizer>::hash_field_mask),
         .output_position_mask = static_cast<std::uint64_t>(
-            std::remove_cv_t<MinimizerT>::pos_field_mask),
+            std::remove_cv_t<p_minimizer>::pos_field_mask),
         .two_stack_route = two_stack_route,
         .sink = sink_state.sink(),
     };
     auto result = kernel(invocation);
     sink_state.validate(result);
-    if (result.proof.algorithm != expected_algorithm) {
+    if (result.stats.algorithm != expected_algorithm) {
         throw std::runtime_error(
-            "selected Highway minimizer returned the wrong family proof");
+            "selected Highway minimizer returned the wrong family stats");
     }
     return result;
 }
 
-[[nodiscard]] constexpr TwoStackContinuationStatus
+[[nodiscard]] constexpr two_stack_continuation_status
 two_stack_transport_failure_status(
-    const ::bioseq::minimizers::MinimizerKernelResult& result) noexcept
+    const ::bioseq::minimizers::minimizer_kernel_result& result) noexcept
 {
-    const auto family = static_cast<TwoStackContinuationStatus>(
+    const auto family = static_cast<two_stack_continuation_status>(
         result.family_status);
-    if (family != TwoStackContinuationStatus::ok) {
+    if (family != two_stack_continuation_status::ok) {
         return family;
     }
     switch (result.status) {
-        case ::bioseq::minimizers::MinimizerKernelStatus::
+        case ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_sequence_view:
-            return TwoStackContinuationStatus::invalid_range;
-        case ::bioseq::minimizers::MinimizerKernelStatus::
+            return two_stack_continuation_status::invalid_range;
+        case ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_continuation:
-            return TwoStackContinuationStatus::invalid_state;
-        case ::bioseq::minimizers::MinimizerKernelStatus::sink_rejected:
-            return TwoStackContinuationStatus::collector_overflow;
+            return two_stack_continuation_status::invalid_state;
+        case ::bioseq::minimizers::minimizer_kernel_status::sink_rejected:
+            return two_stack_continuation_status::collector_overflow;
         default:
-            return TwoStackContinuationStatus::invalid_static_configuration;
+            return two_stack_continuation_status::invalid_static_configuration;
     }
 }
 
-template <MinKernelKind Kind, class MinimizerT,
-          sequence_alphabet Alphabet, class Collector>
-[[gnu::always_inline]] inline TwoStackExecutionProof minimizer_dispatch(
-    Collector& c,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+template <minimizer_kernel_kind p_kind, class p_minimizer,
+          sequence_alphabet p_alphabet, class p_collector>
+[[gnu::always_inline]] inline two_stack_execution_stats minimizer_dispatch(
+    p_collector& c,
+    bioseq::storage::lazy_sequence_view<p_alphabet> seq,
     std::size_t w,
     std::size_t k,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway)
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway)
 {
-    if constexpr (Kind == MinKernelKind::ExactSimd) {
+    if constexpr (p_kind == minimizer_kernel_kind::exact_simd) {
         if (seq.bp_size() > static_cast<sequence_size_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::arithmetic_overflow,
+            throw exact_simd_runtime_error{
+                two_stack_continuation_status::arithmetic_overflow,
                 "query minimizer sketch"};
         }
-        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
-        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region descriptor{};
+        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::
+            resident_packed_sequence descriptor{};
         const auto native_resident = try_minimizer_resident_packed(
             seq, 0u, seq.bp_size());
         const bool borrowed_resident = native_resident.has_value();
@@ -1406,74 +1403,74 @@ template <MinKernelKind Kind, class MinimizerT,
                 seq.bp_size(),
                 4u);
             auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance()
+                bioseq::parallelism::memory_admission_controller::instance()
                     .try_reserve(access.admission_bytes);
             if (!permit) {
-                throw ExactSimdRuntimeError{
-                    TwoStackContinuationStatus::non_contiguous_range,
+                throw exact_simd_runtime_error{
+                    two_stack_continuation_status::non_contiguous_range,
                     "query minimizer sketch admission"};
             }
-            owner.emplace(bioseq::storage::materialize_packed_region(
+            owner.emplace(bioseq::storage::materialize_packed_sequence(
                 seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
             descriptor = owner->descriptor();
         }
-        auto route = ::bioseq::minimizers::TwoStackRoute::
+        auto route = ::bioseq::minimizers::two_stack_route::
             chronological_continuation;
-        if constexpr (std::same_as<Alphabet, ::seq::dna4>
-                      && exact_simd_minimizer_representation<MinimizerT>) {
+        if constexpr (std::same_as<p_alphabet, ::seq::dna4>
+                      && exact_simd_minimizer_representation<p_minimizer>) {
             if (borrowed_resident
-                && descriptor.storage_unit_byte_width == sizeof(std::uint32_t)
+                && descriptor.storage_unit_width == sizeof(std::uint32_t)
                 && w == 10u && k == 15u) [[likely]] {
-                route = ::bioseq::minimizers::TwoStackRoute::resident_report76;
+                route = ::bioseq::minimizers::two_stack_route::resident_report76;
             }
         }
-        const auto result = invoke_selected_minimizer_kernel<MinimizerT>(
+        const auto result = invoke_selected_minimizer_kernel<p_minimizer>(
             highway,
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_two_stack_nthash,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash,
-            minimizer_kernel_view<Alphabet>(descriptor, highway),
+            ::bioseq::minimizers::minimizer_kernel_algorithm::two_stack_nthash,
+            minimizer_kernel_view<p_alphabet>(descriptor, highway),
             w,
             k,
             c,
             route);
-        if (!result.ok()) {
-            throw ExactSimdRuntimeError{
+        if (!result.is_ok()) {
+            throw exact_simd_runtime_error{
                 two_stack_transport_failure_status(result),
                 "query minimizer sketch"};
         }
-        if (!result.proof.two_stack.accepted(
+        if (!result.stats.two_stack.is_internally_consistent(
                 /*require_nonempty_vector_work=*/false)) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::invalid_state,
-                "query minimizer sketch proof"};
+            throw exact_simd_runtime_error{
+                two_stack_continuation_status::invalid_state,
+                "query minimizer sketch stats"};
         }
-        return result.proof.two_stack;
-    } else if constexpr (Kind == MinKernelKind::Simd) {
-        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+        return result.stats.two_stack;
+    } else if constexpr (p_kind == minimizer_kernel_kind::simd) {
+        if constexpr (bioseq::storage::lazy_sequence_view<p_alphabet>::
                           traits::logical_bits_per_symbol != 2u) {
-            // Preserve the established reference-SIMD contract for alphabets
+            // Preserve the established reference-simd contract for alphabets
             // whose symbols are not DNA4's two-bit ranks. They use the scalar
             // minimizer route without consulting or materializing for a
             // Highway kernel.
-            collect_minimizers_segment_scalar<MinimizerT>(
+            collect_minimizers_segment_scalar<p_minimizer>(
                 c, seq, 0u, seq.bp_size(), w, k);
             return {};
         }
         const auto run_reference = [&](const auto& descriptor) {
             const auto result =
-                invoke_selected_minimizer_kernel<MinimizerT>(
+                invoke_selected_minimizer_kernel<p_minimizer>(
                     highway,
-                    ::bioseq::simd_dispatch::HighwayKernelId::
-                        minimizer_reference_minimap_int,
-                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                        reference_minimap_int,
-                    minimizer_kernel_view<Alphabet>(descriptor, highway),
+                    ::bioseq::simd_dispatch::highway_kernel::
+                        minimizer_minimap2_reference,
+                    ::bioseq::minimizers::minimizer_kernel_algorithm::
+                        minimap2_reference,
+                    minimizer_kernel_view<p_alphabet>(descriptor, highway),
                     w,
                     k,
                     c);
-            if (!result.ok()
-                || result.proof.reference.kernel_calls == 0u) {
+            if (!result.is_ok()
+                || result.stats.reference.kernel_calls == 0u) {
                 throw std::runtime_error(
                     "selected Highway reference minimizer declined");
             }
@@ -1491,92 +1488,92 @@ template <MinKernelKind Kind, class MinimizerT,
             seq.bp_size(),
             sizeof(std::uint32_t));
         std::optional<
-            bioseq::storage::admitted_packed_region<Alphabet>> owner;
-        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region descriptor{};
+            bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::
+            resident_packed_sequence descriptor{};
         if (access.route
                 == bioseq::storage::sequence_access_route::borrow_resident
             && access.resident.has_value()) {
             descriptor = *access.resident;
         } else {
             auto permit = bioseq::parallelism::
-                MemoryAdmissionController::instance().try_reserve(
+                memory_admission_controller::instance().try_reserve(
                     access.admission_bytes);
             if (!permit) {
                 throw std::bad_alloc{};
             }
-            owner.emplace(bioseq::storage::materialize_packed_region(
+            owner.emplace(bioseq::storage::materialize_packed_sequence(
                 seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
                 std::move(*permit)));
             descriptor = owner->descriptor();
         }
         run_reference(descriptor);
     } else {
-        collect_minimizers_segment_scalar<MinimizerT>(
+        collect_minimizers_segment_scalar<p_minimizer>(
             c, seq, 0u, seq.bp_size(), w, k);
     }
     return {};
 }
 
-template <MinKernelKind Kind, std::size_t W, std::size_t K,
-          class MinimizerT, sequence_alphabet Alphabet, class Collector>
-[[gnu::always_inline]] inline TwoStackExecutionProof
+template <minimizer_kernel_kind p_kind, std::size_t p_window_size, std::size_t p_kmer_size,
+          class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
+[[gnu::always_inline]] inline two_stack_execution_stats
 minimizer_dispatch_constexpr(
-    Collector& c,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    p_collector& c,
+    bioseq::storage::lazy_sequence_view<p_alphabet> seq,
     std::size_t w,
     std::size_t k,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway)
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway)
 {
-    if (w != W || k != K) {
+    if (w != p_window_size || k != p_kmer_size) {
         throw std::invalid_argument(
-            "constexpr minimizer dispatch received mismatched W/K");
+            "constexpr minimizer dispatch received mismatched p_window_size/p_kmer_size");
     }
-    return minimizer_dispatch<Kind, MinimizerT>(
-        c, seq, W, K, highway);
+    return minimizer_dispatch<p_kind, p_minimizer>(
+        c, seq, p_window_size, p_kmer_size, highway);
 }
 
-// DOC0276 — SUB-RANGE minimizer collection over storage units `[lo_unit, hi_unit)`.
+//  — SUB-RANGE minimizer collection over storage units `[lo_unit, hi_unit)`.
 // Used by `minimap_port_segmented` to sketch one target SEGMENT at a time,
 // forwarding explicit begin/end iterators (advanced to the unit-aligned segment
 // bounds) so positions come out LOCAL to `lo_unit*lpu`.
 //
-// IMPORTANT: this ALWAYS uses the bit-identical SCALAR `collect_minimizers_view`,
-// even for contiguous (no-fragment) sequences. The SIMD two-stack kernel derives
+// IMPORTANT: this ALWAYS uses the bit-identical scalar `collect_minimizers_view`,
+// even for contiguous (no-fragment) sequences. The simd two-stack kernel derives
 // its iteration length from the WHOLE sequence (`calculate_iteration_offsets` over
 // `seq.bp_size()`), not from `(end - begin)`, so handing it a sub-range start/end
 // makes it read past the requested window — garbage minimizers + an out-of-bounds
 // crash (observed: a 206 Mbp segment of a 500 Mbp target reported 99.7M minimizers
 // — more than the WHOLE sequence — then SIGSEGV). The scalar view honours
 // `seq_begin/seq_end` exactly and emits `seq_pos` from 0 at `seq_begin`, which is
-// what the globalisation (`TargetIndex::add_position_offset`) and the scalar/SIMD
-// parity both rely on. Scalar collection over contiguous memory is cheap (no I/O;
+// what the globalisation (`TargetIndex::add_position_offset`) and the scalar/simd
+// parity both rely on. scalar collection over contiguous memory is cheap (no I/O;
 // alignment dominates the per-segment wall-clock), so this is correct AND fast.
-// DOC0345 Patch D — no default backend. The scalar sub-range body now lives in
+//  Patch D — no default backend. The scalar sub-range body now lives in
 // `collect_minimizers_segment_scalar` (bioseq.sequences.kmers) so pipe and the
 // persisted builders share one (bug-carrying) sub-range contract. Under
-// `VulkanSegment` the GPU segment sketch is called and throws on any decline.
-struct MinimizerRangeExecutionProof {
-    ScalarMinimizerExecutionProof scalar{};
-    bool scalar_present = false;
-    TwoStackExecutionProof exact_simd{};
-    bool exact_simd_present = false;
-    PackedPaperNthashExecutionProof paper_nthash{};
-    bool paper_nthash_present = false;
+// `vulkan_segment` the GPU segment sketch is called and throws on any decline.
+struct minimizer_range_execution_stats {
+    scalar_minimizer_execution_stats scalar{};
+    bool scalar_available = false;
+    two_stack_execution_stats exact_simd{};
+    bool exact_simd_available = false;
+    bounded_nthash_execution_stats bounded_nthash{};
+    bool bounded_nthash_available = false;
 };
 
-/// ExactSimd has two independently valid, but biologically incompatible,
-/// minimizer-selection routes for the W=10/K=15 dna4/u32 shape:
+/// exact_simd has two independently valid, but biologically incompatible,
+/// minimizer-selection routes for the p_window_size=10/p_kmer_size=15 dna4/u32 shape:
 ///
 /// * the resident vector_stream route restored from the report-76 fast path;
 /// * the chronological continuation/B8 route used by persisted and fragmented
-///   ExactSimd index producers.
+///   exact_simd index producers.
 ///
 /// A query cannot select between them from its own storage shape.  Indexed
 /// consumers must therefore require the continuation route explicitly; only a
 /// caller that owns both full-resident sides of one transient/no-index
 /// operation may opt into the resident route.
-enum class ExactSimdRangeRoute : std::uint8_t {
+enum class exact_simd_range_route : std::uint8_t {
     require_continuation,
     require_resident_vector_stream,
 };
@@ -1584,38 +1581,38 @@ enum class ExactSimdRangeRoute : std::uint8_t {
 /// Preserve native-width topology by default. Persisted indexed-query
 /// preparation is the narrow exception: its continuation/B8 compatibility
 /// contract requires an exact u32 input packing.
-enum class ExactSimdInputStorage : std::uint8_t {
+enum class exact_simd_input_storage : std::uint8_t {
     preserve_native_width,
     require_indexed_u32,
 };
 
-[[nodiscard]] inline bool exact_simd_proof_matches_range_route(
-    ExactSimdRangeRoute route,
-    const TwoStackExecutionProof& proof) noexcept
+[[nodiscard]] inline bool exact_simd_stats_matches_range_route(
+    exact_simd_range_route route,
+    const two_stack_execution_stats& stats) noexcept
 {
-    if (route == ExactSimdRangeRoute::require_resident_vector_stream) {
-        return proof.resident_vector_stream_kernel_calls > 0u;
+    if (route == exact_simd_range_route::require_resident_vector_stream) {
+        return stats.resident_vector_stream_kernel_calls > 0u;
     }
     // Check every resident-only field, rather than only the call count, so a
-    // partially-populated or mixed proof also fails closed.
-    return proof.resident_vector_stream_kernel_calls == 0u
-        && proof.resident_vector_stream_single_calls == 0u
-        && proof.resident_vector_stream_dual_calls == 0u
-        && proof.resident_vector_stream_nonempty_work_calls == 0u
-        && proof.resident_vector_stream_input_bp == 0u
-        && proof.resident_vector_stream_minimizers_emitted == 0u;
+    // partially-populated or mixed stats also fails closed.
+    return stats.resident_vector_stream_kernel_calls == 0u
+        && stats.resident_vector_stream_single_calls == 0u
+        && stats.resident_vector_stream_dual_calls == 0u
+        && stats.resident_vector_stream_nonempty_work_calls == 0u
+        && stats.resident_vector_stream_input_bp == 0u
+        && stats.resident_vector_stream_minimizers_emitted == 0u;
 }
 
 /// Compare the biological selection sub-route actually attested by two
-/// ExactSimd operations. This is required even when both operations carry the
-/// same high-level ExactSimd backend label: resident vector_stream and
-/// continuation/B8 proofs are not lookup-compatible.
-[[nodiscard]] inline bool exact_simd_proofs_share_selection_route(
-    const TwoStackExecutionProof& lhs,
-    const TwoStackExecutionProof& rhs) noexcept
+/// exact_simd operations. This is required even when both operations carry the
+/// same high-level exact_simd backend label: resident vector_stream and
+/// continuation/B8 stats are not lookup-compatible.
+[[nodiscard]] inline bool exact_simd_stats_share_selection_route(
+    const two_stack_execution_stats& lhs,
+    const two_stack_execution_stats& rhs) noexcept
 {
-    if (!lhs.accepted(/*require_nonempty_vector_work=*/false)
-        || !rhs.accepted(/*require_nonempty_vector_work=*/false)) {
+    if (!lhs.is_internally_consistent(/*require_nonempty_vector_work=*/false)
+        || !rhs.is_internally_consistent(/*require_nonempty_vector_work=*/false)) {
         return false;
     }
     const bool lhs_resident =
@@ -1625,97 +1622,97 @@ enum class ExactSimdInputStorage : std::uint8_t {
     return lhs_resident == rhs_resident;
 }
 
-/// Validate the complete range-proof payload against the selected CPU sketch
-/// backend.  Presence bits are not sufficient evidence on their own: a
-/// non-default proof object with a cleared bit is rejected as hidden
-/// cross-route evidence.  Vulkan is deliberately not accepted here because
-/// this proof type carries only CPU/SIMD operation proofs.
-[[nodiscard]] inline bool minimizer_range_proof_matches_backend(
-    MinimizerSketchBackend backend,
-    const MinimizerRangeExecutionProof& proof,
+/// Validate the complete range-stats payload against the selected CPU sketch
+/// backend.  Presence bits are not sufficient validation on their own: a
+/// non-default stats object with a cleared bit is rejected as hidden
+/// cross-route stats object. Vulkan is deliberately not accepted here because
+/// this stats type carries only CPU/simd operation stats.
+[[nodiscard]] inline bool minimizer_range_stats_matches_backend(
+    minimizer_sketch_backend backend,
+    const minimizer_range_execution_stats& stats,
     bool require_nonempty_vector_work = false,
-    ExactSimdRangeRoute exact_simd_route =
-        ExactSimdRangeRoute::require_continuation) noexcept
+    exact_simd_range_route exact_simd_route =
+        exact_simd_range_route::require_continuation) noexcept
 {
-    const bool scalar_absent = !proof.scalar_present
-        && proof.scalar == ScalarMinimizerExecutionProof{};
-    const bool exact_absent = !proof.exact_simd_present
-        && proof.exact_simd == TwoStackExecutionProof{};
-    const bool paper_absent = !proof.paper_nthash_present
-        && proof.paper_nthash == PackedPaperNthashExecutionProof{};
+    const bool scalar_absent = !stats.scalar_available
+        && stats.scalar == scalar_minimizer_execution_stats{};
+    const bool exact_absent = !stats.exact_simd_available
+        && stats.exact_simd == two_stack_execution_stats{};
+    const bool bounded_absent = !stats.bounded_nthash_available
+        && stats.bounded_nthash == bounded_nthash_execution_stats{};
 
     switch (backend) {
-        case MinimizerSketchBackend::ExactSimd:
+        case minimizer_sketch_backend::exact_simd:
             return scalar_absent
-                && paper_absent
-                && proof.exact_simd_present
-                && proof.exact_simd.accepted(require_nonempty_vector_work)
-                && exact_simd_proof_matches_range_route(
-                    exact_simd_route, proof.exact_simd);
-        case MinimizerSketchBackend::PaperNtHashSimd:
+                && bounded_absent
+                && stats.exact_simd_available
+                && stats.exact_simd.is_internally_consistent(require_nonempty_vector_work)
+                && exact_simd_stats_matches_range_route(
+                    exact_simd_route, stats.exact_simd);
+        case minimizer_sketch_backend::bounded_nthash_simd:
             return scalar_absent
                 && exact_absent
-                && proof.paper_nthash_present
-                && proof.paper_nthash.accepted(require_nonempty_vector_work);
-        case MinimizerSketchBackend::Scalar:
-            return proof.scalar_present
-                && proof.scalar.accepted(require_nonempty_vector_work)
+                && stats.bounded_nthash_available
+                && stats.bounded_nthash.is_internally_consistent(require_nonempty_vector_work);
+        case minimizer_sketch_backend::scalar:
+            return stats.scalar_available
+                && stats.scalar.is_coherent(require_nonempty_vector_work)
                 && exact_absent
-                && paper_absent;
-        case MinimizerSketchBackend::VulkanSegment:
+                && bounded_absent;
+        case minimizer_sketch_backend::vulkan_segment:
             return false;
     }
     return false;
 }
 
-template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
-[[gnu::always_inline]] inline MinimizerRangeExecutionProof
+template <class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
+[[gnu::always_inline]] inline minimizer_range_execution_stats
 minimizer_dispatch_range(
-    Collector& collector,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    p_collector& collector,
+    bioseq::storage::lazy_sequence_view<p_alphabet> seq,
     sequence_size_t lo_bp,
     sequence_size_t hi_bp,
     std::size_t window_size,
     std::size_t kmer_size,
-    MinimizerSketchBackend backend,
-    ExactSimdRangeRoute exact_simd_route =
-        ExactSimdRangeRoute::require_continuation,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr,
-    ExactSimdInputStorage exact_simd_input_storage =
-        ExactSimdInputStorage::preserve_native_width)
+    minimizer_sketch_backend backend,
+    exact_simd_range_route exact_simd_route =
+        exact_simd_range_route::require_continuation,
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway = nullptr,
+    exact_simd_input_storage exact_simd_input_storage =
+        exact_simd_input_storage::preserve_native_width)
 {
     if (lo_bp > hi_bp || hi_bp > seq.bp_size()) {
         throw std::invalid_argument(
             "minimizer range has an invalid biological-coordinate shape");
     }
-    if (backend == MinimizerSketchBackend::VulkanSegment) {
+    if (backend == minimizer_sketch_backend::vulkan_segment) {
         throw std::invalid_argument(
             "Vulkan minimizer range requires an admitted GPU upload owner");
     }
-    if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
+    if (backend == minimizer_sketch_backend::bounded_nthash_simd) {
         if (window_size != 10u || kmer_size != 15u) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd currently requires W=10 and K=15; "
+            throw bounded_nthash_runtime_error(
+                "bounded_nthash_simd currently requires p_window_size=10 and p_kmer_size=15; "
                 "fallback is forbidden");
         }
-        if constexpr (!std::same_as<Alphabet, ::seq::dna4>) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd requires the DNA4 alphabet; fallback is "
+        if constexpr (!std::same_as<p_alphabet, ::seq::dna4>) {
+            throw bounded_nthash_runtime_error(
+                "bounded_nthash_simd requires the DNA4 alphabet; fallback is "
                 "forbidden");
         } else {
-            auto run_paper = [&](const auto& descriptor) {
-                return invoke_selected_minimizer_kernel<MinimizerT>(
+            auto run_bounded = [&](const auto& descriptor) {
+                return invoke_selected_minimizer_kernel<p_minimizer>(
                     highway,
-                    ::bioseq::simd_dispatch::HighwayKernelId::
-                        minimizer_paper_nthash,
-                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                        paper_nthash,
-                    minimizer_kernel_view<Alphabet>(descriptor, highway),
+                    ::bioseq::simd_dispatch::highway_kernel::
+                        minimizer_bounded_nthash,
+                    ::bioseq::minimizers::minimizer_kernel_algorithm::
+                        bounded_nthash,
+                    minimizer_kernel_view<p_alphabet>(descriptor, highway),
                     window_size,
                     kmer_size,
                     collector);
             };
-            ::bioseq::minimizers::MinimizerKernelResult result{};
+            ::bioseq::minimizers::minimizer_kernel_result result{};
             const auto access = bioseq::storage::plan_sequence_access(
                 seq,
                 bioseq::storage::sequence_access_requirement::
@@ -1726,14 +1723,14 @@ minimizer_dispatch_range(
             if (access.route
                     == bioseq::storage::sequence_access_route::borrow_resident
                 && access.resident.has_value()) {
-                result = run_paper(*access.resident);
+                result = run_bounded(*access.resident);
             } else {
-                bioseq::parallelism::MemoryAdmissionFailure failure{};
+                bioseq::parallelism::memory_admission_failure failure{};
                 auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
+                    bioseq::parallelism::memory_admission_controller::instance()
                         .try_reserve(access.admission_bytes, &failure);
                 if (!permit) {
-                    throw PaperNtHashRuntimeError(fmt::format(
+                    throw bounded_nthash_runtime_error(fmt::format(
                         "packed-range admission failed: reason={} "
                         "requested_bytes={} reserved_bytes={} budget_bytes={}",
                         bioseq::parallelism::
@@ -1743,59 +1740,59 @@ minimizer_dispatch_range(
                         failure.reserved_bytes,
                         failure.budget_ceiling_bytes));
                 }
-                auto owner = bioseq::storage::materialize_packed_region(
+                auto owner = bioseq::storage::materialize_packed_sequence(
                     seq, lo_bp, hi_bp, sizeof(std::uint32_t),
                     std::move(*permit));
-                result = run_paper(owner.descriptor());
+                result = run_bounded(owner.descriptor());
             }
-            if (!result.ok()
-                || !result.proof.paper.accepted(
+            if (!result.is_ok()
+                || !result.stats.bounded_nthash.is_internally_consistent(
                     /*require_nonempty_vector_work=*/false)) {
-                throw PaperNtHashRuntimeError(fmt::format(
+                throw bounded_nthash_runtime_error(fmt::format(
                     "checked resident kernel declined without fallback: "
                     "status={} lo_bp={} hi_bp={} w={} k={}",
                     static_cast<unsigned>(result.status),
                     lo_bp, hi_bp, window_size, kmer_size));
             }
-            return MinimizerRangeExecutionProof{
-                .paper_nthash = result.proof.paper,
-                .paper_nthash_present = true,
+            return minimizer_range_execution_stats{
+                .bounded_nthash = result.stats.bounded_nthash,
+                .bounded_nthash_available = true,
             };
         }
     }
-    if (backend == MinimizerSketchBackend::ExactSimd) {
+    if (backend == minimizer_sketch_backend::exact_simd) {
         const bool require_resident = exact_simd_route
-            == ExactSimdRangeRoute::require_resident_vector_stream;
+            == exact_simd_range_route::require_resident_vector_stream;
         if (require_resident) {
-            if constexpr (!std::same_as<Alphabet, ::seq::dna4>
-                          || !exact_simd_minimizer_representation<MinimizerT>) {
+            if constexpr (!std::same_as<p_alphabet, ::seq::dna4>
+                          || !exact_simd_minimizer_representation<p_minimizer>) {
                 throw std::invalid_argument(
-                    "resident ExactSimd vector_stream requires DNA4 and an "
-                    "exact SIMD minimizer representation");
+                    "resident exact_simd vector_stream requires DNA4 and an "
+                    "exact simd minimizer representation");
             } else {
                 if (lo_bp != 0u || hi_bp != seq.bp_size()
                     || window_size != 10u || kmer_size != 15u) {
                     throw std::invalid_argument(
-                        "resident ExactSimd vector_stream requires the whole "
-                        "W=10/K=15 range");
+                        "resident exact_simd vector_stream requires the whole "
+                        "p_window_size=10/p_kmer_size=15 range");
                 }
             }
         }
         const sequence_size_t length = hi_bp - lo_bp;
         if (length > static_cast<sequence_size_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::arithmetic_overflow,
+            throw exact_simd_runtime_error{
+                two_stack_continuation_status::arithmetic_overflow,
                 "target minimizer range sketch"};
         }
-        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
-        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region descriptor{};
+        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::
+            resident_packed_sequence descriptor{};
         const bool require_indexed_u32 = exact_simd_input_storage
-            == ExactSimdInputStorage::require_indexed_u32;
+            == exact_simd_input_storage::require_indexed_u32;
         const auto native_resident = require_resident || require_indexed_u32
             ? std::optional<typename bioseq::storage::
-                basic_lazy_sequence_view<Alphabet>::resident_packed_region>{}
+                lazy_sequence_view<p_alphabet>::resident_packed_sequence>{}
             : try_minimizer_resident_packed(seq, lo_bp, hi_bp);
         if (native_resident.has_value()) {
             descriptor = *native_resident;
@@ -1813,79 +1810,79 @@ minimizer_dispatch_range(
                 descriptor = *access.resident;
             } else {
                 auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
+                    bioseq::parallelism::memory_admission_controller::instance()
                         .try_reserve(access.admission_bytes);
                 if (!permit) {
-                    throw ExactSimdRuntimeError{
-                        TwoStackContinuationStatus::non_contiguous_range,
+                    throw exact_simd_runtime_error{
+                        two_stack_continuation_status::non_contiguous_range,
                         require_resident
                             ? "resident vector_stream admission"
                             : "target minimizer range sketch admission"};
                 }
-                owner.emplace(bioseq::storage::materialize_packed_region(
+                owner.emplace(bioseq::storage::materialize_packed_sequence(
                     seq, lo_bp, hi_bp, 4u, std::move(*permit)));
                 descriptor = owner->descriptor();
             }
         }
         const auto route = require_resident
-            ? ::bioseq::minimizers::TwoStackRoute::resident_report76
-            : ::bioseq::minimizers::TwoStackRoute::
+            ? ::bioseq::minimizers::two_stack_route::resident_report76
+            : ::bioseq::minimizers::two_stack_route::
                 chronological_continuation;
-        const auto result = invoke_selected_minimizer_kernel<MinimizerT>(
+        const auto result = invoke_selected_minimizer_kernel<p_minimizer>(
             highway,
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_two_stack_nthash,
-            ::bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash,
-            minimizer_kernel_view<Alphabet>(descriptor, highway),
+            ::bioseq::minimizers::minimizer_kernel_algorithm::two_stack_nthash,
+            minimizer_kernel_view<p_alphabet>(descriptor, highway),
             window_size,
             kmer_size,
             collector,
             route);
-        if (!result.ok()) {
-            throw ExactSimdRuntimeError{
+        if (!result.is_ok()) {
+            throw exact_simd_runtime_error{
                 two_stack_transport_failure_status(result),
                 require_resident
                     ? "resident vector_stream minimizer sketch"
                     : "target minimizer range sketch"};
         }
-        if (!result.proof.two_stack.accepted(
+        if (!result.stats.two_stack.is_internally_consistent(
                 /*require_nonempty_vector_work=*/false)
-            || !exact_simd_proof_matches_range_route(
-                exact_simd_route, result.proof.two_stack)) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::invalid_state,
-                "target minimizer range sketch proof"};
+            || !exact_simd_stats_matches_range_route(
+                exact_simd_route, result.stats.two_stack)) {
+            throw exact_simd_runtime_error{
+                two_stack_continuation_status::invalid_state,
+                "target minimizer range sketch stats"};
         }
-        return MinimizerRangeExecutionProof{
-            .exact_simd = result.proof.two_stack,
-            .exact_simd_present = true,
+        return minimizer_range_execution_stats{
+            .exact_simd = result.stats.two_stack,
+            .exact_simd_available = true,
         };
     }
-    if (backend != MinimizerSketchBackend::Scalar) {
+    if (backend != minimizer_sketch_backend::scalar) {
         throw std::invalid_argument(
             "minimizer range received an unsupported backend");
     }
-    collect_minimizers_segment_scalar<MinimizerT>(
+    collect_minimizers_segment_scalar<p_minimizer>(
         collector, seq, lo_bp, hi_bp, window_size, kmer_size);
-    ScalarMinimizerExecutionProof proof{};
-    proof.record(hi_bp - lo_bp);
-    return MinimizerRangeExecutionProof{
-        .scalar = proof,
-        .scalar_present = true,
+    scalar_minimizer_execution_stats stats{};
+    stats.record_input(hi_bp - lo_bp);
+    return minimizer_range_execution_stats{
+        .scalar = stats,
+        .scalar_available = true,
     };
 }
 
 /// Dispatch one complete indexed-query sketch through the canonical facade.
-template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
-[[gnu::always_inline]] inline MinimizerRangeExecutionProof
+template <class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
+[[gnu::always_inline]] inline minimizer_range_execution_stats
 minimizer_dispatch_indexed_query_whole(
-    Collector& collector,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_sequence,
+    p_collector& collector,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
     std::size_t window_size,
     std::size_t kmer_size,
-    MinimizerSketchBackend backend,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr) {
-    return minimizer_dispatch_range<MinimizerT>(
+    minimizer_sketch_backend backend,
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway = nullptr) {
+    return minimizer_dispatch_range<p_minimizer>(
         collector,
         query_sequence,
         0u,
@@ -1893,86 +1890,86 @@ minimizer_dispatch_indexed_query_whole(
         window_size,
         kmer_size,
         backend,
-        ExactSimdRangeRoute::require_continuation,
+        exact_simd_range_route::require_continuation,
         highway,
-        ExactSimdInputStorage::require_indexed_u32);
+        exact_simd_input_storage::require_indexed_u32);
 }
 
 // Resolve the biological target-sketch backend from the minimizer selector
-// itself. Chaining and alignment choices must not silently substitute Scalar
-// sketch semantics for an explicitly selected ExactSimd/Paper producer.
-// Unsupported SIMD shapes fail in their checked drivers.
-[[nodiscard]] inline MinimizerSketchBackend
-target_index_sketch_backend_from_params(const Minimap2Params& params) noexcept
+// itself. Chaining and alignment choices must not silently substitute scalar
+// sketch semantics for an explicitly selected exact_simd/bounded ntHash producer.
+// Unsupported simd shapes fail in their checked drivers.
+[[nodiscard]] inline minimizer_sketch_backend
+target_index_sketch_backend_from_params(const minimap2_parameters& params) noexcept
 {
     if (params.minimizer_algorithm
-        == MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
-        return MinimizerSketchBackend::PaperNtHashSimd;
+        == minimizer_algorithm::bounded_nthash_simd) {
+        return minimizer_sketch_backend::bounded_nthash_simd;
     }
     if (params.vulkan_enabled
         && params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm
-            == MinimizerAlgorithmType::VULKAN_MINIMAP_INT) {
-        return MinimizerSketchBackend::VulkanSegment;
+            == minimizer_algorithm::vulkan_minimap_integer) {
+        return minimizer_sketch_backend::vulkan_segment;
     }
     if (params.minimizer_algorithm
-        == MinimizerAlgorithmType::TWO_STACK_NTHASH) {
-        return MinimizerSketchBackend::ExactSimd;
+        == minimizer_algorithm::two_stack_nthash) {
+        return minimizer_sketch_backend::exact_simd;
     }
-    return MinimizerSketchBackend::Scalar;
+    return minimizer_sketch_backend::scalar;
 }
 
-// DOC0276 — segment GEOMETRY. The MinimapSketchData position field is 28 bits
-// (MinimizerRepr<28,15>), so a segment's COLLECTED span — core + an overlap on
+//  — segment GEOMETRY. The minimap_sketch_data position field is 28 bits
+// (minimizer_representation<28,15>), so a segment's COLLECTED span — core + an overlap on
 // each side — must stay within that field, or the global position handed back by
 // `add_position_offset` would be silently masked by the packing ctor
 // (`pos_v & pos_field_mask`, index.cppm) and corrupt the seed. We cap the core at
 // 200 Mbp and each overlap at 30 Mbp; the static_assert ties both to the REAL
 // field width so neither can be bumped past 2^28 without a compile error.
-inline constexpr sequence_size_t kSegmentCoreMaxBp    = 200'000'000ull;  // core ceiling
-inline constexpr sequence_size_t kSegmentOverlapMaxBp =  30'000'000ull;  // per-side overlap ceiling
-inline constexpr sequence_size_t kSegmentMinBp        =  32'000'000ull;  // floor (keep batches useful)
-inline constexpr sequence_size_t kVulkanSegmentMinBp   =   1'000'000ull;  // floor when GPU sketch is selected
-// DOC0353 continuation: 76M/96M is the best measured consolidation point. The
+inline constexpr sequence_size_t k_segment_core_max_bp    = 200'000'000ull;  // core ceiling
+inline constexpr sequence_size_t k_segment_overlap_max_bp =  30'000'000ull;  // per-side overlap ceiling
+inline constexpr sequence_size_t k_segment_min_bp        =  32'000'000ull;  // floor (keep batches useful)
+inline constexpr sequence_size_t k_vulkan_segment_min_bp   =   1'000'000ull;  // floor when GPU sketch is selected
+//  continuation: 76M/96M is the best measured consolidation point. The
 // earlier 100M/128M experiment made the inner sketch admission shrink and exposed
 // a multi-window correctness bug; 96M keeps the collected span below that failed
 // shape while cutting the 300M probe from ~44 GPU windows to ~6 when
 // memory admission accepts a one-window sketch.
-inline constexpr sequence_size_t kVulkanSegmentTargetBp = 76'000'000ull;  // target core before query-overlap clamping
-inline constexpr sequence_size_t kVulkanSegmentCollectedMaxBp =
+inline constexpr sequence_size_t k_vulkan_segment_target_bp = 76'000'000ull;  // target core before query-overlap clamping
+inline constexpr sequence_size_t k_vulkan_segment_collected_max_bp =
     96'000'000ull;
-static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
-                  minimizer_max_sequence_length_v<MinimapSketchData>,
+static_assert(k_segment_core_max_bp + 2 * k_segment_overlap_max_bp <=
+                  k_max_minimizer_sequence_length<minimap_sketch_data>,
               "segment collected span (core + 2*overlap) must fit "
-              "MinimapSketchData's 28-bit position field");
+              "minimap_sketch_data's 28-bit position field");
 
 // Choose a target-index SEGMENT size (bp) from the live memory budget. A full
-// minimizer index over an N-bp target costs ~6 B/bp at PEAK (collector vector
-// 8 B + flat_map bucket ~16 B/distinct + positions 8 B, all × density ~0.19).
+// minimizer index over an N-bp target costs ~6 p_batch/bp at PEAK (collector vector
+// 8 p_batch + flat_map bucket ~16 p_batch/distinct + positions 8 p_batch, all × density ~0.19).
 // On a 16 GB box a 6 Gbp full index (~37 GB) swaps; capping a segment to the
-// budget keeps the live index ~one segment, clamped to [kSegmentMinBp,
-// kSegmentCoreMaxBp].
+// budget keeps the live index ~one segment, clamped to [k_segment_min_bp,
+// k_segment_core_max_bp].
 [[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
     // Respect both the live process/system ceiling and the explicit index cap.
     // The old raw default-budget read ignored
-    // MemoryAdmissionController::set_index_memory_cap_bytes(), so admission
+    // memory_admission_controller::set_index_memory_cap_bytes(), so admission
     // and segment geometry could disagree about the maximum legal index.
     const std::uint64_t budget =
-        bioseq::parallelism::MemoryAdmissionController::instance()
+        bioseq::parallelism::memory_admission_controller::instance()
             .budget_ceiling();
     // allocatable_bytes() == UINT64_MAX when the mach/POSIX probe is unavailable;
-    // dividing keeps it huge so the clamp yields kSegmentCoreMaxBp (the default).
+    // dividing keeps it huge so the clamp yields k_segment_core_max_bp (the default).
     const std::uint64_t by_budget =
-        budget / bioseq::parallelism::kMinimizerIndexPeakBytesPerBp;
+        budget / bioseq::parallelism::k_minimizer_index_peak_bytes_per_bp;
     const sequence_size_t want =
-        (by_budget > kSegmentCoreMaxBp) ? kSegmentCoreMaxBp
+        (by_budget > k_segment_core_max_bp) ? k_segment_core_max_bp
                                         : static_cast<sequence_size_t>(by_budget);
-    return want < kSegmentMinBp ? kSegmentMinBp : want;
+    return want < k_segment_min_bp ? k_segment_min_bp : want;
 }
 
 [[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(
         unsigned divisor,
-        sequence_size_t floor_bp = kSegmentMinBp) noexcept {
+        sequence_size_t floor_bp = k_segment_min_bp) noexcept {
     const sequence_size_t base = segment_bp_from_budget();
     const sequence_size_t divided = divisor <= 1 ? base : base / divisor;
     return divided < floor_bp ? floor_bp : divided;
@@ -1981,8 +1978,8 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
 [[nodiscard]] inline sequence_size_t segment_overlap_bp(
         sequence_size_t query_len) noexcept {
     sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > kSegmentOverlapMaxBp) {
-        overlap_bp = kSegmentOverlapMaxBp;
+    if (overlap_bp > k_segment_overlap_max_bp) {
+        overlap_bp = k_segment_overlap_max_bp;
     }
     return overlap_bp;
 }
@@ -1991,24 +1988,24 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
         sequence_size_t query_len) noexcept {
     const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
     const sequence_size_t expanded_overlap =
-        overlap_bp > kVulkanSegmentCollectedMaxBp / 2
-            ? kVulkanSegmentCollectedMaxBp
+        overlap_bp > k_vulkan_segment_collected_max_bp / 2
+            ? k_vulkan_segment_collected_max_bp
             : overlap_bp * 2;
-    if (expanded_overlap + kVulkanSegmentMinBp
-        >= kVulkanSegmentCollectedMaxBp) {
-        return kVulkanSegmentMinBp;
+    if (expanded_overlap + k_vulkan_segment_min_bp
+        >= k_vulkan_segment_collected_max_bp) {
+        return k_vulkan_segment_min_bp;
     }
     const sequence_size_t room =
-        kVulkanSegmentCollectedMaxBp - expanded_overlap;
-    const sequence_size_t target = std::min(room, kVulkanSegmentTargetBp);
-    return target < kVulkanSegmentMinBp ? kVulkanSegmentMinBp : target;
+        k_vulkan_segment_collected_max_bp - expanded_overlap;
+    const sequence_size_t target = std::min(room, k_vulkan_segment_target_bp);
+    return target < k_vulkan_segment_min_bp ? k_vulkan_segment_min_bp : target;
 }
 
 [[nodiscard]] inline unsigned
 segment_geometry_divisor_for_backend(
-        MinimizerSketchBackend backend,
+        minimizer_sketch_backend backend,
         sequence_size_t query_len = 0) noexcept {
-    if (backend != MinimizerSketchBackend::VulkanSegment) {
+    if (backend != minimizer_sketch_backend::vulkan_segment) {
         return 1u;
     }
     const sequence_size_t base = segment_bp_from_budget();
@@ -2019,25 +2016,25 @@ segment_geometry_divisor_for_backend(
 }
 
 [[nodiscard]] inline sequence_size_t
-segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
-    return backend == MinimizerSketchBackend::VulkanSegment
-        ? kVulkanSegmentMinBp
-        : kSegmentMinBp;
+segment_core_floor_for_backend(minimizer_sketch_backend backend) noexcept {
+    return backend == minimizer_sketch_backend::vulkan_segment
+        ? k_vulkan_segment_min_bp
+        : k_segment_min_bp;
 }
 
-// DOC0279 §11.3a — the segment geometry of `minimap_port_segmented`, extracted
+// — the segment geometry of `minimap_port_segmented`, extracted
 // so `dispatch_buffer`'s stored-index assemble loop reuses the EXACT recompute
 // geometry. NOT a pure function of its args: it reads the runtime budget via
 // `segment_bp_from_budget()` exactly as recompute does. Each entry covers a
 // segment's overlapped collection range `[cs_u, ce_u)` (in units) and its core
 // claim band `[core_lo_bp, core_hi_bp)`.
-[[nodiscard]] inline std::vector<::bioseq::indexing::SegmentUnitRange> segment_unit_ranges(
+[[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range> segment_unit_ranges(
         sequence_size_t total_bp,
         sequence_size_t query_len,
         std::size_t lpu,
         unsigned divisor,
         sequence_size_t floor_bp) {
-    std::vector<::bioseq::indexing::SegmentUnitRange> out;
+    std::vector<::bioseq::indexing::segment_unit_range> out;
     if (total_bp == 0 || lpu == 0) return out;
     const sequence_size_t total_units = (total_bp + lpu - 1) / lpu;
     const sequence_size_t overlap_bp = segment_overlap_bp(query_len);
@@ -2051,27 +2048,27 @@ segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
         const sequence_size_t ce_u = std::min(hi_u + ovl_units, total_units);
         const sequence_size_t core_lo_bp = lo_u * lpu;
         const sequence_size_t core_hi_bp = std::min(hi_u * lpu, total_bp);
-        out.push_back(::bioseq::indexing::SegmentUnitRange{
+        out.push_back(::bioseq::indexing::segment_unit_range{
             cs_u, ce_u, core_lo_bp, core_hi_bp});
     }
     return out;
 }
 
-[[nodiscard]] inline std::vector<::bioseq::indexing::SegmentUnitRange> segment_unit_ranges(
+[[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range> segment_unit_ranges(
         sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
-    return segment_unit_ranges(total_bp, query_len, lpu, divisor, kSegmentMinBp);
+    return segment_unit_ranges(total_bp, query_len, lpu, divisor, k_segment_min_bp);
 }
 
-[[nodiscard]] inline std::vector<::bioseq::indexing::SegmentUnitRange> segment_unit_ranges(
+[[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range> segment_unit_ranges(
         sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
     return segment_unit_ranges(total_bp, query_len, lpu, 1);
 }
 
-[[nodiscard]] inline std::vector<::bioseq::indexing::SegmentUnitRange> segment_unit_ranges_for_backend(
+[[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range> segment_unit_ranges_for_backend(
         sequence_size_t total_bp,
         sequence_size_t query_len,
         std::size_t lpu,
-        MinimizerSketchBackend backend) {
+        minimizer_sketch_backend backend) {
     return segment_unit_ranges(
         total_bp,
         query_len,
@@ -2082,7 +2079,7 @@ segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
 
 [[nodiscard]] inline std::pair<sequence_size_t, sequence_size_t>
 validated_segment_bp_bounds(
-        const ::bioseq::indexing::SegmentUnitRange& range,
+        const ::bioseq::indexing::segment_unit_range& range,
         std::size_t letters_per_unit,
         sequence_size_t total_bp) {
     const sequence_size_t lpu =
@@ -2109,111 +2106,111 @@ validated_segment_bp_bounds(
 }
 
 // ---------------------------------------------------------------------------
-// 8.0.2 MinimizerAlgorithmType kernel traits
+// 8.0.2 minimizer_algorithm kernel traits
 // ---------------------------------------------------------------------------
 //
 // The minimizer kernels are templated on the sketch-collector and the
-// sequence range, both of which depend on the MinimizerStage's `MinimizerT`
+// sequence range, both of which depend on the minimizer_stage's `p_minimizer`
 // and `QR` template parameters.  The trait's `call` method is therefore a
 // member template — the stage instantiates it with the correct types at the
 // call site.
 
-/// Scalar minimizer extraction.
+/// scalar minimizer extraction.
 template <>
-struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::SCALAR> {
+struct algorithm_traits<::bioseq::simd::minimizer_algorithm::scalar> {
     struct kernel_type {
-        static constexpr bool emits_scalar_minimizer_execution_proof = true;
-        static constexpr bool emits_exact_simd_execution_proof = false;
-        static constexpr bool emits_paper_nthash_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
-        template <class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static ScalarMinimizerExecutionProof call(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range,
+        static constexpr bool emits_scalar_minimizer_execution_stats = true;
+        static constexpr bool emits_exact_simd_execution_stats = false;
+        static constexpr bool emits_bounded_nthash_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
+        template <class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static scalar_minimizer_execution_stats call(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
+            minimizer_dispatch<minimizer_kernel_kind::scalar, p_minimizer>(
                 collector, range, window_size, kmer_size,
                 params.highway_kernels);
-            ScalarMinimizerExecutionProof proof{};
-            proof.record(static_cast<std::uint64_t>(range.bp_size()));
-            return proof;
+            scalar_minimizer_execution_stats stats{};
+            stats.record_input(static_cast<std::uint64_t>(range.bp_size()));
+            return stats;
         }
 
-        template <std::size_t W, std::size_t K,
-                  class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static ScalarMinimizerExecutionProof call_constexpr(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range)
+        template <std::size_t p_window_size, std::size_t p_kmer_size,
+                  class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static scalar_minimizer_execution_stats call_constexpr(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range)
         {
-            minimizer_dispatch_constexpr<MinKernelKind::Scalar, W, K, MinimizerT>(
-                collector, range, W, K, params.highway_kernels);
-            ScalarMinimizerExecutionProof proof{};
-            proof.record(static_cast<std::uint64_t>(range.bp_size()));
-            return proof;
+            minimizer_dispatch_constexpr<minimizer_kernel_kind::scalar, p_window_size, p_kmer_size, p_minimizer>(
+                collector, range, p_window_size, p_kmer_size, params.highway_kernels);
+            scalar_minimizer_execution_stats stats{};
+            stats.record_input(static_cast<std::uint64_t>(range.bp_size()));
+            return stats;
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::minimizer_algorithm_name(
-                ::bioseq::simd::MinimizerAlgorithmType::SCALAR);
+                ::bioseq::simd::minimizer_algorithm::scalar);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const ::bioseq::simd::minimap2_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "false"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// Reference SIMD minimizer extraction (single-stack).
+/// Reference simd minimizer extraction (single-stack).
 template <>
-struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW> {
+struct algorithm_traits<::bioseq::simd::minimizer_algorithm::simd_minimap2_reference> {
     struct kernel_type {
-        static constexpr bool emits_scalar_minimizer_execution_proof = false;
-        static constexpr bool emits_exact_simd_execution_proof = false;
-        static constexpr bool emits_paper_nthash_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_minimizer_execution_stats = false;
+        static constexpr bool emits_exact_simd_execution_stats = false;
+        static constexpr bool emits_bounded_nthash_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_reference_minimap_int;
-        template <class MinimizerT, class Collector, class Range>
+            ::bioseq::simd_dispatch::highway_kernel::
+                minimizer_minimap2_reference;
+        template <class p_minimizer, class p_collector, class p_range>
         [[gnu::always_inline]] static void call(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range,
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            minimizer_dispatch<MinKernelKind::Simd, MinimizerT>(
+            minimizer_dispatch<minimizer_kernel_kind::simd, p_minimizer>(
                 collector, range, window_size, kmer_size,
                 params.highway_kernels);
         }
 
-        template <std::size_t W, std::size_t K,
-                  class MinimizerT, class Collector, class Range>
+        template <std::size_t p_window_size, std::size_t p_kmer_size,
+                  class p_minimizer, class p_collector, class p_range>
         [[gnu::always_inline]] static void call_constexpr(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range)
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range)
         {
-            minimizer_dispatch_constexpr<MinKernelKind::Simd, W, K, MinimizerT>(
-                collector, range, W, K, params.highway_kernels);
+            minimizer_dispatch_constexpr<minimizer_kernel_kind::simd, p_window_size, p_kmer_size, p_minimizer>(
+                collector, range, p_window_size, p_kmer_size, params.highway_kernels);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::minimizer_algorithm_name(
-                ::bioseq::simd::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW);
+                ::bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const ::bioseq::simd::minimap2_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "true"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
@@ -2221,181 +2218,181 @@ struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::SIMD_MINIMAP2_SL
 
 /// Two-stack nthash minimizer extraction (current default).
 template <>
-struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH> {
+struct algorithm_traits<::bioseq::simd::minimizer_algorithm::two_stack_nthash> {
     struct kernel_type {
-        static constexpr bool emits_scalar_minimizer_execution_proof = false;
-        static constexpr bool emits_exact_simd_execution_proof = true;
-        static constexpr bool emits_paper_nthash_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_minimizer_execution_stats = false;
+        static constexpr bool emits_exact_simd_execution_stats = true;
+        static constexpr bool emits_bounded_nthash_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_two_stack_nthash;
-        template <class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static TwoStackExecutionProof call(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range,
+        template <class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static two_stack_execution_stats call(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            return minimizer_dispatch<MinKernelKind::ExactSimd, MinimizerT>(
+            return minimizer_dispatch<minimizer_kernel_kind::exact_simd, p_minimizer>(
                 collector, range, window_size, kmer_size,
                 params.highway_kernels);
         }
 
-        template <std::size_t W, std::size_t K,
-                  class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static TwoStackExecutionProof call_constexpr(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range)
+        template <std::size_t p_window_size, std::size_t p_kmer_size,
+                  class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static two_stack_execution_stats call_constexpr(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range)
         {
-            return minimizer_dispatch_constexpr<MinKernelKind::ExactSimd, W, K, MinimizerT>(
-                collector, range, W, K, params.highway_kernels);
+            return minimizer_dispatch_constexpr<minimizer_kernel_kind::exact_simd, p_window_size, p_kmer_size, p_minimizer>(
+                collector, range, p_window_size, p_kmer_size, params.highway_kernels);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::minimizer_algorithm_name(
-                ::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH);
+                ::bioseq::simd::minimizer_algorithm::two_stack_nthash);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const ::bioseq::simd::minimap2_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "true"},
                 {"two_stack",  "true"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// Bounded-memory paper-u32/R7/sum ntHash SIMD minimizer extraction. This is
-/// deliberately distinct from TWO_STACK_NTHASH/ExactSimd: both the execution
-/// proof and persisted scheme identity must match this selector.
+/// Bounded-memory bounded-u32/R7/sum ntHash simd minimizer extraction. This is
+/// deliberately distinct from two_stack_nthash/exact_simd: both the execution
+/// stats and persisted scheme identity must match this selector.
 template <>
-struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD> {
+struct algorithm_traits<::bioseq::simd::minimizer_algorithm::bounded_nthash_simd> {
     struct kernel_type {
-        static constexpr bool emits_scalar_minimizer_execution_proof = false;
-        static constexpr bool emits_exact_simd_execution_proof = false;
-        static constexpr bool emits_paper_nthash_execution_proof = true;
-        static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr bool emits_scalar_minimizer_execution_stats = false;
+        static constexpr bool emits_exact_simd_execution_stats = false;
+        static constexpr bool emits_bounded_nthash_execution_stats = true;
+        static constexpr bool emits_partial_vulkan_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
-                minimizer_paper_nthash;
+            ::bioseq::simd_dispatch::highway_kernel::
+                minimizer_bounded_nthash;
 
-        template <class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static PackedPaperNthashExecutionProof call(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range,
+        template <class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static bounded_nthash_execution_stats call(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            const MinimizerRangeExecutionProof proof =
-                minimizer_dispatch_range<MinimizerT>(
+            const minimizer_range_execution_stats stats =
+                minimizer_dispatch_range<p_minimizer>(
                     collector,
                     range,
                     0,
                     static_cast<sequence_size_t>(range.size()),
                     window_size,
                     kmer_size,
-                    MinimizerSketchBackend::PaperNtHashSimd,
-                    ExactSimdRangeRoute::require_continuation,
+                    minimizer_sketch_backend::bounded_nthash_simd,
+                    exact_simd_range_route::require_continuation,
                     params.highway_kernels);
-            if (!proof.paper_nthash_present) {
-                throw PaperNtHashRuntimeError(
-                    "PaperNtHashSimd leaf returned without Paper execution proof");
+            if (!stats.bounded_nthash_available) {
+                throw bounded_nthash_runtime_error(
+                    "bounded_nthash_simd leaf returned without bounded ntHash execution stats");
             }
-            return proof.paper_nthash;
+            return stats.bounded_nthash;
         }
 
-        template <std::size_t W, std::size_t K,
-                  class MinimizerT, class Collector, class Range>
-        [[gnu::always_inline]] static PackedPaperNthashExecutionProof call_constexpr(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range)
+        template <std::size_t p_window_size, std::size_t p_kmer_size,
+                  class p_minimizer, class p_collector, class p_range>
+        [[gnu::always_inline]] static bounded_nthash_execution_stats call_constexpr(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range)
         {
-            return call<MinimizerT>(params, collector, range, W, K);
+            return call<p_minimizer>(params, collector, range, p_window_size, p_kmer_size);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::minimizer_algorithm_name(
-                ::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD);
+                ::bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params&,
-            std::vector<NamedProperty>&) noexcept {}
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            const ::bioseq::simd::minimap2_parameters&,
+            std::vector<named_property>&) noexcept {}
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised", "true"},
                 {"logical_streams", "8"},
-                {"hash", "paper-u32-nthash-r7-sum"},
+                {"hash", "bounded-u32-nthash-r7-sum"},
                 {"fallback", "forbidden"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-/// DOC0351 Phase C — Vulkan minimap-int minimizer extraction. Reads packed
+///  Stage C — Vulkan minimap-int minimizer extraction. Reads packed
 /// `compact_sequence_range` storage directly on the GPU. When this algorithm
 /// is selected, Vulkan execution is mandatory and failures throw.
 /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
 /// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
 template <>
-struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT> {
+struct algorithm_traits<::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer> {
     struct kernel_type {
-        static constexpr bool emits_scalar_minimizer_execution_proof = false;
-        static constexpr bool emits_exact_simd_execution_proof = false;
-        static constexpr bool emits_paper_nthash_execution_proof = false;
-        static constexpr bool emits_partial_vulkan_execution_proof = true;
+        static constexpr bool emits_scalar_minimizer_execution_stats = false;
+        static constexpr bool emits_exact_simd_execution_stats = false;
+        static constexpr bool emits_bounded_nthash_execution_stats = false;
+        static constexpr bool emits_partial_vulkan_execution_stats = true;
         static constexpr bool may_emit_device_minimizers = true;
 
-        template <class MinimizerT, class Collector, class Range>
+        template <class p_minimizer, class p_collector, class p_range>
         [[nodiscard, gnu::always_inline]] static
-        bioseq::gpu::vulkan::VulkanSketchDispatchToken call(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range,
+        bioseq::gpu::vulkan::vulkan_sketch_dispatch_token call(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
             if (!params.vulkan_enabled) {
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
-            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
+            bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
             auto token =
-                bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
+                bioseq::gpu::vulkan::collect_minimizers_vulkan<p_minimizer>(
                     collector, range, window_size, kmer_size, &decline);
-            if (!token.has_value() || !token->accepted()) {
+            if (!token.has_value() || !token->is_internally_consistent()) {
                 throw_vulkan_sketch_declined(
                     "Vulkan minimizer sketch", decline);
             }
             return *token;
         }
 
-        template <std::size_t W, std::size_t K,
-                  class MinimizerT, class Collector, class Range>
+        template <std::size_t p_window_size, std::size_t p_kmer_size,
+                  class p_minimizer, class p_collector, class p_range>
         [[nodiscard, gnu::always_inline]] static
-        bioseq::gpu::vulkan::VulkanSketchDispatchToken call_constexpr(
-            const ::bioseq::simd::Minimap2Params& params,
-            Collector& collector, Range& range)
+        bioseq::gpu::vulkan::vulkan_sketch_dispatch_token call_constexpr(
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_collector& collector, p_range& range)
         {
-            return call<MinimizerT>(params, collector, range, W, K);
+            return call<p_minimizer>(params, collector, range, p_window_size, p_kmer_size);
         }
 
-        template <class MinimizerT, class Range>
+        template <class p_minimizer, class p_range>
         [[nodiscard]] static std::optional<
-            bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT>>
+            bioseq::gpu::vulkan::vulkan_sketch_result<p_minimizer>>
         call_result(
-            const ::bioseq::simd::Minimap2Params& params,
-            Range& range, std::size_t window_size, std::size_t kmer_size,
-            bioseq::gpu::vulkan::VulkanSketchHostOwnershipRoute
+            const ::bioseq::simd::minimap2_parameters& params,
+            p_range& range, std::size_t window_size, std::size_t kmer_size,
+            bioseq::gpu::vulkan::vulkan_sketch_host_ownership_route
                 host_ownership_route = bioseq::gpu::vulkan::
-                    VulkanSketchHostOwnershipRoute::collector_compatible)
+                    vulkan_sketch_host_ownership_route::collector_compatible)
         {
             if (!params.vulkan_enabled) {
                 throw_vulkan_declined("Vulkan minimizer sketch");
             }
-            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
-            auto result = bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+            bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
+            auto result = bioseq::gpu::vulkan::collect_minimizers_vulkan_result<p_minimizer>(
                 range,
                 window_size,
                 kmer_size,
@@ -2410,45 +2407,45 @@ struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_I
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::minimizer_algorithm_name(
-                ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT);
+                ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params& p,
-            std::vector<NamedProperty>& props) noexcept
+            const ::bioseq::simd::minimap2_parameters& p,
+            std::vector<named_property>& props) noexcept
         {
             props.push_back({"accelerator", "vulkan"});
             props.push_back({"vulkan_enabled", p.vulkan_enabled ? "true" : "false"});
         }
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"hash", "minimap-int"},
                 {"alphabet_dispatch", "runtime-shader-key"},
-                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
 // ---------------------------------------------------------------------------
-// 8.0.3 BaseAlignmentAlgorithmType kernel traits (DOC0254 §6.2)
+// 8.0.3 base_alignment_algorithm kernel traits
 // ---------------------------------------------------------------------------
 //
 // The trait pattern is now universal across every algorithm dimension
-// (DOC0254 R10).  AlignStage<Kernel, QR, TR> calls `Kernel::template
+// ( R10).  align_stage<p_kernel, QR, TR> calls `p_kernel::template
 // call<QR, TR>(...)` once — the per-algorithm dispatch lives entirely in
 // the trait specialisations below.
 
 namespace detail {
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] const ::bioseq::simd::AlignmentKernels<Alphabet>&
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] const ::bioseq::simd::alignment_kernels<p_alphabet>&
 resolve_alignment_kernels(
-    const ::bioseq::simd::Minimap2Params& params)
+    const ::bioseq::simd::minimap2_parameters& params)
 {
     const auto* root = params.highway_kernels;
-    const auto* identity = root == nullptr || !root->complete()
-        ? nullptr : root->template resolve_alphabet_identity<Alphabet>();
+    const auto* identity = root == nullptr || !root->is_complete()
+        ? nullptr : root->template resolve_alphabet_identity<p_alphabet>();
     if (identity == nullptr
         || params.alphabet_code != identity->alphabet_code
         || root->resolve_alphabet_identity(params.alphabet_code)
@@ -2457,18 +2454,18 @@ resolve_alignment_kernels(
             "alignment dispatch requires an alphabet-matched Highway table"};
     }
 
-    auto required = ::bioseq::simd_dispatch::highway_kernel_set(
-        ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2);
-    required |= ::bioseq::simd_dispatch::highway_kernel_set(
-        ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2_batched);
-    required |= ::bioseq::simd_dispatch::highway_kernel_set(
-        ::bioseq::simd_dispatch::HighwayKernelId::alignment_block_aligner);
-    if (!root->contains_all(required)) {
+    auto required = ::bioseq::simd_dispatch::highway_kernel_mask_for(
+        ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2);
+    required |= ::bioseq::simd_dispatch::highway_kernel_mask_for(
+        ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2_batched);
+    required |= ::bioseq::simd_dispatch::highway_kernel_mask_for(
+        ::bioseq::simd_dispatch::highway_kernel::alignment_block_aligner);
+    if (!root->has_all_kernels(required)) {
         throw std::logic_error{
-            "selected Highway table has incomplete alignment availability"};
+            "selected Highway table has is_incomplete alignment availability"};
     }
 
-    const ::bioseq::simd::AlignmentKernels<Alphabet>* resolved = nullptr;
+    const ::bioseq::simd::alignment_kernels<p_alphabet>* resolved = nullptr;
     for (const auto& entry : root->alignment_by_alphabet) {
         if (entry.alphabet_code != identity->alphabet_code) continue;
         if (entry.typed_table == nullptr || resolved != nullptr) {
@@ -2478,7 +2475,7 @@ resolve_alignment_kernels(
         // The generated root reconciles this numeric slot with the concrete
         // type identity before the erased pointer can be cast.
         resolved = static_cast<
-            const ::bioseq::simd::AlignmentKernels<Alphabet>*>(
+            const ::bioseq::simd::alignment_kernels<p_alphabet>*>(
                 entry.typed_table);
     }
     if (resolved == nullptr
@@ -2494,11 +2491,11 @@ resolve_alignment_kernels(
     return *resolved;
 }
 
-/// Shared helper for KSW2 / Block Aligner / KSW2_BATCHED — pushes the
+/// Shared helper for ksw2 / Block Aligner / ksw2_batched — pushes the
 /// four affine-scoring parameters that every base aligner consumes.
 [[gnu::always_inline]] inline void push_base_affine_params(
-    const ::bioseq::simd::Minimap2Params& p,
-    std::vector<NamedProperty>& out)
+    const ::bioseq::simd::minimap2_parameters& p,
+    std::vector<named_property>& out)
 {
     out.push_back({"match_score",  std::to_string(p.match_score)});
     out.push_back({"mismatch_pen", std::to_string(p.mismatch_pen)});
@@ -2509,48 +2506,48 @@ resolve_alignment_kernels(
 }  // namespace detail
 
 template <>
-struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2> {
+struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2> {
     struct kernel_type {
-        /// DOC0254 R10: the dispatcher consults this constant to route the
+        ///  R10: the dispatcher consults this constant to route the
         /// cross-query deferred-align scheduling shape instead of an
-        /// `if constexpr (BAA == ...)` ladder.
+        /// `if constexpr (p_alignment_algorithm == ...)` ladder.
         static constexpr bool supports_cross_query_batched = false;
-        static constexpr bool emits_block_execution_proof = false;
-        static constexpr bool emits_scalar_ksw2_execution_proof = true;
-        static constexpr bool emits_ksw2_batched_execution_proof = false;
+        static constexpr bool emits_block_execution_stats = false;
+        static constexpr bool emits_scalar_ksw2_execution_stats = true;
+        static constexpr bool emits_ksw2_batched_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2;
+            ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2;
 
-        template <sequence_alphabet Alphabet>
+        template <sequence_alphabet p_alphabet>
         [[gnu::always_inline]] static void call(
-            std::span<AlignRegion>                       regions,
-            std::span<const ::bioseq::chaining::Anchor>  anchors,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-            const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
-            const ::bioseq::simd::Minimap2Params& params,
-            BlockAlignerExecutionProof* forbidden_block_proof,
-            ScalarPipelineExecutionProof* scalar_execution_proof)
+            std::span<alignment_region>                       regions,
+            std::span<const ::bioseq::chaining::anchor>  anchors,
+            bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+            const scoring_matrix<p_alphabet>&               scoring_matrix,
+            const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+            const ::bioseq::simd::minimap2_parameters& params,
+            block_aligner_execution_stats* forbidden_block_stats,
+            scalar_pipeline_execution_stats* scalar_execution_stats)
         {
-            if (forbidden_block_proof != nullptr) {
-                block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
+            if (forbidden_block_stats != nullptr) {
+                block_aligner_forbidden_ksw2_fallback(*forbidden_block_stats);
             }
             ::bioseq::simd::align_regions<
-                ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2>(
+                ::bioseq::simd::base_alignment_algorithm::ksw2>(
                 regions, anchors, query_seq, target_seq, scoring_matrix,
                 alignment_kernels, params,
-                /*block_execution_proof=*/nullptr,
-                scalar_execution_proof);
+                /*block_execution_stats=*/nullptr,
+                scalar_execution_stats);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return "KSW2";
+            return "ksw2";
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params& p,
-            std::vector<NamedProperty>& out)
+            const ::bioseq::simd::minimap2_parameters& p,
+            std::vector<named_property>& out)
         {
             detail::push_base_affine_params(p, out);
             out.push_back({"gap_open2", std::to_string(p.gap_open2)});
@@ -2559,45 +2556,45 @@ struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2> {
             out.push_back({"end_bonus", std::to_string(p.end_bonus)});
         }
 
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised",        "intra-sequence striped"},
                 {"single_affine_eq",  "data-dependent"},
-                {"specialised",       Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised",       p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
 template <>
-struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNER> {
+struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::block_aligner> {
     struct kernel_type {
         static constexpr bool supports_cross_query_batched = false;
-        static constexpr bool emits_block_execution_proof = true;
-        static constexpr bool emits_scalar_ksw2_execution_proof = false;
-        static constexpr bool emits_ksw2_batched_execution_proof = false;
+        static constexpr bool emits_block_execution_stats = true;
+        static constexpr bool emits_scalar_ksw2_execution_stats = false;
+        static constexpr bool emits_ksw2_batched_execution_stats = false;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 alignment_block_aligner;
 
-        template <sequence_alphabet Alphabet>
+        template <sequence_alphabet p_alphabet>
         [[gnu::always_inline]] static void call(
-            std::span<AlignRegion>                       regions,
-            std::span<const ::bioseq::chaining::Anchor>  anchors,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-            const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
-            const ::bioseq::simd::Minimap2Params& params,
-            BlockAlignerExecutionProof* block_execution_proof,
-            ScalarPipelineExecutionProof* /*scalar_execution_proof*/)
+            std::span<alignment_region>                       regions,
+            std::span<const ::bioseq::chaining::anchor>  anchors,
+            bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+            const scoring_matrix<p_alphabet>&               scoring_matrix,
+            const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+            const ::bioseq::simd::minimap2_parameters& params,
+            block_aligner_execution_stats* block_execution_stats,
+            scalar_pipeline_execution_stats* /*scalar_execution_stats*/)
         {
             ::bioseq::simd::align_regions<
-                ::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
+                ::bioseq::simd::base_alignment_algorithm::block_aligner>(
                 regions, anchors, query_seq, target_seq, scoring_matrix,
                 alignment_kernels, params,
-                block_execution_proof);
+                block_execution_stats);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -2605,8 +2602,8 @@ struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNE
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params& p,
-            std::vector<NamedProperty>& out)
+            const ::bioseq::simd::minimap2_parameters& p,
+            std::vector<named_property>& out)
         {
             detail::push_base_affine_params(p, out);
             out.push_back({"block_min_size",
@@ -2615,270 +2612,270 @@ struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNE
                 std::to_string(static_cast<int32_t>(p.block_max_size))});
         }
 
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised",       "block-affine"},
                 {"single_affine_only", "true"},
-                {"specialised",      Cep::generic_fallback ? "fallback" : "specialised"},
+                {"specialised",      p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
-// `KSW2_BATCHED` — DOC0254 §11.  The kernel ships in
+// `ksw2_batched` —  The kernel ships in
 // `alignment_hwy/ksw2_batched.cppm`; this trait forwards through a free
 // function `align_regions_batched<QR, TR>(...)` that is declared in this
-// module via the `bioseq_sequences.ksw2_batched` import.
+// module via the `bioseq.alignment.ksw2_batched` import.
 template <>
-struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2_BATCHED> {
+struct algorithm_traits<::bioseq::simd::base_alignment_algorithm::ksw2_batched> {
     struct kernel_type {
-        /// DOC0254 §11.10 — the only kernel whose dispatcher branch
+        /// — the only kernel whose dispatcher branch
         /// supports cross-query batching.  Setting this constant true on
-        /// the KSW2_BATCHED specialisation only is how
+        /// the ksw2_batched specialisation only is how
         /// `pipeline_run_impl_batch` selects the deferred-align variant
         /// without an enum-value `if constexpr` ladder.
         static constexpr bool supports_cross_query_batched = true;
-        static constexpr bool emits_block_execution_proof = false;
-        static constexpr bool emits_scalar_ksw2_execution_proof = false;
-        static constexpr bool emits_ksw2_batched_execution_proof = true;
+        static constexpr bool emits_block_execution_stats = false;
+        static constexpr bool emits_scalar_ksw2_execution_stats = false;
+        static constexpr bool emits_ksw2_batched_execution_stats = true;
         static constexpr auto highway_kernel_id =
-            ::bioseq::simd_dispatch::HighwayKernelId::
+            ::bioseq::simd_dispatch::highway_kernel::
                 alignment_ksw2_batched;
 
         /// The batched entry owns inter-region packing, but its long-fill and
-        /// traceback paths execute the target-local KSW2 z2/d2 kernels as part
+        /// traceback paths execute the target-local ksw2 z2/d2 kernels as part
         /// of the same stage.  EXPLAIN therefore reports both coarse functions.
         [[nodiscard]] static constexpr
-        ::bioseq::simd_dispatch::HighwayKernelSet
+        ::bioseq::simd_dispatch::highway_kernel_mask
         highway_kernel_ids() noexcept {
-            auto kernels = ::bioseq::simd_dispatch::highway_kernel_set(
-                ::bioseq::simd_dispatch::HighwayKernelId::
+            auto kernels = ::bioseq::simd_dispatch::highway_kernel_mask_for(
+                ::bioseq::simd_dispatch::highway_kernel::
                     alignment_ksw2_batched);
-            kernels |= ::bioseq::simd_dispatch::highway_kernel_set(
-                ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2);
+            kernels |= ::bioseq::simd_dispatch::highway_kernel_mask_for(
+                ::bioseq::simd_dispatch::highway_kernel::alignment_ksw2);
             return kernels;
         }
 
-        template <sequence_alphabet Alphabet>
+        template <sequence_alphabet p_alphabet>
         [[gnu::always_inline]] static void call(
-            std::span<AlignRegion>                       regions,
-            std::span<const ::bioseq::chaining::Anchor>  anchors,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-            const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
-            const ::bioseq::simd::Minimap2Params& params,
-            BlockAlignerExecutionProof* forbidden_block_proof,
-            ScalarPipelineExecutionProof* /*scalar_execution_proof*/,
-            Ksw2BatchedExecutionProof* execution_proof = nullptr)
+            std::span<alignment_region>                       regions,
+            std::span<const ::bioseq::chaining::anchor>  anchors,
+            bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+            const scoring_matrix<p_alphabet>&               scoring_matrix,
+            const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+            const ::bioseq::simd::minimap2_parameters& params,
+            block_aligner_execution_stats* forbidden_block_stats,
+            scalar_pipeline_execution_stats* /*scalar_execution_stats*/,
+            ksw2_batched_execution_stats* execution_stats = nullptr)
         {
-            if (forbidden_block_proof != nullptr) {
-                block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
+            if (forbidden_block_stats != nullptr) {
+                block_aligner_forbidden_ksw2_fallback(*forbidden_block_stats);
             }
-            alignment_kernels.ksw2_batched(
+            alignment_kernels.align_ksw2_batched(
                 regions, anchors, query_seq, target_seq, scoring_matrix, params,
-                execution_proof);
+                execution_stats);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return "KSW2 (inter-region batched)";
+            return "ksw2 (inter-region batched)";
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::Minimap2Params& p,
-            std::vector<NamedProperty>& out)
+            const ::bioseq::simd::minimap2_parameters& p,
+            std::vector<named_property>& out)
         {
-            // Same runtime knobs as the intra-sequence KSW2 path; the
+            // Same runtime knobs as the intra-sequence ksw2 path; the
             // bucketing/batching is determined by the kernel from
             // params.max_gap, params.zdrop, and the per-fill geometry.
             algorithm_traits<
-                ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2>::
+                ::bioseq::simd::base_alignment_algorithm::ksw2>::
                 kernel_type::populate_runtime_params(p, out);
         }
 
-        template <is_constexpr_aligner_params Cep>
-        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+        template <is_constexpr_aligner_params p_aligner_parameters>
+        [[nodiscard]] static std::vector<named_property> static_properties() {
             return {
                 {"vectorised",        "inter-sequence packed"},
                 {"bucket_widths",     "[<=32, <=64, <=128, <=256, >256]"},
-                {"long_fill_kernel",  "intra-sequence KSW2 (fallback)"},
-                {"specialised",       Cep::generic_fallback ? "fallback" : "specialised"},
+                {"long_fill_kernel",  "intra-sequence ksw2 (fallback)"},
+                {"specialised",       p_aligner_parameters::generic_fallback ? "fallback" : "specialised"},
             };
         }
     };
 };
 
 // =============================================================================
-// 11. Metadata surface (DOC0249 §11) — full definitions
+// 11. Metadata surface — full definitions
 // =============================================================================
 //
-// `NamedProperty` was hoisted ahead of the algorithm_traits block so trait
-// signatures can return `std::vector<NamedProperty>`.  The remaining
+// `named_property` was hoisted ahead of the algorithm_traits block so trait
+// signatures can return `std::vector<named_property>`.  The remaining
 // description types are defined here in their natural source order.
 
-struct StageAlgorithmDescription {
+struct stage_algorithm_description {
     std::string                name;
-    std::vector<NamedProperty> parameters;
-    std::vector<NamedProperty> computed_properties;
+    std::vector<named_property> parameters;
+    std::vector<named_property> computed_properties;
     std::optional<std::string> extra_description;
-    ::bioseq::simd_dispatch::HighwayKernelSet highway_kernels{};
+    ::bioseq::simd_dispatch::highway_kernel_mask highway_kernels{};
 };
 
-struct StageDescription {
+struct stage_description {
     std::string                              stage_name;
-    std::optional<StageAlgorithmDescription> algorithm;
+    std::optional<stage_algorithm_description> algorithm;
     std::optional<std::string>               extra_description;
 
     /**
      * @brief Pre-allocation upper bound the stage reserves before driving its
-     * kernel (DOC0249 §21 — "reserve correctness").
+     * kernel ( — "reserve correctness").
      *
-     * Populated by every stage that opens an `ArenaSlab<E>` of bounded size
-     * (MinimizerStage, SeedHitStage, ChainStage, RegionStage).  Set to
+     * Populated by every stage that opens an `arena_slab<p_element>` of bounded size
+     * (minimizer_stage, seed_hit_stage, chain_stage, region_stage).  Set to
      * `std::nullopt` for stages that mutate in-place or whose output size
-     * is `0` (IndexStage, SinkStage, etc.).  The EXPLAIN renderer surfaces
+     * is `0` (index_stage, sink_stage, etc.).  The EXPLAIN renderer surfaces
      * this as a per-stage `[reserved: N]` line so a reader can verify
      * `actual ≤ reserved` against the runtime instrumentation log.
      */
     std::optional<std::size_t>               estimated_batch_size;
 };
 
-struct PipelineDescription {
-    std::vector<StageDescription> stages;
+struct pipeline_description {
+    std::vector<stage_description> stages;
 };
 
 inline constexpr std::string_view query_sketch_stage_name =
     "QuerySketchStage";
 
 /** Cold EXPLAIN-only query-sketch route; never a dispatch-chain dimension. */
-enum class QuerySketchPlanRoute : std::uint8_t {
+enum class query_sketch_route : std::uint8_t {
     recompute_capable,
     compatible_persisted_only,
 };
 
 /**
  * Resolve the query-sketch Highway function without adding the minimizer
- * algorithm as another describe-template dimension.  Scalar and Vulkan
+ * algorithm as another describe-template dimension.  scalar and Vulkan
  * sketching are concrete non-Highway routes and therefore map to an empty
- * set. Alphabet validity is established by the caller's authoritative typed
+ * set. p_alphabet validity is established by the caller's authoritative typed
  * dispatch before this code-independent algorithm/route planner runs.
- * Compatible-persisted query preparation performs no Highway work. Paper
+ * Compatible-persisted query preparation performs no Highway work. bounded ntHash
  * ntHash retains its W10/K15 gate. Unknown route or algorithm values remain
  * fail-closed rather than being silently advertised as scalar.
  */
 [[nodiscard]] constexpr std::optional<
-    ::bioseq::simd_dispatch::HighwayKernelSet>
+    ::bioseq::simd_dispatch::highway_kernel_mask>
 planned_query_minimizer_highway_kernels(
-        const ::bioseq::simd::Minimap2Params& params,
-        const QuerySketchPlanRoute route) noexcept {
-    using Algorithm = ::bioseq::simd::MinimizerAlgorithmType;
-    using Kernel = ::bioseq::simd_dispatch::HighwayKernelId;
-    if (route != QuerySketchPlanRoute::recompute_capable
-        && route != QuerySketchPlanRoute::compatible_persisted_only) {
+        const ::bioseq::simd::minimap2_parameters& params,
+        const query_sketch_route route) noexcept {
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    using p_kernel = ::bioseq::simd_dispatch::highway_kernel;
+    if (route != query_sketch_route::recompute_capable
+        && route != query_sketch_route::compatible_persisted_only) {
         return std::nullopt;
     }
     switch (params.minimizer_algorithm) {
-        case Algorithm::SCALAR:
-        case Algorithm::VULKAN_MINIMAP_INT:
-            return ::bioseq::simd_dispatch::HighwayKernelSet{};
-        case Algorithm::SIMD_MINIMAP2_SLOW:
+        case algorithm_type::scalar:
+        case algorithm_type::vulkan_minimap_integer:
+            return ::bioseq::simd_dispatch::highway_kernel_mask{};
+        case algorithm_type::simd_minimap2_reference:
             if (route
-                    == QuerySketchPlanRoute::compatible_persisted_only) {
-                return ::bioseq::simd_dispatch::HighwayKernelSet{};
+                    == query_sketch_route::compatible_persisted_only) {
+                return ::bioseq::simd_dispatch::highway_kernel_mask{};
             }
-            return ::bioseq::simd_dispatch::highway_kernel_set(
-                Kernel::minimizer_reference_minimap_int);
-        case Algorithm::TWO_STACK_NTHASH:
-            return ::bioseq::simd_dispatch::highway_kernel_set(
-                Kernel::minimizer_two_stack_nthash);
-        case Algorithm::PAPER_NTHASH_SIMD:
+            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
+                p_kernel::minimizer_minimap2_reference);
+        case algorithm_type::two_stack_nthash:
+            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
+                p_kernel::minimizer_two_stack_nthash);
+        case algorithm_type::bounded_nthash_simd:
             if (params.window_size != 10
                 || params.kmer_size != 15) {
                 return std::nullopt;
             }
-            return ::bioseq::simd_dispatch::highway_kernel_set(
-                Kernel::minimizer_paper_nthash);
+            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
+                p_kernel::minimizer_bounded_nthash);
     }
     return std::nullopt;
 }
 
 static_assert([]() consteval {
-    using Algorithm = ::bioseq::simd::MinimizerAlgorithmType;
-    using Kernel = ::bioseq::simd_dispatch::HighwayKernelId;
-    using Route = QuerySketchPlanRoute;
-    const auto make_params = [](const Algorithm algorithm,
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    using p_kernel = ::bioseq::simd_dispatch::highway_kernel;
+    using route_type = query_sketch_route;
+    const auto make_params = [](const algorithm_type algorithm,
                                 const std::int32_t window_size = 10,
                                 const std::int32_t kmer_size = 15) consteval {
-        ::bioseq::simd::Minimap2Params params{};
+        ::bioseq::simd::minimap2_parameters params{};
         params.minimizer_algorithm = algorithm;
         params.window_size = window_size;
         params.kmer_size = kmer_size;
         return params;
     };
     const auto slow = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::SIMD_MINIMAP2_SLOW),
-        Route::recompute_capable);
+        make_params(algorithm_type::simd_minimap2_reference),
+        route_type::recompute_capable);
     const auto slow_persisted =
         planned_query_minimizer_highway_kernels(
-            make_params(Algorithm::SIMD_MINIMAP2_SLOW),
-            Route::compatible_persisted_only);
+            make_params(algorithm_type::simd_minimap2_reference),
+            route_type::compatible_persisted_only);
     const auto exact = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::TWO_STACK_NTHASH),
-        Route::compatible_persisted_only);
-    const auto paper = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::PAPER_NTHASH_SIMD),
-        Route::recompute_capable);
-    const auto paper_wrong_window = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::PAPER_NTHASH_SIMD, 9, 15),
-        Route::recompute_capable);
-    const auto paper_wrong_kmer = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::PAPER_NTHASH_SIMD, 10, 14),
-        Route::compatible_persisted_only);
+        make_params(algorithm_type::two_stack_nthash),
+        route_type::compatible_persisted_only);
+    const auto bounded = planned_query_minimizer_highway_kernels(
+        make_params(algorithm_type::bounded_nthash_simd),
+        route_type::recompute_capable);
+    const auto bounded_wrong_window = planned_query_minimizer_highway_kernels(
+        make_params(algorithm_type::bounded_nthash_simd, 9, 15),
+        route_type::recompute_capable);
+    const auto bounded_wrong_kmer = planned_query_minimizer_highway_kernels(
+        make_params(algorithm_type::bounded_nthash_simd, 10, 14),
+        route_type::compatible_persisted_only);
     const auto scalar = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::SCALAR),
-        Route::recompute_capable);
+        make_params(algorithm_type::scalar),
+        route_type::recompute_capable);
     const auto vulkan = planned_query_minimizer_highway_kernels(
-        make_params(Algorithm::VULKAN_MINIMAP_INT),
-        Route::compatible_persisted_only);
+        make_params(algorithm_type::vulkan_minimap_integer),
+        route_type::compatible_persisted_only);
     return slow.has_value()
-        && *slow == ::bioseq::simd_dispatch::highway_kernel_set(
-            Kernel::minimizer_reference_minimap_int)
+        && *slow == ::bioseq::simd_dispatch::highway_kernel_mask_for(
+            p_kernel::minimizer_minimap2_reference)
         && slow_persisted.has_value()
         && slow_persisted->none()
         && exact.has_value()
-        && *exact == ::bioseq::simd_dispatch::highway_kernel_set(
-            Kernel::minimizer_two_stack_nthash)
-        && paper.has_value()
-        && *paper == ::bioseq::simd_dispatch::highway_kernel_set(
-            Kernel::minimizer_paper_nthash)
-        && !paper_wrong_window.has_value()
-        && !paper_wrong_kmer.has_value()
+        && *exact == ::bioseq::simd_dispatch::highway_kernel_mask_for(
+            p_kernel::minimizer_two_stack_nthash)
+        && bounded.has_value()
+        && *bounded == ::bioseq::simd_dispatch::highway_kernel_mask_for(
+            p_kernel::minimizer_bounded_nthash)
+        && !bounded_wrong_window.has_value()
+        && !bounded_wrong_kmer.has_value()
         && scalar.has_value() && scalar->none()
         && vulkan.has_value() && vulkan->none()
         && !planned_query_minimizer_highway_kernels(
-            make_params(Algorithm::SIMD_MINIMAP2_SLOW),
-            static_cast<Route>(0xffu)).has_value();
+            make_params(algorithm_type::simd_minimap2_reference),
+            static_cast<route_type>(0xffu)).has_value();
 }(), "query-sketch Highway planning must remain route- and algorithm-exact");
 
 /**
  * The describe cascade intentionally pins the executable pipeline at the
- * prebuilt-minimizer entry point, so its stage chain has no MinimizerStage.
+ * prebuilt-minimizer entry point, so its stage chain has no minimizer_stage.
  * Represent the query sketch as a neutral plan-only stage instead of making
  * the minimizer enum a describe-template axis. This stage is the canonical
  * owner of the query-sketch Highway functions whenever a description exists.
  */
-[[nodiscard]] inline std::optional<StageDescription>
+[[nodiscard]] inline std::optional<stage_description>
 describe_query_sketch_stage(
-        const ::bioseq::simd::Minimap2Params& params,
-        const QuerySketchPlanRoute route) {
+        const ::bioseq::simd::minimap2_parameters& params,
+        const query_sketch_route route) {
     const auto kernels = planned_query_minimizer_highway_kernels(
         params, route);
     if (!kernels.has_value()) return std::nullopt;
 
-    StageDescription stage;
+    stage_description stage;
     stage.stage_name = std::string{query_sketch_stage_name};
-    StageAlgorithmDescription algorithm;
+    stage_algorithm_description algorithm;
     algorithm.name = ::bioseq::simd::minimizer_algorithm_name(
         params.minimizer_algorithm);
     algorithm.highway_kernels = *kernels;
@@ -2888,30 +2885,30 @@ describe_query_sketch_stage(
 
 /** Number of semantic query-sketch owners in a structured description. */
 [[nodiscard]] inline std::size_t query_sketch_stage_owner_count(
-        const PipelineDescription& description) noexcept {
+        const pipeline_description& description) noexcept {
     return static_cast<std::size_t>(std::ranges::count_if(
         description.stages,
-        [](const StageDescription& stage) noexcept {
+        [](const stage_description& stage) noexcept {
             return stage.stage_name == query_sketch_stage_name
                 && stage.algorithm.has_value();
         }));
 }
 
 // =============================================================================
-// 21. Output size estimates (DOC0249 §21)
+// 21. Output size estimates
 // =============================================================================
 
 namespace detail {
 
 /** Exact coarse Highway functions executed by one selected stage kernel. */
-template <class Kernel>
-[[nodiscard]] constexpr ::bioseq::simd_dispatch::HighwayKernelSet
+template <class p_kernel>
+[[nodiscard]] constexpr ::bioseq::simd_dispatch::highway_kernel_mask
 stage_highway_kernels() noexcept {
-    if constexpr (requires { Kernel::highway_kernel_ids(); }) {
-        return Kernel::highway_kernel_ids();
-    } else if constexpr (requires { Kernel::highway_kernel_id; }) {
-        return ::bioseq::simd_dispatch::highway_kernel_set(
-            Kernel::highway_kernel_id);
+    if constexpr (requires { p_kernel::highway_kernel_ids(); }) {
+        return p_kernel::highway_kernel_ids();
+    } else if constexpr (requires { p_kernel::highway_kernel_id; }) {
+        return ::bioseq::simd_dispatch::highway_kernel_mask_for(
+            p_kernel::highway_kernel_id);
     } else {
         return {};
     }
@@ -2924,7 +2921,7 @@ stage_highway_kernels() noexcept {
 }
 
 /**
- * @brief Reserve-time anchor estimate (DOC0249 §21.3).
+ * @brief Reserve-time anchor estimate.
  *
  * Uses today's median heuristic (2× sketch_count) but clamps by the
  * physical shared-k-mer ceiling so very-short query/target pairs don't
@@ -2958,7 +2955,7 @@ stage_highway_kernels() noexcept {
 /**
  * @brief Upper-bound estimate of the per-region CIGAR op count.
  *
- * DOC0254 §10.3 unifies the helper signature so it can model the post-fill
+ * unifies the helper signature so it can model the post-fill
  * outer extents instead of `region.block_length` (which excludes the
  * left/right kernel extensions).  Describe-time callers pass
  * `(block_length, block_length)` as a coarse approximation — the value is
@@ -2973,7 +2970,7 @@ stage_highway_kernels() noexcept {
 
 [[nodiscard]] constexpr std::size_t estimated_result_count(
     sequence_size_t query_len, sequence_size_t target_len,
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     const std::size_t bp_floor = std::max<std::size_t>(1u,
         static_cast<std::size_t>(std::min(query_len, target_len)) / 500u);
@@ -2983,17 +2980,17 @@ stage_highway_kernels() noexcept {
 } // namespace detail
 
 // =============================================================================
-// 9.6 Derived helpers (DOC0249 §9.6)
+// 9.6 p_derived helpers
 // =============================================================================
 
 [[nodiscard]] constexpr int32_t sub_diff(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.match_score * 2 + params.mismatch_pen;
 }
 
 [[nodiscard]] constexpr int32_t min_diff(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.kmer_size * 2;
 }
@@ -3003,17 +3000,17 @@ stage_highway_kernels() noexcept {
  *
  * Mirrors the cache previously inlined at `minimap_port.cppm:2392-2408`
  * inside `minimap2_port_with_index_impl`.  Hoisted to a free function so
- * both the legacy entry point and `pipeline_run_impl_batch` can share it.
+ * both the previous entry point and `pipeline_run_impl_batch` can share it.
  */
-template <sequence_alphabet Alphabet>
-[[nodiscard, gnu::always_inline]] inline const ScoringMatrix<Alphabet>&
+template <sequence_alphabet p_alphabet>
+[[nodiscard, gnu::always_inline]] inline const scoring_matrix<p_alphabet>&
 thread_local_scoring_matrix(
-    const ::bioseq::simd::Minimap2Params& params)
+    const ::bioseq::simd::minimap2_parameters& params)
 {
     thread_local int8_t cached_match    = std::numeric_limits<int8_t>::min();
     thread_local int8_t cached_mismatch = std::numeric_limits<int8_t>::min();
     thread_local int8_t cached_ambi     = std::numeric_limits<int8_t>::min();
-    thread_local ScoringMatrix<Alphabet> cached_matrix{};
+    thread_local scoring_matrix<p_alphabet> cached_matrix{};
 
     const int8_t want_match    = static_cast<int8_t>(params.match_score);
     const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
@@ -3022,7 +3019,7 @@ thread_local_scoring_matrix(
         || cached_mismatch != want_mismatch
         || cached_ambi != want_ambi)
     {
-        cached_matrix   = ScoringMatrix<Alphabet>::generate(
+        cached_matrix   = scoring_matrix<p_alphabet>::generate(
             want_match, want_mismatch, want_ambi);
         cached_match    = want_match;
         cached_mismatch = want_mismatch;
@@ -3032,107 +3029,107 @@ thread_local_scoring_matrix(
 }
 
 // =============================================================================
-// 8. Concrete stages (DOC0249 §8)
+// 8. Concrete stages
 // =============================================================================
 //
-// Each stage's `process*<Cep>(...)` body forwards to the existing kernel
+// Each stage's `process*<p_aligner_parameters>(...)` body forwards to the existing kernel
 // function in the target-neutral pipeline or its selected kernel table
-// without renaming the kernel.  Wire-type between stages is `std::span<E>`
-// directly; arena ownership is provided by `ArenaSlab<E>` materialised
+// without renaming the kernel.  Wire-type between stages is `std::span<p_element>`
+// directly; arena ownership is provided by `arena_slab<p_element>` materialised
 // inside each stage before the downstream call.
 
 /**
- * @brief Stage 0: minimizer extraction.
+ * @brief stage 0: minimizer extraction.
  *
- * Templated on `Kernel` — the algorithm-specific call surface exposed by
- * `algorithm_traits<MinimizerAlgorithmType::X>::kernel_type` (DOC0249 §8.0,
+ * Templated on `p_kernel` — the algorithm-specific call surface exposed by
+ * `algorithm_traits<minimizer_algorithm::X>::kernel_type`.
  * R5 trait pattern).  The stage body has zero `if constexpr` over enum
  * values; adding a new minimizer-extraction algorithm is a single trait
  * specialisation in the kernel's own module.
  *
  * The stage ignores its input batch and instead sketches the pre-captured
- * `query_seq_` pointer (DOC0249 §8.1).
+ * `query_seq_` pointer.
  */
-template <class MinimizerT,
-          class Kernel,
-          sequence_alphabet Alphabet>
-struct MinimizerStage
-    : StageBase<MinimizerStage<MinimizerT, Kernel, Alphabet>, MinimizerT>
+template <class p_minimizer,
+          class p_kernel,
+          sequence_alphabet p_alphabet>
+struct minimizer_stage
+    : stage_base<minimizer_stage<p_minimizer, p_kernel, p_alphabet>, p_minimizer>
 {
-    static constexpr std::string_view stage_name = "MinimizerStage";
+    static constexpr std::string_view stage_name = "minimizer_stage";
 
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
     int32_t runtime_w;
     int32_t runtime_k;
-    // DOC0307 §5.1 — runtime flags so the Vulkan kernel can gate on
-    // `vulkan_enabled` without touching Runtime when Vulkan is off. CPU kernels
+    // — runtime flags so the Vulkan kernel can gate on
+    // `vulkan_enabled` without touching runtime when Vulkan is off. CPU kernels
     // ignore it.
-    ::bioseq::simd::Minimap2Params params;
-    MatchResultCollection* proof_dst = nullptr;
-    MatchResultCollection* host_timing_dst = nullptr;
+    ::bioseq::simd::minimap2_parameters params;
+    match_result_collection* stats_dst = nullptr;
+    match_result_collection* host_timing_dst = nullptr;
 
-    // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
+    // /: the kernel writes directly into the per-query
     // arena slab via `sketch_collector_arena_adapter`, eliminating the
     // sketches→vector→slab memcpy that the previous shape required.  The
-    // specialised path calls `call_constexpr<W, K, MinimizerT>(...)` so
-    // the (W, K) pair propagates as integer immediates through the
+    // specialised path calls `call_constexpr<p_window_size, p_kmer_size, p_minimizer>(...)` so
+    // the (p_window_size, p_kmer_size) pair propagates as integer immediates through the
     // window-loop bounds and unrolls.
-    template <is_constexpr_aligner_params Cep, class B, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process(B&& /*ignored*/, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process(p_batch&& /*ignored*/, emit_token<p_sink>&& token) {
         const std::uint64_t host_stage_started = host_timing_dst == nullptr
             ? 0u : host_stage_now_ns();
-        const std::size_t window_size = Cep::generic_fallback
+        const std::size_t window_size = p_aligner_parameters::generic_fallback
             ? static_cast<std::size_t>(runtime_w)
-            : Cep::window_len;
-        const std::size_t kmer_size = Cep::generic_fallback
+            : p_aligner_parameters::window_len;
+        const std::size_t kmer_size = p_aligner_parameters::generic_fallback
             ? static_cast<std::size_t>(runtime_k)
-            : Cep::kmer_len;
+            : p_aligner_parameters::kmer_len;
 
-        // Validate the zero-based position domain before any scalar, SIMD, or
-        // Vulkan kernel can construct a masked MinimizerRepr. A query shorter
+        // Validate the zero-based position domain before any scalar, simd, or
+        // Vulkan kernel can construct a masked minimizer_representation. A query shorter
         // than k is valid and naturally emits an empty minimizer batch.
-        require_representable_minimizer_query_length<MinimizerT>(
+        require_representable_minimizer_query_length<p_minimizer>(
             query_seq_.bp_size());
 
-        // DOC0307 §5.1 — device-minimizer path: only the Vulkan kernel exposes
+        // — device-minimizer path: only the Vulkan kernel exposes
         // `call_result`. When it returns a result, copy the host minimizers into
         // the arena slab and forward the resident device span as stage-local
-        // metadata so SeedHitStage can skip a second query-minimizer upload.
-        if constexpr (requires { Kernel::may_emit_device_minimizers; }) {
-            if constexpr (Kernel::may_emit_device_minimizers) {
+        // metadata so seed_hit_stage can skip a second query-minimizer upload.
+        if constexpr (requires { p_kernel::may_emit_device_minimizers; }) {
+            if constexpr (p_kernel::may_emit_device_minimizers) {
                 if (auto gpu_result =
-                        Kernel::template call_result<MinimizerT>(
+                        p_kernel::template call_result<p_minimizer>(
                             params, query_seq_, window_size, kmer_size))
                 {
-                    if (proof_dst == nullptr
-                        || !gpu_result->dispatch_token.accepted()) {
-                        bioseq_log<ERR>(
-                            "Vulkan minimizer stage lacks an operation token or proof sink");
+                    if (stats_dst == nullptr
+                        || !gpu_result->dispatch_token.is_internally_consistent()) {
+                        bioseq_log<logging_level::error>(
+                            "Vulkan minimizer stage lacks an operation token or stats sink");
                         std::abort();
                     }
-                    PartialVulkanExecutionProof proof{};
-                    proof.query_sketch_dispatches =
+                    partial_vulkan_execution_stats stats{};
+                    stats.query_sketch_dispatches =
                         gpu_result->dispatch_token.completed_roundtrips;
-                    proof_dst->record_partial_vulkan_execution_proof(proof);
-                    auto device_slab = make_arena_slab<MinimizerT>();
+                    stats_dst->record_partial_vulkan_execution_stats(stats);
+                    auto device_slab = make_arena_slab<p_minimizer>();
                     device_slab.reserve(gpu_result->host_minimizers.size());
                     if (!gpu_result->host_minimizers.empty()) {
                         std::memcpy(device_slab.data(),
                                     gpu_result->host_minimizers.data(),
-                                    gpu_result->host_minimizers.size() * sizeof(MinimizerT));
+                                    gpu_result->host_minimizers.size() * sizeof(p_minimizer));
                     }
                     device_slab.resize(gpu_result->host_minimizers.size());
-                    MinimizerBatchView<MinimizerT> batch{
+                    minimizer_batch_view<p_minimizer> batch{
                         .host = device_slab.as_const_span(),
                         .device = std::optional<
-                            bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>{
+                            bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>{
                                 gpu_result->device_span()},
                     };
                     // The reservation owns the vector capacity, so destroy
                     // that capacity before releasing its permit. `batch.device`
-                    // independently retains the resident device permit (§6.1).
-                    std::vector<MinimizerT>{}.swap(
+                    // independently retains the resident device permit.
+                    std::vector<p_minimizer>{}.swap(
                         gpu_result->host_minimizers);
                     gpu_result->host_permit.reset();
                     return std::move(token).emit_minimizer_batch(batch);
@@ -3140,96 +3137,96 @@ struct MinimizerStage
             }
         }
 
-        auto sketches_slab = make_arena_slab<MinimizerT>();
+        auto sketches_slab = make_arena_slab<p_minimizer>();
         sketches_slab.reserve(detail::estimated_sketch_count(
             query_seq_.bp_size(), static_cast<int32_t>(window_size)));
 
-        sketch_collector_arena_adapter<MinimizerT> collector{&sketches_slab};
+        sketch_collector_arena_adapter<p_minimizer> collector{&sketches_slab};
 
-        if constexpr (Kernel::emits_partial_vulkan_execution_proof) {
+        if constexpr (p_kernel::emits_partial_vulkan_execution_stats) {
             const auto dispatch_token = [&] {
-                if constexpr (!Cep::generic_fallback) {
-                    return Kernel::template call_constexpr<
-                        Cep::window_len, Cep::kmer_len, MinimizerT>(
+                if constexpr (!p_aligner_parameters::generic_fallback) {
+                    return p_kernel::template call_constexpr<
+                        p_aligner_parameters::window_len, p_aligner_parameters::kmer_len, p_minimizer>(
                             params, collector, query_seq_);
                 } else {
-                    return Kernel::template call<MinimizerT>(
+                    return p_kernel::template call<p_minimizer>(
                         params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
-            if (proof_dst == nullptr || !dispatch_token.accepted()) {
-                bioseq_log<ERR>(
+            if (stats_dst == nullptr || !dispatch_token.is_internally_consistent()) {
+                bioseq_log<logging_level::error>(
                     "Vulkan minimizer stage returned no accepted execution token");
                 std::abort();
             }
-            PartialVulkanExecutionProof proof{};
-            proof.query_sketch_dispatches =
+            partial_vulkan_execution_stats stats{};
+            stats.query_sketch_dispatches =
                 dispatch_token.completed_roundtrips;
-            proof_dst->record_partial_vulkan_execution_proof(proof);
-        } else if constexpr (Kernel::emits_scalar_minimizer_execution_proof) {
-            ScalarMinimizerExecutionProof proof{};
-            if constexpr (!Cep::generic_fallback) {
-                proof = Kernel::template call_constexpr<
-                    Cep::window_len, Cep::kmer_len, MinimizerT>(
+            stats_dst->record_partial_vulkan_execution_stats(stats);
+        } else if constexpr (p_kernel::emits_scalar_minimizer_execution_stats) {
+            scalar_minimizer_execution_stats stats{};
+            if constexpr (!p_aligner_parameters::generic_fallback) {
+                stats = p_kernel::template call_constexpr<
+                    p_aligner_parameters::window_len, p_aligner_parameters::kmer_len, p_minimizer>(
                         params, collector, query_seq_);
             } else {
-                proof = Kernel::template call<MinimizerT>(
+                stats = p_kernel::template call<p_minimizer>(
                     params, collector, query_seq_,
                     window_size, kmer_size);
             }
-            if (proof_dst == nullptr || !proof.accepted()) {
-                bioseq_log<ERR>(
-                    "Scalar minimizer stage returned rejected proof");
+            if (stats_dst == nullptr || !stats.is_coherent()) {
+                bioseq_log<logging_level::error>(
+                    "scalar minimizer stage returned rejected stats");
                 std::abort();
             }
-            proof_dst->record_scalar_query_minimizer_execution_proof(proof);
-        } else if constexpr (Kernel::emits_exact_simd_execution_proof) {
-            const auto proof = [&] {
-                if constexpr (!Cep::generic_fallback) {
-                    return Kernel::template call_constexpr<
-                        Cep::window_len, Cep::kmer_len, MinimizerT>(
+            stats_dst->record_scalar_query_minimizer_execution_stats(stats);
+        } else if constexpr (p_kernel::emits_exact_simd_execution_stats) {
+            const auto stats = [&] {
+                if constexpr (!p_aligner_parameters::generic_fallback) {
+                    return p_kernel::template call_constexpr<
+                        p_aligner_parameters::window_len, p_aligner_parameters::kmer_len, p_minimizer>(
                             params, collector, query_seq_);
                 } else {
-                    return Kernel::template call<MinimizerT>(
+                    return p_kernel::template call<p_minimizer>(
                         params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
-            if (proof_dst == nullptr
-                || !proof.accepted(
+            if (stats_dst == nullptr
+                || !stats.is_internally_consistent(
                     /*require_nonempty_vector_work=*/false)) {
-                bioseq_log<ERR>(
-                    "ExactSimd minimizer stage returned rejected proof");
+                bioseq_log<logging_level::error>(
+                    "exact_simd minimizer stage returned rejected stats");
                 std::abort();
             }
-            proof_dst->record_exact_simd_query_execution_proof(proof);
-        } else if constexpr (Kernel::emits_paper_nthash_execution_proof) {
-            const auto proof = [&] {
-                if constexpr (!Cep::generic_fallback) {
-                    return Kernel::template call_constexpr<
-                        Cep::window_len, Cep::kmer_len, MinimizerT>(
+            stats_dst->record_exact_simd_query_execution_stats(stats);
+        } else if constexpr (p_kernel::emits_bounded_nthash_execution_stats) {
+            const auto stats = [&] {
+                if constexpr (!p_aligner_parameters::generic_fallback) {
+                    return p_kernel::template call_constexpr<
+                        p_aligner_parameters::window_len, p_aligner_parameters::kmer_len, p_minimizer>(
                             params, collector, query_seq_);
                 } else {
-                    return Kernel::template call<MinimizerT>(
+                    return p_kernel::template call<p_minimizer>(
                         params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
-            if (proof_dst == nullptr
-                || !proof.accepted(
+            if (stats_dst == nullptr
+                || !stats.is_internally_consistent(
                     /*require_nonempty_vector_work=*/false)) {
-                bioseq_log<ERR>(
-                    "PaperNtHashSimd minimizer stage returned rejected proof");
+                bioseq_log<logging_level::error>(
+                    "bounded_nthash_simd minimizer stage returned rejected stats");
                 std::abort();
             }
-            proof_dst->record_paper_nthash_query_execution_proof(proof);
-        } else if constexpr (!Cep::generic_fallback) {
-            Kernel::template call_constexpr<
-                Cep::window_len, Cep::kmer_len, MinimizerT>(
+            stats_dst->record_bounded_nthash_query_execution_stats(stats);
+        } else if constexpr (!p_aligner_parameters::generic_fallback) {
+            p_kernel::template call_constexpr<
+                p_aligner_parameters::window_len, p_aligner_parameters::kmer_len, p_minimizer>(
                     params, collector, query_seq_);
         } else {
-            Kernel::template call<MinimizerT>(
+            p_kernel::template call<p_minimizer>(
                 params, collector, query_seq_, window_size, kmer_size);
         }
 
@@ -3237,21 +3234,21 @@ struct MinimizerStage
             host_timing_dst->record_query_sketch_host_time(
                 elapsed_host_stage_ns(host_stage_started));
         }
-        return std::move(token).emit_batch(std::span<const MinimizerT>{
+        return std::move(token).emit_batch(std::span<const p_minimizer>{
             sketches_slab.data(), sketches_slab.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
-        algo.name = std::string{Kernel::algorithm_label()};
-        Kernel::populate_runtime_params({}, algo.parameters);
-        algo.computed_properties = Kernel::template static_properties<Cep>();
-        algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
+        stage_algorithm_description algo;
+        algo.name = std::string{p_kernel::algorithm_label()};
+        p_kernel::populate_runtime_params({}, algo.parameters);
+        algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
+        algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
         desc.algorithm = std::move(algo);
-        // Reserve target for the sketch arena slab (DOC0249 §21.4
+        // Reserve target for the sketch arena slab (
         // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
         // the describe path the proto is empty so bp_size() is zero — which
         // still yields the +64 safety margin from `estimated_sketch_count`.
@@ -3263,47 +3260,47 @@ struct MinimizerStage
 };
 
 /**
- * @brief Stage 1: pass-through that decorates downstream with TargetIndex&.
+ * @brief stage 1: pass-through that decorates downstream with TargetIndex&.
  *
- * Converts the sink shape from `on_batch(span<MinimizerT>)` upstream to
- * `on_batch_with_index(span<MinimizerT>, IndexT const&)` downstream.  Inlines
+ * Converts the sink shape from `on_batch(span<p_minimizer>)` upstream to
+ * `on_batch_with_index(span<p_minimizer>, p_index const&)` downstream.  Inlines
  * away at -O3 (zero runtime cost).
  */
-template <class IndexT>
-struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downstream sees the same sketch span */> {
-    static constexpr std::string_view stage_name = "IndexStage";
+template <class p_index>
+struct index_stage : stage_base<index_stage<p_index>, p_index /* pass-through; downstream sees the same sketch span */> {
+    static constexpr std::string_view stage_name = "index_stage";
 
-    const IndexT* index_;
-    bioseq::indexing::GpuIndexCacheIdentity identity_{};
+    const p_index* index_;
+    bioseq::indexing::gpu_index_cache_identity identity_{};
 
-    template <is_constexpr_aligner_params Cep, class B, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process(B&& sketches, EmitToken<Sink>&& token) {
-        // DOC0307 §5.2 / DOC0351 — whole in-memory targets keep pointer
+    emitted_token<p_sink> process(p_batch&& sketches, emit_token<p_sink>&& token) {
+        // /  — whole in-memory targets keep pointer
         // identity (`{}`); segmented recompute/assembly passes a nonzero
         // identity so a reused stack index object cannot alias another segment
         // in the GPU resident cache.
-        if constexpr (is_minimizer_batch_view_v<B>) {
+        if constexpr (is_minimizer_batch_view_v<p_batch>) {
             return std::move(token).emit_minimizer_batch_with_index(
-                std::forward<B>(sketches), *index_, identity_);
+                std::forward<p_batch>(sketches), *index_, identity_);
         } else {
-            using ElemT = std::remove_const_t<
-                typename std::remove_cvref_t<B>::value_type>;
+            using element_type = std::remove_const_t<
+                typename std::remove_cvref_t<p_batch>::value_type>;
             return std::move(token).emit_batch_with_index(
-                std::span<const ElemT>{sketches.data(), sketches.size()}, *index_, identity_);
+                std::span<const element_type>{sketches.data(), sketches.size()}, *index_, identity_);
         }
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         desc.extra_description = "target index lookup hand-off";
         return desc;
     }
 };
 
-enum class SourceDirectHostAuthority : std::uint8_t {
+enum class source_direct_host_authorization : std::uint8_t {
     none,
     canonical_empty,
     reflected_process_footprint,
@@ -3313,9 +3310,9 @@ enum class SourceDirectHostAuthority : std::uint8_t {
 /// One operation-scoped ledger for the selected source-direct resident route.
 /// It emits exactly one planning receipt after sort/count and exactly one
 /// terminal receipt after cache/fence/arena cleanup (or unwind).  Checksums are
-/// allocation-integrity evidence only; biological parity remains test/bench
-/// evidence and is deliberately absent from these receipts.
-struct DirectResidentOperationLedger {
+/// allocation-integrity observations only; biological parity remains a
+/// test/benchmark property and is deliberately absent from these receipts.
+struct direct_resident_operation_stats {
     std::uint64_t operation_identity = 0u;
     std::uint64_t minimizer_count = 0u;
     std::uint64_t distinct_count = 0u;
@@ -3365,31 +3362,31 @@ struct DirectResidentOperationLedger {
     std::uint64_t cpu_position_bytes_released = 0u;
     std::uint64_t planning_receipts = 0u;
     std::uint64_t terminal_receipts = 0u;
-    bioseq::indexing::GpuSourceDirectMaterializationProof materialization{};
-    SourceDirectHostAuthority source_authority =
-        SourceDirectHostAuthority::none;
-    bool phase_c_checked = false;
-    bool phase_c_compatible = false;
+    bioseq::indexing::gpu_source_direct_materialization_stats materialization{};
+    source_direct_host_authorization source_authority =
+        source_direct_host_authorization::none;
+    bool gpu_target_index_route_checked = false;
+    bool gpu_target_index_route_compatible = false;
     bool source_authority_checked = false;
-    bool source_authority_accepted = false;
+    bool has_valid_source_authorization = false;
     bool runtime_checked = false;
     bool runtime_available = false;
     bool hardware_checked = false;
     bool hardware_available = false;
     bool sorted_shape_checked = false;
-    bool sorted_shape_accepted = false;
+    bool is_sorted_shape_accepted = false;
     bool identity_checked = false;
-    bool identity_accepted = false;
+    bool is_identity_accepted = false;
     bool u32_shape_checked = false;
-    bool u32_shape_accepted = false;
+    bool is_u32_shape_accepted = false;
     bool storage_ranges_checked = false;
-    bool control_range_accepted = false;
-    bool position_range_accepted = false;
+    bool is_control_range_accepted = false;
+    bool is_position_range_accepted = false;
     bool mapping_plan_checked = false;
-    bool mapping_plan_accepted = false;
+    bool is_mapping_plan_accepted = false;
     bool admission_snapshot_taken = false;
     bool canonical_empty = false;
-    bool planning_accepted = false;
+    bool is_planning_accepted = false;
     bool route_committed = false;
     bool materialization_started = false;
     bool materialization_completed = false;
@@ -3426,32 +3423,32 @@ struct DirectResidentOperationLedger {
     }
 
     [[nodiscard]] static constexpr std::string_view source_authority_name(
-        SourceDirectHostAuthority authority) noexcept
+        source_direct_host_authorization authority) noexcept
     {
         switch (authority) {
-            case SourceDirectHostAuthority::canonical_empty:
+            case source_direct_host_authorization::canonical_empty:
                 return "canonical_empty";
-            case SourceDirectHostAuthority::reflected_process_footprint:
+            case source_direct_host_authorization::reflected_process_footprint:
                 return "reflected_process_footprint";
-            case SourceDirectHostAuthority::retained_exact_permit:
+            case source_direct_host_authorization::retained_exact_permit:
                 return "retained_exact_permit";
-            case SourceDirectHostAuthority::none:
+            case source_direct_host_authorization::none:
                 return "none";
         }
         return "unknown";
     }
 
     [[nodiscard]] static constexpr std::string_view resident_authority_name(
-        bioseq::indexing::GpuResidentAccountingAuthority authority) noexcept
+        bioseq::indexing::gpu_resident_accounting_authority authority) noexcept
     {
         switch (authority) {
-            case bioseq::indexing::GpuResidentAccountingAuthority::
+            case bioseq::indexing::gpu_resident_accounting_authority::
                     reflected_process_footprint:
                 return "reflected_process_footprint";
-            case bioseq::indexing::GpuResidentAccountingAuthority::
+            case bioseq::indexing::gpu_resident_accounting_authority::
                     retained_exact_permit:
                 return "retained_exact_permit";
-            case bioseq::indexing::GpuResidentAccountingAuthority::none:
+            case bioseq::indexing::gpu_resident_accounting_authority::none:
                 return "none";
         }
         return "unknown";
@@ -3465,11 +3462,11 @@ struct DirectResidentOperationLedger {
             return;
         }
         try {
-            bioseq_log<INF>(
+            bioseq_log<logging_level::info>(
                 "[gpu_source_direct_operation_planning] operation={} "
                 "route={} "
                 "source_authority={} source_authority_status={} "
-                "phase_c_status={} runtime_status={} device_status={} "
+                "gpu_target_index_route_status={} runtime_status={} device_status={} "
                 "sorted_shape_status={} abi_identity_status={} "
                 "u32_shape_status={} control_range_status={} "
                 "position_range_status={} mapping_plan_status={} "
@@ -3486,19 +3483,19 @@ struct DirectResidentOperationLedger {
                 route_name(),
                 source_authority_name(source_authority),
                 check_status(source_authority_checked,
-                             source_authority_accepted),
-                check_status(phase_c_checked, phase_c_compatible),
+                             has_valid_source_authorization),
+                check_status(gpu_target_index_route_checked, gpu_target_index_route_compatible),
                 check_status(runtime_checked, runtime_available),
                 check_status(hardware_checked, hardware_available),
-                check_status(sorted_shape_checked, sorted_shape_accepted),
-                check_status(identity_checked, identity_accepted),
-                check_status(u32_shape_checked, u32_shape_accepted),
+                check_status(sorted_shape_checked, is_sorted_shape_accepted),
+                check_status(identity_checked, is_identity_accepted),
+                check_status(u32_shape_checked, is_u32_shape_accepted),
                 check_status(storage_ranges_checked,
-                             control_range_accepted),
+                             is_control_range_accepted),
                 check_status(storage_ranges_checked,
-                             position_range_accepted),
+                             is_position_range_accepted),
                 check_status(mapping_plan_checked,
-                             mapping_plan_accepted),
+                             is_mapping_plan_accepted),
                 minimizer_count,
                 distinct_count,
                 logical_control_bytes,
@@ -3535,7 +3532,7 @@ struct DirectResidentOperationLedger {
             ? !pipeline_started && !pipeline_completed
             : pipeline_started && pipeline_completed;
         if (planning_receipts != 1u || planning_log_failed
-            || !planning_accepted || !route_committed
+            || !is_planning_accepted || !route_committed
             || !source_release_completed
             || !pipeline_exact
             || completed_seed_consumers != expected_seed_consumers
@@ -3592,7 +3589,7 @@ struct DirectResidentOperationLedger {
             return false;
         }
         const std::uint64_t allocation_sum =
-            bioseq::parallelism::saturating_add(
+            bioseq::common::saturating_add(
                 materialization.actual_slot_allocation_bytes,
                 materialization.actual_position_allocation_bytes);
         const bool exact_materialization = allocation_sum
@@ -3627,13 +3624,13 @@ struct DirectResidentOperationLedger {
                 == materialization.actual_allocation_bytes
             && materialization.permit_reconciliations == 1u;
         const bool reflected = materialization.authority
-                == bioseq::indexing::GpuResidentAccountingAuthority::
+                == bioseq::indexing::gpu_resident_accounting_authority::
                     reflected_process_footprint
             && materialization.reflected_footprint_bytes
                 >= materialization.actual_allocation_bytes
             && materialization.retained_permit_bytes == 0u;
         const bool retained = materialization.authority
-                == bioseq::indexing::GpuResidentAccountingAuthority::
+                == bioseq::indexing::gpu_resident_accounting_authority::
                     retained_exact_permit
             && materialization.retained_permit_bytes
                 == materialization.actual_allocation_bytes
@@ -3722,13 +3719,13 @@ struct DirectResidentOperationLedger {
         const bool cleanup_checked = source_release_completed
             || cache_cleanup_releases != 0u
             || resident_cleanup_bytes != 0u;
-        const bool cleanup_accepted = source_release_completed
+        const bool is_cleanup_accepted = source_release_completed
             && (!resident_published
                 || (cache_cleanup_releases == 1u
                     && resident_cleanup_bytes
                         == materialization.actual_allocation_bytes));
         try {
-            bioseq_log<INF>(
+            bioseq_log<logging_level::info>(
             "[gpu_source_direct_operation_terminal] operation={} status={} "
             "reason={} route={} N={} D={} actual_control_allocation_bytes={} "
             "actual_position_allocation_bytes={} actual_allocation_bytes={} "
@@ -3830,7 +3827,7 @@ struct DirectResidentOperationLedger {
                 seed_dispatch_started,
                 seed_fence_completions == seed_roundtrips,
                 explicit_pipeline_bypass || zero_anchor_bypass),
-            check_status(cleanup_checked, cleanup_accepted),
+            check_status(cleanup_checked, is_cleanup_accepted),
             stage_status(
                 pipeline_started,
                 pipeline_completed,
@@ -3851,10 +3848,10 @@ struct DirectResidentOperationLedger {
 /// can finish its unwind. Cleanup remains owned by the wrapper/PostSeed; this
 /// guard only prevents a selected operation from disappearing without its two
 /// operation-level receipts.
-struct DirectResidentReceiptGuard {
-    DirectResidentOperationLedger* ledger = nullptr;
+struct direct_resident_receipt_guard {
+    direct_resident_operation_stats* ledger = nullptr;
 
-    ~DirectResidentReceiptGuard() noexcept {
+    ~direct_resident_receipt_guard() noexcept {
         if (ledger == nullptr) return;
         if (ledger->planning_receipts == 0u) {
             ledger->log_planning("reject", "unwind_before_planning_complete");
@@ -3869,16 +3866,16 @@ struct DirectResidentReceiptGuard {
 /// Ordinary transient indexes carry only `index`; the fixed Vulkan handoff
 /// also carries the exact permit that accounts for storage not already
 /// represented by its one-shot process-footprint authority.
-struct TransientTargetIndexReleaseAuthority {
-    bioseq::indexing::MinimizerHashmapFragmentIndex* index = nullptr;
-    bioseq::parallelism::MemoryPermit* permit = nullptr;
+struct transient_target_index_release_authorization {
+    bioseq::indexing::minimizer_hashmap_fragment_index* index = nullptr;
+    bioseq::parallelism::memory_permit* permit = nullptr;
     std::uint64_t expected_permit_bytes = 0u;
     bool require_exact_permit_bytes = false;
-    bioseq::indexing::GpuMinimizerIndexCache*
+    bioseq::indexing::gpu_minimizer_index_cache*
         operation_owned_gpu_cache = nullptr;
-    DirectResidentOperationLedger* direct_ledger = nullptr;
+    direct_resident_operation_stats* direct_ledger = nullptr;
 
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_valid() const noexcept {
         return index != nullptr
             && (!require_exact_permit_bytes || permit != nullptr)
             && (permit == nullptr
@@ -3894,8 +3891,8 @@ struct TransientTargetIndexReleaseAuthority {
 /// seed consumer signals exactly once after dropping its local resident handle;
 /// the last consumer deallocates any transient CPU lookup index and clears any
 /// internally-owned GPU cache before downstream chaining begins.
-struct PostSeedOwnedLifetime {
-    struct ReleaseProof {
+struct post_seed_owned_lifetime {
+    struct release_receipt {
         std::uint64_t gpu_cache_evictions = 0;
         std::uint64_t gpu_resident_bytes_released = 0;
         std::uint64_t cpu_index_releases = 0;
@@ -3906,19 +3903,19 @@ struct PostSeedOwnedLifetime {
     };
 
     std::atomic<std::size_t> remaining_seed_users{0};
-    bioseq::indexing::GpuMinimizerIndexCache* owned_gpu_cache = nullptr;
-    TransientTargetIndexReleaseAuthority owned_cpu_index{};
-    bioseq::parallelism::MemoryPermit retained_seed_arena_permit{};
+    bioseq::indexing::gpu_minimizer_index_cache* owned_gpu_cache = nullptr;
+    transient_target_index_release_authorization owned_cpu_index{};
+    bioseq::parallelism::memory_permit retained_seed_arena_permit{};
 
-    PostSeedOwnedLifetime(
+    post_seed_owned_lifetime(
             std::size_t seed_users,
-            bioseq::indexing::GpuMinimizerIndexCache* gpu_cache,
-            TransientTargetIndexReleaseAuthority cpu_index) noexcept
+            bioseq::indexing::gpu_minimizer_index_cache* gpu_cache,
+            transient_target_index_release_authorization cpu_index) noexcept
         : remaining_seed_users(seed_users),
           owned_gpu_cache(gpu_cache),
           owned_cpu_index(cpu_index) {}
 
-    ~PostSeedOwnedLifetime() noexcept {
+    ~post_seed_owned_lifetime() noexcept {
         if (owned_cpu_index.direct_ledger == nullptr) return;
         auto& ledger = *owned_cpu_index.direct_ledger;
         if (owned_gpu_cache != nullptr) {
@@ -3952,10 +3949,10 @@ struct PostSeedOwnedLifetime {
                     : "seed_user_not_completed");
     }
 
-    PostSeedOwnedLifetime(const PostSeedOwnedLifetime&) = delete;
-    PostSeedOwnedLifetime& operator=(const PostSeedOwnedLifetime&) = delete;
+    post_seed_owned_lifetime(const post_seed_owned_lifetime&) = delete;
+    post_seed_owned_lifetime& operator=(const post_seed_owned_lifetime&) = delete;
 
-    [[nodiscard]] ReleaseProof complete_seed_user() {
+    [[nodiscard]] release_receipt complete_seed_user() {
         std::size_t previous =
             remaining_seed_users.load(std::memory_order_acquire);
         while (previous != 0u
@@ -3966,138 +3963,138 @@ struct PostSeedOwnedLifetime {
                    std::memory_order_acquire)) {
         }
         if (previous == 0u) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "post-seed lifetime user underflow"};
         }
         if (owned_cpu_index.direct_ledger != nullptr) {
             auto& ledger = *owned_cpu_index.direct_ledger;
             ledger.completed_seed_consumers =
-                bioseq::parallelism::saturating_add(
+                bioseq::common::saturating_add(
                     ledger.completed_seed_consumers, 1u);
         }
         if (previous != 1u) return {};
 
-        ReleaseProof proof{};
+        release_receipt stats{};
         if (owned_gpu_cache != nullptr) {
             auto* const cache_to_release = owned_gpu_cache;
             owned_gpu_cache = nullptr;
-            proof.gpu_resident_bytes_released =
+            stats.gpu_resident_bytes_released =
                 cache_to_release->resident_bytes();
             cache_to_release->clear();
-            proof.gpu_cache_evictions =
-                proof.gpu_resident_bytes_released != 0u ? 1u : 0u;
+            stats.gpu_cache_evictions =
+                stats.gpu_resident_bytes_released != 0u ? 1u : 0u;
             if (owned_cpu_index.direct_ledger != nullptr) {
                 auto& ledger = *owned_cpu_index.direct_ledger;
                 ledger.cache_cleanup_releases =
-                    proof.gpu_cache_evictions;
+                    stats.gpu_cache_evictions;
                 ledger.resident_cleanup_bytes =
-                    proof.gpu_resident_bytes_released;
+                    stats.gpu_resident_bytes_released;
             }
         }
         if (owned_cpu_index.index != nullptr) {
-            if (!owned_cpu_index.accepted()) {
-                bioseq_log<ERR>(
+            if (!owned_cpu_index.is_valid()) {
+                bioseq_log<logging_level::error>(
                     "post-seed lifetime has invalid CPU index release authority");
                 std::abort();
             }
             const bool had_resident_storage =
                 !owned_cpu_index.index->table_empty()
                 || owned_cpu_index.index->positions.capacity() != 0u;
-            proof.cpu_position_bytes_released =
-                bioseq::parallelism::saturating_mul(
+            stats.cpu_position_bytes_released =
+                bioseq::common::saturating_mul(
                     owned_cpu_index.index->positions.capacity(),
                     sizeof(std::uint64_t));
             owned_cpu_index.index->release_storage();
-            proof.cpu_index_releases = had_resident_storage ? 1u : 0u;
+            stats.cpu_index_releases = had_resident_storage ? 1u : 0u;
             if (owned_cpu_index.permit != nullptr) {
                 if (!owned_cpu_index.index->table_empty()
                     || owned_cpu_index.index->positions.capacity() != 0u) {
-                    bioseq_log<ERR>(
+                    bioseq_log<logging_level::error>(
                         "post-seed CPU index permit release preceded storage");
                     std::abort();
                 }
-                proof.cpu_index_storage_released_before_permit = true;
-                proof.cpu_index_permit_bytes_released =
+                stats.cpu_index_storage_released_before_permit = true;
+                stats.cpu_index_permit_bytes_released =
                     owned_cpu_index.permit->bytes();
-                proof.cpu_index_permit_releases =
+                stats.cpu_index_permit_releases =
                     static_cast<bool>(*owned_cpu_index.permit) ? 1u : 0u;
                 owned_cpu_index.permit->release();
             }
         }
-        return proof;
+        return stats;
     }
 };
 
 /**
- * @brief Stage 2: seed-hit collection.
+ * @brief stage 2: seed-hit collection.
  *
  * Wraps the `collect_seed_hits` kernel, which writes its anchor output
- * directly into a caller-provided ArenaSlab (DOC0249 §13 follow-up:
+ * directly into a caller-provided arena_slab ( follow-up:
  * output-side kernel-to-arena refactor).  No `std::vector` is materialised
  * inside the stage — the per-stage memcpy that the previous shape required
  * is eliminated, so the kernel's `push_back` traffic lands straight in the
  * pipeline arena.
  */
-struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
-    static constexpr std::string_view stage_name = "SeedHitStage";
+struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
+    static constexpr std::string_view stage_name = "seed_hit_stage";
 
-    ::bioseq::simd::Minimap2Params params;
+    ::bioseq::simd::minimap2_parameters params;
     sequence_size_t                               query_len;
-    // DOC0307 §5.2 — batch/segment-wave-scoped GPU index cache. The outer
+    // — batch/segment-wave-scoped GPU index cache. The outer
     // wave creates one cache, passes `&cache` here, and clears it at wave end.
     // Null on single-shot paths (then the GPU seed path uploads uncached).
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr;
-    MatchResultCollection* proof_dst = nullptr;
-    PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr;
-    MatchResultCollection* host_timing_dst = nullptr;
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr;
+    match_result_collection* stats_dst = nullptr;
+    post_seed_owned_lifetime* post_seed_owned_lifetime = nullptr;
+    match_result_collection* host_timing_dst = nullptr;
 
-    // DOC0307 §5.2 — host/device accessors for both the std::span CPU shape and
-    // the MinimizerBatchView device shape.
-    template <class MinimizerT>
-    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
-    sketch_span_of(const std::span<const MinimizerT>& s) noexcept { return s; }
-    template <class MinimizerT>
-    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
-    sketch_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.host; }
+    // — host/device accessors for both the std::span CPU shape and
+    // the minimizer_batch_view device shape.
+    template <class p_minimizer>
+    [[nodiscard, gnu::always_inline]] static std::span<const p_minimizer>
+    sketch_span_of(const std::span<const p_minimizer>& s) noexcept { return s; }
+    template <class p_minimizer>
+    [[nodiscard, gnu::always_inline]] static std::span<const p_minimizer>
+    sketch_span_of(const minimizer_batch_view<p_minimizer>& b) noexcept { return b.host; }
 
-    template <class MinimizerT>
+    template <class p_minimizer>
     [[nodiscard, gnu::always_inline]] static
-    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
-    device_span_of(const std::span<const MinimizerT>&) noexcept { return std::nullopt; }
-    template <class MinimizerT>
+    std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>
+    device_span_of(const std::span<const p_minimizer>&) noexcept { return std::nullopt; }
+    template <class p_minimizer>
     [[nodiscard, gnu::always_inline]] static
-    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
-    device_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.device; }
+    std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>
+    device_span_of(const minimizer_batch_view<p_minimizer>& b) noexcept { return b.device; }
 
-    template <is_constexpr_aligner_params Cep, class B, class IndexT, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_index, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_with_index(
-        B&& sketches, const IndexT& target_index_ref,
-        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
-        EmitToken<Sink>&& token)
+    emitted_token<p_sink> process_with_index(
+        p_batch&& sketches, const p_index& target_index_ref,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
+        emit_token<p_sink>&& token)
     {
         const std::uint64_t host_stage_started = host_timing_dst == nullptr
             ? 0u : host_stage_now_ns();
-        const int32_t kmer_size = Cep::generic_fallback
+        const int32_t kmer_size = p_aligner_parameters::generic_fallback
             ? params.kmer_size
-            : static_cast<int32_t>(Cep::kmer_len);
+            : static_cast<int32_t>(p_aligner_parameters::kmer_len);
 
-        using MinimizerT = std::remove_const_t<
-            typename std::remove_cvref_t<B>::value_type>;
+        using p_minimizer = std::remove_const_t<
+            typename std::remove_cvref_t<p_batch>::value_type>;
 
-        auto sketch_span = sketch_span_of<MinimizerT>(sketches);
-        auto device_span = device_span_of<MinimizerT>(sketches);
-        DirectResidentOperationLedger* const direct_ledger =
+        auto sketch_span = sketch_span_of<p_minimizer>(sketches);
+        auto device_span = device_span_of<p_minimizer>(sketches);
+        direct_resident_operation_stats* const direct_ledger =
             post_seed_owned_lifetime == nullptr
             ? nullptr
             : post_seed_owned_lifetime->owned_cpu_index.direct_ledger;
 
-        // DOC0307 §5.2 — run the selected GPU seed-hit lookup before the CPU
+        // — run the selected GPU seed-hit lookup before the CPU
         // path. If it declines, the selected Vulkan pipeline fails loudly.
-        // Only the concrete MinimizerHashmapFragmentIndex carries the GPU view.
+        // Only the concrete minimizer_hashmap_fragment_index carries the GPU view.
         if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
             bool seed_gpu_declined = false;
-            bioseq::gpu::vulkan::VulkanSeedLookupDecline seed_decline{
+            bioseq::seeding::vulkan_seed_lookup_decline seed_decline{
                 .query_length = static_cast<std::uint64_t>(query_len),
                 .query_minimizer_count = static_cast<std::uint64_t>(
                     sketch_span.size()),
@@ -4105,16 +4102,16 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                 .max_occ = params.max_occ,
                 .fused_frontend = params.vulkan_fused_frontend_enabled,
             };
-            if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
-                          bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+            if constexpr (std::same_as<std::remove_cvref_t<p_index>,
+                          bioseq::indexing::minimizer_hashmap_fragment_index>) {
                 // Strict Vulkan selection owns its anchor allocation. A
                 // prepared fragment view has no resident GPU index and reaches
                 // the fail-closed decline below without allocating CPU output.
-                auto anchors_slab = make_arena_slab<Anchor>();
+                auto anchors_slab = make_arena_slab<anchor>();
                 if (gpu_index_identity.source_direct_sorted_dense
                     && gpu_index_identity.canonical_empty) {
                     if (!bioseq::indexing::
-                            gpu_source_direct_identity_well_formed(
+                            is_gpu_source_direct_identity_well_formed(
                                 gpu_index_identity)
                         || !target_index_ref.table_empty()
                         || !target_index_ref.positions.empty()
@@ -4123,7 +4120,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         || gpu_index_cache != nullptr
                         || direct_ledger == nullptr
                         || params.vulkan_fused_frontend_enabled) {
-                        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
                             "canonical empty source-direct route is invalid"};
                     }
                     direct_ledger->empty_bypass = true;
@@ -4134,39 +4131,38 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                             post_seed_owned_lifetime->complete_seed_user());
                     }
                     return std::move(token).emit_batch(
-                        std::span<Anchor>{});
+                        std::span<anchor>{});
                 }
-                auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+                auto& runtime = bioseq::gpu::vulkan::runtime::instance();
                 if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                     auto key = bioseq::indexing::make_gpu_index_cache_key(
                         target_index_ref, gpu_index_identity);
                     std::shared_ptr<const bioseq::indexing::
-                        GpuResidentMinimizerIndex> resident_index;
-                    // Keep operation-originated materialization evidence
+                        gpu_resident_minimizer_index> resident_index;
+                    // Keep operation-originated materialization statistics
                     // separate from the seed-decline record. The seed lookup
                     // entry point intentionally resets its decline output at
-                    // entry, while this evidence must survive a successful
+                    // entry, while these statistics must survive a successful
                     // lookup so the benchmark records the one real upload and
                     // leaves later cache hits at zero.
-                    bioseq::indexing::GpuIndexUploadDecline
+                    bioseq::indexing::gpu_index_upload_decline
                         index_materialization{};
                     if (gpu_index_cache == nullptr) {
-                        seed_decline.reason = bioseq::gpu::vulkan::
-                            VulkanSeedLookupDeclineReason::index_cache_unavailable;
+                        seed_decline.reason = bioseq::seeding::vulkan_seed_lookup_decline_reason::index_cache_unavailable;
                     } else if (gpu_index_identity.
                             source_direct_sorted_dense) {
                         if (!bioseq::indexing::
-                                gpu_source_direct_identity_well_formed(
+                                is_gpu_source_direct_identity_well_formed(
                                     gpu_index_identity)
                             || gpu_index_identity.canonical_empty
                             || params.vulkan_fused_frontend_enabled
                             || direct_ledger == nullptr) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                 "source-direct resident seed identity is invalid"};
                         }
                         direct_ledger->cache_lookup_started = true;
                         direct_ledger->cache_required_lookups =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->cache_required_lookups, 1u);
                         auto required =
                             gpu_index_cache->find_required_preinserted(
@@ -4174,11 +4170,10 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         if (required) {
                             resident_index = std::move(*required);
                             direct_ledger->cache_required_hits =
-                                bioseq::parallelism::saturating_add(
+                                bioseq::common::saturating_add(
                                     direct_ledger->cache_required_hits, 1u);
                         } else {
-                            seed_decline.reason = bioseq::gpu::vulkan::
-                                VulkanSeedLookupDeclineReason::
+                            seed_decline.reason = bioseq::seeding::vulkan_seed_lookup_decline_reason::
                                     resident_index_unavailable;
                         }
                     } else {
@@ -4188,42 +4183,39 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                             &index_materialization);
                         if (!resident_index) {
                             seed_decline.index_upload = index_materialization;
-                            seed_decline.reason = index_materialization.declined()
-                                ? bioseq::gpu::vulkan::
-                                    VulkanSeedLookupDeclineReason::
+                            seed_decline.reason = index_materialization.is_declined()
+                                ? bioseq::seeding::vulkan_seed_lookup_decline_reason::
                                         resident_index_upload_declined
-                                : bioseq::gpu::vulkan::
-                                    VulkanSeedLookupDeclineReason::
+                                : bioseq::seeding::vulkan_seed_lookup_decline_reason::
                                         resident_index_unavailable;
                         }
                     }
                     if (resident_index
                         && gpu_index_identity.source_direct_sorted_dense
                         && post_seed_owned_lifetime == nullptr) {
-                        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
                             "source-direct seed route has no arena permit owner"};
                     }
                     if (direct_ledger != nullptr) {
                         if (post_seed_owned_lifetime->retained_seed_arena_permit) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                 "source-direct seed route retained a prior arena permit"};
                         }
-                        if (proof_dst == nullptr) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
-                                "source-direct seed stage has no execution-proof sink"};
+                        if (stats_dst == nullptr) {
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                                "source-direct seed stage has no execution-stats sink"};
                         }
                         direct_ledger->mapped_prefix_started = true;
                         direct_ledger->slab_capacity_before =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->slab_capacity_before,
                                 static_cast<std::uint64_t>(
                                     anchors_slab.capacity()));
                     }
-                    bioseq::gpu::vulkan::VulkanSeedLookupCompletion
+                    bioseq::seeding::vulkan_seed_lookup_completion
                         seed_completion{false};
                     if (resident_index) {
-                        seed_completion = bioseq::gpu::vulkan::
-                            collect_seed_hits_vulkan<MinimizerT>(
+                        seed_completion = bioseq::seeding::collect_seed_hits_vulkan<p_minimizer>(
                                 sketch_span,
                                 device_span,
                                 target_index_ref,
@@ -4238,47 +4230,47 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                     }
                     if (direct_ledger != nullptr) {
                         direct_ledger->mapped_prefix_passes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->mapped_prefix_passes,
                                 seed_decline.mapped_prefix_authority_passes);
                         direct_ledger->mapped_prefix_lookups =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->mapped_prefix_lookups,
                                 seed_decline.mapped_prefix_lookup_count);
                         direct_ledger->mapped_prefix_comparisons =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->mapped_prefix_comparisons,
                                 seed_decline.mapped_prefix_comparison_count);
                         direct_ledger->slab_requested_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->slab_requested_bytes,
                                 seed_decline.anchors_out_growth_bytes);
                         direct_ledger->slab_actual_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->slab_actual_bytes,
                                 seed_decline.anchors_out_actual_growth_bytes);
                         direct_ledger->slab_retained_permit_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->slab_retained_permit_bytes,
                                 seed_decline.
                                     anchors_out_retained_permit_bytes);
                         direct_ledger->seed_reserved_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->seed_reserved_bytes,
                                 seed_decline.reserved_bytes);
                         direct_ledger->seed_planned_vulkan_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->seed_planned_vulkan_bytes,
                                 seed_decline.
                                     planned_vulkan_allocation_bytes);
                         direct_ledger->seed_actual_vulkan_bytes =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->seed_actual_vulkan_bytes,
                                 seed_decline.actual_vulkan_allocation_bytes);
                         direct_ledger->slab_admission_started =
                             seed_decline.exact_anchor_count != 0u;
                         direct_ledger->seed_dispatches =
-                            bioseq::parallelism::saturating_add(
+                            bioseq::common::saturating_add(
                                 direct_ledger->seed_dispatches,
                                 seed_decline.seed_lookup_dispatches);
                         direct_ledger->seed_dispatch_started =
@@ -4286,17 +4278,17 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                             || seed_decline.seed_lookup_dispatches != 0u;
                         if (seed_completion) {
                             direct_ledger->seed_roundtrips =
-                                bioseq::parallelism::saturating_add(
+                                bioseq::common::saturating_add(
                                     direct_ledger->seed_roundtrips, 1u);
                             if (seed_decline.exact_anchor_count == 0u) {
                                 direct_ledger->zero_anchor_bypasses =
-                                    bioseq::parallelism::saturating_add(
+                                    bioseq::common::saturating_add(
                                         direct_ledger->zero_anchor_bypasses,
                                         1u);
                             }
                             if (seed_decline.seed_lookup_dispatches != 0u) {
                                 direct_ledger->seed_fence_completions =
-                                    bioseq::parallelism::saturating_add(
+                                    bioseq::common::saturating_add(
                                         direct_ledger->seed_fence_completions,
                                         1u);
                             }
@@ -4306,7 +4298,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         if (post_seed_owned_lifetime == nullptr
                             || post_seed_owned_lifetime->
                                 retained_seed_arena_permit) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                 "source-direct seed permit owner is invalid"};
                         }
                         post_seed_owned_lifetime->
@@ -4315,96 +4307,96 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         if (seed_completion.retained_anchor_bytes
                             != post_seed_owned_lifetime->
                                 retained_seed_arena_permit.bytes()) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                 "source-direct seed permit byte authority is invalid"};
                         }
                     }
                     if (resident_index && seed_completion) {
-                        if (proof_dst == nullptr) {
-                            throw bioseq::gpu::vulkan::VulkanRuntimeError{
-                                "Vulkan seed stage has no execution-proof sink"};
+                        if (stats_dst == nullptr) {
+                            throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                                "Vulkan seed stage has no execution-stats sink"};
                         }
-                        PartialVulkanExecutionProof proof{};
-                        proof.seed_lookup_dispatches =
+                        partial_vulkan_execution_stats stats{};
+                        stats.seed_lookup_dispatches =
                             seed_decline.seed_lookup_dispatches;
-                        proof.seed_open_addressed_lookup_dispatches =
+                        stats.seed_open_addressed_lookup_dispatches =
                             seed_decline.open_addressed_lookup_dispatches;
-                        proof.seed_sorted_dense_lookup_dispatches =
+                        stats.seed_sorted_dense_lookup_dispatches =
                             seed_decline.sorted_dense_lookup_dispatches;
-                        proof.seed_bitonic_sort_dispatches =
-                            seed_decline.sort_proof.bitonic_sort_dispatches;
-                        proof.seed_radix_sort_operations =
-                            seed_decline.sort_proof.radix_sort_operations;
-                        proof.seed_radix_anchor_count =
-                            seed_decline.sort_proof.radix_anchor_count;
-                        proof.seed_radix_passes =
-                            seed_decline.sort_proof.radix_passes;
-                        proof.seed_radix_histogram_dispatches =
-                            seed_decline.sort_proof.radix_histogram_dispatches;
-                        proof.seed_radix_scan_dispatches =
-                            seed_decline.sort_proof.radix_scan_dispatches;
-                        proof.seed_radix_scatter_dispatches =
-                            seed_decline.sort_proof.radix_scatter_dispatches;
-                        proof.seed_host_sort_fallbacks =
-                            seed_decline.sort_proof.host_sort_fallbacks;
+                        stats.seed_bitonic_sort_dispatches =
+                            seed_decline.sort_stats.bitonic_sort_dispatches;
+                        stats.seed_radix_sort_operations =
+                            seed_decline.sort_stats.radix_sort_operations;
+                        stats.seed_radix_anchor_count =
+                            seed_decline.sort_stats.radix_anchor_count;
+                        stats.seed_radix_passes =
+                            seed_decline.sort_stats.radix_passes;
+                        stats.seed_radix_histogram_dispatches =
+                            seed_decline.sort_stats.radix_histogram_dispatches;
+                        stats.seed_radix_scan_dispatches =
+                            seed_decline.sort_stats.radix_scan_dispatches;
+                        stats.seed_radix_scatter_dispatches =
+                            seed_decline.sort_stats.radix_scatter_dispatches;
+                        stats.seed_host_sort_fallbacks =
+                            seed_decline.sort_stats.host_sort_fallbacks;
                         if (seed_decline.canonical_anchor_order_checked) {
-                            proof.seed_anchor_proof_operations = 1u;
-                            proof.seed_canonical_anchor_count =
+                            stats.seed_anchor_stats_operations = 1u;
+                            stats.seed_canonical_anchor_count =
                                 seed_decline.canonical_anchor_count;
-                            proof.seed_canonical_anchor_order_checks = 1u;
-                            proof.seed_canonical_anchor_order_accepts =
+                            stats.seed_canonical_anchor_order_checks = 1u;
+                            stats.seed_canonical_anchor_order_accepts =
                                 seed_decline.canonical_anchor_order_accepted
                                     ? 1u : 0u;
-                            proof.seed_canonical_tie_normalization_runs =
+                            stats.seed_canonical_tie_normalization_runs =
                                 seed_decline.
                                     canonical_tie_normalization_runs;
-                            proof.seed_canonical_tie_normalization_anchors =
+                            stats.seed_canonical_tie_normalization_anchors =
                                 seed_decline.
                                     canonical_tie_normalization_anchors;
-                            proof.seed_anchor_digest_lane0 =
+                            stats.seed_anchor_digest_lane0 =
                                 seed_decline.canonical_anchor_digest_lo;
-                            proof.seed_anchor_digest_lane1 =
+                            stats.seed_anchor_digest_lane1 =
                                 seed_decline.canonical_anchor_digest_hi;
                         }
                         // `index_upload` is populated only by the operation
                         // that actually materialized a new resident index.
-                        // Cache hits leave it zeroed, so these counters never
+                        // cache_type hits leave it zeroed, so these counters never
                         // multiply one upload by the number of queries reusing
                         // it.
                         const auto& index_upload = index_materialization;
                         if (index_upload.slot_capacity != 0u) {
-                            proof.gpu_index_materializations = 1u;
+                            stats.gpu_index_materializations = 1u;
                             if (index_upload.representation
-                                == bioseq::indexing::GpuIndexRepresentation::
+                                == bioseq::indexing::gpu_index_representation::
                                     open_addressed_70) {
-                                proof.gpu_index_open_addressed_materializations = 1u;
+                                stats.gpu_index_open_addressed_materializations = 1u;
                             } else {
-                                proof.gpu_index_sorted_dense_materializations = 1u;
+                                stats.gpu_index_sorted_dense_materializations = 1u;
                             }
-                            proof.gpu_index_unique_keys =
+                            stats.gpu_index_unique_keys =
                                 index_upload.unique_key_count;
-                            proof.gpu_index_slot_capacity =
+                            stats.gpu_index_slot_capacity =
                                 index_upload.slot_capacity;
-                            proof.gpu_index_logical_resident_bytes =
+                            stats.gpu_index_logical_resident_bytes =
                                 index_upload.resident_bytes;
-                            proof.gpu_index_actual_allocation_bytes =
+                            stats.gpu_index_actual_allocation_bytes =
                                 index_upload.actual_allocation_bytes;
-                            proof.gpu_index_fully_touched_bytes =
+                            stats.gpu_index_fully_touched_bytes =
                                 index_upload.fully_touched_bytes;
-                            proof.gpu_index_staging_bytes =
+                            stats.gpu_index_staging_bytes =
                                 index_upload.staging_bytes;
-                            proof.gpu_index_permit_releases =
-                                index_upload.materialization_permit_released ? 1u : 0u;
-                            proof.gpu_index_process_footprint_reflections =
-                                index_upload.process_footprint_reflected ? 1u : 0u;
-                            proof.gpu_index_reflected_footprint_bytes =
+                            stats.gpu_index_permit_releases =
+                                index_upload.is_materialization_permit_released ? 1u : 0u;
+                            stats.gpu_index_process_footprint_reflections =
+                                index_upload.is_process_footprint_reflected ? 1u : 0u;
+                            stats.gpu_index_reflected_footprint_bytes =
                                 index_upload.reflected_footprint_delta_bytes;
-                            proof.gpu_index_max_load_ppm = index_upload.load_ppm;
-                            proof.gpu_index_max_probe = index_upload.max_probe;
+                            stats.gpu_index_max_load_ppm = index_upload.load_ppm;
+                            stats.gpu_index_max_probe = index_upload.max_probe;
                         }
                         // `emit_batch` is synchronous: without dropping this
                         // local handle first, the multi-gigabyte resident index
-                        // survives through ChainStage even if the cache is
+                        // survives through chain_stage even if the cache is
                         // cleared.  Seed lookup has completed its Vulkan fence
                         // and copied anchors into `anchors_slab`, so neither
                         // index nor query-device storage is used downstream.
@@ -4413,67 +4405,64 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         if (post_seed_owned_lifetime != nullptr) {
                             const auto release =
                                 post_seed_owned_lifetime->complete_seed_user();
-                            proof.post_seed_owned_gpu_cache_evictions =
+                            stats.post_seed_owned_gpu_cache_evictions =
                                 release.gpu_cache_evictions;
-                            proof.post_seed_owned_gpu_resident_bytes_released =
+                            stats.post_seed_owned_gpu_resident_bytes_released =
                                 release.gpu_resident_bytes_released;
-                            proof.post_seed_owned_cpu_index_releases =
+                            stats.post_seed_owned_cpu_index_releases =
                                 release.cpu_index_releases;
-                            proof.post_seed_owned_cpu_position_bytes_released =
+                            stats.post_seed_owned_cpu_position_bytes_released =
                                 release.cpu_position_bytes_released;
                         }
-                        proof_dst->record_partial_vulkan_execution_proof(proof);
+                        stats_dst->record_partial_vulkan_execution_stats(stats);
                         return std::move(token).emit_batch(
-                            std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
+                            std::span<anchor>{anchors_slab.data(), anchors_slab.size()});
                     }
                     seed_gpu_declined = true;
                 } else {
-                    seed_decline.reason = bioseq::gpu::vulkan::
-                        VulkanSeedLookupDeclineReason::hardware_device_unavailable;
+                    seed_decline.reason = bioseq::seeding::vulkan_seed_lookup_decline_reason::hardware_device_unavailable;
                     seed_gpu_declined = true;
                 }
             } else {
-                seed_decline.reason = bioseq::gpu::vulkan::
-                    VulkanSeedLookupDeclineReason::resident_index_unavailable;
+                seed_decline.reason = bioseq::seeding::vulkan_seed_lookup_decline_reason::resident_index_unavailable;
                 seed_gpu_declined = true;
             }
             if (seed_gpu_declined) {
-                if (!seed_decline.declined()) {
-                    seed_decline.reason = bioseq::gpu::vulkan::
-                        VulkanSeedLookupDeclineReason::resident_index_unavailable;
+                if (!seed_decline.is_declined()) {
+                    seed_decline.reason = bioseq::seeding::vulkan_seed_lookup_decline_reason::resident_index_unavailable;
                 }
-                bioseq::gpu::vulkan::throw_vulkan_seed_lookup_strict_decline(
+                bioseq::seeding::throw_vulkan_seed_lookup_strict_decline(
                     "Vulkan seed lookup", seed_decline);
             }
         }
 
         if (direct_ledger != nullptr) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct resident route cannot fall back to CPU seeding"};
         }
 
-        MatchResultCollection* const cpu_seed_proof_dst = proof_dst;
-        PostSeedOwnedLifetime* const cpu_seed_owned_lifetime =
+        match_result_collection* const cpu_seed_stats_dst = stats_dst;
+        post_seed_owned_lifetime* const cpu_seed_owned_lifetime =
             post_seed_owned_lifetime;
-        MatchResultCollection* const cpu_seed_host_timing_dst =
+        match_result_collection* const cpu_seed_host_timing_dst =
             host_timing_dst;
         const auto record_cpu_seed_completion =
-            [cpu_seed_proof_dst, sketch_span, cpu_seed_owned_lifetime,
+            [cpu_seed_stats_dst, sketch_span, cpu_seed_owned_lifetime,
              cpu_seed_host_timing_dst, host_stage_started] {
-            // A successful strict Vulkan lookup returned above, so this proof
+            // A successful strict Vulkan lookup returned above, so this stats
             // can only describe a real CPU seed operation.
-            if (cpu_seed_proof_dst == nullptr) {
-                bioseq_log<ERR>("CPU seed stage has no execution-proof sink");
+            if (cpu_seed_stats_dst == nullptr) {
+                bioseq_log<logging_level::error>("CPU seed stage has no execution-stats sink");
                 std::abort();
             }
-            ScalarPipelineExecutionProof proof{};
-            proof.record_seed_lookup(
+            scalar_pipeline_execution_stats stats{};
+            stats.record_seed_lookup(
                 static_cast<std::uint64_t>(sketch_span.size()));
-            cpu_seed_proof_dst->record_scalar_pipeline_execution_proof(proof);
+            cpu_seed_stats_dst->record_scalar_pipeline_execution_stats(stats);
 
             if (cpu_seed_owned_lifetime != nullptr) {
-                // CPU-index retirement is lifetime evidence, not Vulkan
-                // execution evidence. Prepared fragment batches are normally
+                // CPU-index retirement is a lifetime observation, not Vulkan
+                // execution statistics. Prepared fragment batches are normally
                 // externally owned and leave this pointer null.
                 (void)cpu_seed_owned_lifetime->complete_seed_user();
             }
@@ -4483,13 +4472,13 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             }
         };
 
-        if constexpr (bioseq::indexing::PreparedFragmentAnchorQueryIndex<
-                          std::remove_cvref_t<IndexT>>) {
-            static_assert(std::same_as<MinimizerT, MinimapSketchData>,
+        if constexpr (bioseq::indexing::prepared_fragment_anchor_query_index<
+                          std::remove_cvref_t<p_index>>) {
+            static_assert(std::same_as<p_minimizer, minimap_sketch_data>,
                 "prepared fragment anchors require canonical query minimizers");
-            const std::span<const Anchor> ordered_anchors =
+            const std::span<const anchor> ordered_anchors =
                 target_index_ref.ordered_fragment_seed_anchors(
-                    std::span<const MinimapSketchData>{
+                    std::span<const minimap_sketch_data>{
                         sketch_span.data(), sketch_span.size()},
                     query_len,
                     params.max_occ,
@@ -4497,37 +4486,37 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             record_cpu_seed_completion();
             // The owning PreparedFragmentAnchorBatch outlives this synchronous
             // pipeline call. Emit its already-canonical span directly: no
-            // ArenaSlab allocation, anchor copy, or global MPF sort.
+            // arena_slab allocation, anchor copy, or global MPF sort.
             return std::move(token).emit_batch(ordered_anchors);
         } else {
             // Ordinary per-hash lookup retains the arena-producing kernel.
-            auto anchors_slab = make_arena_slab<Anchor>();
+            auto anchors_slab = make_arena_slab<anchor>();
             anchors_slab.reserve(detail::estimated_anchor_count(
                 sketch_span.size(),
                 static_cast<std::size_t>(query_len),
                 static_cast<std::size_t>(target_index_ref.target_length()),
                 kmer_size));
-            collect_seed_hits<MinimizerT>(
+            collect_seed_hits<p_minimizer>(
                 sketch_span,
                 target_index_ref,
                 query_len, params.max_occ, kmer_size,
                 anchors_slab);
             record_cpu_seed_completion();
             return std::move(token).emit_batch(
-                std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
+                std::span<anchor>{anchors_slab.data(), anchors_slab.size()});
         }
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
+        stage_algorithm_description algo;
         algo.name = "Seed hits + canonical CPU ordering";
         algo.parameters.push_back({"max_occ", std::to_string(params.max_occ)});
         algo.parameters.push_back({"query_len", std::to_string(query_len)});
         desc.algorithm = std::move(algo);
-        // Anchor reserve target — used by SeedHitStage's slab (DOC0249 §21.4
+        // anchor reserve target — used by seed_hit_stage's slab (
         // "estimated_anchor_count").  The actual sketch count is unknown at
         // describe time so the reported figure uses query_len/window=10 as
         // the canonical median; the runtime reserve picks a tighter value
@@ -4544,41 +4533,41 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
 };
 
 /**
- * @brief Stage 3: anchor chaining.
+ * @brief stage 3: anchor chaining.
  *
- * Templated on `Kernel` — the algorithm-specific call surface exposed by
- * `algorithm_traits<ChainingAlgorithmType::X>::kernel_type` (DOC0249 §8.0,
+ * Templated on `p_kernel` — the algorithm-specific call surface exposed by
+ * `algorithm_traits<chaining_algorithm::X>::kernel_type`.
  * R5 trait pattern).  The stage body has zero `if constexpr` over enum
  * values — adding a new chaining algorithm is a single trait specialisation
  * in the kernel's own module.
  *
  * The chosen kernel writes its `(chains, reordered_anchors)` output directly
- * into caller-provided ArenaSlab parameters (DOC0249 §13 follow-up:
+ * into caller-provided arena_slab parameters ( follow-up:
  * output-side kernel-to-arena refactor); no intermediate vector is
  * materialised inside the stage.
  */
-template <class Kernel>
-struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
-    static constexpr std::string_view stage_name = "ChainStage";
+template <class p_kernel>
+struct chain_stage : stage_base<chain_stage<p_kernel>, chain> {
+    static constexpr std::string_view stage_name = "chain_stage";
 
-    ChainingParams cp;
+    chaining_parameters cp;
     sequence_size_t query_len = 0;
-    MatchResultCollection* proof_dst = nullptr;
-    MatchResultCollection* host_timing_dst = nullptr;
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels = nullptr;
+    match_result_collection* stats_dst = nullptr;
+    match_result_collection* host_timing_dst = nullptr;
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
 
-    template <is_constexpr_aligner_params Cep, class B, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process(B&& anchors_in, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process(p_batch&& anchors_in, emit_token<p_sink>&& token) {
         const std::uint64_t host_stage_started = host_timing_dst == nullptr
             ? 0u : host_stage_now_ns();
-        ChainingParams active_cp = cp;
+        chaining_parameters active_cp = cp;
         active_cp.query_len = query_len;
-        const std::span<const Anchor> anchors_span{
+        const std::span<const anchor> anchors_span{
             anchors_in.data(), anchors_in.size()};
 
-        auto chains_slab    = make_arena_slab<Chain>();
-        auto reordered_slab = make_arena_slab<Anchor>();
+        auto chains_slab    = make_arena_slab<chain>();
+        auto reordered_slab = make_arena_slab<anchor>();
         if (active_cp.coordinate_only) {
             chains_slab.reserve(1);
             // Reserve the full upstream bound before the Vulkan backend opens
@@ -4592,57 +4581,57 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
             reordered_slab.reserve(anchors_in.size());
         }
 
-        if constexpr (Kernel::emits_scalar_chaining_execution_proof) {
-            if (proof_dst == nullptr) {
-                bioseq_log<ERR>(
-                    "Scalar chaining stage has no execution-proof sink");
+        if constexpr (p_kernel::emits_scalar_chaining_execution_stats) {
+            if (stats_dst == nullptr) {
+                bioseq_log<logging_level::error>(
+                    "scalar chaining stage has no execution-stats sink");
                 std::abort();
             }
-            ScalarPipelineExecutionProof proof{};
-            Kernel::call(
-                anchors_span, active_cp, chains_slab, reordered_slab, &proof);
+            scalar_pipeline_execution_stats stats{};
+            p_kernel::call(
+                anchors_span, active_cp, chains_slab, reordered_slab, &stats);
             /* This receipt is written after the kernel returns, so a zero-hit
              * negative is attested without claiming scalar score/backtrack
              * work that the kernel correctly skipped. */
-            proof.record_scalar_chain_stage_completion(
+            stats.record_scalar_chain_stage_completion(
                 static_cast<std::uint64_t>(anchors_span.size()));
-            proof_dst->record_scalar_pipeline_execution_proof(proof);
-        } else if constexpr (Kernel::emits_simd_chaining_execution_proof) {
-            if (proof_dst == nullptr) {
-                bioseq_log<ERR>("SIMD chaining stage has no execution-proof sink");
+            stats_dst->record_scalar_pipeline_execution_stats(stats);
+        } else if constexpr (p_kernel::emits_simd_chaining_execution_stats) {
+            if (stats_dst == nullptr) {
+                bioseq_log<logging_level::error>("simd chaining stage has no execution-stats sink");
                 std::abort();
             }
-            ::bioseq::chaining::SimdChainingExecutionProof proof{};
-            Kernel::call(
+            ::bioseq::chaining::simd_chaining_execution_stats stats{};
+            p_kernel::call(
                 highway_kernels, anchors_span, active_cp,
-                chains_slab, reordered_slab, &proof);
-            if (!proof.accepted(
+                chains_slab, reordered_slab, &stats);
+            if (!stats.is_internally_consistent(
                     active_cp.simd_policy,
                     /*require_nonempty_vector_work=*/false)) {
-                const auto status = proof.policy_evidence_coherent(
+                const auto status = stats.has_consistent_policy_stats(
                         active_cp.simd_policy)
-                    ? SimdChainingStatus::invalid_parameters
-                    : SimdChainingStatus::invalid_policy;
-                throw SimdChainingRuntimeError(
+                    ? simd_chaining_status::invalid_parameters
+                    : simd_chaining_status::invalid_policy;
+                throw simd_chaining_runtime_error(
                     status,
                     "selected policy does not match operation-originated "
-                    "SIMD chaining proof");
+                    "simd chaining stats");
             }
-            proof_dst->record_simd_chaining_execution_proof(proof);
-        } else if constexpr (Kernel::emits_partial_vulkan_execution_proof) {
-            if (proof_dst == nullptr) {
-                bioseq_log<ERR>(
-                    "Vulkan chaining stage has no execution-proof sink");
+            stats_dst->record_simd_chaining_execution_stats(stats);
+        } else if constexpr (p_kernel::emits_partial_vulkan_execution_stats) {
+            if (stats_dst == nullptr) {
+                bioseq_log<logging_level::error>(
+                    "Vulkan chaining stage has no execution-stats sink");
                 std::abort();
             }
-            if (Kernel::call(
+            if (p_kernel::call(
                     anchors_span, active_cp, chains_slab, reordered_slab)) {
-                PartialVulkanExecutionProof proof{};
-                proof.chain_score_dispatches = 1;
-                proof_dst->record_partial_vulkan_execution_proof(proof);
+                partial_vulkan_execution_stats stats{};
+                stats.chain_score_dispatches = 1;
+                stats_dst->record_partial_vulkan_execution_stats(stats);
             }
         } else {
-            Kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
+            p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
         }
 
         if (host_timing_dst != nullptr) {
@@ -4651,16 +4640,16 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         }
 
         return std::move(token).emit_batch_pair(
-            std::span<Chain> {chains_slab.data(),    chains_slab.size()},
-            std::span<Anchor>{reordered_slab.data(), reordered_slab.size()});
+            std::span<chain> {chains_slab.data(),    chains_slab.size()},
+            std::span<anchor>{reordered_slab.data(), reordered_slab.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
-        algo.name = std::string{Kernel::algorithm_label()};
+        stage_algorithm_description algo;
+        algo.name = std::string{p_kernel::algorithm_label()};
         algo.parameters.push_back({"min_chain_score", std::to_string(cp.min_chain_score)});
         algo.parameters.push_back({"min_seed_count",  std::to_string(cp.min_seed_count)});
         algo.parameters.push_back({"max_chain_skip",  std::to_string(cp.max_chain_skip)});
@@ -4668,66 +4657,66 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
         // Let the selected kernel append its own runtime params (e.g. the
-        // Vulkan backend's phase / vulkan_enabled markers) so the
-        // EXPLAIN metadata is not dead code. No-op for the scalar/SIMD/RMQ
-        // kernels (DOC0304 §7.2).
-        Kernel::populate_runtime_params(cp, algo.parameters);
-        algo.computed_properties = Kernel::template static_properties<Cep>();
-        algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
+        // Vulkan backend's stage / vulkan_enabled markers) so the
+        // EXPLAIN metadata is not dead code. No-op for the scalar/simd/range_minimum_query
+        // kernels.
+        p_kernel::populate_runtime_params(cp, algo.parameters);
+        algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
+        algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
         desc.algorithm = std::move(algo);
-        // Chain stage's two arena slabs are sized from the runtime
+        // chain stage's two arena slabs are sized from the runtime
         // anchor count (which is unknown at describe time), so we leave
         // `estimated_batch_size` empty rather than fabricate a per-query
         // figure that doesn't reflect the actual reserve.  The
         // `[reserved: ...]` line in EXPLAIN is therefore omitted for
-        // ChainStage; the runtime `chains_slab.reserve(...)` call still
+        // chain_stage; the runtime `chains_slab.reserve(...)` call still
         // sizes from `estimated_chain_count(anchors_in.size(), ...)`.
         return desc;
     }
 };
 
 /**
- * @brief Stage 4: chain → region conversion.
+ * @brief stage 4: chain → region conversion.
  *
  * Wraps the `generate_regions` kernel, which writes its
- * `AlignRegion`-per-chain output directly into a caller-provided
- * ArenaSlab via placement-new (DOC0249 §13 follow-up: output-side
- * kernel-to-arena refactor).  `AlignRegion` owns a `std::vector<CigarOp>`,
+ * `alignment_region`-per-chain output directly into a caller-provided
+ * arena_slab via placement-new ( follow-up: output-side
+ * kernel-to-arena refactor).  `alignment_region` owns a `std::vector<cigar_operation>`,
  * so it is not trivially-destructible; the slab's destructor walks
- * `[0, len_)` and calls `~AlignRegion()` on each live element before the
+ * `[0, len_)` and calls `~alignment_region()` on each live element before the
  * arena reclaims the storage.
  */
-struct RegionStage : StageBase<RegionStage, AlignRegion> {
-    static constexpr std::string_view stage_name = "RegionStage";
+struct region_stage : stage_base<region_stage, alignment_region> {
+    static constexpr std::string_view stage_name = "region_stage";
 
     sequence_size_t query_len = 0;
-    MatchResultCollection* host_timing_dst = nullptr;
+    match_result_collection* host_timing_dst = nullptr;
 
-    template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_chain_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(CB&& chains, AB&& anchors, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process_pair(p_chain_batch&& chains, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
         if (host_timing_dst != nullptr) {
             host_timing_dst->begin_region_host_phase(host_stage_now_ns());
         }
-        // `AlignRegion` owns a `std::vector<CigarOp>` so the slab uses the
+        // `alignment_region` owns a `std::vector<cigar_operation>` so the slab uses the
         // placement-new pattern; no intermediate `std::vector` is needed.
-        auto regions_slab = make_arena_slab<AlignRegion>();
+        auto regions_slab = make_arena_slab<alignment_region>();
         generate_regions(
-            std::span<Chain>{chains.data(), chains.size()},
-            std::span<const Anchor>{anchors.data(), anchors.size()},
+            std::span<chain>{chains.data(), chains.size()},
+            std::span<const anchor>{anchors.data(), anchors.size()},
             query_len,
             regions_slab);
 
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions_slab.data(), regions_slab.size()},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions_slab.data(), regions_slab.size()},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
+        stage_algorithm_description algo;
         algo.name = "Region generation";
         algo.parameters.push_back({"query_len", std::to_string(query_len)});
         desc.algorithm = std::move(algo);
@@ -4739,38 +4728,38 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
 };
 
 /**
- * @brief Stage 5: classify primary/secondary in place.
+ * @brief stage 5: classify primary/secondary in place.
  *
  * Mutates the regions span via `classify_primary_secondary` (which takes
- * std::vector<AlignRegion>& and modifies parent / score fields).  The
+ * std::vector<alignment_region>& and modifies parent / score fields).  The
  * vector-wrapper here copies in and out; the touched region count is bounded
  * by best_n + 16 so the cost is negligible.
  */
-struct PrimarySecondaryStage : StageBase<PrimarySecondaryStage, AlignRegion> {
-    static constexpr std::string_view stage_name = "PrimarySecondaryStage";
+struct primary_secondary_stage : stage_base<primary_secondary_stage, alignment_region> {
+    static constexpr std::string_view stage_name = "primary_secondary_stage";
 
     float   mask_level;
     int32_t mask_len;
     int32_t sub_diff_value;
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
-        // Kernel now mutates in place through a span — no vector round-trip
-        // (DOC0249 M8).
+    emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
+        // p_kernel now mutates in place through a span — no vector round-trip
+        // ( M8).
         classify_primary_secondary(
-            std::span<AlignRegion>{regions.data(), regions.size()},
+            std::span<alignment_region>{regions.data(), regions.size()},
             mask_level, mask_len, sub_diff_value);
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), regions.size()},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions.data(), regions.size()},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
+        stage_algorithm_description algo;
         algo.name = "Classify primary/secondary";
         algo.parameters.push_back({"mask_level",
             std::to_string(static_cast<double>(mask_level))});
@@ -4782,34 +4771,34 @@ struct PrimarySecondaryStage : StageBase<PrimarySecondaryStage, AlignRegion> {
 };
 
 /**
- * @brief Stage 6: filter secondary regions, shrinking the span in place.
+ * @brief stage 6: filter secondary regions, shrinking the span in place.
  */
-struct SecondaryFilterStage : StageBase<SecondaryFilterStage, AlignRegion> {
-    static constexpr std::string_view stage_name = "SecondaryFilterStage";
+struct secondary_filter_stage : stage_base<secondary_filter_stage, alignment_region> {
+    static constexpr std::string_view stage_name = "secondary_filter_stage";
 
     float   pri_ratio;
     int32_t min_diff_value;
     int32_t best_n;
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
-        // Kernel filters in place via a span; the new effective size is
+    emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
+        // p_kernel filters in place via a span; the new effective size is
         // returned so the downstream stage observes a shorter prefix
-        // (DOC0249 M8 — `filter_secondary_regions_span`).
+        // ( M8 — `filter_secondary_regions_span`).
         const std::size_t new_size = filter_secondary_regions(
-            std::span<AlignRegion>{regions.data(), regions.size()},
+            std::span<alignment_region>{regions.data(), regions.size()},
             pri_ratio, min_diff_value, best_n);
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), new_size},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions.data(), new_size},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
+        stage_algorithm_description algo;
         algo.name = "Filter secondary regions";
         algo.parameters.push_back({"pri_ratio",
             std::to_string(static_cast<double>(pri_ratio))});
@@ -4821,43 +4810,43 @@ struct SecondaryFilterStage : StageBase<SecondaryFilterStage, AlignRegion> {
 };
 
 /**
- * @brief Stage 7: estimate divergence (conditional).
+ * @brief stage 7: estimate divergence (conditional).
  */
-template <class MinimizerT, class QueryMinimizers = std::vector<MinimizerT>>
-struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>, AlignRegion> {
-    static constexpr std::string_view stage_name = "DivergenceStage";
+template <class p_minimizer, class p_query_minimizers = std::vector<p_minimizer>>
+struct divergence_stage : stage_base<divergence_stage<p_minimizer, p_query_minimizers>, alignment_region> {
+    static constexpr std::string_view stage_name = "divergence_stage";
 
-    const QueryMinimizers* query_minimizers_;
+    const p_query_minimizers* query_minimizers_;
     sequence_size_t query_len;
     sequence_size_t target_len;
     int32_t runtime_kmer_size;
     bool    enabled;
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
         if (enabled) {
-            const int32_t kmer_size = Cep::generic_fallback
+            const int32_t kmer_size = p_aligner_parameters::generic_fallback
                 ? runtime_kmer_size
-                : static_cast<int32_t>(Cep::kmer_len);
-            estimate_divergence_from_seeds<MinimizerT>(
-                std::span<AlignRegion>{regions.data(), regions.size()},
-                std::span<const MinimizerT>{
+                : static_cast<int32_t>(p_aligner_parameters::kmer_len);
+            estimate_divergence_from_seeds<p_minimizer>(
+                std::span<alignment_region>{regions.data(), regions.size()},
+                std::span<const p_minimizer>{
                     query_minimizers_->data(), query_minimizers_->size()},
-                std::span<const Anchor>{anchors.data(), anchors.size()},
+                std::span<const anchor>{anchors.data(), anchors.size()},
                 query_len, kmer_size, target_len);
         }
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), regions.size()},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions.data(), regions.size()},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         if (enabled) {
-            StageAlgorithmDescription algo;
+            stage_algorithm_description algo;
             algo.name = "Estimate divergence from seeds";
             desc.algorithm = std::move(algo);
         }
@@ -4865,28 +4854,28 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
     }
 };
 
-[[nodiscard]] inline ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm
+[[nodiscard]] inline ::bioseq::prefilter::resolved_prefilter_algorithm
 resolve_prefilter_algorithm(
-    ::bioseq::prefilter_stats::PrefilterBackendType backend,
-    std::span<const prefilters::PrefilterJob> jobs) noexcept
+    ::bioseq::prefilter::prefilter_backend backend,
+    std::span<const prefilter::prefilter_job> jobs) noexcept
 {
-    using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
-    using Algorithm = ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
-    if (backend != Backend::VULKAN) {
-        return Algorithm::sneaky_snake;
+    using backend_type = ::bioseq::prefilter::prefilter_backend;
+    using algorithm_type = ::bioseq::prefilter::resolved_prefilter_algorithm;
+    if (backend != backend_type::vulkan) {
+        return algorithm_type::sneaky_snake;
     }
-    for (const prefilters::PrefilterJob& job : jobs) {
+    for (const prefilter::prefilter_job& job : jobs) {
         const bool measured_length = job.query_length == job.target_length
             && (job.query_length == 32u || job.query_length == 64u);
         const bool measured_threshold =
             job.max_edits == 2u || job.max_edits == 4u;
         if (!measured_length || !measured_threshold) {
-            return Algorithm::sneaky_snake;
+            return algorithm_type::sneaky_snake;
         }
     }
     return jobs.empty()
-        ? Algorithm::sneaky_snake
-        : Algorithm::gatekeeper;
+        ? algorithm_type::sneaky_snake
+        : algorithm_type::gatekeeper;
 }
 
 /**
@@ -4895,59 +4884,59 @@ resolve_prefilter_algorithm(
  * intentionally excluded.  A region is removed only when the sum of proven
  * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
  */
-template <sequence_alphabet Alphabet>
-struct PrefilterStage
-    : StageBase<PrefilterStage<Alphabet>, AlignRegion> {
-    static constexpr std::string_view stage_name = "PrefilterStage";
+template <sequence_alphabet p_alphabet>
+struct prefilter_stage
+    : stage_base<prefilter_stage<p_alphabet>, alignment_region> {
+    static constexpr std::string_view stage_name = "prefilter_stage";
 
-    ::bioseq::simd::Minimap2Params params;
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
-    MatchResultCollection* proof_dst_ = nullptr;
+    ::bioseq::simd::minimap2_parameters params;
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_;
+    match_result_collection* stats_dst_ = nullptr;
 
     [[nodiscard]] static constexpr std::string_view backend_name(
-        ::bioseq::prefilter_stats::PrefilterBackendType backend) noexcept {
-        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
+        ::bioseq::prefilter::prefilter_backend backend) noexcept {
+        using backend_type = ::bioseq::prefilter::prefilter_backend;
         switch (backend) {
-            case Backend::AUTO: return "auto";
-            case Backend::SCALAR: return "scalar";
-            case Backend::SIMD: return "highway_simd";
-            case Backend::VULKAN: return "vulkan";
+            case backend_type::automatic: return "auto";
+            case backend_type::scalar: return "scalar";
+            case backend_type::simd: return "highway_simd";
+            case backend_type::vulkan: return "vulkan";
         }
         return "unknown";
     }
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    EmittedToken<Sink> process_pair(
-        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
+    emitted_token<p_sink> process_pair(
+        p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
         if (!params.prefilter_enabled || !params.compute_edit_distance
             || regions.size() == 0) {
             return std::move(token).emit_batch_pair(
-                std::span<AlignRegion>{regions.data(), regions.size()},
-                std::span<const Anchor>{anchors.data(), anchors.size()});
+                std::span<alignment_region>{regions.data(), regions.size()},
+                std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
         static const auto* prefilter_region =
-            bioseq::instr::register_region_static("prefilter");
-        auto prefilter_scope = bioseq::instr::region(prefilter_region);
+            bioseq::instrumentation::register_static_region("prefilter");
+        auto prefilter_scope = bioseq::instrumentation::region(prefilter_region);
 
         std::vector<std::uint8_t> query_ranks;
         std::vector<std::uint8_t> target_ranks;
-        std::vector<prefilters::PrefilterJob> jobs;
+        std::vector<prefilter::prefilter_job> jobs;
         std::vector<std::size_t> job_regions;
         const std::uint64_t max_flat_offset =
             (std::numeric_limits<std::uint32_t>::max)();
 
         for (std::size_t region_index = 0;
              region_index < regions.size(); ++region_index) {
-            const AlignRegion& region = regions[region_index];
+            const alignment_region& region = regions[region_index];
             (void)for_each_mandatory_alignment_gap(
                 region,
-                std::span<const Anchor>{anchors.data(), anchors.size()},
+                std::span<const anchor>{anchors.data(), anchors.size()},
                 params,
                 [this, &query_ranks, &target_ranks, &jobs, &job_regions,
                  &region, region_index, max_flat_offset](
-                    const MandatoryAlignmentGapWindow& window) {
+                    const mandatory_alignment_gap_window& window) {
                     const std::uint64_t query_length =
                         window.query_end - window.query_start;
                     const std::uint64_t target_length =
@@ -4992,7 +4981,7 @@ struct PrefilterStage
                         target_destination,
                         static_cast<std::size_t>(window.target_start),
                         static_cast<std::size_t>(window.target_end));
-                    jobs.push_back(prefilters::PrefilterJob{
+                    jobs.push_back(prefilter::prefilter_job{
                         .query_offset = query_offset,
                         .target_offset = target_offset,
                         .query_length = static_cast<std::uint32_t>(query_length),
@@ -5006,33 +4995,33 @@ struct PrefilterStage
 
         if (jobs.empty()) {
             return std::move(token).emit_batch_pair(
-                std::span<AlignRegion>{regions.data(), regions.size()},
-                std::span<const Anchor>{anchors.data(), anchors.size()});
+                std::span<alignment_region>{regions.data(), regions.size()},
+                std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
-        const prefilters::PrefilterBatchInput input{
+        const prefilter::prefilter_batch_input input{
             .query_ranks = query_ranks,
             .target_ranks = target_ranks,
             .jobs = jobs,
         };
-        std::vector<prefilters::PrefilterResult> results;
-        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
-        using Algorithm = ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
-        const Backend selected = params.prefilter_backend
-            == Backend::AUTO
-                ? Backend::SIMD
+        std::vector<prefilter::prefilter_result> results;
+        using backend_type = ::bioseq::prefilter::prefilter_backend;
+        using algorithm_type = ::bioseq::prefilter::resolved_prefilter_algorithm;
+        const backend_type selected = params.prefilter_backend
+            == backend_type::automatic
+                ? backend_type::simd
                 : params.prefilter_backend;
-        const Algorithm algorithm =
+        const algorithm_type algorithm =
             resolve_prefilter_algorithm(selected, jobs);
         switch (selected) {
-            case Backend::SCALAR:
+            case backend_type::scalar:
                 results = sneaky_snake_scalar_batch(input);
                 break;
-            case Backend::SIMD:
-            case Backend::AUTO: {
+            case backend_type::simd:
+            case backend_type::automatic: {
                 if (params.highway_kernels == nullptr
-                    || !params.highway_kernels->contains(
-                        ::bioseq::simd_dispatch::HighwayKernelId::
+                    || !params.highway_kernels->has_kernel(
+                        ::bioseq::simd_dispatch::highway_kernel::
                             prefilter_sneaky_snake_simd_batch)
                     || params.highway_kernels->common
                             .sneaky_snake_simd_batch == nullptr) {
@@ -5043,12 +5032,12 @@ struct PrefilterStage
                     .sneaky_snake_simd_batch(input, {});
                 break;
             }
-            case Backend::VULKAN: {
-                if (algorithm == Algorithm::gatekeeper) {
-                    results = prefilters::run_gatekeeper_vulkan_batch(
+            case backend_type::vulkan: {
+                if (algorithm == algorithm_type::gatekeeper) {
+                    results = prefilter::run_gatekeeper_vulkan_batch(
                         query_ranks, target_ranks, jobs);
                 } else {
-                    results = prefilters::run_sneaky_snake_vulkan_batch(
+                    results = prefilter::run_sneaky_snake_vulkan_batch(
                         query_ranks, target_ranks, jobs);
                 }
                 break;
@@ -5072,48 +5061,48 @@ struct PrefilterStage
         std::vector<std::uint64_t> lower_bounds(regions.size(), 0u);
         std::vector<bool> keep(regions.size(), true);
         for (std::size_t index = 0; index < results.size(); ++index) {
-            const prefilters::PrefilterResult& result = results[index];
+            const prefilter::prefilter_result& result = results[index];
             const std::size_t region_index = job_regions[index];
-            switch (static_cast<prefilters::PrefilterStatus>(result.status)) {
-                case prefilters::PrefilterStatus::success:
+            switch (static_cast<prefilter::prefilter_status>(result.status)) {
+                case prefilter::prefilter_status::success:
                     ++evaluated_jobs;
                     if (jobs[index].query_length == 64u
                         && jobs[index].target_length == 64u) {
                         ++length_64_jobs;
                     }
                     break;
-                case prefilters::PrefilterStatus::conservative_unequal:
+                case prefilter::prefilter_status::conservative_unequal:
                     ++length_difference_jobs;
                     break;
-                case prefilters::PrefilterStatus::unsupported_conservative:
+                case prefilter::prefilter_status::unsupported_conservative:
                     ++unsupported_jobs;
                     break;
                 default:
                     throw std::runtime_error(
                         "rank prefilter backend returned an unknown status");
             }
-            if (algorithm == Algorithm::gatekeeper) {
+            if (algorithm == algorithm_type::gatekeeper) {
                 mask_rejection_candidates +=
-                    prefilters::gatekeeper_mask_rejection_candidate(result)
+                    prefilter::gatekeeper_mask_rejection_candidate(result)
                         ? 1u : 0u;
                 exact_guard_activations +=
-                    prefilters::gatekeeper_exact_guard_activated(result)
+                    prefilter::gatekeeper_exact_guard_activated(result)
                         ? 1u : 0u;
                 guard_confirmed_rejections +=
-                    prefilters::gatekeeper_guard_confirmed_rejection(result)
+                    prefilter::gatekeeper_guard_confirmed_rejection(result)
                         ? 1u : 0u;
                 hamming_exact_rejections +=
-                    prefilters::gatekeeper_hamming_exact_rejection(result)
+                    prefilter::gatekeeper_hamming_exact_rejection(result)
                         ? 1u : 0u;
             }
-            if (!prefilters::prefilter_accepted(result)) ++rejected_jobs;
+            if (!prefilter::is_prefilter_accepted(result)) ++rejected_jobs;
             if (result.status == static_cast<std::uint32_t>(
-                    prefilters::PrefilterStatus::unsupported_conservative)) continue;
+                    prefilter::prefilter_status::unsupported_conservative)) continue;
             lower_bounds[region_index] =
-                bioseq::parallelism::saturating_add(
+                bioseq::common::saturating_add(
                     lower_bounds[region_index],
                     static_cast<std::uint64_t>(result.lower_bound));
-            if (!prefilters::prefilter_accepted(result)
+            if (!prefilter::is_prefilter_accepted(result)
                 || lower_bounds[region_index] > params.prefilter_max_edits) {
                 keep[region_index] = false;
             }
@@ -5127,12 +5116,12 @@ struct PrefilterStage
             }
             ++output_size;
         }
-        if (proof_dst_ == nullptr) {
+        if (stats_dst_ == nullptr) {
             throw std::logic_error(
-                "rank prefilter stage has no execution-proof sink");
+                "rank prefilter stage has no execution-stats sink");
         }
-        ::bioseq::prefilter_stats::PrefilterExecutionProof call_proof{};
-        call_proof.record_batch(
+        ::bioseq::prefilter::prefilter_execution_stats call_stats{};
+        call_stats.record_batch(
             algorithm,
             selected,
             static_cast<std::uint64_t>(jobs.size()),
@@ -5147,25 +5136,25 @@ struct PrefilterStage
             guard_confirmed_rejections,
             hamming_exact_rejections,
             length_64_jobs);
-        proof_dst_->record_prefilter_execution_proof(call_proof);
+        stats_dst_->record_prefilter_execution_stats(call_stats);
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), output_size},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions.data(), output_size},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        using backend_type = ::bioseq::prefilter::prefilter_backend;
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         if (params.prefilter_enabled) {
-            StageAlgorithmDescription algorithm;
+            stage_algorithm_description algorithm;
             algorithm.name = "Rank edit-distance prefilter";
             algorithm.parameters.push_back({
                 "backend", std::string{backend_name(params.prefilter_backend)}});
             algorithm.parameters.push_back({
                 "algorithm",
-                params.prefilter_backend == Backend::VULKAN
+                params.prefilter_backend == backend_type::vulkan
                     ? "batch_resolved_gatekeeper_or_sneaky_snake"
                     : "sneaky_snake"});
             algorithm.parameters.push_back({
@@ -5173,18 +5162,18 @@ struct PrefilterStage
             algorithm.parameters.push_back({
                 "submaze_width",
                 std::to_string(
-                    prefilters::sneaky_snake_default_submaze_width)});
+                    prefilter::sneaky_snake_default_submaze_width)});
             algorithm.computed_properties.push_back({
                 "domain", "mandatory seed-to-seed global fills"});
             algorithm.computed_properties.push_back({
                 "survivor_check", "exact post-alignment edit distance"});
             algorithm.computed_properties.push_back({
-                "gatekeeper_auto_domain", "length in {32,64}, E in {2,4}"});
-            if (params.prefilter_backend == Backend::SIMD
-                || params.prefilter_backend == Backend::AUTO) {
+                "gatekeeper_auto_domain", "length in {32,64}, p_element in {2,4}"});
+            if (params.prefilter_backend == backend_type::simd
+                || params.prefilter_backend == backend_type::automatic) {
                 algorithm.highway_kernels = ::bioseq::simd_dispatch::
-                    highway_kernel_set(
-                        ::bioseq::simd_dispatch::HighwayKernelId::
+                    highway_kernel_mask_for(
+                        ::bioseq::simd_dispatch::highway_kernel::
                             prefilter_sneaky_snake_simd_batch);
             }
             desc.algorithm = std::move(algorithm);
@@ -5196,25 +5185,25 @@ struct PrefilterStage
 /**
  * Authoritative exact edit-distance predicate gate.
  *
- * This runs after traceback has populated `AlignRegion::edit_distance` and
+ * This runs after traceback has populated `alignment_region::edit_distance` and
  * before the final primary/secondary and MAPQ pass.  Consequently a candidate
  * that does not satisfy the SQL predicate cannot influence the classification
  * or mapping-quality metadata of a candidate that does.  The earlier
  * rank-prefilter stage remains only a conservative work-avoidance gate.
  */
-struct ExactEditFilterStage
-    : StageBase<ExactEditFilterStage, AlignRegion> {
-    static constexpr std::string_view stage_name = "ExactEditFilterStage";
+struct exact_edit_filter_stage
+    : stage_base<exact_edit_filter_stage, alignment_region> {
+    static constexpr std::string_view stage_name = "exact_edit_filter_stage";
 
-    ::bioseq::simd::Minimap2Params params;
+    ::bioseq::simd::minimap2_parameters params;
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    EmittedToken<Sink> process_pair(
-        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
+    emitted_token<p_sink> process_pair(
+        p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
         if (!params.exact_edit_filter_enabled) {
             return std::move(token).emit_batch_pair(
-                std::span<AlignRegion>{regions.data(), regions.size()},
-                std::span<const Anchor>{anchors.data(), anchors.size()});
+                std::span<alignment_region>{regions.data(), regions.size()},
+                std::span<const anchor>{anchors.data(), anchors.size()});
         }
         if (!params.compute_edit_distance) {
             throw std::logic_error(
@@ -5225,7 +5214,7 @@ struct ExactEditFilterStage
             params.exact_edit_filter_exclusive_upper_bound;
         std::size_t output_size = 0;
         for (std::size_t index = 0; index < regions.size(); ++index) {
-            AlignRegion& region = regions.data()[index];
+            alignment_region& region = regions.data()[index];
             if (!region.has_alignment) {
                 throw std::runtime_error(
                     "exact edit filter received a region without alignment traceback");
@@ -5238,7 +5227,7 @@ struct ExactEditFilterStage
             if (output_size != index) {
                 regions.data()[output_size] = std::move(region);
             }
-            AlignRegion& survivor = regions.data()[output_size];
+            alignment_region& survivor = regions.data()[output_size];
             survivor.region_id = static_cast<std::int32_t>(output_size);
             survivor.parent = -1;
             survivor.secondary_score = 0;
@@ -5249,16 +5238,16 @@ struct ExactEditFilterStage
         }
 
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), output_size},
-            std::span<const Anchor>{anchors.data(), anchors.size()});
+            std::span<alignment_region>{regions.data(), output_size},
+            std::span<const anchor>{anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         if (params.exact_edit_filter_enabled) {
-            StageAlgorithmDescription algorithm;
+            stage_algorithm_description algorithm;
             algorithm.name = "Exact edit-distance predicate";
             algorithm.parameters.push_back({
                 "exclusive_upper_bound",
@@ -5273,122 +5262,122 @@ struct ExactEditFilterStage
 };
 
 /**
- * @brief Stage 8: base-level alignment via the chosen aligner (conditional).
+ * @brief stage 8: base-level alignment via the chosen aligner (conditional).
  *
- * DOC0254 §6.3 — reparameterised on `Kernel = kernel_t<BAA>`.  Algorithm
- * dispatch happens exclusively via the trait; the `if constexpr (BAA == ...)`
+ * — reparameterised on `p_kernel = kernel_t<p_alignment_algorithm>`.  algorithm_type
+ * dispatch happens exclusively via the trait; the `if constexpr (p_alignment_algorithm == ...)`
  * ladder inside `describe()` is gone — its rows now live in
- * `Kernel::populate_runtime_params(...)`.
+ * `p_kernel::populate_runtime_params(...)`.
  */
-template <class Kernel,
-          sequence_alphabet Alphabet>
-struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
-    static constexpr std::string_view stage_name = "AlignStage";
+template <class p_kernel,
+          sequence_alphabet p_alphabet>
+struct align_stage : stage_base<align_stage<p_kernel, p_alphabet>, alignment_region> {
+    static constexpr std::string_view stage_name = "align_stage";
 
-    ::bioseq::simd::Minimap2Params params;
-    const ScoringMatrix<Alphabet>*                sm;
-    const ::bioseq::simd::AlignmentKernels<Alphabet>* alignment_kernels_;
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
+    ::bioseq::simd::minimap2_parameters params;
+    const scoring_matrix<p_alphabet>*                sm;
+    const ::bioseq::simd::alignment_kernels<p_alphabet>* alignment_kernels_;
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_;
     bool                                          enabled;
-    MatchResultCollection*                        proof_dst_;
-    MatchResultCollection*                        host_timing_dst_;
+    match_result_collection*                        stats_dst_;
+    match_result_collection*                        host_timing_dst_;
 
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& anchors, emit_token<p_sink>&& token) {
         if (host_timing_dst_ != nullptr) {
             host_timing_dst_->transition_region_to_alignment_result_host_phase(
                 host_stage_now_ns(), enabled);
         }
         if (enabled) {
-            if constexpr (Kernel::emits_scalar_ksw2_execution_proof) {
-                if (proof_dst_ == nullptr) {
-                    bioseq_log<ERR>(
-                        "Scalar KSW2 stage has no execution-proof sink");
+            if constexpr (p_kernel::emits_scalar_ksw2_execution_stats) {
+                if (stats_dst_ == nullptr) {
+                    bioseq_log<logging_level::error>(
+                        "scalar ksw2 stage has no execution-stats sink");
                     std::abort();
                 }
-                ScalarPipelineExecutionProof call_proof{};
-                Kernel::template call<Alphabet>(
-                    std::span<AlignRegion>{regions.data(), regions.size()},
-                    std::span<const ::bioseq::chaining::Anchor>{
+                scalar_pipeline_execution_stats call_stats{};
+                p_kernel::template call<p_alphabet>(
+                    std::span<alignment_region>{regions.data(), regions.size()},
+                    std::span<const ::bioseq::chaining::anchor>{
                         anchors.data(), anchors.size()},
                     query_seq_, target_seq_, *sm, *alignment_kernels_, params,
-                    /*forbidden_block_proof=*/nullptr,
-                    &call_proof);
-                proof_dst_->record_scalar_pipeline_execution_proof(
-                    call_proof);
+                    /*forbidden_block_stats=*/nullptr,
+                    &call_stats);
+                stats_dst_->record_scalar_pipeline_execution_stats(
+                    call_stats);
             } else if constexpr (
-                    Kernel::emits_ksw2_batched_execution_proof) {
-                if (proof_dst_ == nullptr) {
-                    bioseq_log<ERR>(
-                        "KSW2 batched stage has no execution-proof sink");
+                    p_kernel::emits_ksw2_batched_execution_stats) {
+                if (stats_dst_ == nullptr) {
+                    bioseq_log<logging_level::error>(
+                        "ksw2 batched stage has no execution-stats sink");
                     std::abort();
                 }
-                Ksw2BatchedExecutionProof call_proof{};
-                Kernel::template call<Alphabet>(
-                    std::span<AlignRegion>{regions.data(), regions.size()},
-                    std::span<const ::bioseq::chaining::Anchor>{
+                ksw2_batched_execution_stats call_stats{};
+                p_kernel::template call<p_alphabet>(
+                    std::span<alignment_region>{regions.data(), regions.size()},
+                    std::span<const ::bioseq::chaining::anchor>{
                         anchors.data(), anchors.size()},
                     query_seq_, target_seq_, *sm, *alignment_kernels_, params,
-                    /*forbidden_block_proof=*/nullptr,
-                    /*scalar_execution_proof=*/nullptr,
-                    &call_proof);
-                if (!call_proof.accepted(
+                    /*forbidden_block_stats=*/nullptr,
+                    /*scalar_execution_stats=*/nullptr,
+                    &call_stats);
+                if (!call_stats.is_coherent(
                         /*require_nonempty_work=*/false)) {
-                    bioseq_log<ERR>(
-                        "KSW2 batched stage produced rejected execution proof");
+                    bioseq_log<logging_level::error>(
+                        "ksw2 batched stage produced rejected execution stats");
                     std::abort();
                 }
-                proof_dst_->record_ksw2_batched_execution_proof(
-                    call_proof);
-            } else if constexpr (Kernel::emits_block_execution_proof) {
-                if (proof_dst_ == nullptr) {
-                    bioseq_log<ERR>(
-                        "Block Aligner stage has no execution-proof sink");
+                stats_dst_->record_ksw2_batched_execution_stats(
+                    call_stats);
+            } else if constexpr (p_kernel::emits_block_execution_stats) {
+                if (stats_dst_ == nullptr) {
+                    bioseq_log<logging_level::error>(
+                        "Block Aligner stage has no execution-stats sink");
                     std::abort();
                 }
-                BlockAlignerExecutionProof call_proof{};
-                Kernel::template call<Alphabet>(
-                    std::span<AlignRegion>{regions.data(), regions.size()},
-                    std::span<const ::bioseq::chaining::Anchor>{
+                block_aligner_execution_stats call_stats{};
+                p_kernel::template call<p_alphabet>(
+                    std::span<alignment_region>{regions.data(), regions.size()},
+                    std::span<const ::bioseq::chaining::anchor>{
                         anchors.data(), anchors.size()},
                     query_seq_, target_seq_, *sm, *alignment_kernels_, params,
-                    &call_proof,
-                    /*scalar_execution_proof=*/nullptr);
-                if (!call_proof.accepted()) {
-                    bioseq_log<ERR>(
-                        "Block Aligner stage produced a rejected execution proof");
+                    &call_stats,
+                    /*scalar_execution_stats=*/nullptr);
+                if (!call_stats.is_internally_consistent()) {
+                    bioseq_log<logging_level::error>(
+                        "Block Aligner stage produced a rejected execution stats");
                     std::abort();
                 }
-                proof_dst_->record_block_aligner_execution_proof(
-                    call_proof);
+                stats_dst_->record_block_aligner_execution_stats(
+                    call_stats);
             } else {
-                Kernel::template call<Alphabet>(
-                    std::span<AlignRegion>{regions.data(), regions.size()},
-                    std::span<const ::bioseq::chaining::Anchor>{
+                p_kernel::template call<p_alphabet>(
+                    std::span<alignment_region>{regions.data(), regions.size()},
+                    std::span<const ::bioseq::chaining::anchor>{
                         anchors.data(), anchors.size()},
                     query_seq_, target_seq_, *sm, *alignment_kernels_, params,
-                    /*forbidden_block_proof=*/nullptr,
-                    /*scalar_execution_proof=*/nullptr);
+                    /*forbidden_block_stats=*/nullptr,
+                    /*scalar_execution_stats=*/nullptr);
             }
         }
         return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{regions.data(), regions.size()},
-            std::span<const ::bioseq::chaining::Anchor>{
+            std::span<alignment_region>{regions.data(), regions.size()},
+            std::span<const ::bioseq::chaining::anchor>{
                 anchors.data(), anchors.size()});
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         if (enabled) {
-            StageAlgorithmDescription algo;
-            algo.name = std::string{Kernel::algorithm_label()};
-            Kernel::populate_runtime_params(params, algo.parameters);
-            algo.computed_properties = Kernel::template static_properties<Cep>();
-            algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
+            stage_algorithm_description algo;
+            algo.name = std::string{p_kernel::algorithm_label()};
+            p_kernel::populate_runtime_params(params, algo.parameters);
+            algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
+            algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
             desc.algorithm = std::move(algo);
         }
         return desc;
@@ -5396,44 +5385,44 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
 };
 
 /**
- * @brief Stage 9: compute MAPQ (conditional).
+ * @brief stage 9: compute MAPQ (conditional).
  *
  * Accepts a `(regions, anchors)` pair upstream but only uses the regions
- * span; emits the regions span downstream as a single batch (DOC0249 §8.10).
+ * span; emits the regions span downstream as a single batch.
  */
-struct MapqStage : StageBase<MapqStage, AlignRegion> {
-    static constexpr std::string_view stage_name = "MapqStage";
+struct mapq_stage : stage_base<mapq_stage, alignment_region> {
+    static constexpr std::string_view stage_name = "mapq_stage";
 
-    ::bioseq::simd::Minimap2Params params;
+    ::bioseq::simd::minimap2_parameters params;
     bool                                          enabled;
 
-    template <is_constexpr_aligner_params Cep, class RB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process(RB&& regions, EmitToken<Sink>&& token) {
+    emitted_token<p_sink> process(p_region_batch&& regions, emit_token<p_sink>&& token) {
         if (enabled) {
             compute_mapping_quality(
-                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<alignment_region>{regions.data(), regions.size()},
                 params, 0);
         }
         return std::move(token).emit_batch(
-            std::span<AlignRegion>{regions.data(), regions.size()});
+            std::span<alignment_region>{regions.data(), regions.size()});
     }
 
-    // DOC0254 §4.3: pair → single delegation.  The outer body has no
-    // surviving `EmitToken<Sink>` after the inner call moves it, so a
+    //: pair → single delegation.  The outer body has no
+    // surviving `emit_token<p_sink>` after the inner call moves it, so a
     // second emit is structurally blocked.
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    template <is_constexpr_aligner_params p_aligner_parameters, class p_region_batch, class p_anchor_batch, class p_sink>
     [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& /*unused*/, EmitToken<Sink>&& token) {
-        return process<Cep>(std::forward<RB>(regions), std::move(token));
+    emitted_token<p_sink> process_pair(p_region_batch&& regions, p_anchor_batch&& /*unused*/, emit_token<p_sink>&& token) {
+        return process<p_aligner_parameters>(std::forward<p_region_batch>(regions), std::move(token));
     }
 
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
+    template <is_constexpr_aligner_params p_aligner_parameters>
+    [[nodiscard]] stage_description describe() const {
+        stage_description desc;
         desc.stage_name = std::string{stage_name};
         if (enabled) {
-            StageAlgorithmDescription algo;
+            stage_algorithm_description algo;
             algo.name = "Compute mapping quality (mm_set_mapq2)";
             desc.algorithm = std::move(algo);
         }
@@ -5444,17 +5433,17 @@ struct MapqStage : StageBase<MapqStage, AlignRegion> {
 /**
  * @brief Terminal sink: push converted MatchResults into the collection.
  *
- * Not a `BareStage` — appears as the tail of `make_pipeline<Cep>(...)`.
+ * Not a `bare_stage` — appears as the tail of `make_pipeline<p_aligner_parameters>(...)`.
  */
-struct SinkStage {
-    MatchResultCollection* dst_;
+struct sink_stage {
+    match_result_collection* dst_;
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
-    MatchResultCollection* host_timing_dst_ = nullptr;
+    match_result_collection* host_timing_dst_ = nullptr;
 
-    [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
+    [[gnu::always_inline]] inline void on_batch(std::span<alignment_region> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
-        // `region_slot` is move-consumed into the converted MatchResult; the
+        // `region_slot` is move-consumed into the converted match_result; the
         // slot is left in a valid-but-moved-from state and reclaimed by
         // whichever owner (arena slab or std::vector) holds the span.
         for (auto& region_slot : regions) {
@@ -5462,7 +5451,7 @@ struct SinkStage {
                 region_to_match_result(std::move(region_slot), query_len, target_len));
         }
         if (host_timing_dst_ != nullptr
-            && host_timing_dst_->alignment_result_host_phase_active) {
+            && host_timing_dst_->is_alignment_result_host_stage_active) {
             host_timing_dst_->finish_alignment_result_host_phase(
                 host_stage_now_ns());
         }
@@ -5470,7 +5459,7 @@ struct SinkStage {
 
     [[gnu::always_inline]] inline void on_completed() noexcept {
         if (host_timing_dst_ != nullptr
-            && host_timing_dst_->alignment_result_host_phase_active) {
+            && host_timing_dst_->is_alignment_result_host_stage_active) {
             host_timing_dst_->finish_alignment_result_host_phase(
                 host_stage_now_ns());
         }
@@ -5478,18 +5467,18 @@ struct SinkStage {
 };
 
 // =============================================================================
-// 11.2 describe() walker — out-of-line definition (Stage forward-declared above)
+// 11.2 describe() walker — out-of-line definition (stage forward-declared above)
 // =============================================================================
 
-template <is_constexpr_aligner_params Cep, class Self, class Sink>
-[[nodiscard]] PipelineDescription Stage<Cep, Self, Sink>::describe() const {
-    // DOC0254 §9.2 / R11: every concrete stage's `describe()` is templated on
-    // Cep so describe-time Cep-sensitive output always matches the runtime
+template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
+[[nodiscard]] pipeline_description stage<p_aligner_parameters, p_self, p_sink>::describe() const {
+    // / R11: every concrete stage's `describe()` is templated on
+    // p_aligner_parameters so describe-time p_aligner_parameters-sensitive output always matches the runtime
     // path's behaviour.  No `describe_representative_cep_t` alias.
-    PipelineDescription d;
-    d.stages.push_back(self_.template describe<Cep>());
+    pipeline_description d;
+    d.stages.push_back(self_.template describe<p_aligner_parameters>());
     if constexpr (requires { sink_.describe(); }) {
-        PipelineDescription rest = sink_.describe();
+        pipeline_description rest = sink_.describe();
         d.stages.insert(d.stages.end(),
             std::make_move_iterator(rest.stages.begin()),
             std::make_move_iterator(rest.stages.end()));
@@ -5498,13 +5487,13 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
 }
 
 /**
- * @brief Injects the Cep computed properties as a leading entry in the
- * pipeline description so the EXPLAIN renderer sees w/k/L beside the first
+ * @brief Injects the p_aligner_parameters computed properties as a leading entry in the
+ * pipeline description so the EXPLAIN renderer sees w/k/p_bucket_width beside the first
  * stage.
  */
-template <is_constexpr_aligner_params Cep, class Self, class Sink>
-[[nodiscard]] PipelineDescription describe_with_params(
-    const Stage<Cep, Self, Sink>& pipeline)
+template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
+[[nodiscard]] pipeline_description describe_with_params(
+    const stage<p_aligner_parameters, p_self, p_sink>& pipeline)
 {
     auto d = pipeline.describe();
     if (!d.stages.empty()) {
@@ -5514,13 +5503,13 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
             first.algorithm->name = "pipeline configuration";
         }
         first.algorithm->computed_properties.push_back(
-            {"cep.window_len", std::to_string(Cep::window_len)});
+            {"cep.window_len", std::to_string(p_aligner_parameters::window_len)});
         first.algorithm->computed_properties.push_back(
-            {"cep.kmer_len",   std::to_string(Cep::kmer_len)});
+            {"cep.kmer_len",   std::to_string(p_aligner_parameters::kmer_len)});
         first.algorithm->computed_properties.push_back(
-            {"cep.sequence_len_log2", std::to_string(Cep::sequence_len_log2)});
+            {"cep.sequence_len_log2", std::to_string(p_aligner_parameters::sequence_len_log2)});
         first.algorithm->computed_properties.push_back(
-            {"cep.specialised", Cep::generic_fallback ? "fallback" : "specialised"});
+            {"cep.specialised", p_aligner_parameters::generic_fallback ? "fallback" : "specialised"});
     }
     return d;
 }
@@ -5530,89 +5519,89 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
 // =============================================================================
 
 [[nodiscard]] inline bool vulkan_components_requested(
-    const ::bioseq::simd::Minimap2Params& params) noexcept;
+    const ::bioseq::simd::minimap2_parameters& params) noexcept;
 
 /**
- * @brief Build the full minimap pipeline value for one (Cep, BAA, CA, MA, EP).
+ * @brief Build the full minimap pipeline value for one (p_aligner_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point).
  *
  * All template parameters are fixed by the caller (the dispatcher cascade).
  * The function is the single place both the run path and the describe path
- * consult to learn what stages are present — adding or removing a stage edits
- * only this function (DOC0249 §9.4).
+ * consult to learn what stages are is_available — adding or removing a stage edits
+ * only this function.
  */
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA,
-          ::bioseq::simd::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT,
-          class QueryMinimizers = std::vector<MinimizerT>>
+template <is_constexpr_aligner_params p_aligner_parameters,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
+          ::bioseq::simd::minimizer_algorithm     p_minimizer_algorithm,
+          pipeline_entry_point                                                p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          class p_query_minimizers = std::vector<p_minimizer>>
 [[nodiscard, gnu::always_inline]] inline auto make_minimap_pipeline(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const QueryMinimizers&            query_minimizers,
-    const IndexT&                     target_index,
-    const ScoringMatrix<Alphabet>&    scoring_matrix,
-    const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
-    MatchResultCollection&            output_collection,
-    const ::bioseq::simd::Minimap2Params& params,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const p_query_minimizers&            query_minimizers,
+    const p_index&                     target_index,
+    const scoring_matrix<p_alphabet>&    scoring_matrix,
+    const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+    match_result_collection&            output_collection,
+    const ::bioseq::simd::minimap2_parameters& params,
     sequence_size_t                   query_len,
     sequence_size_t                   target_len,
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
-    PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr)
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    post_seed_owned_lifetime* post_seed_owned_lifetime = nullptr)
 {
-    MatchResultCollection* host_timing_dst =
+    match_result_collection* host_timing_dst =
         vulkan_components_requested(params) ? nullptr : &output_collection;
-    MatchResultCollection* chaining_proof_dst = nullptr;
-    if constexpr (CA
-            == ::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2
-        || CA
-            == ::bioseq::simd::ChainingAlgorithmType::SIMD_MM2
-        || CA
-            == ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP) {
-        chaining_proof_dst = &output_collection;
+    match_result_collection* chaining_stats_dst = nullptr;
+    if constexpr (p_chaining_algorithm
+            == ::bioseq::simd::chaining_algorithm::scalar_minimap2
+        || p_chaining_algorithm
+            == ::bioseq::simd::chaining_algorithm::simd_minimap2
+        || p_chaining_algorithm
+            == ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming) {
+        chaining_stats_dst = &output_collection;
     }
-    MatchResultCollection* alignment_proof_dst = nullptr;
-    if constexpr (kernel_t<BAA>::emits_block_execution_proof
-        || kernel_t<BAA>::emits_scalar_ksw2_execution_proof
-        || kernel_t<BAA>::emits_ksw2_batched_execution_proof) {
-        alignment_proof_dst = &output_collection;
+    match_result_collection* alignment_stats_dst = nullptr;
+    if constexpr (kernel_t<p_alignment_algorithm>::emits_block_execution_stats
+        || kernel_t<p_alignment_algorithm>::emits_scalar_ksw2_execution_stats
+        || kernel_t<p_alignment_algorithm>::emits_ksw2_batched_execution_stats) {
+        alignment_stats_dst = &output_collection;
     }
-    auto tail = make_pipeline<Cep>(
-        IndexStage<IndexT>{ {}, &target_index, gpu_index_identity },
-        SeedHitStage{ {}, params, query_len, gpu_index_cache,
+    auto tail = make_pipeline<p_aligner_parameters>(
+        index_stage<p_index>{ {}, &target_index, gpu_index_identity },
+        seed_hit_stage{ {}, params, query_len, gpu_index_cache,
                       &output_collection, post_seed_owned_lifetime,
                       host_timing_dst },
-        ChainStage<kernel_t<CA>>{
-            {}, params.to_chaining_params(), query_len,
-            chaining_proof_dst, host_timing_dst, params.highway_kernels },
-        RegionStage{ {}, query_len, host_timing_dst },
-        PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
-        SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
-        DivergenceStage<MinimizerT, QueryMinimizers>{
+        chain_stage<kernel_t<p_chaining_algorithm>>{
+            {}, params.make_chaining_parameters(), query_len,
+            chaining_stats_dst, host_timing_dst, params.highway_kernels },
+        region_stage{ {}, query_len, host_timing_dst },
+        primary_secondary_stage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
+        secondary_filter_stage{ {}, params.pri_ratio, min_diff(params), params.best_n },
+        divergence_stage<p_minimizer, p_query_minimizers>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
-        PrefilterStage<Alphabet>{
+        prefilter_stage<p_alphabet>{
             {}, params, query_seq, target_seq, &output_collection },
-        AlignStage<kernel_t<BAA>, Alphabet>{
+        align_stage<kernel_t<p_alignment_algorithm>, p_alphabet>{
             {}, params, &scoring_matrix, &alignment_kernels,
             query_seq, target_seq,
             params.do_cigar || params.compute_edit_distance,
-            alignment_proof_dst, host_timing_dst },
-        ExactEditFilterStage{{}, params},
-        PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
-        SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
-        MapqStage{ {}, params, params.compute_mapq },
-        SinkStage{ &output_collection, query_len, target_len, host_timing_dst }
+            alignment_stats_dst, host_timing_dst },
+        exact_edit_filter_stage{{}, params},
+        primary_secondary_stage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
+        secondary_filter_stage{ {}, params.pri_ratio, min_diff(params), params.best_n },
+        mapq_stage{ {}, params, params.compute_mapq },
+        sink_stage{ &output_collection, query_len, target_len, host_timing_dst }
     );
 
-    if constexpr (EP == EntryPoint::FromSequence) {
-        MinimizerStage<MinimizerT, kernel_t<MA>, Alphabet> head{
+    if constexpr (p_entry_point == pipeline_entry_point::from_sequence) {
+        minimizer_stage<p_minimizer, kernel_t<p_minimizer_algorithm>, p_alphabet> head{
             {}, query_seq, params.window_size, params.kmer_size, params,
             &output_collection, host_timing_dst };
-        return head.template attach<Cep>(std::move(tail));
+        return head.template attach<p_aligner_parameters>(std::move(tail));
     } else {
         return tail;
     }
@@ -5625,66 +5614,66 @@ template <is_constexpr_aligner_params Cep,
 /**
  * @brief Run the pipeline over N queries against one shared target index.
  *
- * Opens a single outer `Arena::Chain` scope for the whole batch and a nested
+ * Opens a single outer `Arena::chain` scope for the whole batch and a nested
  * inner scope per query so each query's slabs are reclaimed before the next
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
 /// Return whether the resolved statement asks for any full biological Vulkan
 /// component. `vulkan_enabled` is deliberately absent: it is only the runtime
-/// capability gate, and enabling that gate must not turn an otherwise CPU/SIMD
+/// capability gate, and enabling that gate must not turn an otherwise CPU/simd
 /// tuple into a full GPU-selected statement.  The rank prefilter is also absent:
 /// it is an explicitly requested, self-contained accelerator inside the generic
 /// pipeline and does not authorize GPU-to-CPU fallback for minimization,
 /// chaining, or alignment. The cache toggle is likewise only policy for a
 /// selected seed path.
 [[nodiscard]] inline bool vulkan_components_requested(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.vulkan_seed_hits_enabled
         || params.vulkan_fused_frontend_enabled
         || params.vulkan_gpu_index_build_enabled
         || params.vulkan_extend_enabled
         || params.minimizer_algorithm ==
-               ::bioseq::simd::MinimizerAlgorithmType::
-                   VULKAN_MINIMAP_INT
+               ::bioseq::simd::minimizer_algorithm::
+                   vulkan_minimap_integer
         || params.chaining_algorithm ==
-               ::bioseq::simd::ChainingAlgorithmType::
-                   VULKAN_TILED_DP;
+               ::bioseq::simd::chaining_algorithm::
+                   vulkan_tiled_dynamic_programming;
 }
 
 /// Return whether any Vulkan work can execute for this statement.  This is a
 /// thread-placement/runtime-lifetime predicate, not biological route
 /// admission: a standalone rank prefilter is allowed inside the generic
-/// CPU/SIMD pipeline while `vulkan_components_requested()` remains false.
+/// CPU/simd pipeline while `vulkan_components_requested()` remains false.
 [[nodiscard]] inline bool vulkan_accelerator_requested(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return vulkan_components_requested(params)
         || (params.prefilter_enabled
             && params.prefilter_backend ==
-               ::bioseq::prefilter_stats::PrefilterBackendType::VULKAN);
+               ::bioseq::prefilter::prefilter_backend::vulkan);
 }
 
 /// Exact statement shape that the current dedicated resident GPU route can
-/// execute without entering any generic CPU/SIMD biological stage. A selected
+/// execute without entering any generic CPU/simd biological stage. A selected
 /// tuple outside this shape must fail before generic pipeline construction.
 [[nodiscard]] inline bool complete_all_gpu_tuple_selected(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_seed_hits_enabled
         && params.vulkan_fused_frontend_enabled
         && params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::MinimizerAlgorithmType::
-                   VULKAN_MINIMAP_INT
+               ::bioseq::simd::minimizer_algorithm::
+                   vulkan_minimap_integer
         && params.chaining_algorithm ==
-               ::bioseq::simd::ChainingAlgorithmType::
-                   VULKAN_TILED_DP
+               ::bioseq::simd::chaining_algorithm::
+                   vulkan_tiled_dynamic_programming
         && params.base_alignment_algorithm ==
-               ::bioseq::simd::BaseAlignmentAlgorithmType::
-                   BLOCK_ALIGNER
+               ::bioseq::simd::base_alignment_algorithm::
+                   block_aligner
         && !params.compute_divergence
         && !params.compute_mapq
         && !params.compute_edit_distance
@@ -5695,15 +5684,15 @@ template <is_constexpr_aligner_params Cep,
 }
 
 /// Validate the target-format and algorithm tuple admitted by the dedicated
-/// persisted Shape-V5 GPU preparation route. The caller supplies the live
+/// persisted grouped-SoA GPU preparation route. The caller supplies the live
 /// supported-alphabet pack size so a legitimate zero-based alphabet code is
 /// distinguished from an out-of-range code.
-[[nodiscard]] inline bool persisted_shape_v5_gpu_preparation_tuple_valid(
+[[nodiscard]] inline bool is_persisted_grouped_soa_gpu_preparation_tuple_valid(
     const std::uint8_t alphabet_code,
     const std::size_t supported_alphabet_count,
     const std::uint8_t storage_unit_byte_width,
-    const ::bioseq::minimizers::MinimizerSketchBackend backend,
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+    const ::bioseq::minimizers::minimizer_sketch_backend backend,
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return static_cast<std::size_t>(alphabet_code) < supported_alphabet_count
         && (storage_unit_byte_width == 1u
@@ -5712,37 +5701,37 @@ template <is_constexpr_aligner_params Cep,
             || storage_unit_byte_width == 8u)
         && params.kmer_size == 15
         && params.window_size == 10
-        && backend == ::bioseq::minimizers::MinimizerSketchBackend::
-               VulkanSegment
+        && backend == ::bioseq::minimizers::minimizer_sketch_backend::
+               vulkan_segment
         && complete_all_gpu_tuple_selected(params);
 }
 
-// DOC0310 §16 — the Phase C frontend's GPU target-index build replaces the CPU
-// `MinimizerHashmapFragmentIndex` build for this exact (minimizer, chaining)
-// leaf. Runtime-gated; both flags plus the matching algorithm selectors must be
+// — the Stage C frontend's GPU target-index build replaces the CPU
+// `minimizer_hashmap_fragment_index` build for this exact (minimizer, chaining)
+// leaf. runtime-gated; both flags plus the matching algorithm selectors must be
 // set. The runtime device check is done at the call site.
-[[nodiscard]] inline bool phase_c_index_build_active(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+[[nodiscard]] inline bool is_gpu_target_index_build_active(
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_fused_frontend_enabled
         && params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+               ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer
         && params.chaining_algorithm ==
-               ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP;
+               ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming;
 }
 
-[[nodiscard]] inline bool phase_c_coordinate_only_active(
-    const ::bioseq::simd::Minimap2Params& params) noexcept
+[[nodiscard]] inline bool is_gpu_coordinate_only_execution_active(
+    const ::bioseq::simd::minimap2_parameters& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_seed_hits_enabled
         && params.vulkan_fused_frontend_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+               ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer
         && params.chaining_algorithm ==
-               ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP
+               ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming
         && !params.do_cigar
         && !params.compute_divergence
         && !params.compute_mapq
@@ -5752,15 +5741,15 @@ template <is_constexpr_aligner_params Cep,
         && params.max_occ >= 0;
 }
 
-struct PhaseCQueryGateStorage {
+struct ordered_sketch_query_gate_storage {
     static constexpr unsigned gate_bits =
-        bioseq::gpu::vulkan::kPhaseCQueryGateBits;
+        bioseq::gpu::vulkan::k_gpu_query_gate_bits;
 
-    PhaseCQueryGateStorage() = default;
-    PhaseCQueryGateStorage(const PhaseCQueryGateStorage&) = delete;
-    PhaseCQueryGateStorage& operator=(const PhaseCQueryGateStorage&) = delete;
-    PhaseCQueryGateStorage(PhaseCQueryGateStorage&&) = delete;
-    PhaseCQueryGateStorage& operator=(PhaseCQueryGateStorage&&) = delete;
+    ordered_sketch_query_gate_storage() = default;
+    ordered_sketch_query_gate_storage(const ordered_sketch_query_gate_storage&) = delete;
+    ordered_sketch_query_gate_storage& operator=(const ordered_sketch_query_gate_storage&) = delete;
+    ordered_sketch_query_gate_storage(ordered_sketch_query_gate_storage&&) = delete;
+    ordered_sketch_query_gate_storage& operator=(ordered_sketch_query_gate_storage&&) = delete;
 
     // The only mutable owner is consumed at freeze.  Afterwards every user has
     // a shared_ptr<const vector>; no mutable alias can alter a published gate.
@@ -5771,8 +5760,8 @@ struct PhaseCQueryGateStorage {
 
     void ensure_allocated() {
         if (frozen) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError(
-                "Phase C query gate mutation attempted after freeze");
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "Stage C query gate mutation attempted after freeze");
         }
         if (mutable_words) return;
         const std::uint64_t bit_count = std::uint64_t{1} << gate_bits;
@@ -5781,11 +5770,11 @@ struct PhaseCQueryGateStorage {
             static_cast<std::size_t>(bit_count / 32u), 0u);
     }
 
-    template <class MinimizerT>
-    void add(std::span<const MinimizerT> minimizers) {
+    template <class p_minimizer>
+    void add(std::span<const p_minimizer> minimizers) {
         ensure_allocated();
         cached_identity.reset();
-        for (const MinimizerT& minimizer : minimizers) {
+        for (const p_minimizer& minimizer : minimizers) {
             const std::uint64_t bit = minimizer.kmer() & mask;
             (*mutable_words)[static_cast<std::size_t>(bit >> 5u)] |=
                 std::uint32_t{1} << (bit & 31u);
@@ -5803,17 +5792,17 @@ struct PhaseCQueryGateStorage {
         return frozen_words;
     }
 
-    [[nodiscard]] bioseq::gpu::vulkan::VulkanSketchQueryGate
+    [[nodiscard]] bioseq::gpu::vulkan::vulkan_sketch_query_gate
     vulkan_gate() const noexcept
     {
         const auto gate_identity = identity();
         const auto owner = freeze_words();
-        return bioseq::gpu::vulkan::VulkanSketchQueryGate{
+        return bioseq::gpu::vulkan::vulkan_sketch_query_gate{
             owner
                 ? std::span<const std::uint32_t>{owner->data(), owner->size()}
                 : std::span<const std::uint32_t>{},
             mask,
-            bioseq::gpu::vulkan::VulkanSketchQueryGateIdentity{
+            bioseq::gpu::vulkan::vulkan_sketch_query_gate_identity{
                 .enabled = gate_identity.enabled,
                 .word_count = gate_identity.word_count,
                 .mask = gate_identity.mask,
@@ -5824,7 +5813,7 @@ struct PhaseCQueryGateStorage {
             true};
     }
 
-    struct Identity {
+    struct identity {
         bool enabled = false;
         std::uint32_t word_count = 0;
         std::uint32_t mask = 0;
@@ -5832,16 +5821,16 @@ struct PhaseCQueryGateStorage {
         std::uint64_t digest_hi = 0;
         std::uint64_t set_bits = 0;
     };
-    mutable std::optional<Identity> cached_identity{};
+    mutable std::optional<identity> cached_identity{};
 
     /// Canonical 128-bit digest over little-endian u32 gate words. The cache is
     /// also bound once per wave, so this is identity metadata, not permission
     /// to share a filtered resident across unrelated waves.
-    [[nodiscard]] Identity identity() const noexcept {
+    [[nodiscard]] identity identity() const noexcept {
         const auto owner = freeze_words();
         if (cached_identity) return *cached_identity;
         if (!owner) {
-            cached_identity = Identity{};
+            cached_identity = identity{};
             return *cached_identity;
         }
         std::uint64_t lo = 1469598103934665603ULL;
@@ -5857,7 +5846,7 @@ struct PhaseCQueryGateStorage {
                 hi *= 0xbf58476d1ce4e5b9ULL;
             }
         }
-        cached_identity = Identity{
+        cached_identity = identity{
             .enabled = true,
             .word_count = static_cast<std::uint32_t>(owner->size()),
             .mask = mask,
@@ -5874,11 +5863,11 @@ struct PhaseCQueryGateStorage {
     }
 };
 
-inline void bind_phase_c_query_gate_identity(
-    bioseq::indexing::GpuMinimizerIndexCache* cache,
-    const PhaseCQueryGateStorage& gate,
-    const PhaseCQueryGateStorage::Identity& gate_identity,
-    bioseq::indexing::GpuIndexCacheIdentity& identity)
+inline void bind_gpu_query_gate_identity(
+    bioseq::indexing::gpu_minimizer_index_cache* cache,
+    const ordered_sketch_query_gate_storage& gate,
+    const ordered_sketch_query_gate_storage::identity& gate_identity,
+    bioseq::indexing::gpu_index_cache_identity& identity)
 {
     identity.gate_enabled = gate_identity.enabled;
     identity.gate_word_count = gate_identity.word_count;
@@ -5887,8 +5876,8 @@ inline void bind_phase_c_query_gate_identity(
     identity.gate_digest_hi = gate_identity.digest_hi;
     identity.gate_canonical_words = gate.canonical_words();
     if (cache == nullptr) return;
-    using Cache = bioseq::indexing::GpuMinimizerIndexCache;
-    auto bound = cache->bind_gate_once(Cache::GateIdentity{
+    using cache_type = bioseq::indexing::gpu_minimizer_index_cache;
+    auto bound = cache->bind_gate_once(cache_type::gate_identity{
         .enabled = gate_identity.enabled,
         .word_count = gate_identity.word_count,
         .mask = gate_identity.mask,
@@ -5897,11 +5886,11 @@ inline void bind_phase_c_query_gate_identity(
         .canonical_words = gate.canonical_words(),
     });
     if (!bound) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-            "Phase C GPU index cache gate binding rejected ({})",
-            bound.error() == Cache::GateBindError::identity_mismatch
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+            "Stage C GPU index cache gate binding rejected ({})",
+            bound.error() == cache_type::gate_bind_error::identity_mismatch
                 ? "identity_mismatch"
-                : bound.error() == Cache::GateBindError::invalid_identity
+                : bound.error() == cache_type::gate_bind_error::invalid_identity
                     ? "invalid_identity" : "cache_not_empty"));
     }
 }
@@ -5909,16 +5898,16 @@ inline void bind_phase_c_query_gate_identity(
 /// Freeze a query gate behind its immutable canonical owner once per wave.
 /// Segment loops reuse the returned value, so they neither alias mutable words
 /// nor re-hash/copy the 8 MiB gate for every target window.
-[[nodiscard]] inline bioseq::gpu::vulkan::VulkanSketchQueryGate
-freeze_phase_c_query_gate(
-    bioseq::gpu::vulkan::VulkanSketchQueryGate gate)
+[[nodiscard]] inline bioseq::gpu::vulkan::vulkan_sketch_query_gate
+freeze_gpu_query_gate(
+    bioseq::gpu::vulkan::vulkan_sketch_query_gate gate)
 {
     auto identity = gate.canonical_identity();
-    if (!identity.well_formed()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(
-            "Phase C query gate has a malformed canonical identity");
+    if (!identity.is_well_formed()) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "Stage C query gate has a malformed canonical identity");
     }
-    bioseq::gpu::vulkan::VulkanSketchQueryGate frozen{};
+    bioseq::gpu::vulkan::vulkan_sketch_query_gate frozen{};
     frozen.mask = identity.mask;
     frozen.identity = std::move(identity);
     frozen.identity_valid = true;
@@ -5932,15 +5921,15 @@ freeze_phase_c_query_gate(
 
 /// Bind a segmented adoption key to the runtime build's authoritative frozen
 /// gate identity, after proving it is exactly the gate supplied to the build.
-/// Deriving a default/ungated key for a gated build is an evidence mismatch.
+/// Deriving a default/ungated key for a gated build is an identity mismatch.
 inline void bind_verified_gpu_segment_gate_identity(
-    bioseq::indexing::GpuMinimizerIndexCacheKey& key,
-    const bioseq::gpu::vulkan::GpuBuiltIndexGateIdentity& expected,
-    const bioseq::gpu::vulkan::GpuBuiltIndexGateIdentity& built)
+    bioseq::indexing::gpu_minimizer_index_cache_key& key,
+    const bioseq::gpu::vulkan::gpu_index_gate_identity& expected,
+    const bioseq::gpu::vulkan::gpu_index_gate_identity& built)
 {
-    if (!expected.well_formed() || !built.well_formed()
-        || !built.exact_equals(expected)) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError(
+    if (!expected.is_well_formed() || !built.is_well_formed()
+        || !built.is_exactly_equal_to(expected)) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
             "segmented GPU target-index gate identity mismatch");
     }
     key.gate_enabled = built.enabled;
@@ -5951,12 +5940,12 @@ inline void bind_verified_gpu_segment_gate_identity(
     key.gate_canonical_words = built.canonical_words;
 }
 
-[[nodiscard]] inline MatchResult phase_c_coordinate_to_match_result(
-    const bioseq::gpu::vulkan::GpuCoordinateOnlyResultWire& coord,
+[[nodiscard]] inline match_result gpu_coordinate_to_match_result(
+    const bioseq::gpu::vulkan::gpu_coordinate_result_wire& coord,
     sequence_size_t query_len,
     sequence_size_t target_len)
 {
-    return MatchResult{
+    return match_result{
         .query_len = query_len,
         .query_start = coord.query_start,
         .query_end = coord.query_end,
@@ -5979,30 +5968,30 @@ inline void bind_verified_gpu_segment_gate_identity(
     };
 }
 
-// DOC0271 Phase 1 §5.3 — the deferred-align parallel pipeline template
+//  Stage 1 — the deferred-align parallel pipeline template
 // (`pipeline_run_impl_batch_deferred_align`) and its supporting types
 // (`PerQueryAlignState`, `AlignCollectStage`, `align_regions_batched_cross_query`)
 // were removed. The two function bodies were 98% identical and LTO already
 // DCE'd the deferred body in every linked binary (no production caller sets
 // `params.cross_query_batched = true`), so the post-LTO `__TEXT` is unchanged.
 // The pre-LTO IR cost — paid in pipe.cppm's TU compile RSS — is what motivates
-// the deletion: every `BAA = KSW2_BATCHED` leaf no longer instantiates a
-// duplicate ~6 KB body. See DOC0271 §4.3 + §5.3 Option B for the rationale.
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA,
-          ::bioseq::simd::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT>
-[[nodiscard]] std::vector<MatchResultCollection> pipeline_run_impl_batch(
-    std::span<const bioseq::storage::basic_lazy_sequence_view<Alphabet>> query_seqs,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
-    const IndexT&                               target_index,
-    const ::bioseq::simd::Minimap2Params& params,
-    bioseq::indexing::GpuMinimizerIndexCache* external_gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+// the deletion: every `p_alignment_algorithm = ksw2_batched` leaf no longer instantiates a
+// duplicate ~6 KB body. See + Option p_batch for the rationale.
+template <is_constexpr_aligner_params p_aligner_parameters,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
+          ::bioseq::simd::minimizer_algorithm     p_minimizer_algorithm,
+          pipeline_entry_point                                                p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index>
+[[nodiscard]] std::vector<match_result_collection> pipeline_run_impl_batch(
+    std::span<const bioseq::storage::lazy_sequence_view<p_alphabet>> query_seqs,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    std::span<const std::vector<p_minimizer>>    query_minimizers_per_query,
+    const p_index&                               target_index,
+    const ::bioseq::simd::minimap2_parameters& params,
+    bioseq::indexing::gpu_minimizer_index_cache* external_gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false)
 {
     std::optional<context::context>                 owned_context;
@@ -6011,30 +6000,30 @@ template <is_constexpr_aligner_params Cep,
         owned_context.emplace();
         install.emplace(*owned_context);
     }
-    auto outer_chain_scope = context::current().push<context::Arena::Chain>();
+    auto outer_chain_scope = context::current().push<context::arena::chain>();
 
-    bioseq_log<DBG>("[bioseq] pipe: pipeline_run_impl_batch entry — Cep(L={},K={},W={},fallback={}) "
-            "BAA={} CA={} MA={} EP={} queries={} target_bp={}",
-            Cep::sequence_len_log2, Cep::kmer_len, Cep::window_len,
-            Cep::generic_fallback ? 1 : 0,
-            static_cast<int>(BAA), static_cast<int>(CA), static_cast<int>(MA),
-            static_cast<int>(EP), query_seqs.size(), target_seq.bp_size());
+    bioseq_log<logging_level::debug>("[bioseq] pipe: pipeline_run_impl_batch entry — p_aligner_parameters(p_bucket_width={},p_kmer_size={},p_window_size={},fallback={}) "
+            "p_alignment_algorithm={} p_chaining_algorithm={} p_minimizer_algorithm={} p_entry_point={} queries={} target_bp={}",
+            p_aligner_parameters::sequence_len_log2, p_aligner_parameters::kmer_len, p_aligner_parameters::window_len,
+            p_aligner_parameters::generic_fallback ? 1 : 0,
+            static_cast<int>(p_alignment_algorithm), static_cast<int>(p_chaining_algorithm), static_cast<int>(p_minimizer_algorithm),
+            static_cast<int>(p_entry_point), query_seqs.size(), target_seq.bp_size());
 
     const sequence_size_t target_len = target_seq.bp_size();
-    const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
+    const auto& scoring_matrix = thread_local_scoring_matrix<p_alphabet>(params);
     // Resolve once for the entire alphabet-homogeneous query wave. Every
     // per-query pipeline borrows this immutable typed binding.
     const auto& alignment_kernels =
-        detail::resolve_alignment_kernels<Alphabet>(params);
+        detail::resolve_alignment_kernels<p_alphabet>(params);
 
-    // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
+    /// — one GPU index cache for the whole batch wave, shared
     // across queries that look up the same target index. When a Vulkan seed
     // path is selected, runtime/device failure is reported before scalar work
     // can masquerade as a GPU row.
-    std::optional<bioseq::indexing::GpuMinimizerIndexCache> owned_gpu_index_cache;
+    std::optional<bioseq::indexing::gpu_minimizer_index_cache> owned_gpu_index_cache;
     if (external_gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
-        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        bioseq::gpu::vulkan::runtime& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
         std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
@@ -6042,56 +6031,56 @@ template <is_constexpr_aligner_params Cep,
         if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
         owned_gpu_index_cache.emplace(limit);
     }
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache_ptr =
         external_gpu_index_cache != nullptr
             ? external_gpu_index_cache
             : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
-    // DOC0310 §12/§16 — build the target minimizer index on the GPU and inject
-    // it into the wave cache under the key the SeedHitStage will compute, so the
-    // CPU `MinimizerHashmapFragmentIndex` build (skipped upstream in
+    /// — build the target minimizer index on the GPU and inject
+    // it into the wave cache under the key the seed_hit_stage will compute, so the
+    // CPU `minimizer_hashmap_fragment_index` build (skipped upstream in
     // `minimap2_port` for this leaf) is never paid. If the device build declines
     // this selected GPU path fails loudly.
-    PhaseCQueryGateStorage phase_c_query_gate;
+    ordered_sketch_query_gate_storage gpu_query_gate;
     // A production target index is complete and query-independent.  Keep the
     // gate type for explicitly named direct-matching experiments, but publish
     // the ordinary/no-index build under the canonical disabled identity.
-    const auto phase_c_gate_proof = phase_c_query_gate.identity();
-    if (phase_c_index_build_active(params)) {
-        bind_phase_c_query_gate_identity(
-            gpu_index_cache_ptr, phase_c_query_gate, phase_c_gate_proof,
+    const auto gpu_query_gate_identity = gpu_query_gate.identity();
+    if (is_gpu_target_index_build_active(params)) {
+        bind_gpu_query_gate_identity(
+            gpu_index_cache_ptr, gpu_query_gate, gpu_query_gate_identity,
             gpu_index_identity);
     }
 
-    const IndexT* effective_index_ptr = &target_index;
+    const p_index* effective_index_ptr = &target_index;
     bool vulkan_target_index_built = false;
-    bioseq::gpu::vulkan::GpuBuiltIndexOwnershipProof
+    bioseq::gpu::vulkan::gpu_index_build_stats
         vulkan_target_index_ownership{};
-    if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
-                  bioseq::indexing::MinimizerHashmapFragmentIndex>) {
-        if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
+    if constexpr (std::same_as<std::remove_cvref_t<p_index>,
+                  bioseq::indexing::minimizer_hashmap_fragment_index>) {
+        if (gpu_index_cache_ptr != nullptr && is_gpu_target_index_build_active(params)
             && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
-            auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+            auto& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
             bool injected = false;
-            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
-            auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
+            bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
+            auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<p_minimizer>(
                 target_seq,
                 static_cast<std::size_t>(params.window_size),
                 static_cast<std::size_t>(params.kmer_size),
-                phase_c_query_gate.vulkan_gate(),
+                gpu_query_gate.vulkan_gate(),
                 &decline);
             if (!built) {
                 throw_vulkan_sketch_declined(
-                    "Phase C GPU target-index build", decline);
+                    "Stage C GPU target-index build", decline);
             }
             auto key = bioseq::indexing::make_gpu_index_cache_key(
                 target_index, gpu_index_identity);
             auto adopted = bioseq::indexing::adopt_gpu_built_index(
                 gpu_rt, std::move(*built), key);
             if (!adopted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-                    "Phase C GPU target-index adoption rejected ({})",
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+                    "Stage C GPU target-index adoption rejected ({})",
                     bioseq::indexing::gpu_built_index_adoption_error_name(
                         adopted.error())));
             }
@@ -6100,129 +6089,129 @@ template <is_constexpr_aligner_params Cep,
             resident->target_len = target_len;
             auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
             if (!inserted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-                    "Phase C GPU target-index cache insertion rejected ({})",
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+                    "Stage C GPU target-index cache insertion rejected ({})",
                     static_cast<unsigned>(inserted.error())));
             }
             injected = true;
             vulkan_target_index_built = true;
-            bioseq_log<ERR>("[phase_c] GPU index injected: slot_mask={} pos={} target_len={}",
+            bioseq_log<logging_level::error>("[gpu_target_index] GPU index injected: slot_mask={} pos={} target_len={}",
                             resident->slot_mask, resident->position_count, target_len);
         }
     }
-    const IndexT& effective_index = *effective_index_ptr;
+    const p_index& effective_index = *effective_index_ptr;
 
-    // Empty proto for the FromSequence path's unused minimizers argument.
-    static const std::vector<MinimizerT> empty_minimizers_proto{};
+    // Empty proto for the from_sequence path's unused minimizers argument.
+    static const std::vector<p_minimizer> empty_minimizers_proto{};
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, target_seq,
          &effective_index, &scoring_matrix, &alignment_kernels, &params,
          gpu_index_cache_ptr,
          gpu_index_identity, vulkan_target_index_built,
-         vulkan_target_index_ownership, phase_c_gate_proof](std::size_t qi) {
+         vulkan_target_index_ownership, gpu_query_gate_identity](std::size_t qi) {
         const auto query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
-        auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
+        auto per_query_chain_scope = context::current().push<context::arena::chain>();
 
-        MatchResultCollection out;
+        match_result_collection out;
         if (vulkan_target_index_built
-            && phase_c_target_build_proof_owner_query(qi)) {
-            PartialVulkanExecutionProof proof{};
-            proof.target_sketch_dispatches = 1;
-            proof.target_index_build_dispatches = 1;
-            proof.gpu_index_count_phase_admissions =
-                vulkan_target_index_ownership.count_phase_admissions;
-            proof.gpu_index_main_peak_admissions =
+            && is_ordered_target_build_owner_query(qi)) {
+            partial_vulkan_execution_stats stats{};
+            stats.target_sketch_dispatches = 1;
+            stats.target_index_build_dispatches = 1;
+            stats.gpu_index_count_admissions =
+                vulkan_target_index_ownership.count_admissions;
+            stats.gpu_index_main_peak_admissions =
                 vulkan_target_index_ownership.main_peak_admissions;
-            proof.gpu_index_resident_transfers =
+            stats.gpu_index_resident_transfers =
                 vulkan_target_index_ownership.resident_transfers;
-            proof.gpu_index_adoption_rereserve_attempts =
+            stats.gpu_index_adoption_rereserve_attempts =
                 vulkan_target_index_ownership.adoption_rereserve_attempts;
-            proof.gpu_index_adoption_successes =
+            stats.gpu_index_adoption_successes =
                 vulkan_target_index_ownership.adoption_successes;
-            proof.gpu_index_owned_resident_bytes =
+            stats.gpu_index_owned_resident_bytes =
                 vulkan_target_index_ownership.resident_bytes;
-            proof.gpu_index_gate_enabled =
+            stats.gpu_index_gate_enabled =
                 vulkan_target_index_ownership.query_gate_enabled;
-            proof.gpu_index_gate_word_count =
+            stats.gpu_index_gate_word_count =
                 vulkan_target_index_ownership.query_gate_word_count;
-            proof.gpu_index_gate_mask =
+            stats.gpu_index_gate_mask =
                 vulkan_target_index_ownership.query_gate_mask;
-            proof.gpu_index_gate_set_bits = phase_c_gate_proof.set_bits;
-            proof.gpu_index_gate_digest_lo =
+            stats.gpu_index_gate_set_bits = gpu_query_gate_identity.set_bits;
+            stats.gpu_index_gate_digest_lo =
                 vulkan_target_index_ownership.query_gate_digest_lo;
-            proof.gpu_index_gate_digest_hi =
+            stats.gpu_index_gate_digest_hi =
                 vulkan_target_index_ownership.query_gate_digest_hi;
-            proof.gpu_index_gate_count_dispatches =
+            stats.gpu_index_gate_count_dispatches =
                 vulkan_target_index_ownership.gate_count_dispatches;
-            proof.gpu_index_gated_emit_dispatches =
+            stats.gpu_index_gated_emit_dispatches =
                 vulkan_target_index_ownership.gated_emit_dispatches;
-            proof.gpu_index_ungated_emit_dispatches =
+            stats.gpu_index_ungated_emit_dispatches =
                 vulkan_target_index_ownership.ungated_emit_dispatches;
-            proof.gpu_index_exact_count_dispatches =
+            stats.gpu_index_exact_count_dispatches =
                 vulkan_target_index_ownership.exact_count_dispatches;
-            proof.gpu_index_exact_count_prefix_scan_dispatches =
+            stats.gpu_index_exact_count_prefix_scan_dispatches =
                 vulkan_target_index_ownership.
                     exact_count_prefix_scan_dispatches;
-            proof.gpu_index_exact_count_control_readbacks =
+            stats.gpu_index_exact_count_control_readbacks =
                 vulkan_target_index_ownership.
                     exact_count_control_readbacks;
-            proof.gpu_index_deterministic_tile_emit_dispatches =
+            stats.gpu_index_deterministic_tile_emit_dispatches =
                 vulkan_target_index_ownership.
                     deterministic_tile_emit_dispatches;
-            proof.gpu_index_atomic_append_dispatches =
+            stats.gpu_index_atomic_append_dispatches =
                 vulkan_target_index_ownership.atomic_append_dispatches;
-            proof.gpu_index_emit_validation_control_readbacks =
+            stats.gpu_index_emit_validation_control_readbacks =
                 vulkan_target_index_ownership.
                     emit_validation_control_readbacks;
-            proof.gpu_index_counted_minimizer_count =
+            stats.gpu_index_counted_minimizer_count =
                 vulkan_target_index_ownership.counted_minimizer_count;
-            proof.gpu_index_verified_emit_count =
+            stats.gpu_index_verified_emit_count =
                 vulkan_target_index_ownership.verified_emit_count;
-            proof.gpu_index_count_emit_parity_verified =
+            stats.gpu_index_count_emit_parity_verified =
                 vulkan_target_index_ownership.count_emit_parity_verified;
-            proof.gpu_index_target_minimizer_capacity_estimate =
+            stats.gpu_index_target_minimizer_capacity_estimate =
                 vulkan_target_index_ownership.
                     target_minimizer_capacity_estimate;
-            proof.gpu_index_capacity_estimate_underestimated =
+            stats.gpu_index_capacity_estimate_underestimated =
                 vulkan_target_index_ownership.
                     capacity_estimate_underestimated;
-            proof.gpu_index_arena_trimmed_before_permit_shrink =
+            stats.gpu_index_arena_trimmed_before_permit_shrink =
                 vulkan_target_index_ownership.
                     arena_trimmed_before_permit_shrink;
-            proof.gpu_index_retained_minimizer_count =
+            stats.gpu_index_retained_minimizer_count =
                 vulkan_target_index_ownership.retained_minimizer_count;
-            proof.gpu_index_distinct_minimizer_count =
+            stats.gpu_index_distinct_minimizer_count =
                 vulkan_target_index_ownership.distinct_minimizer_count;
-            out.record_partial_vulkan_execution_proof(proof);
+            out.record_partial_vulkan_execution_stats(stats);
         }
         out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
 
-        const auto& mins_for_this_query = (EP == EntryPoint::WithPrebuiltMinimizers)
+        const auto& mins_for_this_query = (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers)
             ? query_minimizers_per_query[qi]
             : empty_minimizers_proto;
 
-        // Short-circuit early-empty cases matching the legacy entry's
+        // Short-circuit early-empty cases matching the previous entry's
         // returns at `minimap_port.cppm:2313` and :2325.
         if (query_len == 0 || target_len == 0) {
             return out;
         }
 
         auto pipeline =
-            make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
-                                  MinimizerT, IndexT>(
+            make_minimap_pipeline<p_aligner_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point, p_alphabet,
+                                  p_minimizer, p_index>(
             query_seq, target_seq, mins_for_this_query, effective_index,
             scoring_matrix, alignment_kernels, out, params,
             query_len, target_len,
             gpu_index_cache_ptr, gpu_index_identity);
 
-        if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
-            pipeline.on_batch(std::span<const MinimizerT>{
+        if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
+            pipeline.on_batch(std::span<const p_minimizer>{
                 mins_for_this_query.data(), mins_for_this_query.size()});
         } else {
-            // FromSequence: MinimizerStage's process ignores the input and
+            // from_sequence: minimizer_stage's process ignores the input and
             // sketches the cached query_seq_ pointer instead; pass an empty
             // span of bytes as a placeholder.
             pipeline.on_batch(std::span<const std::byte>{});
@@ -6231,13 +6220,13 @@ template <is_constexpr_aligner_params Cep,
         return out;
     };
 
-    std::vector<MatchResultCollection> out_per_query;
+    std::vector<match_result_collection> out_per_query;
     const bool may_parallel_batch =
         !vulkan_accelerator_requested(params)
-        && bioseq::parallelism::task_parallel(
-            bioseq::parallelism::GlobalPool::instance().mode())
+        && bioseq::parallelism::has_parallel_tasks(
+            bioseq::parallelism::global_pool::instance().get_mode())
         && query_seqs.size()
-            >= bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT
+            >= bioseq::parallelism::task_parallel_minimums::k_query_count
         && lazy_is_worker_shareable(target_seq)
         && std::ranges::all_of(query_seqs,
                [](const auto query) {
@@ -6248,8 +6237,8 @@ template <is_constexpr_aligner_params Cep,
         out_per_query.resize(query_seqs.size());
         bioseq::parallelism::parallel_for_pipeline(
             0, query_seqs.size(), 1,
-            bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT,
-            bioseq::parallelism::TaskParallelRegion::query_batch,
+            bioseq::parallelism::task_parallel_minimums::k_query_count,
+            bioseq::parallelism::task_parallel_region::query_batch,
             [&out_per_query, &run_one_query](std::size_t lo, std::size_t hi) {
                 for (std::size_t qi = lo; qi < hi; ++qi) {
                     out_per_query[qi] = run_one_query(qi);
@@ -6262,18 +6251,18 @@ template <is_constexpr_aligner_params Cep,
         }
     }
 
-    // DOC0307 §4.4 — release the wave's resident GPU index handles.
+    // — release the wave's resident GPU index handles.
     if (owned_gpu_index_cache) {
         owned_gpu_index_cache->clear();
     }
     return out_per_query;
 }
 
-// DOC0271 Phase 1 §5.3 — the entire cross-query deferred-align scheduling shape
+//  Stage 1 — the entire cross-query deferred-align scheduling shape
 // (including `pipeline_run_impl_batch_deferred_align`, `PerQueryAlignState`,
 // `AlignCollectStage`, and `align_regions_batched_cross_query`) was deleted.
 // Its only structural difference from `pipeline_run_impl_batch` was one extra
-// `Arena::Chain` push for a not-yet-implemented cross-query fill accumulator;
+// `Arena::chain` push for a not-yet-implemented cross-query fill accumulator;
 // the cross-query helper itself was a pass-through over per-query
 // `align_regions_batched<…>` calls. Restoring the shape later means re-adding
 // the four declarations above; the runtime semantics are now `cross_query_batched`-
@@ -6282,24 +6271,24 @@ template <is_constexpr_aligner_params Cep,
 /**
  * @brief Single-query convenience wrapper around `pipeline_run_impl_batch`.
  */
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA,
-          ::bioseq::simd::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT,
-          class QueryMinimizers = std::vector<MinimizerT>>
-[[nodiscard, gnu::always_inline]] inline MatchResultCollection pipeline_run_impl(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const QueryMinimizers&            query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::Minimap2Params& params,
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+template <is_constexpr_aligner_params p_aligner_parameters,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
+          ::bioseq::simd::minimizer_algorithm     p_minimizer_algorithm,
+          pipeline_entry_point                                                p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          class p_query_minimizers = std::vector<p_minimizer>>
+[[nodiscard, gnu::always_inline]] inline match_result_collection pipeline_run_impl(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const p_query_minimizers&            query_minimizers,
+    const p_index&                     target_index,
+    const ::bioseq::simd::minimap2_parameters& params,
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
-    TransientTargetIndexReleaseAuthority
+    transient_target_index_release_authorization
         transient_target_index_owner = {})
 {
     std::optional<context::context>                 owned_context;
@@ -6309,26 +6298,26 @@ template <is_constexpr_aligner_params Cep,
         install.emplace(*owned_context);
     }
     // The locally owned cache must outlive PostSeed's raw cache pointer, while
-    // PostSeed itself must outlive every Arena::Chain that backs an admitted
+    // PostSeed itself must outlive every Arena::chain that backs an admitted
     // anchor slab. Reverse destruction therefore requires this exact order.
-    std::optional<bioseq::indexing::GpuMinimizerIndexCache>
+    std::optional<bioseq::indexing::gpu_minimizer_index_cache>
         owned_gpu_index_cache;
-    // Declared before the Arena::Chain scope so any exact retained anchor
+    // Declared before the Arena::chain scope so any exact retained anchor
     // permit is released only after that arena has physically unwound.
-    std::optional<PostSeedOwnedLifetime> post_seed_owned_lifetime;
-    auto outer_chain_scope = context::current().push<context::Arena::Chain>();
+    std::optional<post_seed_owned_lifetime> post_seed_owned_lifetime;
+    auto outer_chain_scope = context::current().push<context::arena::chain>();
 
     const sequence_size_t target_len = target_seq.bp_size();
     const sequence_size_t query_len = query_seq.bp_size();
-    const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
+    const auto& scoring_matrix = thread_local_scoring_matrix<p_alphabet>(params);
     const auto& alignment_kernels =
-        detail::resolve_alignment_kernels<Alphabet>(params);
+        detail::resolve_alignment_kernels<p_alphabet>(params);
 
     if (gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled
         && !(gpu_index_identity.source_direct_sorted_dense
             && gpu_index_identity.canonical_empty)) {
-        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        bioseq::gpu::vulkan::runtime& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
         std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
@@ -6336,49 +6325,49 @@ template <is_constexpr_aligner_params Cep,
         if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
         owned_gpu_index_cache.emplace(limit);
     }
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache_ptr =
         gpu_index_cache != nullptr
             ? gpu_index_cache
             : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
-    PhaseCQueryGateStorage phase_c_query_gate;
+    ordered_sketch_query_gate_storage gpu_query_gate;
     // Fair no-index semantics require the full query-independent target index.
-    const auto phase_c_gate_proof = phase_c_query_gate.identity();
-    if (phase_c_index_build_active(params)) {
-        bind_phase_c_query_gate_identity(
-            gpu_index_cache_ptr, phase_c_query_gate, phase_c_gate_proof,
+    const auto gpu_query_gate_identity = gpu_query_gate.identity();
+    if (is_gpu_target_index_build_active(params)) {
+        bind_gpu_query_gate_identity(
+            gpu_index_cache_ptr, gpu_query_gate, gpu_query_gate_identity,
             gpu_index_identity);
     }
 
-    const IndexT* effective_index_ptr = &target_index;
+    const p_index* effective_index_ptr = &target_index;
     bool vulkan_target_index_built = false;
-    bioseq::gpu::vulkan::GpuBuiltIndexOwnershipProof
+    bioseq::gpu::vulkan::gpu_index_build_stats
         vulkan_target_index_ownership{};
-    if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
-                  bioseq::indexing::MinimizerHashmapFragmentIndex>) {
-        if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
+    if constexpr (std::same_as<std::remove_cvref_t<p_index>,
+                  bioseq::indexing::minimizer_hashmap_fragment_index>) {
+        if (gpu_index_cache_ptr != nullptr && is_gpu_target_index_build_active(params)
             && allow_gpu_target_index_build && target_index.table_empty()
             && target_len > 0) {
-            auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+            auto& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
             bool injected = false;
-            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
-            auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
+            bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
+            auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<p_minimizer>(
                 target_seq,
                 static_cast<std::size_t>(params.window_size),
                 static_cast<std::size_t>(params.kmer_size),
-                phase_c_query_gate.vulkan_gate(),
+                gpu_query_gate.vulkan_gate(),
                 &decline);
             if (!built) {
                 throw_vulkan_sketch_declined(
-                    "Phase C GPU target-index build", decline);
+                    "Stage C GPU target-index build", decline);
             }
             auto key = bioseq::indexing::make_gpu_index_cache_key(
                 target_index, gpu_index_identity);
             auto adopted = bioseq::indexing::adopt_gpu_built_index(
                 gpu_rt, std::move(*built), key);
             if (!adopted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-                    "Phase C GPU target-index adoption rejected ({})",
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+                    "Stage C GPU target-index adoption rejected ({})",
                     bioseq::indexing::gpu_built_index_adoption_error_name(
                         adopted.error())));
             }
@@ -6387,85 +6376,85 @@ template <is_constexpr_aligner_params Cep,
             resident->target_len = target_len;
             auto inserted = gpu_index_cache_ptr->insert_built(key, resident);
             if (!inserted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-                    "Phase C GPU target-index cache insertion rejected ({})",
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+                    "Stage C GPU target-index cache insertion rejected ({})",
                     static_cast<unsigned>(inserted.error())));
             }
             injected = true;
             vulkan_target_index_built = true;
-            bioseq_log<ERR>("[phase_c] GPU index injected: slot_mask={} pos={} target_len={}",
+            bioseq_log<logging_level::error>("[gpu_target_index] GPU index injected: slot_mask={} pos={} target_len={}",
                             resident->slot_mask, resident->position_count, target_len);
         }
     }
-    const IndexT& effective_index = *effective_index_ptr;
+    const p_index& effective_index = *effective_index_ptr;
 
-    MatchResultCollection out;
+    match_result_collection out;
     if (vulkan_target_index_built) {
-        PartialVulkanExecutionProof proof{};
-        proof.target_sketch_dispatches = 1;
-        proof.target_index_build_dispatches = 1;
-        proof.gpu_index_count_phase_admissions =
-            vulkan_target_index_ownership.count_phase_admissions;
-        proof.gpu_index_main_peak_admissions =
+        partial_vulkan_execution_stats stats{};
+        stats.target_sketch_dispatches = 1;
+        stats.target_index_build_dispatches = 1;
+        stats.gpu_index_count_admissions =
+            vulkan_target_index_ownership.count_admissions;
+        stats.gpu_index_main_peak_admissions =
             vulkan_target_index_ownership.main_peak_admissions;
-        proof.gpu_index_resident_transfers =
+        stats.gpu_index_resident_transfers =
             vulkan_target_index_ownership.resident_transfers;
-        proof.gpu_index_adoption_rereserve_attempts =
+        stats.gpu_index_adoption_rereserve_attempts =
             vulkan_target_index_ownership.adoption_rereserve_attempts;
-        proof.gpu_index_adoption_successes =
+        stats.gpu_index_adoption_successes =
             vulkan_target_index_ownership.adoption_successes;
-        proof.gpu_index_owned_resident_bytes =
+        stats.gpu_index_owned_resident_bytes =
             vulkan_target_index_ownership.resident_bytes;
-        proof.gpu_index_gate_enabled =
+        stats.gpu_index_gate_enabled =
             vulkan_target_index_ownership.query_gate_enabled;
-        proof.gpu_index_gate_word_count =
+        stats.gpu_index_gate_word_count =
             vulkan_target_index_ownership.query_gate_word_count;
-        proof.gpu_index_gate_mask =
+        stats.gpu_index_gate_mask =
             vulkan_target_index_ownership.query_gate_mask;
-        proof.gpu_index_gate_set_bits = phase_c_gate_proof.set_bits;
-        proof.gpu_index_gate_digest_lo =
+        stats.gpu_index_gate_set_bits = gpu_query_gate_identity.set_bits;
+        stats.gpu_index_gate_digest_lo =
             vulkan_target_index_ownership.query_gate_digest_lo;
-        proof.gpu_index_gate_digest_hi =
+        stats.gpu_index_gate_digest_hi =
             vulkan_target_index_ownership.query_gate_digest_hi;
-        proof.gpu_index_gate_count_dispatches =
+        stats.gpu_index_gate_count_dispatches =
             vulkan_target_index_ownership.gate_count_dispatches;
-        proof.gpu_index_gated_emit_dispatches =
+        stats.gpu_index_gated_emit_dispatches =
             vulkan_target_index_ownership.gated_emit_dispatches;
-        proof.gpu_index_ungated_emit_dispatches =
+        stats.gpu_index_ungated_emit_dispatches =
             vulkan_target_index_ownership.ungated_emit_dispatches;
-        proof.gpu_index_exact_count_dispatches =
+        stats.gpu_index_exact_count_dispatches =
             vulkan_target_index_ownership.exact_count_dispatches;
-        proof.gpu_index_exact_count_prefix_scan_dispatches =
+        stats.gpu_index_exact_count_prefix_scan_dispatches =
             vulkan_target_index_ownership.exact_count_prefix_scan_dispatches;
-        proof.gpu_index_exact_count_control_readbacks =
+        stats.gpu_index_exact_count_control_readbacks =
             vulkan_target_index_ownership.exact_count_control_readbacks;
-        proof.gpu_index_deterministic_tile_emit_dispatches =
+        stats.gpu_index_deterministic_tile_emit_dispatches =
             vulkan_target_index_ownership.deterministic_tile_emit_dispatches;
-        proof.gpu_index_atomic_append_dispatches =
+        stats.gpu_index_atomic_append_dispatches =
             vulkan_target_index_ownership.atomic_append_dispatches;
-        proof.gpu_index_emit_validation_control_readbacks =
+        stats.gpu_index_emit_validation_control_readbacks =
             vulkan_target_index_ownership.emit_validation_control_readbacks;
-        proof.gpu_index_counted_minimizer_count =
+        stats.gpu_index_counted_minimizer_count =
             vulkan_target_index_ownership.counted_minimizer_count;
-        proof.gpu_index_verified_emit_count =
+        stats.gpu_index_verified_emit_count =
             vulkan_target_index_ownership.verified_emit_count;
-        proof.gpu_index_count_emit_parity_verified =
+        stats.gpu_index_count_emit_parity_verified =
             vulkan_target_index_ownership.count_emit_parity_verified;
-        proof.gpu_index_target_minimizer_capacity_estimate =
+        stats.gpu_index_target_minimizer_capacity_estimate =
             vulkan_target_index_ownership.target_minimizer_capacity_estimate;
-        proof.gpu_index_capacity_estimate_underestimated =
+        stats.gpu_index_capacity_estimate_underestimated =
             vulkan_target_index_ownership.capacity_estimate_underestimated;
-        proof.gpu_index_arena_trimmed_before_permit_shrink =
+        stats.gpu_index_arena_trimmed_before_permit_shrink =
             vulkan_target_index_ownership.
                 arena_trimmed_before_permit_shrink;
-        proof.gpu_index_retained_minimizer_count =
+        stats.gpu_index_retained_minimizer_count =
             vulkan_target_index_ownership.retained_minimizer_count;
-        proof.gpu_index_distinct_minimizer_count =
+        stats.gpu_index_distinct_minimizer_count =
             vulkan_target_index_ownership.distinct_minimizer_count;
-        out.record_partial_vulkan_execution_proof(proof);
+        out.record_partial_vulkan_execution_stats(stats);
     }
     out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
-    DirectResidentOperationLedger* const direct_ledger =
+    direct_resident_operation_stats* const direct_ledger =
         transient_target_index_owner.direct_ledger;
     const bool direct_empty_bypass = direct_ledger != nullptr
         && gpu_index_identity.source_direct_sorted_dense
@@ -6504,20 +6493,20 @@ template <is_constexpr_aligner_params Cep,
         return out;
     }
 
-    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers
-                  && std::same_as<std::remove_cvref_t<IndexT>,
-                         bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+    if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers
+                  && std::same_as<std::remove_cvref_t<p_index>,
+                         bioseq::indexing::minimizer_hashmap_fragment_index>) {
         // The resident seed-to-coordinate kernel is only profitable once the
         // target index is genuinely resident/GPU-built. Using it on the current
-        // VulkanSegment host-materialised sparse segment indexes repeats
+        // vulkan_segment host-materialised sparse segment indexes repeats
         // submit/readback orchestration per segment and is slower than the
-        // normal Vulkan seed+chain path (DOC0353 2026-06-25).
-        if (phase_c_coordinate_only_active(params)
+        // normal Vulkan seed+chain path ( 2026-06-25).
+        if (is_gpu_coordinate_only_execution_active(params)
             && allow_gpu_target_index_build
             && effective_index.table_empty()) {
-            auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+            auto& runtime = bioseq::gpu::vulkan::runtime::instance();
             if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
-                throw_vulkan_declined("Phase C resident seed-to-coordinate");
+                throw_vulkan_declined("Stage C resident seed-to-coordinate");
             }
             auto key = bioseq::indexing::make_gpu_index_cache_key(
                 effective_index, gpu_index_identity);
@@ -6527,22 +6516,22 @@ template <is_constexpr_aligner_params Cep,
                       runtime, effective_index, key,
                       params.vulkan_index_cache_enabled);
             if (!resident_index) {
-                throw_vulkan_declined("Phase C resident seed-to-coordinate index");
+                throw_vulkan_declined("Stage C resident seed-to-coordinate index");
             }
 
-            std::span<const MinimizerT> sketch_span{
+            std::span<const p_minimizer> sketch_span{
                 query_minimizers.data(), query_minimizers.size()};
-            std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+            std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>
                 device_span{};
-            if constexpr (is_minimizer_batch_view_v<QueryMinimizers>) {
+            if constexpr (is_minimizer_batch_view_v<p_query_minimizers>) {
                 device_span = query_minimizers.device;
             }
-            const bioseq::gpu::vulkan::Buffer* device_words =
+            const bioseq::gpu::vulkan::buffer* device_words =
                 (device_span && device_span->words() != nullptr
                  && device_span->count() == sketch_span.size())
                     ? device_span->words()
                     : nullptr;
-            bioseq::gpu::vulkan::PhaseCSeedInputs inputs{
+            bioseq::gpu::vulkan::gpu_seed_inputs inputs{
                 .host_minimizer_bytes = device_words != nullptr
                     ? std::span<const std::byte>{}
                     : std::as_bytes(sketch_span),
@@ -6555,25 +6544,25 @@ template <is_constexpr_aligner_params Cep,
                 .minimizer_count = static_cast<std::uint32_t>(sketch_span.size()),
                 .minimizer_word_kind =
                     static_cast<std::uint32_t>(
-                        bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::word_kind),
+                        bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_word_kind),
                 .minimizer_words32_per_record =
-                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+                    bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_words32_per_minimizer,
                 .hash_shift =
-                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::hash_shift,
+                    bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_hash_shift,
                 .pos_bits =
-                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::pos_bits,
+                    bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_position_bits,
                 .bucket_count = resident_index->bucket_count,
                 .target_position_offset = resident_index->target_position_offset,
             };
 
-            auto cp = params.to_chaining_params();
+            auto cp = params.make_chaining_parameters();
             std::int32_t max_dist_x = cp.max_gap;
             std::int32_t max_dist_y = cp.max_gap;
             if (max_dist_x < cp.bandwidth) max_dist_x = cp.bandwidth;
             if (max_dist_y < cp.bandwidth) max_dist_y = cp.bandwidth;
             const auto chain_key =
                 bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
-            const auto coord = runtime.run_phase_c_seed_to_coordinate_roundtrip(
+            const auto coord = runtime.run_seed_to_coordinate_roundtrip(
                 inputs,
                 query_len,
                 target_len,
@@ -6592,7 +6581,7 @@ template <is_constexpr_aligner_params Cep,
                 16u);
             if (coord.valid != 0u) {
                 out.results.push_back(
-                    phase_c_coordinate_to_match_result(coord, query_len, target_len));
+                    gpu_coordinate_to_match_result(coord, query_len, target_len));
             }
             return out;
         }
@@ -6601,17 +6590,17 @@ template <is_constexpr_aligner_params Cep,
     if (direct_ledger != nullptr) {
         direct_ledger->pipeline_started = true;
     }
-    auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
+    auto per_query_chain_scope = context::current().push<context::arena::chain>();
     auto pipeline =
-        make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
-                              MinimizerT, IndexT, QueryMinimizers>(
+        make_minimap_pipeline<p_aligner_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point, p_alphabet,
+                              p_minimizer, p_index, p_query_minimizers>(
         query_seq, target_seq, query_minimizers, effective_index,
         scoring_matrix, alignment_kernels, out, params,
         query_len, target_len,
         gpu_index_cache_ptr, gpu_index_identity,
         post_seed_owned_lifetime ? &*post_seed_owned_lifetime : nullptr);
 
-    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
+    if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
         pipeline.on_batch(query_minimizers);
     } else {
         pipeline.on_batch(std::span<const std::byte>{});
@@ -6626,33 +6615,33 @@ template <is_constexpr_aligner_params Cep,
 }
 
 // =============================================================================
-// DOC0256 / DOC0261 — value_sequence (non-type parameter pack carrier)
+//  /  — value_sequence (non-type parameter pack carrier)
 // =============================================================================
 //
-// `value_sequence<T, Vs...>` lives in `bioseq_common.templating` (DOC0261
-// §4.3); re-exported here so the existing pipe.cppm body keeps the
-// unqualified name. See DOC0261 §12.4.
+// `value_sequence<p_type, p_values...>` lives in `bioseq.common.templating` (
+//); re-exported here so the existing pipe.cppm body keeps the
+// unqualified name. See
 
 using ::bioseq::common::templating::value_sequence;
 
 // =============================================================================
-// DOC0256 §4 — MinimizerLayout-driven L bucket derivation
+// — minimizer_layout-driven p_bucket_width bucket derivation
 // =============================================================================
 //
-// Replaces the hand-coded `(K, L)` ladders that used to live inside
+// Replaces the hand-coded `(p_kmer_size, p_bucket_width)` ladders that used to live inside
 // `dispatch_pipeline` and `minimap_port`.  The bucket list is computed at
-// compile time from the per-K transitions in `MinimizerLayout::storage_bits`,
-// so adding a new K only requires editing `kmer_size_buckets` and the
-// per-K clause in `storage_bits_for`.
+// compile time from the per-p_kmer_size transitions in `minimizer_layout::storage_bits`,
+// so adding a new p_kmer_size only requires editing `kmer_size_buckets` and the
+// per-p_kmer_size clause in `storage_bits_for`.
 
 /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
 /// entry is the default for non-canonical kmer_size — see kmer_size_default.
 ///
-/// DOC0271 Phase 1 / BIOSEQ_OPTTIMIZATION_LEVEL — the array's SIZE must
+///  Stage 1 / BIOSEQ_OPTTIMIZATION_LEVEL — the array's SIZE must
 /// match its element count, not be hard-coded to 3. A `std::array<size_t, 3>`
 /// with only `{15u}` initialised silently zeroes the trailing two slots, and
-/// the consteval dispatch table then enumerates K=0, which instantiates
-/// `MinimizerRepr<63, 0>` whose `hash_shift` equals `sizeof(storage_t)*8` and
+/// the consteval dispatch table then enumerates p_kmer_size=0, which instantiates
+/// `minimizer_representation<63, 0>` whose `hash_shift` equals `sizeof(storage_type)*8` and
 /// trips an undefined-shift constexpr error in `index.cppm:151`. `std::to_array`
 /// deduces the array size from the initialiser so the two stay in lockstep.
 inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
@@ -6663,10 +6652,10 @@ inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
     #endif
 });
 
-/// `bit_width(max(max_bp - 1, 1))` clamped into `[K, 63]` — the smallest
-/// `L` such that `2^L > max_bp - 1`, lifted up to `K` so the resulting
-/// `MinimizerLayout<L, K>` keeps `pos_bits >= kmer_size`.  At L=63 every K
-/// resolves to a non-void storage_t (the 128-bit specialisation handles the
+/// `bit_width(max(max_bp - 1, 1))` clamped into `[p_kmer_size, 63]` — the smallest
+/// `p_bucket_width` such that `2^p_bucket_width > max_bp - 1`, lifted up to `p_kmer_size` so the resulting
+/// `minimizer_layout<p_bucket_width, p_kmer_size>` keeps `pos_bits >= kmer_size`.  At p_bucket_width=63 every p_kmer_size
+/// resolves to a non-void storage_type (the 128-bit specialisation handles the
 /// upper band), so a clamp on the upper end is sufficient.
 [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(
     std::size_t max_bp, std::size_t kmer_size) noexcept
@@ -6684,58 +6673,58 @@ static_assert(round_up_seq_len_log2(std::size_t{1} << 62, 15u) == 62u);
 
 namespace detail {
 
-/// Pack-expansion builder for a per-K table of `storage_bits` values keyed
-/// by L ∈ [0, 64).  The layout type takes (L, K) as template parameters, so
-/// the only way to convert a runtime L into a template argument is to
-/// pre-compute every value of `MinimizerLayout<L, K>::storage_bits` for L
+/// Pack-expansion builder for a per-p_kmer_size table of `storage_bits` values keyed
+/// by p_bucket_width ∈ [0, 64).  The layout type takes (p_bucket_width, p_kmer_size) as template parameters, so
+/// the only way to convert a runtime p_bucket_width into a template argument is to
+/// pre-compute every value of `minimizer_layout<p_bucket_width, p_kmer_size>::storage_bits` for p_bucket_width
 /// in the legal range and index into the resulting `std::array`.  All work
 /// happens at constant-evaluation time; the dispatcher path never enters
 /// this helper.
-template <std::size_t K, std::size_t... Ls>
+template <std::size_t p_kmer_size, std::size_t... p_bucket_values>
 [[nodiscard]] consteval auto make_storage_bits_table_impl(
-    std::index_sequence<Ls...>) noexcept
+    std::index_sequence<p_bucket_values...>) noexcept
 {
-    using ::bioseq::minimizers::MinimizerLayout;
-    return std::array<std::size_t, sizeof...(Ls)>{
-        MinimizerLayout<Ls, K>::storage_bits...
+    using ::bioseq::minimizers::minimizer_layout;
+    return std::array<std::size_t, sizeof...(p_bucket_values)>{
+        minimizer_layout<p_bucket_values, p_kmer_size>::storage_bits...
     };
 }
 
-template <std::size_t K>
+template <std::size_t p_kmer_size>
 [[nodiscard]] consteval auto make_storage_bits_table() noexcept {
-    return make_storage_bits_table_impl<K>(std::make_index_sequence<64u>{});
+    return make_storage_bits_table_impl<p_kmer_size>(std::make_index_sequence<64u>{});
 }
 
-/// Look up `MinimizerLayout<L, K>::storage_bits` from the per-K table.  The
-/// per-K clauses are a *dispatch table*, not a hand-tuned ladder — they exist
-/// because the layout requires K as a *template* argument and the consteval
-/// helper above can only enumerate L for a fixed compile-time K.  Every K
+/// Look up `minimizer_layout<p_bucket_width, p_kmer_size>::storage_bits` from the per-p_kmer_size table.  The
+/// per-p_kmer_size clauses are a *dispatch table*, not a hand-tuned ladder — they exist
+/// because the layout requires p_kmer_size as a *template* argument and the consteval
+/// helper above can only enumerate p_bucket_width for a fixed compile-time p_kmer_size.  Every p_kmer_size
 /// in `kmer_size_buckets` must have a matching clause here.
 [[nodiscard]] consteval std::size_t storage_bits_for(
-    std::size_t L, std::size_t K) noexcept
+    std::size_t p_bucket_width, std::size_t p_kmer_size) noexcept
 {
-    if (K == 15u) return make_storage_bits_table<15u>()[L];
-    if (K == 7u)  return make_storage_bits_table<7u>()[L];
-    if (K == 27u) return make_storage_bits_table<27u>()[L];
+    if (p_kmer_size == 15u) return make_storage_bits_table<15u>()[p_bucket_width];
+    if (p_kmer_size == 7u)  return make_storage_bits_table<7u>()[p_bucket_width];
+    if (p_kmer_size == 27u) return make_storage_bits_table<27u>()[p_bucket_width];
     return 0u;
 }
 
-/// Compute the breakpoint L values for a given K.  For each L in [K, 63]:
-///   - L is emitted if storage_bits_for(L, K) != storage_bits_for(L-1, K),
-///     recorded as the largest L of the previous band (i.e. L-1).
-///   - L = K is emitted as the lower anchor.
-///   - L = 63 is always emitted as the terminal anchor.
+/// Compute the breakpoint p_bucket_width values for a given p_kmer_size.  For each p_bucket_width in [p_kmer_size, 63]:
+///   - p_bucket_width is emitted if storage_bits_for(p_bucket_width, p_kmer_size) != storage_bits_for(p_bucket_width-1, p_kmer_size),
+///     recorded as the largest p_bucket_width of the previous band (i.e. p_bucket_width-1).
+///   - p_bucket_width = p_kmer_size is emitted as the lower anchor.
+///   - p_bucket_width = 63 is always emitted as the terminal anchor.
 /// Max 6 entries possible (initial + up to 3 storage transitions + terminal +
 /// headroom).
-template <std::size_t K>
+template <std::size_t p_kmer_size>
 [[nodiscard]] consteval auto compute_breakpoints_for() noexcept {
     std::array<std::size_t, 6u> out{};
     std::size_t out_n = 0u;
     std::size_t last_bits = 0u;
-    for (std::size_t L = K; L <= 63u; ++L) {
-        const std::size_t bits = storage_bits_for(L, K);
+    for (std::size_t p_bucket_width = p_kmer_size; p_bucket_width <= 63u; ++p_bucket_width) {
+        const std::size_t bits = storage_bits_for(p_bucket_width, p_kmer_size);
         if (bits != last_bits) {
-            out[out_n++] = (last_bits == 0u) ? L : L - 1u;
+            out[out_n++] = (last_bits == 0u) ? p_bucket_width : p_bucket_width - 1u;
             last_bits = bits;
         }
     }
@@ -6748,17 +6737,17 @@ static_assert(compute_breakpoints_for<7u>().second  <= 6u);
 static_assert(compute_breakpoints_for<27u>().second <= 6u);
 
 /// Work-buffer type for `compute_global_l_buckets`.  Sized 32 (≤ 6
-/// breakpoints/K × ≤ 5 kmer sizes = 30; rounded up to a power of two for
+/// breakpoints/p_kmer_size × ≤ 5 kmer sizes = 30; rounded up to a power of two for
 /// headroom).
 using raw_buf = std::array<std::size_t, 32u>;
 
-/// Free consteval helper — merges compute_breakpoints_for<K>()'s breakpoint
+/// Free consteval helper — merges compute_breakpoints_for<p_kmer_size>()'s breakpoint
 /// list into (raw, raw_n) using the lifted `append_unique_value` primitive.
-template <std::size_t K>
+template <std::size_t p_kmer_size>
 consteval void merge_breakpoints_into(
     raw_buf& raw, std::size_t& raw_n) noexcept
 {
-    constexpr auto bp = compute_breakpoints_for<K>();
+    constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
     for (std::size_t i = 0u; i < bp.second; ++i) {
         ::bioseq::common::templating::append_unique_value(raw, raw_n, bp.first[i]);
     }
@@ -6768,13 +6757,13 @@ consteval void merge_breakpoints_into(
 /// accumulator state through `merge_breakpoints_into` (no `[&]` capture)
 /// and finishes with the lifted insertion-sort primitive — the
 /// dispatcher's smallest-ge lookup needs sorted input.
-template <std::size_t... Is>
+template <std::size_t... p_indices>
 [[nodiscard]] consteval auto compute_global_l_buckets_impl(
-    std::index_sequence<Is...>) noexcept
+    std::index_sequence<p_indices...>) noexcept
 {
     raw_buf raw{};
     std::size_t raw_n = 0u;
-    (merge_breakpoints_into<kmer_size_buckets[Is]>(raw, raw_n), ...);
+    (merge_breakpoints_into<kmer_size_buckets[p_indices]>(raw, raw_n), ...);
     ::bioseq::common::templating::sort_in_place_ascending(raw, raw_n);
     return std::pair{raw, raw_n};
 }
@@ -6786,7 +6775,7 @@ template <std::size_t... Is>
 
 } // namespace detail
 
-/// Materialised dispatcher L bucket list — the union of per-K breakpoints
+/// Materialised dispatcher p_bucket_width bucket list — the union of per-p_kmer_size breakpoints
 /// computed at compile time.  The `_n` constant gives the live prefix size;
 /// the array itself is sized 32 for headroom.
 inline constexpr auto seq_len_log2_buckets_pair = detail::compute_global_l_buckets();
@@ -6800,11 +6789,11 @@ namespace detail {
 
 /// Materialise `seq_len_log2_buckets` as a `value_sequence` the chain can
 /// pack-expand.  Used as the value-list of `seq_len_log2_registry`.
-template <std::size_t... Is>
+template <std::size_t... p_indices>
 [[nodiscard]] consteval auto make_seq_len_log2_buckets_seq(
-    std::index_sequence<Is...>) noexcept
+    std::index_sequence<p_indices...>) noexcept
 {
-    return value_sequence<std::size_t, seq_len_log2_buckets[Is]...>{};
+    return value_sequence<std::size_t, seq_len_log2_buckets[p_indices]...>{};
 }
 
 using seq_len_log2_buckets_seq = decltype(
@@ -6813,40 +6802,40 @@ using seq_len_log2_buckets_seq = decltype(
 
 /// Materialise `kmer_size_buckets` similarly.  Used as the value-list of
 /// `kmer_size_registry`.
-template <std::size_t... Is>
+template <std::size_t... p_indices>
 [[nodiscard]] consteval auto make_kmer_size_buckets_seq(
-    std::index_sequence<Is...>) noexcept
+    std::index_sequence<p_indices...>) noexcept
 {
-    return value_sequence<std::size_t, kmer_size_buckets[Is]...>{};
+    return value_sequence<std::size_t, kmer_size_buckets[p_indices]...>{};
 }
 
 using kmer_size_buckets_seq = decltype(
     make_kmer_size_buckets_seq(
         std::make_index_sequence<kmer_size_buckets.size()>{}));
 
-// DOC0271 Phase 1 §5.1 — per-K seq_len_log2 breakpoint sequence.
+//  Stage 1 — per-p_kmer_size seq_len_log2 breakpoint sequence.
 //
-// Materialise the K-specific breakpoint list (from `compute_breakpoints_for<K>()`)
-// as a `value_sequence<std::size_t, ...>`.  Used by `bucket_step_pinned`'s
-// K-aware `value_list_for<K>` to iterate only the L breakpoints relevant for
-// that K — rather than the global union shape `seq_len_log2_buckets_seq` (which
-// causes the §3 explosion).
-template <std::size_t K, std::size_t... Is>
+// Materialise the p_kmer_size-specific breakpoint list (from `compute_breakpoints_for<p_kmer_size>()`)
+// as a `value_sequence<std::size_t, ...>`.  Used by `dependent_bucket_step`'s
+// p_kmer_size-aware `value_list_for<p_kmer_size>` to iterate only the p_bucket_width breakpoints relevant for
+// that p_kmer_size — rather than the global union shape `seq_len_log2_buckets_seq` (which
+// causes the explosion).
+template <std::size_t p_kmer_size, std::size_t... p_indices>
 [[nodiscard]] consteval auto make_per_k_breakpoints_seq_impl(
-    std::index_sequence<Is...>) noexcept
+    std::index_sequence<p_indices...>) noexcept
 {
-    constexpr auto bp = compute_breakpoints_for<K>();
-    return value_sequence<std::size_t, bp.first[Is]...>{};
+    constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
+    return value_sequence<std::size_t, bp.first[p_indices]...>{};
 }
 
-template <std::size_t K>
+template <std::size_t p_kmer_size>
 [[nodiscard]] consteval auto make_per_k_breakpoints_seq() noexcept {
-    constexpr auto bp = compute_breakpoints_for<K>();
-    return make_per_k_breakpoints_seq_impl<K>(std::make_index_sequence<bp.second>{});
+    constexpr auto bp = compute_breakpoints_for<p_kmer_size>();
+    return make_per_k_breakpoints_seq_impl<p_kmer_size>(std::make_index_sequence<bp.second>{});
 }
 
-template <std::size_t K>
-using per_k_breakpoints_seq = decltype(make_per_k_breakpoints_seq<K>());
+template <std::size_t p_kmer_size>
+using per_k_breakpoints_seq = decltype(make_per_k_breakpoints_seq<p_kmer_size>());
 
 static_assert(per_k_breakpoints_seq<15u>::size() == compute_breakpoints_for<15u>().second);
 static_assert(per_k_breakpoints_seq<7u>::size()  == compute_breakpoints_for<7u>().second);
@@ -6854,7 +6843,7 @@ static_assert(per_k_breakpoints_seq<27u>::size() == compute_breakpoints_for<27u>
 
 } // namespace detail
 
-/// Canonical k-mer default — the historical fallback for any non-canonical
+/// Canonical k-mer default for any non-canonical
 /// `params.kmer_size` value.  The chain's `kmer_size_step` pins this when
 /// the runtime field is outside `kmer_size_buckets`.
 inline constexpr std::size_t kmer_size_default = 15u;
@@ -6863,22 +6852,21 @@ static_assert(kmer_size_default == kmer_size_buckets[0],
     "the chain's default-value path expects them in sync.");
 
 // =============================================================================
-// DOC0256 §5.1–5.3 / DOC0261 §4.4 — Low-level enum/value dispatch primitives
+// / — Low-level enum/value dispatch primitives
 // =============================================================================
 //
-// The dispatch primitives now live in `bioseq_common.templating`
-// (DOC0261). They are re-exported under the existing names so this
+// The dispatch primitives now live in `bioseq.common.templating`
+//. They are re-exported under the existing names so this
 // module's call sites stay unchanged. Codegen is identical to the
 // previous in-place definition — every helper carries
 // `[[gnu::always_inline]]`.
 
-using ::bioseq::common::templating::enum_dispatch_pack;
-using ::bioseq::common::templating::enum_dispatch_pack_void;
-using ::bioseq::common::templating::value_dispatch_smallest_ge;
-using ::bioseq::common::templating::value_dispatch_exact_with_default;
+using ::bioseq::common::templating::dispatch_exact_value_or_default;
+using ::bioseq::common::templating::dispatch_exact_value_or_default_void;
+using ::bioseq::common::templating::dispatch_smallest_not_less;
 
 // =============================================================================
-// DOC0256 §5.4 / §5.9 — algorithm_enum_values registry + per-dim selectors
+// / — algorithm_enum_values registry + per-dim selectors
 // =============================================================================
 //
 // Each registry exposes:
@@ -6894,64 +6882,61 @@ using ::bioseq::common::templating::value_dispatch_exact_with_default;
 // Adding a new dispatched dimension is one new registry plus one `enum_step` /
 // `bucket_step` alias.
 
-template <class Enum>
+template <class p_enum>
 struct algorithm_enum_values;
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::ChainingAlgorithmType> {
-    using target_t = ::bioseq::simd::ChainingAlgorithmType;
-    using enum_t   = target_t;  // legacy alias.
-    static constexpr target_t default_value = target_t::SCALAR_MM2;
+struct algorithm_enum_values<::bioseq::simd::chaining_algorithm> {
+    using target_t = ::bioseq::simd::chaining_algorithm;
+    static constexpr target_t default_value = target_t::scalar_minimap2;
     using value_list = value_sequence<target_t,
-        target_t::SCALAR_MM2,
-        target_t::SIMD_MM2,
-        target_t::RMQ,
-        target_t::VULKAN_TILED_DP>;
+        target_t::scalar_minimap2,
+        target_t::simd_minimap2,
+        target_t::range_minimum_query,
+        target_t::vulkan_tiled_dynamic_programming>;
 
-    template <class... Args>
+    template <class... p_arguments>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::Minimap2Params& p,
-        Args&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& p,
+        p_arguments&&...) noexcept
     {
         return p.chaining_algorithm;
     }
 };
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::BaseAlignmentAlgorithmType> {
-    using target_t = ::bioseq::simd::BaseAlignmentAlgorithmType;
-    using enum_t   = target_t;
-    static constexpr target_t default_value = target_t::BLOCK_ALIGNER;
+struct algorithm_enum_values<::bioseq::simd::base_alignment_algorithm> {
+    using target_t = ::bioseq::simd::base_alignment_algorithm;
+    static constexpr target_t default_value = target_t::block_aligner;
     using value_list = value_sequence<target_t,
-        target_t::KSW2,
-        target_t::BLOCK_ALIGNER,
-        target_t::KSW2_BATCHED>;
+        target_t::ksw2,
+        target_t::block_aligner,
+        target_t::ksw2_batched>;
 
-    template <class... Args>
+    template <class... p_arguments>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::Minimap2Params& p,
-        Args&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& p,
+        p_arguments&&...) noexcept
     {
         return p.base_alignment_algorithm;
     }
 };
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::MinimizerAlgorithmType> {
-    using target_t = ::bioseq::simd::MinimizerAlgorithmType;
-    using enum_t   = target_t;
-    static constexpr target_t default_value = target_t::SCALAR;
+struct algorithm_enum_values<::bioseq::simd::minimizer_algorithm> {
+    using target_t = ::bioseq::simd::minimizer_algorithm;
+    static constexpr target_t default_value = target_t::scalar;
     using value_list = value_sequence<target_t,
-        target_t::SCALAR,
-        target_t::SIMD_MINIMAP2_SLOW,
-        target_t::TWO_STACK_NTHASH,
-        target_t::VULKAN_MINIMAP_INT,
-        target_t::PAPER_NTHASH_SIMD>;
+        target_t::scalar,
+        target_t::simd_minimap2_reference,
+        target_t::two_stack_nthash,
+        target_t::vulkan_minimap_integer,
+        target_t::bounded_nthash_simd>;
 
-    template <class... Args>
+    template <class... p_arguments>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::Minimap2Params& p,
-        Args&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& p,
+        p_arguments&&...) noexcept
     {
         return p.minimizer_algorithm;
     }
@@ -6959,32 +6944,32 @@ struct algorithm_enum_values<::bioseq::simd::MinimizerAlgorithmType> {
 
 namespace detail {
 
-template <class Enum, Enum V>
+template <class p_enum, p_enum p_value>
 [[nodiscard]] consteval bool trait_specialised_for() noexcept {
-    return requires { typename algorithm_traits<V>::kernel_type; };
+    return requires { typename algorithm_traits<p_value>::kernel_type; };
 }
 
-template <class Enum, Enum... Vs>
+template <class p_enum, p_enum... p_values>
 [[nodiscard]] consteval bool all_traits_specialised_for(
-    value_sequence<Enum, Vs...>) noexcept
+    value_sequence<p_enum, p_values...>) noexcept
 {
-    return (trait_specialised_for<Enum, Vs>() && ...);
+    return (trait_specialised_for<p_enum, p_values>() && ...);
 }
 
 } // namespace detail
 
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::ChainingAlgorithmType>::value_list{}),
-    "algorithm_enum_values<ChainingAlgorithmType>::value_list contains a value "
+    algorithm_enum_values<::bioseq::simd::chaining_algorithm>::value_list{}),
+    "algorithm_enum_values<chaining_algorithm>::value_list contains a value "
     "without an algorithm_traits<>::kernel_type specialisation.  Add the trait "
     "specialisation alongside the enum value.");
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::BaseAlignmentAlgorithmType>::value_list{}),
-    "algorithm_enum_values<BaseAlignmentAlgorithmType>::value_list contains a "
+    algorithm_enum_values<::bioseq::simd::base_alignment_algorithm>::value_list{}),
+    "algorithm_enum_values<base_alignment_algorithm>::value_list contains a "
     "value without an algorithm_traits<>::kernel_type specialisation.");
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::MinimizerAlgorithmType>::value_list{}),
-    "algorithm_enum_values<MinimizerAlgorithmType>::value_list contains a "
+    algorithm_enum_values<::bioseq::simd::minimizer_algorithm>::value_list{}),
+    "algorithm_enum_values<minimizer_algorithm>::value_list contains a "
     "value without an algorithm_traits<>::kernel_type specialisation.");
 
 namespace detail {
@@ -6994,8 +6979,8 @@ namespace detail {
 /// first two args so a chain composing `seq_len_log2_step` into a call site
 /// lacking `(QR&, TR&)` in those slots produces a localised diagnostic
 /// at the chain instantiation point.
-template <class T>
-concept has_bp_size = requires (const T& x) {
+template <class p_type>
+concept has_bp_size = requires (const p_type& x) {
     { x.bp_size() } -> std::convertible_to<std::size_t>;
 };
 
@@ -7004,11 +6989,11 @@ struct seq_len_log2_registry {
     static constexpr std::size_t default_value = seq_len_log2_buckets[0];
     using value_list = seq_len_log2_buckets_seq;
 
-    template <has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
+    template <has_bp_size p_query_range, has_bp_size p_target_range, class... p_remaining_stages>
     [[nodiscard, gnu::always_inline]] static std::size_t read_field(
-        const ::bioseq::simd::Minimap2Params& params,
-        const QR_arg& q, const TR_arg& t,
-        Rest&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& params,
+        const p_query_range& q, const p_target_range& t,
+        p_remaining_stages&&...) noexcept
     {
         const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
         return round_up_seq_len_log2(
@@ -7021,40 +7006,40 @@ struct kmer_size_registry {
     static constexpr std::size_t default_value = kmer_size_default;
     using value_list = kmer_size_buckets_seq;
 
-    template <class... Args>
+    template <class... p_arguments>
     [[nodiscard, gnu::always_inline]] static constexpr std::size_t read_field(
-        const ::bioseq::simd::Minimap2Params& params,
-        Args&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& params,
+        p_arguments&&...) noexcept
     {
         return static_cast<std::size_t>(params.kmer_size);
     }
 };
 
-/// DOC0271 Phase 1 §5.1 — pinned-aware seq_len_log2 registry.
+///  Stage 1 — pinned-aware seq_len_log2 registry.
 ///
-/// Exposes `value_list_for<K, …>` and `read_field_for<K, …>` so the chain's
-/// `bucket_step_pinned` can iterate only the L breakpoints for the previously-pinned K.
-/// This collapses the 21-cell (L, K) Cartesian product (the global L union × K) into
-/// the per-K breakpoint count: `3 + 4 + 2 = 9` cells (K=15: 3 buckets, K=7: 4, K=27: 2).
+/// Exposes `value_list_for<p_kmer_size, …>` and `read_field_for<p_kmer_size, …>` so the chain's
+/// `dependent_bucket_step` can iterate only the p_bucket_width breakpoints for the previously-pinned p_kmer_size.
+/// This collapses the 21-cell (p_bucket_width, p_kmer_size) Cartesian product (the global p_bucket_width union × p_kmer_size) into
+/// the per-p_kmer_size breakpoint count: `3 + 4 + 2 = 9` cells (p_kmer_size=15: 3 buckets, p_kmer_size=7: 4, p_kmer_size=27: 2).
 ///
-/// Place this step *after* `kmer_size_step` in the chain so `Pinned... = (K, …)`.
+/// Place this step *after* `kmer_size_step` in the chain so `Pinned... = (p_kmer_size, …)`.
 struct seq_len_log2_registry_per_k {
     using target_t = std::size_t;
 
-    /// Anchored to K=15's lower bucket boundary (`compute_breakpoints_for<15>()[0]`).
+    /// Anchored to p_kmer_size=15's lower bucket boundary (`compute_breakpoints_for<15>()[0]`).
     /// The chain only ever pins `default_value` when `active_v` is false; today every
-    /// `bucket_step_pinned` is unconditionally active so this is dead code, but the
+    /// `dependent_bucket_step` is unconditionally active so this is dead code, but the
     /// chain primitive requires a value to thread through inactive steps.
     static constexpr std::size_t default_value = 15u;
 
-    template <std::size_t K, auto... /*RestPinned*/>
-    using value_list_for = per_k_breakpoints_seq<K>;
+    template <std::size_t p_kmer_size, auto... /*RestPinned*/>
+    using value_list_for = per_k_breakpoints_seq<p_kmer_size>;
 
-    template <std::size_t /*K_pinned*/, has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
+    template <std::size_t /*K_pinned*/, has_bp_size p_query_range, has_bp_size p_target_range, class... p_remaining_stages>
     [[nodiscard, gnu::always_inline]] static std::size_t read_field_for(
-        const ::bioseq::simd::Minimap2Params& params,
-        const QR_arg& q, const TR_arg& t,
-        Rest&&...) noexcept
+        const ::bioseq::simd::minimap2_parameters& params,
+        const p_query_range& q, const p_target_range& t,
+        p_remaining_stages&&...) noexcept
     {
         const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
         return round_up_seq_len_log2(
@@ -7065,179 +7050,179 @@ struct seq_len_log2_registry_per_k {
 } // namespace detail
 
 // =============================================================================
-// DOC0256 §5.7 / §5.8 / DOC0261 §4.6 — dispatch_chain primitive and step adapters
+// / / — dispatch_chain primitive and step adapters
 // =============================================================================
 //
 // The chain primitive and the three step adapters now live in
-// `bioseq_common.templating::dispatch_chain.cppm` (DOC0261 §4.6).
+// `bioseq.common.templating::dispatch_chain.cppm`.
 // They are re-exported here so the pipeline body keeps unqualified
-// names. The per-pipeline aliases below pin `Params = Minimap2Params`;
+// names. The per-pipeline aliases below pin `Params = minimap2_parameters`;
 // `pipeline_dispatch_chain` is the local alias that supplies the
-// `Minimap2Params` slot so chain call sites do not need to repeat it.
+// `minimap2_parameters` slot so chain call sites do not need to repeat it.
 
 namespace detail {
 
 using ::bioseq::common::templating::enum_step;
 using ::bioseq::common::templating::bucket_step;
-using ::bioseq::common::templating::bucket_step_pinned;
+using ::bioseq::common::templating::dependent_bucket_step;
 using ::bioseq::common::templating::guarded_step;
 
 using baa_step = enum_step<algorithm_enum_values<
-    ::bioseq::simd::BaseAlignmentAlgorithmType>>;
+    ::bioseq::simd::base_alignment_algorithm>>;
 using ca_step  = enum_step<algorithm_enum_values<
-    ::bioseq::simd::ChainingAlgorithmType>>;
+    ::bioseq::simd::chaining_algorithm>>;
 using ma_step  = enum_step<algorithm_enum_values<
-    ::bioseq::simd::MinimizerAlgorithmType>>;
+    ::bioseq::simd::minimizer_algorithm>>;
 using kmer_size_step    = enum_step<kmer_size_registry>;
 using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
 
-/// DOC0271 Phase 1 §5.1 — per-K seq_len_log2 step. Must follow `kmer_size_step`
-/// in the chain so the pinned-K's per-K breakpoint list is iterated.
-using seq_len_log2_step_per_k = bucket_step_pinned<seq_len_log2_registry_per_k>;
+///  Stage 1 — per-p_kmer_size seq_len_log2 step. Must follow `kmer_size_step`
+/// in the chain so the pinned-p_kmer_size's per-p_kmer_size breakpoint list is iterated.
+using seq_len_log2_step_per_k = dependent_bucket_step<seq_len_log2_registry_per_k>;
 
 /// Per-pipeline chain alias — pins `Params` to the only param type
-/// pipe.cppm ever uses. `R` and the leaf template stay as template
+/// pipe.cppm ever uses. `p_result` and the leaf template stay as template
 /// parameters because real call sites instantiate with different
-/// return types (MatchResultCollection / PipelineDescription / void).
-template <class R, template <auto...> class Leaf, class... Steps>
+/// return types (match_result_collection / pipeline_description / void).
+template <class p_result, template <auto...> class p_leaf, class... p_steps>
 using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
-    R, Leaf, ::bioseq::simd::Minimap2Params, Steps...>;
+    p_result, p_leaf, ::bioseq::simd::minimap2_parameters, p_steps...>;
 
 } // namespace detail
 
 // =============================================================================
-// DOC0256 §5.10 — Leaf types and traits aliases
+// — p_leaf types and traits aliases
 // =============================================================================
 //
-// `pipeline_run_leaf<EP, QR, TR, MT, IT, L, K, BAA, CA, MA>` is the
+// `pipeline_run_leaf<p_entry_point, QR, TR, MT, IT, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>` is the
 // namespace-scope class template that bottoms out the runtime cascade.
-// The Cep (Specialised vs Fallback) branch lifted from the deleted
+// The p_aligner_parameters (Specialised vs Fallback) branch lifted from the deleted
 // `dispatch_on_specialisation` lives inside the leaf body.
 //
-// `pipeline_run_traits<EP, QR, TR, MT, IT>::leaf<L, K, BAA, CA, MA>` is the
+// `pipeline_run_traits<p_entry_point, QR, TR, MT, IT>::leaf<p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>` is the
 // alias-template wrapper exposing the leaf as an NTTP-only `template
 // <auto...> class` view — the shape `dispatch_chain` requires for its
-// `template <auto...> class Leaf` template-template parameter.
+// `template <auto...> class p_leaf` template-template parameter.
 
 namespace detail {
 
-template <EntryPoint EP_v,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT,
-          std::size_t L, std::size_t K,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA,
-          ::bioseq::simd::MinimizerAlgorithmType     MA>
+template <pipeline_entry_point p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          std::size_t p_bucket_width, std::size_t p_kmer_size,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
+          ::bioseq::simd::minimizer_algorithm     p_minimizer_algorithm>
 struct pipeline_run_leaf {
-    static_assert(std::is_same_v<decltype(L), std::size_t>,
-        "pipeline_run_leaf: L must be std::size_t (comes from seq_len_log2_step).");
-    static_assert(std::is_same_v<decltype(K), std::size_t>,
-        "pipeline_run_leaf: K must be std::size_t (comes from kmer_size_step).");
-    static_assert(std::is_same_v<decltype(BAA),
-        ::bioseq::simd::BaseAlignmentAlgorithmType>,
-        "pipeline_run_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
-    static_assert(std::is_same_v<decltype(CA),
-        ::bioseq::simd::ChainingAlgorithmType>,
-        "pipeline_run_leaf: CA must be ChainingAlgorithmType (from ca_step).");
-    static_assert(std::is_same_v<decltype(MA),
-        ::bioseq::simd::MinimizerAlgorithmType>,
-        "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
+    static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>,
+        "pipeline_run_leaf: p_bucket_width must be std::size_t (comes from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>,
+        "pipeline_run_leaf: p_kmer_size must be std::size_t (comes from kmer_size_step).");
+    static_assert(std::is_same_v<decltype(p_alignment_algorithm),
+        ::bioseq::simd::base_alignment_algorithm>,
+        "pipeline_run_leaf: p_alignment_algorithm must be base_alignment_algorithm (from baa_step).");
+    static_assert(std::is_same_v<decltype(p_chaining_algorithm),
+        ::bioseq::simd::chaining_algorithm>,
+        "pipeline_run_leaf: p_chaining_algorithm must be chaining_algorithm (from ca_step).");
+    static_assert(std::is_same_v<decltype(p_minimizer_algorithm),
+        ::bioseq::simd::minimizer_algorithm>,
+        "pipeline_run_leaf: p_minimizer_algorithm must be minimizer_algorithm (from ma_step).");
 
-    template <class QueryMinimizers>
+    template <class p_query_minimizers>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
-    static MatchResultCollection call(
-        const ::bioseq::simd::Minimap2Params& params,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-        const QueryMinimizers&            query_minimizers,
-        const IndexT&                     target_index,
-        bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache,
-        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
+    static match_result_collection call(
+        const ::bioseq::simd::minimap2_parameters& params,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const p_query_minimizers&            query_minimizers,
+        const p_index&                     target_index,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
         bool allow_gpu_target_index_build,
-        TransientTargetIndexReleaseAuthority
+        transient_target_index_release_authorization
             transient_target_index_owner = {})
     {
-        using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        using specialized_parameters     = static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
         #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
-        using FallbackCep = ConstexprAlignerFallbackParams<63>;
+        using fallback_parameters = fallback_aligner_parameters<63>;
         #else
-        using FallbackCep = ConstexprAlignerFallbackParams<L>;
+        using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
         #endif
 
         #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
-        // Cep selection — lifted from the deleted `dispatch_on_specialisation`.
-        // Both Cep instantiations are present in the binary; the runtime
-        // `if` picks one.  Compile-time impact: identical to the v0 body.
+        // p_aligner_parameters selection — lifted from the deleted `dispatch_on_specialisation`.
+        // Both p_aligner_parameters instantiations are is_available in the binary; the runtime
+        // `if` picks one.  Compile-time impact: identical to the earlier design body.
         if (params.window_size == 10
-            && params.kmer_size == static_cast<int32_t>(K))
+            && params.kmer_size == static_cast<int32_t>(p_kmer_size))
         {
-            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, Alphabet,
-                                     MinimizerT, IndexT, QueryMinimizers>(
+            return pipeline_run_impl<specialized_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point, p_alphabet,
+                                     p_minimizer, p_index, p_query_minimizers>(
                 query_seq, target_seq, query_minimizers, target_index, params,
                 gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
                 transient_target_index_owner);
         }
         #endif
-        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, Alphabet,
-                                 MinimizerT, IndexT, QueryMinimizers>(
+        return pipeline_run_impl<fallback_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point, p_alphabet,
+                                 p_minimizer, p_index, p_query_minimizers>(
             query_seq, target_seq, query_minimizers, target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
             transient_target_index_owner);
     }
 };
 
-template <EntryPoint EP_v,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT>
+template <pipeline_entry_point p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index>
 struct pipeline_run_traits {
-    template <auto K, auto L, auto BAA, auto CA, auto MA>
+    template <auto p_kmer_size, auto p_bucket_width, auto p_alignment_algorithm, auto p_chaining_algorithm, auto p_minimizer_algorithm>
     using leaf = pipeline_run_leaf<
-        EP_v, Alphabet, MinimizerT, IndexT, L, K, BAA, CA, MA>;
+        p_entry_point, p_alphabet, p_minimizer, p_index, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>;
 };
 
-/// Common leaf body shared by both Spec and Fallback Cep branches inside
-/// `describe_leaf::call`.  Identical to the legacy `describe_pipeline_leaf`
-/// from the v0 design — kept under that name so the §7.1 chain instantiation
-/// can be expressed without renaming the legacy entry.  Declared before
+/// Common leaf body shared by both Spec and Fallback p_aligner_parameters branches inside
+/// `describe_leaf::call`.  Identical to the previous `describe_pipeline_leaf`
+/// from the earlier design — kept under that name so the chain instantiation
+/// can be expressed without renaming the previous entry.  Declared before
 /// `describe_leaf` so its unqualified call inside `describe_leaf::call`
 /// resolves at the point of template definition.
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA,
-          ::bioseq::simd::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          sequence_alphabet Alphabet>
-[[nodiscard]] PipelineDescription describe_pipeline_leaf(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ::bioseq::simd::Minimap2Params& params,
+template <is_constexpr_aligner_params p_aligner_parameters,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm,
+          ::bioseq::simd::minimizer_algorithm     p_minimizer_algorithm,
+          pipeline_entry_point                                                p_entry_point,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] pipeline_description describe_pipeline_leaf(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const ::bioseq::simd::minimap2_parameters& params,
     sequence_size_t query_len, sequence_size_t target_len,
-    const QuerySketchPlanRoute query_sketch_route)
+    const query_sketch_route query_sketch_route)
 {
-    using MinimizerT = typename Cep::minimizer_repr_t;
-    const std::vector<MinimizerT> empty_minimizers{};
-    MinimizerHashmapFragmentIndex empty_index{};
-    MatchResultCollection         ignored_out{};
-    const auto& sm = thread_local_scoring_matrix<Alphabet>(params);
+    using p_minimizer = typename p_aligner_parameters::minimizer_repr_t;
+    const std::vector<p_minimizer> empty_minimizers{};
+    minimizer_hashmap_fragment_index empty_index{};
+    match_result_collection         ignored_out{};
+    const auto& sm = thread_local_scoring_matrix<p_alphabet>(params);
     /* Description construction inspects selected stage traits and frozen
      * parameters; it never executes a kernel. Keep the runtime Highway table
      * out of this cold metadata path so plain EXPLAIN can describe an unbound
      * GUC snapshot before BatchProcessor performs the one allowed dispatch. */
-    const ::bioseq::simd::AlignmentKernels<Alphabet>
+    const ::bioseq::simd::alignment_kernels<p_alphabet>
         description_alignment_kernels{};
 
     auto pipeline =
-        make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet, MinimizerT,
-                              MinimizerHashmapFragmentIndex>(
+        make_minimap_pipeline<p_aligner_parameters, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point, p_alphabet, p_minimizer,
+                              minimizer_hashmap_fragment_index>(
         query_seq, target_seq, empty_minimizers, empty_index, sm,
         description_alignment_kernels, ignored_out, params,
         query_len, target_len);
-    auto description = describe_with_params<Cep>(pipeline);
+    auto description = describe_with_params<p_aligner_parameters>(pipeline);
     if (complete_all_gpu_tuple_selected(params)) {
         /* The scheduler admits this exact tuple only to the dedicated
          * resident GPU route and returns before constructing the generic
-         * CPU/SIMD pipeline. In particular, bounded CIGAR is produced by the
-         * Vulkan extension, not by the selected BLOCK_ALIGNER trait. Keep the
+         * CPU/simd pipeline. In particular, bounded CIGAR is produced by the
+         * Vulkan extension, not by the selected block_aligner trait. Keep the
          * generic stage skeleton for EXPLAIN, but do not advertise any of its
          * bypassed Highway entry points as planned work. */
         for (auto& stage : description.stages) {
@@ -7258,115 +7243,115 @@ template <is_constexpr_aligner_params Cep,
     return description;
 }
 
-// Describe-side leaf — EP/MA remain pinned so the structural stage skeleton
+// Describe-side leaf — p_entry_point/p_minimizer_algorithm remain pinned so the structural stage skeleton
 // does not multiply describe instantiations.  The exact query-minimizer
 // Highway function is resolved neutrally from the frozen runtime enum and
 // attached to the plan-only QuerySketchStage above.
-template <sequence_alphabet Alphabet,
-          std::size_t L, std::size_t K,
-          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::ChainingAlgorithmType      CA>
+template <sequence_alphabet p_alphabet,
+          std::size_t p_bucket_width, std::size_t p_kmer_size,
+          ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+          ::bioseq::simd::chaining_algorithm      p_chaining_algorithm>
 struct describe_leaf {
-    static_assert(std::is_same_v<decltype(L), std::size_t>,
-        "describe_leaf: L must be std::size_t (from seq_len_log2_step).");
-    static_assert(std::is_same_v<decltype(K), std::size_t>,
-        "describe_leaf: K must be std::size_t (from kmer_size_step).");
-    static_assert(std::is_same_v<decltype(BAA),
-        ::bioseq::simd::BaseAlignmentAlgorithmType>,
-        "describe_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
-    static_assert(std::is_same_v<decltype(CA),
-        ::bioseq::simd::ChainingAlgorithmType>,
-        "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
+    static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>,
+        "describe_leaf: p_bucket_width must be std::size_t (from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>,
+        "describe_leaf: p_kmer_size must be std::size_t (from kmer_size_step).");
+    static_assert(std::is_same_v<decltype(p_alignment_algorithm),
+        ::bioseq::simd::base_alignment_algorithm>,
+        "describe_leaf: p_alignment_algorithm must be base_alignment_algorithm (from baa_step).");
+    static_assert(std::is_same_v<decltype(p_chaining_algorithm),
+        ::bioseq::simd::chaining_algorithm>,
+        "describe_leaf: p_chaining_algorithm must be chaining_algorithm (from ca_step).");
 
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
-    static PipelineDescription call(
-        const ::bioseq::simd::Minimap2Params& params,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> t,
+    static pipeline_description call(
+        const ::bioseq::simd::minimap2_parameters& params,
+        bioseq::storage::lazy_sequence_view<p_alphabet> q,
+        bioseq::storage::lazy_sequence_view<p_alphabet> t,
         const int32_t& query_len,
         const int32_t& target_len,
-        const QuerySketchPlanRoute& query_sketch_route)
+        const query_sketch_route& query_sketch_route)
     {
-        using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        using specialized_parameters     = static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
         #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
-        using FallbackCep = ConstexprAlignerFallbackParams<63>;
+        using fallback_parameters = fallback_aligner_parameters<63>;
         #else
-        using FallbackCep = ConstexprAlignerFallbackParams<L>;
+        using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
         #endif
 
-        constexpr auto EP_describe = EntryPoint::WithPrebuiltMinimizers;
+        constexpr auto EP_describe = pipeline_entry_point::with_prebuilt_minimizers;
         constexpr auto MA_describe = algorithm_enum_values<
-            ::bioseq::simd::MinimizerAlgorithmType>::default_value;
+            ::bioseq::simd::minimizer_algorithm>::default_value;
         static_assert(MA_describe ==
-            ::bioseq::simd::MinimizerAlgorithmType::SCALAR,
-            "describe_leaf relies on MA default = SCALAR.  Update both call "
-            "sites if the MA default ever changes.");
+            ::bioseq::simd::minimizer_algorithm::scalar,
+            "describe_leaf relies on p_minimizer_algorithm default = scalar.  Update both call "
+            "sites if the p_minimizer_algorithm default ever changes.");
 
         #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
         if (params.window_size == 10
-            && params.kmer_size == static_cast<int32_t>(K))
+            && params.kmer_size == static_cast<int32_t>(p_kmer_size))
         {
-            return describe_pipeline_leaf<SpecCep, BAA, CA,
-                MA_describe, EP_describe, Alphabet>(
+            return describe_pipeline_leaf<specialized_parameters, p_alignment_algorithm, p_chaining_algorithm,
+                MA_describe, EP_describe, p_alphabet>(
                     q, t, params, query_len, target_len,
                     query_sketch_route);
         }
         #endif
-        return describe_pipeline_leaf<FallbackCep, BAA, CA,
-            MA_describe, EP_describe, Alphabet>(
+        return describe_pipeline_leaf<fallback_parameters, p_alignment_algorithm, p_chaining_algorithm,
+            MA_describe, EP_describe, p_alphabet>(
                 q, t, params, query_len, target_len,
                 query_sketch_route);
     }
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct describe_traits {
-    // DOC0271 Phase 1 §5.1: chain pins K before L (see pipeline_run_traits).
-    template <auto K, auto L, auto BAA, auto CA>
-    using leaf = describe_leaf<Alphabet, L, K, BAA, CA>;
+    //  Stage 1: chain pins p_kmer_size before p_bucket_width (see pipeline_run_traits).
+    template <auto p_kmer_size, auto p_bucket_width, auto p_alignment_algorithm, auto p_chaining_algorithm>
+    using leaf = describe_leaf<p_alphabet, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm>;
 };
 
 } // namespace detail
 
 // =============================================================================
-// DOC0256 §4.4 / §6.1 — top-level runtime cascade entry
+// / — top-level runtime cascade entry
 // =============================================================================
 //
 // Replaces every per-level dispatcher function (`dispatch_on_chain`,
 // `dispatch_on_chain_and_mini`, `dispatch_on_algorithms`,
-// `dispatch_on_specialisation`) and the hand-coded `(K, L)` ladder.  The
+// `dispatch_on_specialisation`) and the hand-coded `(p_kmer_size, p_bucket_width)` ladder.  The
 // body is a single `dispatch_chain<...>::run<>(...)` line over five steps
-// (L, K, BAA, CA, MA) — see DOC0256 §R16.
+// (p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm) — see
 
-template <EntryPoint EP,
-          sequence_alphabet Alphabet,
-          class MinimizerT, class IndexT,
-          class QueryMinimizers = std::vector<MinimizerT>>
+template <pipeline_entry_point p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          class p_query_minimizers = std::vector<p_minimizer>>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
-MatchResultCollection dispatch_pipeline(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const QueryMinimizers&            query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::Minimap2Params& params,
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+match_result_collection dispatch_pipeline(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const p_query_minimizers&            query_minimizers,
+    const p_index&                     target_index,
+    const ::bioseq::simd::minimap2_parameters& params,
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
-    TransientTargetIndexReleaseAuthority
+    transient_target_index_release_authorization
         transient_target_index_owner = {})
 {
-    using Traits = detail::pipeline_run_traits<EP, Alphabet, MinimizerT, IndexT>;
-    // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
-    // iterate only the breakpoints relevant for the pinned K.
+    using traits_type = detail::pipeline_run_traits<p_entry_point, p_alphabet, p_minimizer, p_index>;
+    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order so the p_bucket_width step (per-p_kmer_size) can
+    // iterate only the breakpoints relevant for the pinned p_kmer_size.
     return detail::dispatch_chain<
-        MatchResultCollection,
-        Traits::template leaf,
+        match_result_collection,
+        traits_type::template leaf,
         detail::kmer_size_step,
         detail::seq_len_log2_step_per_k,
         detail::baa_step,
         detail::ca_step,
         detail::guarded_step<detail::ma_step,
-            /*active=*/(EP != EntryPoint::WithPrebuiltMinimizers)>
+            /*active=*/(p_entry_point != pipeline_entry_point::with_prebuilt_minimizers)>
     >::template run<>(
         params, query_seq, target_seq, query_minimizers, target_index,
         gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
@@ -7374,30 +7359,30 @@ MatchResultCollection dispatch_pipeline(
 }
 
 // =============================================================================
-// DOC0256 §7.1 — describe_pipeline_for (EXPLAIN path)
+// — describe_pipeline_for (EXPLAIN path)
 // =============================================================================
 //
-// One chain instantiation over four steps (L, K, BAA, CA). EP and MA are
+// One chain instantiation over four steps (p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm). p_entry_point and p_minimizer_algorithm are
 // pinned constants inside `describe_leaf`; algorithm-specific query-sketch
 // metadata is added through the neutral enum-to-kernel mapping above.
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
-PipelineDescription describe_pipeline_for(
-    const ::bioseq::simd::Minimap2Params& params,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_proto,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_proto,
-    const QuerySketchPlanRoute query_sketch_route =
-        QuerySketchPlanRoute::recompute_capable)
+pipeline_description describe_pipeline_for(
+    const ::bioseq::simd::minimap2_parameters& params,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_proto,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_proto,
+    const query_sketch_route query_sketch_route =
+        query_sketch_route::recompute_capable)
 {
     const sequence_size_t query_len  = query_seq_proto.bp_size();
     const sequence_size_t target_len = target_seq_proto.bp_size();
 
-    using Traits = detail::describe_traits<Alphabet>;
-    // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
+    using traits_type = detail::describe_traits<p_alphabet>;
+    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order (per-p_kmer_size p_bucket_width step).
     return detail::dispatch_chain<
-        PipelineDescription,
-        Traits::template leaf,
+        pipeline_description,
+        traits_type::template leaf,
         detail::kmer_size_step,
         detail::seq_len_log2_step_per_k,
         detail::baa_step,
@@ -7408,60 +7393,60 @@ PipelineDescription describe_pipeline_for(
 }
 
 /**
- * Cold typed EXPLAIN entry. The owning metadata registry selects `Alphabet`
+ * Cold typed EXPLAIN entry. The owning metadata registry selects `p_alphabet`
  * and supplies its runtime code together, so this layer neither redispatches
  * nor maintains a second type/code map.
  */
-template <sequence_alphabet Alphabet>
-[[nodiscard]] inline PipelineDescription describe_pipeline_for(
-    const ::bioseq::simd::Minimap2Params& params,
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline pipeline_description describe_pipeline_for(
+    const ::bioseq::simd::minimap2_parameters& params,
     const std::uint8_t alphabet_code,
-    const QuerySketchPlanRoute query_sketch_route =
-        QuerySketchPlanRoute::recompute_capable)
+    const query_sketch_route query_sketch_route =
+        query_sketch_route::recompute_capable)
 {
     if (params.highway_kernels != nullptr) {
-        const auto* identity = params.highway_kernels->complete()
+        const auto* identity = params.highway_kernels->is_complete()
             ? params.highway_kernels
-                ->template resolve_alphabet_identity<Alphabet>()
+                ->template resolve_alphabet_identity<p_alphabet>()
             : nullptr;
         if (identity == nullptr || identity->alphabet_code != alphabet_code
             || params.highway_kernels->resolve_alphabet_identity(
                    alphabet_code) != identity) {
             throw std::invalid_argument{
-                "pipeline description received mismatched alphabet evidence"};
+                "pipeline description received mismatched alphabet identity"};
         }
     }
-    using Proto = sequence_custom_alphabet<Alphabet, std::uint64_t>;
-    compact_sequence_range<Proto> empty_query_proto{};
-    compact_sequence_range<Proto> empty_target_proto{};
+    using sequence_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    compact_sequence_range<sequence_type> empty_query_proto{};
+    compact_sequence_range<sequence_type> empty_target_proto{};
     auto empty_query_owner =
-        bioseq::storage::make_lazy_in_memory(empty_query_proto);
+        bioseq::storage::make_resident_lazy_sequence(empty_query_proto);
     auto empty_target_owner =
-        bioseq::storage::make_lazy_in_memory(empty_target_proto);
+        bioseq::storage::make_resident_lazy_sequence(empty_target_proto);
     auto typed_params = params;
     typed_params.alphabet_code = alphabet_code;
     return describe_pipeline_for(
         typed_params,
-        bioseq::storage::as_lazy_sequence_view(empty_query_owner),
-        bioseq::storage::as_lazy_sequence_view(empty_target_owner),
+        bioseq::storage::make_lazy_sequence_view(empty_query_owner),
+        bioseq::storage::make_lazy_sequence_view(empty_target_owner),
         query_sketch_route);
 }
 
 } // namespace bioseq::simd::pipe
 
 // =============================================================================
-// 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
+// 9.7 Public entry points — relocated from minimap_port.cppm so
 // they can delegate to `pipe::dispatch_pipeline` without forming a circular
 // import. These scheduler-facing entry points are target-neutral and receive
-// the already-selected Highway table through Minimap2Params.
+// the already-selected Highway table through minimap2_parameters.
 // =============================================================================
 
 namespace bioseq::simd {
 
-// DOC0279 §9 — relocated index name in scope for this namespace's entry points.
-using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::MinimizerLookupIndex;
-using bioseq::indexing::MinimizerSeedIndex;
+// — relocated index name in scope for this namespace's entry points.
+using bioseq::indexing::minimizer_hashmap_fragment_index;
+using bioseq::indexing::minimizer_lookup_index;
+using bioseq::indexing::minimizer_seed_index;
 
 namespace pipe_entry_detail {
 
@@ -7469,42 +7454,42 @@ namespace pipe_entry_detail {
 // a sparse result whose allocator pages were already resident retains its exact
 // permit; query and ordinary small-target sketches keep the collector route.
 inline constexpr std::uint64_t
-    kVulkanFixedHostAdoptionTargetMinimumBp = std::uint64_t{256} << 20u;
+    k_vulkan_fixed_host_adoption_target_minimum_bp = std::uint64_t{256} << 20u;
 
 /// Select the fixed host-ownership transaction only for a large target sketch
 /// whose complete execution tuple is accepted by the source-direct device ABI.
 /// Query sketching and every incompatible target intentionally remain on the
 /// established collector-compatible Vulkan route.
-template <class MinimizerT>
+template <class p_minimizer>
 [[nodiscard]] constexpr bool
 fixed_vulkan_target_host_adoption_route_selected(
-        bool phase_c_gpu_index,
-        const Minimap2Params& params,
+        bool is_gpu_target_index_build,
+        const minimap2_parameters& params,
         std::uint32_t alphabet_size,
         std::uint64_t target_bp) noexcept {
-    return !phase_c_gpu_index
+    return !is_gpu_target_index_build
         && params.vulkan_enabled
         && params.vulkan_seed_hits_enabled
         && !params.vulkan_fused_frontend_enabled
         && !params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm
-            == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
-        && bioseq::indexing::gpu_source_direct_tuple_supported<MinimizerT>(
+            == minimizer_algorithm::vulkan_minimap_integer
+        && bioseq::indexing::gpu_source_direct_tuple_supported<p_minimizer>(
             alphabet_size,
             params.kmer_size,
             params.window_size)
-        && target_bp >= kVulkanFixedHostAdoptionTargetMinimumBp;
+        && target_bp >= k_vulkan_fixed_host_adoption_target_minimum_bp;
 }
 
-/// Evidence carried with the fixed Vulkan target host allocation.  The host
+/// Accounting receipt carried with the fixed Vulkan target host allocation. The host
 /// allocation has exactly one accounting authority: either its fully-touched
 /// bytes were reconciled into process footprint and the permit was released,
 /// or an exact permit remains attached to the allocation.  Empty output is the
 /// footprint-authoritative zero-byte case.
-template <class MinimizerT>
-struct VulkanSketchHostAdoptionReceipt {
-    const MinimizerT* source_data = nullptr;
-    const MinimizerT* adopted_data = nullptr;
+template <class p_minimizer>
+struct vulkan_sketch_host_adoption_receipt {
+    const p_minimizer* source_data = nullptr;
+    const p_minimizer* adopted_data = nullptr;
     std::size_t adopted_size = 0u;
     std::size_t adopted_capacity = 0u;
     std::size_t source_capacity_after_adoption = 0u;
@@ -7512,43 +7497,43 @@ struct VulkanSketchHostAdoptionReceipt {
     std::uint64_t retained_host_permit_bytes = 0u;
     std::uint64_t host_footprint_reflected_delta_bytes = 0u;
     std::uint64_t device_allocation_bytes_released = 0u;
-    bool host_permit_released_to_process_footprint = false;
-    bool device_owner_present_before_adoption = false;
+    bool is_host_permit_released_to_process_footprint = false;
+    bool device_owner_available_before_adoption = false;
     bool device_owner_unique_before_adoption = false;
     bool device_released_before_return = false;
     bool arena_trimmed_before_adoption = false;
-    bioseq::gpu::vulkan::VulkanSketchDispatchToken dispatch_token{};
+    bioseq::gpu::vulkan::vulkan_sketch_dispatch_token dispatch_token{};
 
-    [[nodiscard]] bool zero_copy_adoption_accepted() const noexcept {
+    [[nodiscard]] bool is_zero_copy_adoption_valid() const noexcept {
         const std::uint64_t expected_capacity_bytes =
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(adopted_capacity),
-                static_cast<std::uint64_t>(sizeof(MinimizerT)));
-        const bool allocation_identity_accepted = adopted_size == 0u
+                static_cast<std::uint64_t>(sizeof(p_minimizer)));
+        const bool is_allocation_identity_accepted = adopted_size == 0u
             ? adopted_capacity == 0u && host_capacity_bytes == 0u
             : source_data == adopted_data
                 && adopted_capacity == adopted_size
                 && host_capacity_bytes == expected_capacity_bytes;
         const bool footprint_authority =
-            host_permit_released_to_process_footprint
+            is_host_permit_released_to_process_footprint
             && retained_host_permit_bytes == 0u
             && (host_capacity_bytes == 0u
                 || host_footprint_reflected_delta_bytes
                     >= host_capacity_bytes);
         const bool retained_permit_authority =
-            !host_permit_released_to_process_footprint
+            !is_host_permit_released_to_process_footprint
             && host_capacity_bytes != 0u
             && retained_host_permit_bytes == host_capacity_bytes;
-        return allocation_identity_accepted
+        return is_allocation_identity_accepted
             && expected_capacity_bytes
                 != (std::numeric_limits<std::uint64_t>::max)()
             && source_capacity_after_adoption == 0u
             && footprint_authority != retained_permit_authority
-            && device_owner_present_before_adoption
+            && device_owner_available_before_adoption
             && device_owner_unique_before_adoption
             && device_released_before_return
             && arena_trimmed_before_adoption
-            && dispatch_token.accepted();
+            && dispatch_token.is_internally_consistent();
     }
 };
 
@@ -7557,21 +7542,21 @@ struct VulkanSketchHostAdoptionReceipt {
 /// the allocation before returning its reservation.  Move assignment is
 /// intentionally unavailable: memberwise assignment would release an existing
 /// destination permit before freeing its destination vector.
-template <class MinimizerT>
-struct FixedVulkanTargetHostOwner {
-    std::optional<bioseq::parallelism::MemoryPermit> host_permit;
-    std::vector<MinimizerT> minimizers;
-    VulkanSketchHostAdoptionReceipt<MinimizerT> adoption{};
+template <class p_minimizer>
+struct fixed_vulkan_target_host_owner {
+    std::optional<bioseq::parallelism::memory_permit> host_permit;
+    std::vector<p_minimizer> minimizers;
+    vulkan_sketch_host_adoption_receipt<p_minimizer> adoption{};
 
-    FixedVulkanTargetHostOwner() = default;
-    FixedVulkanTargetHostOwner(const FixedVulkanTargetHostOwner&) = delete;
-    FixedVulkanTargetHostOwner& operator=(
-        const FixedVulkanTargetHostOwner&) = delete;
-    FixedVulkanTargetHostOwner& operator=(
-        FixedVulkanTargetHostOwner&&) = delete;
+    fixed_vulkan_target_host_owner() = default;
+    fixed_vulkan_target_host_owner(const fixed_vulkan_target_host_owner&) = delete;
+    fixed_vulkan_target_host_owner& operator=(
+        const fixed_vulkan_target_host_owner&) = delete;
+    fixed_vulkan_target_host_owner& operator=(
+        fixed_vulkan_target_host_owner&&) = delete;
 
-    FixedVulkanTargetHostOwner(
-            FixedVulkanTargetHostOwner&& other) noexcept {
+    fixed_vulkan_target_host_owner(
+            fixed_vulkan_target_host_owner&& other) noexcept {
         // Swap the allocation while the source permit is still live, then move
         // its authority.  The destination is newly constructed and empty.
         minimizers.swap(other.minimizers);
@@ -7583,15 +7568,15 @@ struct FixedVulkanTargetHostOwner {
         other.host_permit.reset();
     }
 
-    [[nodiscard]] bool ownership_authority_accepted() const noexcept {
-        const bool valid_permit_present = host_permit.has_value()
+    [[nodiscard]] bool has_valid_ownership_authorization() const noexcept {
+        const bool valid_permit_available = host_permit.has_value()
             && static_cast<bool>(*host_permit);
         const bool footprint_authority =
-            adoption.host_permit_released_to_process_footprint
+            adoption.is_host_permit_released_to_process_footprint
             && !host_permit.has_value();
         const bool retained_permit_authority =
-            !adoption.host_permit_released_to_process_footprint
-            && valid_permit_present
+            !adoption.is_host_permit_released_to_process_footprint
+            && valid_permit_available
             && host_permit->bytes() == adoption.host_capacity_bytes
             && host_permit->bytes()
                 == adoption.retained_host_permit_bytes;
@@ -7600,14 +7585,14 @@ struct FixedVulkanTargetHostOwner {
             && minimizers.capacity() == adoption.adopted_capacity
             && (minimizers.empty()
                 || minimizers.data() == adoption.adopted_data);
-        return adoption.zero_copy_adoption_accepted()
+        return adoption.is_zero_copy_adoption_valid()
             && allocation_matches_receipt
             && footprint_authority != retained_permit_authority;
     }
 
     void release_consumed_host_permit() {
         if (minimizers.capacity() != 0u) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "fixed Vulkan host permit release preceded vector "
                 "deallocation"};
         }
@@ -7615,22 +7600,22 @@ struct FixedVulkanTargetHostOwner {
     }
 };
 
-template <class MinimizerT>
+template <class p_minimizer>
 void release_fixed_vulkan_source_after_resident_publication(
-    FixedVulkanTargetHostOwner<MinimizerT>& source,
-    pipe::DirectResidentOperationLedger& ledger,
+    fixed_vulkan_target_host_owner<p_minimizer>& source,
+    pipe::direct_resident_operation_stats& ledger,
     bool resident_published)
 {
     const std::uint64_t released_bytes =
-        bioseq::parallelism::saturating_mul(
-            source.minimizers.capacity(), sizeof(MinimizerT));
+        bioseq::common::saturating_mul(
+            source.minimizers.capacity(), sizeof(p_minimizer));
     {
-        std::vector<MinimizerT> empty;
+        std::vector<p_minimizer> empty;
         source.minimizers.swap(empty);
     }
     if (source.host_permit.has_value()) {
         if (source.minimizers.capacity() != 0u) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct host permit release preceded source storage"};
         }
         source.host_permit.reset();
@@ -7646,7 +7631,7 @@ void release_fixed_vulkan_source_after_resident_publication(
 /// handoff.  Keeping the transaction in one helper lets tests exercise the
 /// same reserve/build/validate path used by `minimap2_port` instead of merely
 /// reproducing its arithmetic.
-struct VulkanTargetIndexHandoffReceipt {
+struct vulkan_target_index_handoff_receipt {
     std::uint64_t admitted_position_headroom_bytes = 0u;
     std::uint64_t admitted_table_headroom_bytes = 0u;
     std::uint64_t admitted_build_bytes = 0u;
@@ -7670,7 +7655,7 @@ struct VulkanTargetIndexHandoffReceipt {
     bool source_host_permit_cleared_after_consumption = false;
     bool source_adoption_cleared_after_consumption = false;
 
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_valid() const noexcept {
         return source_capacity_released
             && source_host_permit_cleared_after_consumption
             && source_adoption_cleared_after_consumption
@@ -7678,10 +7663,10 @@ struct VulkanTargetIndexHandoffReceipt {
                 <= admitted_position_headroom_bytes
             && retained_table_bytes <= admitted_table_headroom_bytes
             && retained_index_bytes
-                == bioseq::parallelism::saturating_add(
+                == bioseq::common::saturating_add(
                     retained_position_bytes, retained_table_bytes)
             && retained_index_bytes
-                == bioseq::parallelism::saturating_add(
+                == bioseq::common::saturating_add(
                     retained_index_permit_bytes,
                     transferred_position_footprint_bytes)
             && transferred_position_footprint_bytes
@@ -7695,7 +7680,7 @@ struct VulkanTargetIndexHandoffReceipt {
             && retained_position_initialized_bytes
                 == retained_position_bytes
             && retained_position_initialized_bytes
-                == bioseq::parallelism::saturating_mul(
+                == bioseq::common::saturating_mul(
                     retained_position_count,
                     static_cast<std::uint64_t>(sizeof(std::uint64_t)))
             && (!source_footprint_authority_transferred_to_positions
@@ -7714,18 +7699,18 @@ struct VulkanTargetIndexHandoffReceipt {
 /// index permit precedes the index so reverse destruction releases table and
 /// position storage first.  Move assignment is deleted to rule out releasing a
 /// destination permit before its previous index storage is deallocated.
-struct VulkanAdmittedTargetIndex {
-    std::optional<bioseq::parallelism::MemoryPermit> index_permit;
-    MinimizerHashmapFragmentIndex index;
-    VulkanTargetIndexHandoffReceipt receipt{};
+struct vulkan_admitted_target_index {
+    std::optional<bioseq::parallelism::memory_permit> index_permit;
+    minimizer_hashmap_fragment_index index;
+    vulkan_target_index_handoff_receipt receipt{};
 
-    VulkanAdmittedTargetIndex() = default;
-    VulkanAdmittedTargetIndex(const VulkanAdmittedTargetIndex&) = delete;
-    VulkanAdmittedTargetIndex& operator=(
-        const VulkanAdmittedTargetIndex&) = delete;
-    VulkanAdmittedTargetIndex& operator=(VulkanAdmittedTargetIndex&&) = delete;
+    vulkan_admitted_target_index() = default;
+    vulkan_admitted_target_index(const vulkan_admitted_target_index&) = delete;
+    vulkan_admitted_target_index& operator=(
+        const vulkan_admitted_target_index&) = delete;
+    vulkan_admitted_target_index& operator=(vulkan_admitted_target_index&&) = delete;
 
-    VulkanAdmittedTargetIndex(VulkanAdmittedTargetIndex&& other) noexcept
+    vulkan_admitted_target_index(vulkan_admitted_target_index&& other) noexcept
         : index(std::move(other.index)),
           receipt(other.receipt) {
         // Move storage while the source reservation remains authoritative,
@@ -7737,8 +7722,8 @@ struct VulkanAdmittedTargetIndex {
         other.receipt = {};
     }
 
-    [[nodiscard]] bool accepted() const noexcept {
-        return receipt.accepted()
+    [[nodiscard]] bool is_valid() const noexcept {
+        return receipt.is_valid()
             && index_permit.has_value()
             && static_cast<bool>(*index_permit)
             && index_permit->bytes()
@@ -7751,21 +7736,21 @@ struct VulkanAdmittedTargetIndex {
     }
 };
 
-template <class MinimizerT>
-[[nodiscard]] VulkanAdmittedTargetIndex
+template <class p_minimizer>
+[[nodiscard]] vulkan_admitted_target_index
 admit_and_build_fixed_vulkan_target_index(
-    FixedVulkanTargetHostOwner<MinimizerT> target_host,
+    fixed_vulkan_target_host_owner<p_minimizer> target_host,
     sequence_size_t target_len)
 {
-    if (!target_host.ownership_authority_accepted()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+    if (!target_host.has_valid_ownership_authorization()) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan zero-copy target-index handoff lacks host ownership "
             "authority"};
     }
     const bool source_host_permit_retained_during_build =
         target_host.host_permit.has_value();
     const bool source_footprint_authority_before_build =
-        target_host.adoption.host_permit_released_to_process_footprint
+        target_host.adoption.is_host_permit_released_to_process_footprint
         && !target_host.host_permit.has_value();
     const std::uint64_t source_host_capacity_bytes_before_build =
         target_host.adoption.host_capacity_bytes;
@@ -7778,7 +7763,7 @@ admit_and_build_fixed_vulkan_target_index(
             ? target_host.host_permit->bytes()
             : 0u;
     const std::uint64_t position_payload_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(target_host.minimizers.size()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     // Empty sketches retain neither positions nor a table.  Do not turn the
@@ -7789,7 +7774,7 @@ admit_and_build_fixed_vulkan_target_index(
             : bioseq::gpu::vulkan::
                 vulkan_exact_host_allocation_admission_bytes(
                     position_payload_bytes);
-    const bioseq::indexing::MinimizerHashmapTableAllocationPlan table_plan =
+    const bioseq::indexing::minimizer_hashmap_table_allocation_plan table_plan =
         bioseq::indexing::minimizer_hashmap_table_allocation_plan(
             static_cast<std::uint64_t>(target_host.minimizers.size()));
     const std::uint64_t admitted_table_headroom_bytes = !table_plan.valid
@@ -7800,7 +7785,7 @@ admit_and_build_fixed_vulkan_target_index(
                 vulkan_exact_host_allocation_admission_bytes(
                     table_plan.allocation_bytes);
     const std::uint64_t build_peak_bytes =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             admitted_position_headroom_bytes,
             admitted_table_headroom_bytes);
     if (position_payload_bytes
@@ -7811,13 +7796,13 @@ admit_and_build_fixed_vulkan_target_index(
             == (std::numeric_limits<std::uint64_t>::max)()
         || build_peak_bytes
             == (std::numeric_limits<std::uint64_t>::max)()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan zero-copy target-index handoff has invalid "
             "capacity accounting"};
     }
-    VulkanAdmittedTargetIndex admitted_index;
+    vulkan_admitted_target_index admitted_index;
     auto& admission =
-        bioseq::parallelism::MemoryAdmissionController::instance();
+        bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t reserved_bytes_before_index_admission =
         admission.reserved_bytes();
     if (source_host_permit_retained_during_build) {
@@ -7825,16 +7810,16 @@ admit_and_build_fixed_vulkan_target_index(
         // allocator pages are visible in RSS.  The conservative overlap can
         // deny a medium sparse result, but it never over-admits the real
         // host-vector + positions + one-shot FOA-table build peak.
-        bioseq_log<DBG>(
+        bioseq_log<logging_level::debug>(
             "[vulkan sketch] strict target-index handoff keeps sparse host "
             "permit through build: host={} index_peak={}",
             source_host_permit_bytes_before_build,
             build_peak_bytes);
     }
-    bioseq::parallelism::MemoryAdmissionFailure failure{};
+    bioseq::parallelism::memory_admission_failure failure{};
     auto permit = admission.try_reserve(build_peak_bytes, &failure);
     if (!permit.has_value()) {
-        bioseq_log<ERR>(
+        bioseq_log<logging_level::error>(
             "[vulkan sketch] strict target-index handoff admission "
             "denied: peak={} positions={} table={} requested={} "
             "reserved={} allocatable_after_reservations={}",
@@ -7844,7 +7829,7 @@ admit_and_build_fixed_vulkan_target_index(
             failure.requested_bytes,
             failure.reserved_bytes,
             failure.allocatable_after_reservations_bytes);
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan zero-copy target-index handoff admission denied"};
     }
     admitted_index.index_permit.emplace(std::move(*permit));
@@ -7853,7 +7838,7 @@ admit_and_build_fixed_vulkan_target_index(
     admitted_index.index.build_consuming_full_table(
         std::move(target_host.minimizers), target_len);
     const std::uint64_t retained_position_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(
                 admitted_index.index.positions.capacity()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
@@ -7862,11 +7847,11 @@ admit_and_build_fixed_vulkan_target_index(
     const std::uint64_t retained_position_count =
         static_cast<std::uint64_t>(admitted_index.index.positions.size());
     const std::uint64_t retained_position_initialized_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             retained_position_count,
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     const std::uint64_t retained_index_bytes =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             retained_position_bytes, retained_table_bytes);
     if (target_host.minimizers.capacity() != 0u
         || retained_position_bytes
@@ -7880,7 +7865,7 @@ admit_and_build_fixed_vulkan_target_index(
         || retained_table_bytes != table_plan.allocation_bytes
         || retained_index_bytes
             == (std::numeric_limits<std::uint64_t>::max)()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan zero-copy target-index build exceeded admitted "
             "host capacity"};
     }
@@ -7911,7 +7896,7 @@ admit_and_build_fixed_vulkan_target_index(
             : 0u;
     const std::uint64_t retained_index_permit_bytes =
         retained_index_bytes - transferred_position_footprint_bytes;
-    bioseq_log<INF>(
+    bioseq_log<logging_level::info>(
         "[vulkan sketch] strict target-index replacement authority: "
         "source_authority={} source_capacity={} source_reflected={} "
         "source_permit={} source_count={} position_count={} "
@@ -7938,9 +7923,9 @@ admit_and_build_fixed_vulkan_target_index(
         target_host.adoption.adopted_size == 0u
         && target_host.adoption.host_capacity_bytes == 0u
         && !target_host.adoption.
-            host_permit_released_to_process_footprint;
+            is_host_permit_released_to_process_footprint;
     admitted_index.index_permit->shrink_to(retained_index_permit_bytes);
-    admitted_index.receipt = VulkanTargetIndexHandoffReceipt{
+    admitted_index.receipt = vulkan_target_index_handoff_receipt{
         .admitted_position_headroom_bytes =
             admitted_position_headroom_bytes,
         .admitted_table_headroom_bytes = admitted_table_headroom_bytes,
@@ -7981,8 +7966,8 @@ admit_and_build_fixed_vulkan_target_index(
         .source_adoption_cleared_after_consumption =
             source_adoption_cleared_after_consumption,
     };
-    if (!admitted_index.accepted()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+    if (!admitted_index.is_valid()) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan zero-copy target-index owning receipt was rejected"};
     }
     return admitted_index;
@@ -7992,102 +7977,102 @@ admit_and_build_fixed_vulkan_target_index(
 
 /**
  * @brief Run the minimap2 pipeline against a pre-built target index using a
- * caller-supplied query minimiser vector (DOC0249 §9.7).
+ * caller-supplied query minimiser vector.
  *
  * Single-query convenience wrapper that hands off to
- * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>(...)`.  All algorithm-
+ * `pipe::dispatch_pipeline<p_entry_point::with_prebuilt_minimizers>(...)`.  All algorithm-
  * choice and bucket dispatch happens inside the pipe cascade — no
- * `(BAA, CA)` switch at this layer.
+ * `(p_alignment_algorithm, p_chaining_algorithm)` switch at this layer.
  */
-template <class MinimizerT,
-          sequence_alphabet Alphabet,
-          ::bioseq::indexing::MinimizerSeedIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params = Minimap2Params{},
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+template <class p_minimizer,
+          sequence_alphabet p_alphabet,
+          ::bioseq::indexing::minimizer_seed_index p_index>
+[[nodiscard]] match_result_collection minimap2_port_with_index(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const std::vector<p_minimizer>& query_minimizers,
+    const p_index& prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false)
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("minimap2_port_with_index");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("minimap2_port_with_index");
+    auto _scope = bioseq::instrumentation::region(_desc);
     return ::bioseq::simd::pipe::dispatch_pipeline<
-        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
-            Alphabet, MinimizerT, IndexT>(
+        ::bioseq::simd::pipe::pipeline_entry_point::with_prebuilt_minimizers,
+            p_alphabet, p_minimizer, p_index>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
-template <class MinimizerT,
-          sequence_alphabet Alphabet,
-          ::bioseq::indexing::MinimizerSeedIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ::bioseq::simd::pipe::MinimizerBatchView<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params = Minimap2Params{},
-    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
-    bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
+template <class p_minimizer,
+          sequence_alphabet p_alphabet,
+          ::bioseq::indexing::minimizer_seed_index p_index>
+[[nodiscard]] match_result_collection minimap2_port_with_index(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const ::bioseq::simd::pipe::minimizer_batch_view<p_minimizer>& query_minimizers,
+    const p_index& prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false)
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("minimap2_port_with_index");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("minimap2_port_with_index");
+    auto _scope = bioseq::instrumentation::region(_desc);
     return ::bioseq::simd::pipe::dispatch_pipeline<
-        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
-            Alphabet, MinimizerT, IndexT>(
+        ::bioseq::simd::pipe::pipeline_entry_point::with_prebuilt_minimizers,
+            p_alphabet, p_minimizer, p_index>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 /**
  * @brief Run the minimap2 pipeline against pre-built target minimizers
- * (DOC0249 §9.7 / legacy minimap2_port shape).
+ * ( / previous minimap2_port shape).
  *
  * Builds a TargetIndex from `target_minimizers` and delegates to
  * `minimap2_port_with_index`.
  */
-template <class MinimizerT,
-          sequence_alphabet Alphabet>
-[[nodiscard]] MatchResultCollection minimap2_port(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    std::vector<MinimizerT> target_minimizers,
-    const Minimap2Params& params = Minimap2Params{})
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection minimap2_port(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const std::vector<p_minimizer>& query_minimizers,
+    std::vector<p_minimizer> target_minimizers,
+    const minimap2_parameters& params = minimap2_parameters{})
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("minimap2_port");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("minimap2_port");
+    auto _scope = bioseq::instrumentation::region(_desc);
     const sequence_size_t target_len = target_seq.bp_size();
-    MinimizerHashmapFragmentIndex target_index;
-    // DOC0310 §16 — for the Phase C leaf with the GPU index build active, leave
+    minimizer_hashmap_fragment_index target_index;
+    // — for the Stage C leaf with the GPU index build active, leave
     // the CPU index empty; `pipeline_run_impl_batch` must build it on the
     // device. This is the line that removes the XXL_HIFI
     // `target_index_build` bottleneck from the GPU row.
-    const bool phase_c_gpu_index =
-        ::bioseq::simd::pipe::phase_c_index_build_active(params);
-    if (!phase_c_gpu_index) {
+    const bool is_gpu_target_index_build =
+        ::bioseq::simd::pipe::is_gpu_target_index_build_active(params);
+    if (!is_gpu_target_index_build) {
         target_index.build_consuming(
             std::move(target_minimizers), target_len);
     } else {
-        std::vector<MinimizerT>{}.swap(target_minimizers);
+        std::vector<p_minimizer>{}.swap(target_minimizers);
     }
     static const auto* _with_index_desc =
-        bioseq::instr::register_region_static("minimap2_port_with_index");
-    auto _with_index_scope = bioseq::instr::region(_with_index_desc);
+        bioseq::instrumentation::register_static_region("minimap2_port_with_index");
+    auto _with_index_scope = bioseq::instrumentation::region(_with_index_desc);
     return ::bioseq::simd::pipe::dispatch_pipeline<
-        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
-            Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
+        ::bioseq::simd::pipe::pipeline_entry_point::with_prebuilt_minimizers,
+            p_alphabet, p_minimizer, minimizer_hashmap_fragment_index>(
                 query_seq, target_seq, query_minimizers, target_index, params,
-                nullptr, {}, phase_c_gpu_index,
+                nullptr, {}, is_gpu_target_index_build,
                 ::bioseq::simd::pipe::
-                    TransientTargetIndexReleaseAuthority{
+                    transient_target_index_release_authorization{
                         .index = &target_index});
 }
 
@@ -8098,20 +8083,20 @@ namespace pipe_entry_detail {
 /// exactly, streamed into final mapped buffers, published under an
 /// operation-unique key, and only then released.  No CPU FOA table or CPU
 /// positions vector is constructed on this route.
-template <class MinimizerT,
-          sequence_alphabet Alphabet>
-[[nodiscard]] MatchResultCollection
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection
 minimap2_port_with_fixed_vulkan_target_handoff(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    FixedVulkanTargetHostOwner<MinimizerT> target_host,
-    const Minimap2Params& params)
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const std::vector<p_minimizer>& query_minimizers,
+    fixed_vulkan_target_host_owner<p_minimizer> target_host,
+    const minimap2_parameters& params)
 {
-    pipe::DirectResidentOperationLedger ledger{};
+    pipe::direct_resident_operation_stats ledger{};
     ledger.operation_identity = bioseq::indexing::
         next_gpu_source_direct_operation_identity();
-    pipe::DirectResidentReceiptGuard receipt_guard{&ledger};
+    pipe::direct_resident_receipt_guard receipt_guard{&ledger};
     ledger.source_capacity_bytes =
         target_host.adoption.host_capacity_bytes;
     ledger.source_reflected_bytes =
@@ -8120,110 +8105,110 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         target_host.host_permit.has_value()
             ? target_host.host_permit->bytes() : 0u;
     ledger.source_authority = target_host.minimizers.empty()
-        ? pipe::SourceDirectHostAuthority::canonical_empty
-        : target_host.adoption.host_permit_released_to_process_footprint
-            ? pipe::SourceDirectHostAuthority::
+        ? pipe::source_direct_host_authorization::canonical_empty
+        : target_host.adoption.is_host_permit_released_to_process_footprint
+            ? pipe::source_direct_host_authorization::
                 reflected_process_footprint
-            : pipe::SourceDirectHostAuthority::retained_exact_permit;
+            : pipe::source_direct_host_authorization::retained_exact_permit;
 
     const sequence_size_t target_len = target_seq.bp_size();
 
-    std::optional<bioseq::indexing::GpuMinimizerIndexCache>
+    std::optional<bioseq::indexing::gpu_minimizer_index_cache>
         operation_gpu_cache;
-    std::shared_ptr<bioseq::indexing::GpuResidentMinimizerIndex>
+    std::shared_ptr<bioseq::indexing::gpu_resident_minimizer_index>
         construction_handle;
-    MinimizerHashmapFragmentIndex empty_target_index;
+    minimizer_hashmap_fragment_index empty_target_index;
     empty_target_index.target_len = target_len;
-    bioseq::indexing::GpuIndexCacheIdentity cache_identity{};
-    bioseq::indexing::GpuMinimizerIndexCacheKey cache_key{};
+    bioseq::indexing::gpu_index_cache_identity cache_identity{};
+    bioseq::indexing::gpu_minimizer_index_cache_key cache_key{};
 
     try {
-        ledger.phase_c_checked = true;
-        ledger.phase_c_compatible =
+        ledger.gpu_target_index_route_checked = true;
+        ledger.gpu_target_index_route_compatible =
             !::bioseq::simd::pipe::
-                phase_c_index_build_active(params)
+                is_gpu_target_index_build_active(params)
             && params.vulkan_enabled
             && params.vulkan_seed_hits_enabled
             && !params.vulkan_fused_frontend_enabled
             && !params.vulkan_gpu_index_build_enabled
             && params.minimizer_algorithm
-                == MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
-        if (!ledger.phase_c_compatible) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                == minimizer_algorithm::vulkan_minimap_integer;
+        if (!ledger.gpu_target_index_route_compatible) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "fixed Vulkan host target handoff has an ineligible direct tuple"};
         }
 
         ledger.source_authority_checked = true;
-        ledger.source_authority_accepted =
-            target_host.ownership_authority_accepted();
-        if (!ledger.source_authority_accepted) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        ledger.has_valid_source_authorization =
+            target_host.has_valid_ownership_authorization();
+        if (!ledger.has_valid_source_authorization) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct target handoff lacks source authority"};
         }
 
         ledger.runtime_checked = true;
-        auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+        auto& runtime = bioseq::gpu::vulkan::runtime::instance();
         ledger.runtime_available = true;
         ledger.hardware_checked = true;
         ledger.hardware_available =
             bioseq::gpu::vulkan::hardware_device_available(runtime);
         if (!ledger.hardware_available) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct target handoff has no Vulkan device"};
         }
 
         static const auto* _desc =
-            bioseq::instr::register_region_static("minimap2_port");
-        auto _scope = bioseq::instr::region(_desc);
-        MinimizerHashmapFragmentIndex::sort_source_by_hash_in_place(
+            bioseq::instrumentation::register_static_region("minimap2_port");
+        auto _scope = bioseq::instrumentation::region(_desc);
+        minimizer_hashmap_fragment_index::sort_source_by_hash_in_place(
             target_host.minimizers);
         ledger.sorted_shape_checked = true;
         const auto inspected = bioseq::indexing::
-            inspect_presorted_minimizer_source<MinimizerT>(
-                std::span<const MinimizerT>{
+            inspect_presorted_minimizer_source<p_minimizer>(
+                std::span<const p_minimizer>{
                     target_host.minimizers.data(),
                     target_host.minimizers.size()});
         if (!inspected) {
-            ledger.sorted_shape_accepted = false;
+            ledger.is_sorted_shape_accepted = false;
             ledger.log_planning("reject", "sorted_source_shape_invalid");
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct sorted source shape is invalid"};
         }
-        ledger.sorted_shape_accepted = true;
+        ledger.is_sorted_shape_accepted = true;
         ledger.minimizer_count = inspected->minimizer_count;
         ledger.distinct_count = inspected->distinct_count;
 
-        using TargetAlphabet = Alphabet;
+        using target_alphabet_type = p_alphabet;
         ledger.identity_checked = true;
         cache_identity = bioseq::indexing::
-            make_gpu_source_direct_sorted_dense_identity<MinimizerT>(
+            make_gpu_source_direct_sorted_dense_identity<p_minimizer>(
                 runtime,
                 ledger.operation_identity,
                 ledger.minimizer_count,
                 ledger.distinct_count,
                 static_cast<std::uint32_t>(
-                    seqan3::alphabet_size<TargetAlphabet>),
+                    seqan3::alphabet_size<target_alphabet_type>),
                 static_cast<std::uint32_t>(params.kmer_size),
                 static_cast<std::uint32_t>(params.window_size));
-        ledger.identity_accepted = bioseq::indexing::
-            gpu_source_direct_identity_well_formed(cache_identity);
-        if (!ledger.identity_accepted) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        ledger.is_identity_accepted = bioseq::indexing::
+            is_gpu_source_direct_identity_well_formed(cache_identity);
+        if (!ledger.is_identity_accepted) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct cache identity is ineligible"};
         }
         cache_key = bioseq::indexing::make_gpu_index_cache_key(
             empty_target_index, cache_identity);
 
         ledger.u32_shape_checked = true;
-        ledger.u32_shape_accepted =
+        ledger.is_u32_shape_accepted =
             ledger.minimizer_count
                 <= (std::numeric_limits<std::uint32_t>::max)()
             && ledger.distinct_count
                 <= (std::numeric_limits<std::uint32_t>::max)()
             && ((ledger.minimizer_count == 0u)
                 == (ledger.distinct_count == 0u));
-        if (!ledger.u32_shape_accepted) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        if (!ledger.is_u32_shape_accepted) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct resident shape exceeds the device ABI"};
         }
 
@@ -8236,14 +8221,14 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         ledger.max_storage_buffer_range =
             runtime.features().max_storage_buffer_range;
         if (!preflight) {
-            ledger.control_range_accepted = false;
-            ledger.position_range_accepted = false;
+            ledger.is_control_range_accepted = false;
+            ledger.is_position_range_accepted = false;
             ledger.log_planning("reject", "shape_or_storage_range_rejected");
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct resident preflight rejected"};
         }
-        ledger.control_range_accepted = true;
-        ledger.position_range_accepted = true;
+        ledger.is_control_range_accepted = true;
+        ledger.is_position_range_accepted = true;
         ledger.canonical_empty = preflight->canonical_empty;
         ledger.logical_control_bytes = preflight->control_bytes;
         ledger.logical_position_bytes = preflight->position_bytes;
@@ -8261,9 +8246,9 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         ledger.conservative_request_bytes =
             preflight->conservative_request_bytes;
         ledger.mapping_plan_checked = true;
-        ledger.mapping_plan_accepted = true;
+        ledger.is_mapping_plan_accepted = true;
         const auto snapshot = bioseq::parallelism::
-            MemoryAdmissionController::instance().diagnostic_snapshot();
+            memory_admission_controller::instance().diagnostic_snapshot();
         ledger.admission_snapshot_taken = true;
         ledger.reserved_before_bytes = snapshot.reserved_bytes;
         ledger.allocatable_before_bytes =
@@ -8276,33 +8261,33 @@ minimap2_port_with_fixed_vulkan_target_handoff(
             ledger.shortfall_bytes = ledger.conservative_request_bytes
                 - ledger.allocatable_before_bytes;
         }
-        ledger.planning_accepted = ledger.shortfall_bytes == 0u;
+        ledger.is_planning_accepted = ledger.shortfall_bytes == 0u;
         ledger.log_planning(
-            ledger.planning_accepted ? "proceed" : "reject",
-            ledger.planning_accepted
+            ledger.is_planning_accepted ? "proceed" : "reject",
+            ledger.is_planning_accepted
                 ? "exact_shape_and_range_preflight_passed"
                 : "resident_memory_shortfall");
-        if (!ledger.planning_accepted) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        if (!ledger.is_planning_accepted) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct resident planning admission rejected"};
         }
         ledger.route_committed = true;
 
         if (!ledger.canonical_empty) {
             ledger.materialization_started = true;
-            bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
+            bioseq::parallelism::memory_admission_failure admission_failure{};
             auto resident_permit = bioseq::parallelism::
-                MemoryAdmissionController::instance().try_reserve(
+                memory_admission_controller::instance().try_reserve(
                     ledger.conservative_request_bytes,
                     &admission_failure);
             if (!resident_permit) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
                     "source-direct resident admission failed"};
             }
             auto materialized = bioseq::indexing::
                 materialize_sorted_dense_from_presorted_minimizers(
                     runtime,
-                    std::span<const MinimizerT>{
+                    std::span<const p_minimizer>{
                         target_host.minimizers.data(),
                     target_host.minimizers.size()},
                     target_len,
@@ -8310,10 +8295,10 @@ minimap2_port_with_fixed_vulkan_target_handoff(
                     cache_key,
                     *resident_permit);
             if (!materialized) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
                     "source-direct resident materialization failed"};
             }
-            ledger.materialization = materialized->proof;
+            ledger.materialization = materialized->stats;
             ledger.materialization_completed = true;
             construction_handle = std::move(materialized->resident);
             operation_gpu_cache.emplace(
@@ -8321,7 +8306,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
             auto inserted = operation_gpu_cache->insert_built(
                 cache_key, construction_handle);
             if (!inserted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
                     "source-direct resident preinsert failed"};
             }
             ledger.cache_preinsertions = 1u;
@@ -8333,13 +8318,13 @@ minimap2_port_with_fixed_vulkan_target_handoff(
             target_host, ledger, ledger.resident_published);
 
         static const auto* _with_index_desc =
-            bioseq::instr::register_region_static(
+            bioseq::instrumentation::register_static_region(
                 "minimap2_port_with_index");
-        auto _with_index_scope = bioseq::instr::region(_with_index_desc);
+        auto _with_index_scope = bioseq::instrumentation::region(_with_index_desc);
         auto result = ::bioseq::simd::pipe::dispatch_pipeline<
             ::bioseq::simd::pipe::
-                EntryPoint::WithPrebuiltMinimizers,
-                Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
+                pipeline_entry_point::with_prebuilt_minimizers,
+                p_alphabet, p_minimizer, minimizer_hashmap_fragment_index>(
                     query_seq,
                     target_seq,
                     query_minimizers,
@@ -8350,151 +8335,151 @@ minimap2_port_with_fixed_vulkan_target_handoff(
                     cache_identity,
                     /*allow_gpu_target_index_build=*/false,
                     ::bioseq::simd::pipe::
-                        TransientTargetIndexReleaseAuthority{
+                        transient_target_index_release_authorization{
                             .operation_owned_gpu_cache =
                                 operation_gpu_cache
                                     ? &*operation_gpu_cache : nullptr,
                             .direct_ledger = &ledger});
         if (ledger.terminal_receipts != 1u || !ledger.terminal_success) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            throw bioseq::gpu::vulkan::vulkan_runtime_error{
                 "source-direct operation terminal receipt rejected"};
         }
-        PartialVulkanExecutionProof operation_proof{};
-        operation_proof.gpu_index_source_direct_operations = 1u;
-        operation_proof.gpu_index_source_direct_terminal_successes = 1u;
-        operation_proof.gpu_index_source_direct_empty_bypasses =
+        partial_vulkan_execution_stats operation_stats{};
+        operation_stats.gpu_index_source_direct_operations = 1u;
+        operation_stats.gpu_index_source_direct_terminal_successes = 1u;
+        operation_stats.gpu_index_source_direct_empty_bypasses =
             ledger.empty_bypass ? 1u : 0u;
-        operation_proof.gpu_index_source_direct_zero_query_bypasses =
+        operation_stats.gpu_index_source_direct_zero_query_bypasses =
             ledger.zero_query_bypasses;
-        operation_proof.gpu_index_source_direct_planning_receipts =
+        operation_stats.gpu_index_source_direct_planning_receipts =
             ledger.planning_receipts;
-        operation_proof.gpu_index_source_direct_terminal_receipts =
+        operation_stats.gpu_index_source_direct_terminal_receipts =
             ledger.terminal_receipts;
-        operation_proof.gpu_index_source_direct_materializations =
+        operation_stats.gpu_index_source_direct_materializations =
             ledger.materialization_completed ? 1u : 0u;
-        operation_proof.gpu_index_source_direct_resident_publications =
+        operation_stats.gpu_index_source_direct_resident_publications =
             ledger.resident_published ? 1u : 0u;
-        operation_proof.gpu_index_source_direct_logical_control_bytes =
+        operation_stats.gpu_index_source_direct_logical_control_bytes =
             ledger.logical_control_bytes;
-        operation_proof.gpu_index_source_direct_logical_position_bytes =
+        operation_stats.gpu_index_source_direct_logical_position_bytes =
             ledger.logical_position_bytes;
-        operation_proof.gpu_index_source_direct_control_requirement_bytes =
+        operation_stats.gpu_index_source_direct_control_requirement_bytes =
             ledger.control_requirement_bytes;
-        operation_proof.gpu_index_source_direct_position_requirement_bytes =
+        operation_stats.gpu_index_source_direct_position_requirement_bytes =
             ledger.position_requirement_bytes;
-        operation_proof.gpu_index_source_direct_allocation_request_bytes =
+        operation_stats.gpu_index_source_direct_allocation_request_bytes =
             ledger.conservative_request_bytes;
-        operation_proof.gpu_index_source_direct_actual_control_bytes =
+        operation_stats.gpu_index_source_direct_actual_control_bytes =
             ledger.materialization.actual_slot_allocation_bytes;
-        operation_proof.gpu_index_source_direct_actual_position_bytes =
+        operation_stats.gpu_index_source_direct_actual_position_bytes =
             ledger.materialization.actual_position_allocation_bytes;
-        operation_proof.gpu_index_source_direct_source_releases =
+        operation_stats.gpu_index_source_direct_source_releases =
             ledger.source_releases;
-        operation_proof.gpu_index_source_direct_source_released_bytes =
+        operation_stats.gpu_index_source_direct_source_released_bytes =
             ledger.source_released_bytes;
-        operation_proof.gpu_index_source_direct_checksum_matches =
+        operation_stats.gpu_index_source_direct_checksum_matches =
             ledger.materialization.source_checksum != 0u
                 && ledger.materialization.source_checksum
                     == ledger.materialization.mapped_checksum
             ? 1u : 0u;
-        operation_proof.gpu_index_source_direct_source_traversals =
+        operation_stats.gpu_index_source_direct_source_traversals =
             ledger.materialization.complete_source_traversals;
-        operation_proof.gpu_index_source_direct_mapped_traversals =
+        operation_stats.gpu_index_source_direct_mapped_traversals =
             ledger.materialization.complete_mapped_traversals;
-        operation_proof.gpu_index_source_direct_reflected_authorities =
+        operation_stats.gpu_index_source_direct_reflected_authorities =
             ledger.materialization.authority
-                == bioseq::indexing::GpuResidentAccountingAuthority::
+                == bioseq::indexing::gpu_resident_accounting_authority::
                     reflected_process_footprint
             ? 1u : 0u;
-        operation_proof.gpu_index_source_direct_retained_authorities =
+        operation_stats.gpu_index_source_direct_retained_authorities =
             ledger.materialization.authority
-                == bioseq::indexing::GpuResidentAccountingAuthority::
+                == bioseq::indexing::gpu_resident_accounting_authority::
                     retained_exact_permit
             ? 1u : 0u;
-        operation_proof.
+        operation_stats.
             gpu_index_source_direct_retained_resident_permit_bytes =
                 ledger.materialization.retained_permit_bytes;
-        operation_proof.gpu_index_source_direct_cache_preinsertions =
+        operation_stats.gpu_index_source_direct_cache_preinsertions =
             ledger.cache_preinsertions;
-        operation_proof.gpu_index_source_direct_expected_seed_consumers =
+        operation_stats.gpu_index_source_direct_expected_seed_consumers =
             ledger.expected_seed_consumers;
-        operation_proof.gpu_index_source_direct_completed_seed_consumers =
+        operation_stats.gpu_index_source_direct_completed_seed_consumers =
             ledger.completed_seed_consumers;
-        operation_proof.gpu_index_source_direct_required_lookups =
+        operation_stats.gpu_index_source_direct_required_lookups =
             ledger.cache_required_lookups;
-        operation_proof.gpu_index_source_direct_required_hits =
+        operation_stats.gpu_index_source_direct_required_hits =
             ledger.cache_required_hits;
-        operation_proof.gpu_index_source_direct_required_misses =
+        operation_stats.gpu_index_source_direct_required_misses =
             ledger.cache_required_lookups - ledger.cache_required_hits;
-        operation_proof.gpu_index_source_direct_fallback_attempts = 0u;
-        operation_proof.gpu_index_source_direct_mapped_prefix_passes =
+        operation_stats.gpu_index_source_direct_fallback_attempts = 0u;
+        operation_stats.gpu_index_source_direct_mapped_prefix_passes =
             ledger.mapped_prefix_passes;
-        operation_proof.gpu_index_source_direct_mapped_prefix_lookups =
+        operation_stats.gpu_index_source_direct_mapped_prefix_lookups =
             ledger.mapped_prefix_lookups;
-        operation_proof.gpu_index_source_direct_mapped_prefix_comparisons =
+        operation_stats.gpu_index_source_direct_mapped_prefix_comparisons =
             ledger.mapped_prefix_comparisons;
-        operation_proof.gpu_index_source_direct_seed_slab_requested_bytes =
+        operation_stats.gpu_index_source_direct_seed_slab_requested_bytes =
             ledger.slab_requested_bytes;
-        operation_proof.
+        operation_stats.
             gpu_index_source_direct_seed_slab_initial_capacity =
                 ledger.slab_capacity_before;
-        operation_proof.gpu_index_source_direct_seed_slab_actual_bytes =
+        operation_stats.gpu_index_source_direct_seed_slab_actual_bytes =
             ledger.slab_actual_bytes;
-        operation_proof.gpu_index_source_direct_seed_slab_retained_bytes =
+        operation_stats.gpu_index_source_direct_seed_slab_retained_bytes =
             ledger.slab_retained_permit_bytes;
-        operation_proof.
+        operation_stats.
             gpu_index_source_direct_seed_slab_permit_releases =
                 ledger.slab_permit_releases;
-        operation_proof.gpu_index_source_direct_seed_reserved_bytes =
+        operation_stats.gpu_index_source_direct_seed_reserved_bytes =
             ledger.seed_reserved_bytes;
-        operation_proof.gpu_index_source_direct_seed_planned_vulkan_bytes =
+        operation_stats.gpu_index_source_direct_seed_planned_vulkan_bytes =
             ledger.seed_planned_vulkan_bytes;
-        operation_proof.gpu_index_source_direct_seed_actual_vulkan_bytes =
+        operation_stats.gpu_index_source_direct_seed_actual_vulkan_bytes =
             ledger.seed_actual_vulkan_bytes;
-        operation_proof.gpu_index_source_direct_seed_roundtrips =
+        operation_stats.gpu_index_source_direct_seed_roundtrips =
             ledger.seed_roundtrips;
-        operation_proof.gpu_index_source_direct_zero_anchor_bypasses =
+        operation_stats.gpu_index_source_direct_zero_anchor_bypasses =
             ledger.zero_anchor_bypasses;
-        operation_proof.gpu_index_source_direct_seed_fence_completions =
+        operation_stats.gpu_index_source_direct_seed_fence_completions =
             ledger.seed_fence_completions;
-        operation_proof.gpu_index_source_direct_cache_cleanup_releases =
+        operation_stats.gpu_index_source_direct_cache_cleanup_releases =
             ledger.cache_cleanup_releases;
-        operation_proof.gpu_index_source_direct_resident_cleanup_bytes =
+        operation_stats.gpu_index_source_direct_resident_cleanup_bytes =
             ledger.resident_cleanup_bytes;
-        operation_proof.gpu_index_source_direct_pipeline_completions =
+        operation_stats.gpu_index_source_direct_pipeline_completions =
             ledger.pipeline_completed ? 1u : 0u;
         if (!ledger.canonical_empty) {
-            operation_proof.gpu_index_materializations = 1u;
-            operation_proof.gpu_index_sorted_dense_materializations = 1u;
-            operation_proof.gpu_index_unique_keys = ledger.distinct_count;
-            operation_proof.gpu_index_slot_capacity = ledger.distinct_count;
-            operation_proof.gpu_index_retained_minimizer_count =
+            operation_stats.gpu_index_materializations = 1u;
+            operation_stats.gpu_index_sorted_dense_materializations = 1u;
+            operation_stats.gpu_index_unique_keys = ledger.distinct_count;
+            operation_stats.gpu_index_slot_capacity = ledger.distinct_count;
+            operation_stats.gpu_index_retained_minimizer_count =
                 ledger.minimizer_count;
-            operation_proof.gpu_index_distinct_minimizer_count =
+            operation_stats.gpu_index_distinct_minimizer_count =
                 ledger.distinct_count;
-            operation_proof.gpu_index_logical_resident_bytes =
+            operation_stats.gpu_index_logical_resident_bytes =
                 ledger.logical_resident_bytes;
-            operation_proof.gpu_index_actual_allocation_bytes =
+            operation_stats.gpu_index_actual_allocation_bytes =
                 ledger.materialization.actual_allocation_bytes;
-            operation_proof.gpu_index_fully_touched_bytes =
+            operation_stats.gpu_index_fully_touched_bytes =
                 ledger.materialization.fully_touched_bytes;
             const bool reflected_authority =
                 ledger.materialization.authority
-                    == bioseq::indexing::GpuResidentAccountingAuthority::
+                    == bioseq::indexing::gpu_resident_accounting_authority::
                         reflected_process_footprint;
-            operation_proof.gpu_index_permit_releases =
+            operation_stats.gpu_index_permit_releases =
                 reflected_authority ? 1u : 0u;
-            operation_proof.gpu_index_process_footprint_reflections =
+            operation_stats.gpu_index_process_footprint_reflections =
                 reflected_authority ? 1u : 0u;
-            operation_proof.gpu_index_reflected_footprint_bytes =
+            operation_stats.gpu_index_reflected_footprint_bytes =
                 ledger.materialization.reflected_footprint_bytes;
-            operation_proof.gpu_index_max_load_ppm = 1'000'000u;
-            operation_proof.gpu_index_max_probe = 0u;
+            operation_stats.gpu_index_max_load_ppm = 1'000'000u;
+            operation_stats.gpu_index_max_probe = 0u;
         }
-        // Seed lookup dispatch and biological-anchor proof were already
-        // recorded by SeedHitStage. This operation proof deliberately leaves
+        // Seed lookup dispatch and biological-anchor stats were already
+        // recorded by seed_hit_stage. This operation stats deliberately leaves
         // those generic fields zero so aggregation cannot double count them.
-        result.record_partial_vulkan_execution_proof(operation_proof);
+        result.record_partial_vulkan_execution_stats(operation_stats);
         return result;
     } catch (...) {
         const std::exception_ptr pending = std::current_exception();
@@ -8534,44 +8519,44 @@ minimap2_port_with_fixed_vulkan_target_handoff(
 }
 
 // =============================================================================
-// DOC0256 §5.10.4 / §6.3 — sketch leaf and helpers
+// / — sketch leaf and helpers
 // =============================================================================
 //
 // The two minimizer sketching switches (target pass / query pass) in the
-// legacy `minimap_port_with_repr` body collapse into:
-//   - `sketch_leaf<MinimizerT, Collector, Range, MA>` — the chain's
-//     terminal leaf; pins MA at compile time and invokes the trait's
+// previous `minimap_port_with_repr` body collapse into:
+//   - `sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>` — the chain's
+//     terminal leaf; pins p_minimizer_algorithm at compile time and invokes the trait's
 //     kernel directly.
-//   - `sketch_traits<MinimizerT, Collector, Range>::leaf<MA>` — the
+//   - `sketch_traits<p_minimizer, p_collector, p_range>::leaf<p_minimizer_algorithm>` — the
 //     alias-template wrapper exposing the leaf as a `template <auto>
 //     class`.
-//   - `sketch_one<MinimizerT>(...)` — one `dispatch_chain` instantiation
+//   - `sketch_one<p_minimizer>(...)` — one `dispatch_chain` instantiation
 //     over `ma_step`.
-//   - `sketch_into_collector<MinimizerT>(...)` — packages the per-pass
-//     register_region_static + reserve + sketch_one into one inline call.
+//   - `sketch_into_collector<p_minimizer>(...)` — packages the per-pass
+//     register_static_region + reserve + sketch_one into one inline call.
 
-/// One operation-originated sketch proof, independent of whether the
-/// dispatcher selected scalar, ExactSimd, or Vulkan. The Vulkan member carries
+/// One operation-originated sketch stats, independent of whether the
+/// dispatcher selected scalar, exact_simd, or Vulkan. The Vulkan member carries
 /// only a role-neutral sketch token here; the caller that knows whether this
 /// invocation sketched a query or target consumes it into the corresponding
-/// MatchResultCollection stage counter.
-struct MinimizerSketchExecutionProof {
-    ScalarMinimizerExecutionProof scalar{};
-    bool scalar_present = false;
-    TwoStackExecutionProof exact_simd{};
-    bool exact_simd_present = false;
-    PackedPaperNthashExecutionProof paper_nthash{};
-    bool paper_nthash_present = false;
-    PartialVulkanExecutionProof partial_vulkan{};
+/// match_result_collection stage counter.
+struct minimizer_sketch_execution_stats {
+    scalar_minimizer_execution_stats scalar{};
+    bool scalar_available = false;
+    two_stack_execution_stats exact_simd{};
+    bool exact_simd_available = false;
+    bounded_nthash_execution_stats bounded_nthash{};
+    bool bounded_nthash_available = false;
+    partial_vulkan_execution_stats partial_vulkan{};
 
     [[nodiscard]] bool empty() const noexcept {
-        return !scalar_present
-            && scalar == ScalarMinimizerExecutionProof{}
-            && !exact_simd_present
-            && exact_simd == TwoStackExecutionProof{}
-            && !paper_nthash_present
-            && paper_nthash == PackedPaperNthashExecutionProof{}
-            && partial_vulkan == PartialVulkanExecutionProof{};
+        return !scalar_available
+            && scalar == scalar_minimizer_execution_stats{}
+            && !exact_simd_available
+            && exact_simd == two_stack_execution_stats{}
+            && !bounded_nthash_available
+            && bounded_nthash == bounded_nthash_execution_stats{}
+            && partial_vulkan == partial_vulkan_execution_stats{};
     }
 };
 
@@ -8581,55 +8566,55 @@ struct MinimizerSketchExecutionProof {
 /// their exact permit because allocator-page reuse made the RSS delta
 /// inconclusive.  Device ownership must be unique and is destroyed here before
 /// any later CPU-index admission can begin.
-template <class MinimizerT>
-[[nodiscard]] FixedVulkanTargetHostOwner<MinimizerT>
+template <class p_minimizer>
+[[nodiscard]] fixed_vulkan_target_host_owner<p_minimizer>
 adopt_fixed_vulkan_sketch_host_result(
-    bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT> source)
+    bioseq::gpu::vulkan::vulkan_sketch_result<p_minimizer> source)
 {
-    using bioseq::gpu::vulkan::VulkanRuntimeError;
-    using bioseq::gpu::vulkan::VulkanSketchHostOwnershipRoute;
-    using bioseq::parallelism::saturating_mul;
+    using bioseq::gpu::vulkan::vulkan_runtime_error;
+    using bioseq::gpu::vulkan::vulkan_sketch_host_ownership_route;
+    using bioseq::common::saturating_mul;
 
     if (source.host_ownership_route
-            != VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+            != vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption
         || !source.arena_trimmed_before_host_materialization
-        || !source.dispatch_token.accepted()) {
-        throw VulkanRuntimeError{
+        || !source.dispatch_token.is_internally_consistent()) {
+        throw vulkan_runtime_error{
             "Vulkan fixed host result lacks zero-copy ownership authority"};
     }
     const std::uint64_t host_capacity_bytes = saturating_mul(
         static_cast<std::uint64_t>(source.host_minimizers.capacity()),
-        static_cast<std::uint64_t>(sizeof(MinimizerT)));
+        static_cast<std::uint64_t>(sizeof(p_minimizer)));
     const bool valid_retained_permit = source.host_permit.has_value()
         && static_cast<bool>(*source.host_permit)
         && source.host_permit->bytes() == host_capacity_bytes;
     const bool footprint_authority =
-        source.host_permit_released_to_process_footprint
+        source.is_host_permit_released_to_process_footprint
         && !source.host_permit.has_value()
         && (host_capacity_bytes == 0u
             || source.host_footprint_reflected_delta_bytes
                 >= host_capacity_bytes);
     const bool retained_permit_authority =
-        !source.host_permit_released_to_process_footprint
+        !source.is_host_permit_released_to_process_footprint
         && host_capacity_bytes != 0u
         && valid_retained_permit;
-    const bool device_owner_present = source.device != nullptr;
-    const bool device_owner_unique = device_owner_present
+    const bool device_owner_available = source.device != nullptr;
+    const bool device_owner_unique = device_owner_available
         && source.device.use_count() == 1u;
     if (host_capacity_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || source.host_minimizers.size()
             != source.host_minimizers.capacity()
         || footprint_authority == retained_permit_authority
         || !device_owner_unique) {
-        throw VulkanRuntimeError{
+        throw vulkan_runtime_error{
             "Vulkan fixed host result has inconsistent host/device ownership "
             "authority"};
     }
 
     std::weak_ptr<bioseq::gpu::vulkan::
-        VulkanDeviceMinimizerStorage<MinimizerT>> device_lifetime =
+        vulkan_device_minimizer_storage<p_minimizer>> device_lifetime =
             source.device;
-    VulkanSketchHostAdoptionReceipt<MinimizerT> receipt{
+    vulkan_sketch_host_adoption_receipt<p_minimizer> receipt{
         .source_data = source.host_minimizers.data(),
         .adopted_size = source.host_minimizers.size(),
         .host_capacity_bytes = host_capacity_bytes,
@@ -8640,15 +8625,15 @@ adopt_fixed_vulkan_sketch_host_result(
             source.host_footprint_reflected_delta_bytes,
         .device_allocation_bytes_released =
             source.device->words.allocation_bytes,
-        .host_permit_released_to_process_footprint =
-            source.host_permit_released_to_process_footprint,
-        .device_owner_present_before_adoption = device_owner_present,
+        .is_host_permit_released_to_process_footprint =
+            source.is_host_permit_released_to_process_footprint,
+        .device_owner_available_before_adoption = device_owner_available,
         .device_owner_unique_before_adoption = device_owner_unique,
         .arena_trimmed_before_adoption =
             source.arena_trimmed_before_host_materialization,
         .dispatch_token = source.dispatch_token,
     };
-    FixedVulkanTargetHostOwner<MinimizerT> adopted;
+    fixed_vulkan_target_host_owner<p_minimizer> adopted;
     adopted.minimizers.swap(source.host_minimizers);
     if (source.host_permit.has_value()) {
         adopted.host_permit.emplace(std::move(*source.host_permit));
@@ -8661,285 +8646,285 @@ adopt_fixed_vulkan_sketch_host_result(
         source.host_minimizers.capacity();
     receipt.device_released_before_return = device_lifetime.expired();
     adopted.adoption = receipt;
-    if (!adopted.ownership_authority_accepted()) {
-        throw VulkanRuntimeError{
+    if (!adopted.has_valid_ownership_authorization()) {
+        throw vulkan_runtime_error{
             "Vulkan fixed host result was not adopted zero-copy"};
     }
     return adopted;
 }
 
-template <class MinimizerT>
-struct FixedVulkanTargetSketch {
-    FixedVulkanTargetHostOwner<MinimizerT> host;
-    MinimizerSketchExecutionProof proof{};
+template <class p_minimizer>
+struct fixed_vulkan_target_sketch {
+    fixed_vulkan_target_host_owner<p_minimizer> host;
+    minimizer_sketch_execution_stats stats{};
 
-    FixedVulkanTargetSketch(
-            FixedVulkanTargetHostOwner<MinimizerT> adopted_host,
-            MinimizerSketchExecutionProof execution_proof) noexcept
-        : host(std::move(adopted_host)), proof(execution_proof) {}
-    FixedVulkanTargetSketch(const FixedVulkanTargetSketch&) = delete;
-    FixedVulkanTargetSketch& operator=(const FixedVulkanTargetSketch&) = delete;
-    FixedVulkanTargetSketch& operator=(FixedVulkanTargetSketch&&) = delete;
-    FixedVulkanTargetSketch(FixedVulkanTargetSketch&& other) noexcept
-        : host(std::move(other.host)), proof(other.proof) {}
+    fixed_vulkan_target_sketch(
+            fixed_vulkan_target_host_owner<p_minimizer> adopted_host,
+            minimizer_sketch_execution_stats execution_stats) noexcept
+        : host(std::move(adopted_host)), stats(execution_stats) {}
+    fixed_vulkan_target_sketch(const fixed_vulkan_target_sketch&) = delete;
+    fixed_vulkan_target_sketch& operator=(const fixed_vulkan_target_sketch&) = delete;
+    fixed_vulkan_target_sketch& operator=(fixed_vulkan_target_sketch&&) = delete;
+    fixed_vulkan_target_sketch(fixed_vulkan_target_sketch&& other) noexcept
+        : host(std::move(other.host)), stats(other.stats) {}
 };
 
-template <class MinimizerT, class Range>
-[[nodiscard]] FixedVulkanTargetSketch<MinimizerT>
+template <class p_minimizer, class p_range>
+[[nodiscard]] fixed_vulkan_target_sketch<p_minimizer>
 sketch_vulkan_into_adopted_host_vector(
-    Range& range,
+    p_range& range,
     const std::size_t& window_len,
     const std::size_t& kmer_len,
-    const ::bioseq::simd::Minimap2Params& params)
+    const ::bioseq::simd::minimap2_parameters& params)
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("mm_sketch");
-    auto _scope = bioseq::instr::region(_desc);
-    using Kernel = typename ::bioseq::simd::pipe::
-        algorithm_traits<MinimizerAlgorithmType::VULKAN_MINIMAP_INT>::
+        bioseq::instrumentation::register_static_region("mm_sketch");
+    auto _scope = bioseq::instrumentation::region(_desc);
+    using p_kernel = typename ::bioseq::simd::pipe::
+        algorithm_traits<minimizer_algorithm::vulkan_minimap_integer>::
             kernel_type;
-    auto source = Kernel::template call_result<MinimizerT>(
+    auto source = p_kernel::template call_result<p_minimizer>(
         params,
         range,
         window_len,
         kmer_len,
-        bioseq::gpu::vulkan::VulkanSketchHostOwnershipRoute::
+        bioseq::gpu::vulkan::vulkan_sketch_host_ownership_route::
             fixed_zero_copy_adoption);
     if (!source.has_value()) {
-        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
             "Vulkan fixed host sketch returned no result"};
     }
     auto adopted = adopt_fixed_vulkan_sketch_host_result(
         std::move(*source));
-    MinimizerSketchExecutionProof proof{};
-    proof.partial_vulkan.sketch_dispatches =
+    minimizer_sketch_execution_stats stats{};
+    stats.partial_vulkan.sketch_dispatches =
         adopted.adoption.dispatch_token.completed_roundtrips;
-    return FixedVulkanTargetSketch<MinimizerT>{
-        std::move(adopted), proof};
+    return fixed_vulkan_target_sketch<p_minimizer>{
+        std::move(adopted), stats};
 }
 
-[[nodiscard]] inline bool minimizer_sketch_proof_matches_selected_route(
-    ::bioseq::simd::MinimizerAlgorithmType selected,
-    const MinimizerSketchExecutionProof& proof) noexcept
+[[nodiscard]] inline bool minimizer_sketch_stats_matches_selected_route(
+    ::bioseq::simd::minimizer_algorithm selected,
+    const minimizer_sketch_execution_stats& stats) noexcept
 {
     if (selected
-        == ::bioseq::simd::MinimizerAlgorithmType::SCALAR) {
-        return proof.scalar_present
-            && proof.scalar.accepted()
-            && !proof.exact_simd_present
-            && proof.exact_simd == TwoStackExecutionProof{}
-            && !proof.paper_nthash_present
-            && proof.paper_nthash == PackedPaperNthashExecutionProof{}
-            && proof.partial_vulkan == PartialVulkanExecutionProof{};
+        == ::bioseq::simd::minimizer_algorithm::scalar) {
+        return stats.scalar_available
+            && stats.scalar.is_coherent()
+            && !stats.exact_simd_available
+            && stats.exact_simd == two_stack_execution_stats{}
+            && !stats.bounded_nthash_available
+            && stats.bounded_nthash == bounded_nthash_execution_stats{}
+            && stats.partial_vulkan == partial_vulkan_execution_stats{};
     }
     if (selected
-        == ::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH) {
-        return !proof.scalar_present
-            && proof.scalar == ScalarMinimizerExecutionProof{}
-            && proof.exact_simd_present
-            && proof.exact_simd.accepted(
+        == ::bioseq::simd::minimizer_algorithm::two_stack_nthash) {
+        return !stats.scalar_available
+            && stats.scalar == scalar_minimizer_execution_stats{}
+            && stats.exact_simd_available
+            && stats.exact_simd.is_internally_consistent(
                 /*require_nonempty_vector_work=*/false)
-            && !proof.paper_nthash_present
-            && proof.paper_nthash == PackedPaperNthashExecutionProof{}
-            && proof.partial_vulkan == PartialVulkanExecutionProof{};
+            && !stats.bounded_nthash_available
+            && stats.bounded_nthash == bounded_nthash_execution_stats{}
+            && stats.partial_vulkan == partial_vulkan_execution_stats{};
     }
     if (selected
-        == ::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
-        return !proof.scalar_present
-            && proof.scalar == ScalarMinimizerExecutionProof{}
-            && !proof.exact_simd_present
-            && proof.exact_simd == TwoStackExecutionProof{}
-            && proof.paper_nthash_present
-            && proof.paper_nthash.accepted(
+        == ::bioseq::simd::minimizer_algorithm::bounded_nthash_simd) {
+        return !stats.scalar_available
+            && stats.scalar == scalar_minimizer_execution_stats{}
+            && !stats.exact_simd_available
+            && stats.exact_simd == two_stack_execution_stats{}
+            && stats.bounded_nthash_available
+            && stats.bounded_nthash.is_internally_consistent(
                 /*require_nonempty_vector_work=*/false)
-            && proof.partial_vulkan == PartialVulkanExecutionProof{};
+            && stats.partial_vulkan == partial_vulkan_execution_stats{};
     }
     if (selected
-        == ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT) {
-        return !proof.scalar_present
-            && proof.scalar == ScalarMinimizerExecutionProof{}
-            && !proof.exact_simd_present
-            && proof.exact_simd == TwoStackExecutionProof{}
-            && !proof.paper_nthash_present
-            && proof.paper_nthash == PackedPaperNthashExecutionProof{}
-            && proof.partial_vulkan.exact_sketch_token_accepted();
+        == ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer) {
+        return !stats.scalar_available
+            && stats.scalar == scalar_minimizer_execution_stats{}
+            && !stats.exact_simd_available
+            && stats.exact_simd == two_stack_execution_stats{}
+            && !stats.bounded_nthash_available
+            && stats.bounded_nthash == bounded_nthash_execution_stats{}
+            && stats.partial_vulkan.has_valid_exact_sketch_token();
     }
-    return proof.empty();
+    return stats.is_empty();
 }
 
-enum class MinimizerSketchRole : std::uint8_t {
+enum class minimizer_sketch_role : std::uint8_t {
     query,
     target,
 };
 
-/// Consume one already-validated operation proof into its call-site role.
+/// Consume one already-validated operation stats into its call-site role.
 /// This function never consults the algorithm selector and never manufactures
-/// evidence from route identity: only counters carried by the returned proof
+/// counters from route identity: only counters carried by the returned stats
 /// are transferred.
-inline void record_minimizer_sketch_execution_proof(
-    MatchResultCollection& destination,
-    const MinimizerSketchExecutionProof& proof,
-    MinimizerSketchRole role) noexcept
+inline void record_minimizer_sketch_execution_stats(
+    match_result_collection& destination,
+    const minimizer_sketch_execution_stats& stats,
+    minimizer_sketch_role role) noexcept
 {
-    if (proof.scalar_present) {
-        if (role == MinimizerSketchRole::query) {
-            destination.record_scalar_query_minimizer_execution_proof(
-                proof.scalar);
+    if (stats.scalar_available) {
+        if (role == minimizer_sketch_role::query) {
+            destination.record_scalar_query_minimizer_execution_stats(
+                stats.scalar);
         } else {
-            destination.record_scalar_target_minimizer_execution_proof(
-                proof.scalar);
+            destination.record_scalar_target_minimizer_execution_stats(
+                stats.scalar);
         }
     }
-    if (proof.exact_simd_present) {
-        if (role == MinimizerSketchRole::query) {
-            destination.record_exact_simd_query_execution_proof(
-                proof.exact_simd);
+    if (stats.exact_simd_available) {
+        if (role == minimizer_sketch_role::query) {
+            destination.record_exact_simd_query_execution_stats(
+                stats.exact_simd);
         } else {
-            destination.record_exact_simd_target_execution_proof(
-                proof.exact_simd);
+            destination.record_exact_simd_target_execution_stats(
+                stats.exact_simd);
         }
     }
-    if (proof.paper_nthash_present) {
-        if (role == MinimizerSketchRole::query) {
-            destination.record_paper_nthash_query_execution_proof(
-                proof.paper_nthash);
+    if (stats.bounded_nthash_available) {
+        if (role == minimizer_sketch_role::query) {
+            destination.record_bounded_nthash_query_execution_stats(
+                stats.bounded_nthash);
         } else {
-            destination.record_paper_nthash_target_execution_proof(
-                proof.paper_nthash);
+            destination.record_bounded_nthash_target_execution_stats(
+                stats.bounded_nthash);
         }
     }
-    if (proof.partial_vulkan.exact_sketch_token_accepted()) {
-        PartialVulkanExecutionProof routed{};
-        if (role == MinimizerSketchRole::query) {
+    if (stats.partial_vulkan.has_valid_exact_sketch_token()) {
+        partial_vulkan_execution_stats routed{};
+        if (role == minimizer_sketch_role::query) {
             routed.query_sketch_dispatches =
-                proof.partial_vulkan.sketch_dispatches;
+                stats.partial_vulkan.sketch_dispatches;
         } else {
             routed.target_sketch_dispatches =
-                proof.partial_vulkan.sketch_dispatches;
+                stats.partial_vulkan.sketch_dispatches;
         }
-        destination.record_partial_vulkan_execution_proof(routed);
+        destination.record_partial_vulkan_execution_stats(routed);
     }
 }
 
-template <class MinimizerT,
-          class Collector, class Range,
-          ::bioseq::simd::MinimizerAlgorithmType MA>
+template <class p_minimizer,
+          class p_collector, class p_range,
+          ::bioseq::simd::minimizer_algorithm p_minimizer_algorithm>
 struct sketch_leaf {
-    static_assert(std::is_same_v<decltype(MA),
-        ::bioseq::simd::MinimizerAlgorithmType>,
-        "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
+    static_assert(std::is_same_v<decltype(p_minimizer_algorithm),
+        ::bioseq::simd::minimizer_algorithm>,
+        "sketch_leaf: p_minimizer_algorithm must be minimizer_algorithm (from ma_step).");
 
     BIOSEQ_PIPELINE_INLINE_ATTR
-    static MinimizerSketchExecutionProof call(
-        const ::bioseq::simd::Minimap2Params& params,
-        Collector& collector, Range& range,
+    static minimizer_sketch_execution_stats call(
+        const ::bioseq::simd::minimap2_parameters& params,
+        p_collector& collector, p_range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
     {
-        using Kernel = typename ::bioseq::simd::pipe::
-            algorithm_traits<MA>::kernel_type;
-        if constexpr (Kernel::emits_scalar_minimizer_execution_proof) {
+        using p_kernel = typename ::bioseq::simd::pipe::
+            algorithm_traits<p_minimizer_algorithm>::kernel_type;
+        if constexpr (p_kernel::emits_scalar_minimizer_execution_stats) {
             return {
-                .scalar = Kernel::template call<MinimizerT>(
+                .scalar = p_kernel::template call<p_minimizer>(
                     params, collector, range, window_len, kmer_len),
-                .scalar_present = true,
+                .scalar_available = true,
             };
-        } else if constexpr (Kernel::emits_exact_simd_execution_proof) {
+        } else if constexpr (p_kernel::emits_exact_simd_execution_stats) {
             return {
-                .exact_simd = Kernel::template call<MinimizerT>(
+                .exact_simd = p_kernel::template call<p_minimizer>(
                     params, collector, range, window_len, kmer_len),
-                .exact_simd_present = true,
+                .exact_simd_available = true,
             };
-        } else if constexpr (Kernel::emits_paper_nthash_execution_proof) {
+        } else if constexpr (p_kernel::emits_bounded_nthash_execution_stats) {
             return {
-                .paper_nthash = Kernel::template call<MinimizerT>(
+                .bounded_nthash = p_kernel::template call<p_minimizer>(
                     params, collector, range, window_len, kmer_len),
-                .paper_nthash_present = true,
+                .bounded_nthash_available = true,
             };
-        } else if constexpr (Kernel::emits_partial_vulkan_execution_proof) {
-            const auto token = Kernel::template call<MinimizerT>(
+        } else if constexpr (p_kernel::emits_partial_vulkan_execution_stats) {
+            const auto token = p_kernel::template call<p_minimizer>(
                 params, collector, range, window_len, kmer_len);
-            if (!token.accepted()) {
+            if (!token.is_internally_consistent()) {
                 ::bioseq::simd::pipe::throw_vulkan_declined(
                     "Vulkan minimizer sketch execution token");
             }
-            MinimizerSketchExecutionProof proof{};
-            proof.partial_vulkan.sketch_dispatches =
+            minimizer_sketch_execution_stats stats{};
+            stats.partial_vulkan.sketch_dispatches =
                 token.completed_roundtrips;
-            return proof;
+            return stats;
         } else {
-            Kernel::template call<MinimizerT>(
+            p_kernel::template call<p_minimizer>(
                 params, collector, range, window_len, kmer_len);
             return {};
         }
     }
 };
 
-template <class MinimizerT, class Collector, class Range>
+template <class p_minimizer, class p_collector, class p_range>
 struct sketch_traits {
-    template <auto MA>
-    using leaf = sketch_leaf<MinimizerT, Collector, Range, MA>;
+    template <auto p_minimizer_algorithm>
+    using leaf = sketch_leaf<p_minimizer, p_collector, p_range, p_minimizer_algorithm>;
 };
 
-/// One-step chain over the MA dimension — replaces the legacy switch on
-/// `params.minimizer_algorithm`.  The chain pins MA at compile time and the
+/// One-step chain over the p_minimizer_algorithm dimension — replaces the previous switch on
+/// `params.minimizer_algorithm`.  The chain pins p_minimizer_algorithm at compile time and the
 /// leaf dispatches via the trait's kernel.
-template <class MinimizerT, class Collector, class Range>
+template <class p_minimizer, class p_collector, class p_range>
 BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
-MinimizerSketchExecutionProof sketch_one(
-    Collector& collector, Range& range,
+minimizer_sketch_execution_stats sketch_one(
+    p_collector& collector, p_range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
-    const ::bioseq::simd::Minimap2Params& params)
+    const ::bioseq::simd::minimap2_parameters& params)
 {
-    using Traits = sketch_traits<MinimizerT, Collector, Range>;
+    using traits_type = sketch_traits<p_minimizer, p_collector, p_range>;
     return ::bioseq::simd::pipe::detail::dispatch_chain<
-        MinimizerSketchExecutionProof,
-        Traits::template leaf,
+        minimizer_sketch_execution_stats,
+        traits_type::template leaf,
         ::bioseq::simd::pipe::detail::ma_step
     >::template run<>(params, collector, range, window_len, kmer_len);
 }
 
 /// Packages the per-pass instrumentation scope + collector reserve +
 /// sketch_one into one inline call.  Replaces the ~22-line block-scope
-/// boilerplate repeated for the target and query passes in the legacy
+/// boilerplate repeated for the target and query passes in the previous
 /// `minimap_port_with_repr` body.
-template <class MinimizerT, class Range>
+template <class p_minimizer, class p_range>
 BIOSEQ_PIPELINE_INLINE_ATTR
-MinimizerSketchExecutionProof sketch_into_collector(
-    sketch_collector_t<MinimizerT>& collector,
-    Range& range,
+minimizer_sketch_execution_stats sketch_into_collector(
+    sketch_collector_t<p_minimizer>& collector,
+    p_range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
-    const ::bioseq::simd::Minimap2Params& params)
+    const ::bioseq::simd::minimap2_parameters& params)
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("mm_sketch");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("mm_sketch");
+    auto _scope = bioseq::instrumentation::region(_desc);
     collector.reserve(
         range.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
-    return sketch_one<MinimizerT>(
+    return sketch_one<p_minimizer>(
         collector, range, window_len, kmer_len, params);
 }
 
 /**
  * @brief Per-bucket helper for the from-sequence `minimap_port` entry.
  *
- * Owns one `Arena::Chain` scope around the target minimiser sketching + index
- * build.  Sketching is dispatched via `sketch_into_collector<MinimizerT>` —
+ * Owns one `Arena::chain` scope around the target minimiser sketching + index
+ * build.  Sketching is dispatched via `sketch_into_collector<p_minimizer>` —
  * the per-pass switch on `params.minimizer_algorithm` is now expressed as a
  * single-step `dispatch_chain` instantiation inside `sketch_one`.  Once the
  * target index is built, the function delegates to `minimap2_port_with_index`
- * so the per-query MinimizerStage inside `pipe::dispatch_pipeline` handles
+ * so the per-query minimizer_stage inside `pipe::dispatch_pipeline` handles
  * query sketching.
  */
-template <class MinimizerT,
-          sequence_alphabet Alphabet>
-[[nodiscard]] MatchResultCollection minimap_port_with_repr(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const Minimap2Params& params)
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection minimap_port_with_repr(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params)
 {
     static const auto* _desc =
-        bioseq::instr::register_region_static("minimap_port");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("minimap_port");
+    auto _scope = bioseq::instrumentation::region(_desc);
 
     std::optional<context::context> owned_context;
     std::optional<context::installed_context_scope> context_install;
@@ -8951,34 +8936,34 @@ template <class MinimizerT,
     const std::size_t window_len = static_cast<std::size_t>(params.window_size);
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
 
-    // DOC0310 §16 — skip the host target sketch for the Phase C GPU-index leaf;
+    // — skip the host target sketch for the Stage C GPU-index leaf;
     // the device index build sketches the target itself. If that selected GPU
     // path cannot run, the pipeline throws instead of rebuilding on CPU.
     // The fixed Vulkan host vector carries either footprint authority or its
     // exact retained permit. Its dedicated handoff owns the later CPU-index
     // permit locally and destroys the nested index before releasing it.
-    std::vector<MinimizerT> target_minimizers;
-    std::optional<FixedVulkanTargetSketch<MinimizerT>> fixed_target_sketch;
-    MinimizerSketchExecutionProof target_sketch_proof{};
-    const bool phase_c_gpu_index =
-        ::bioseq::simd::pipe::phase_c_index_build_active(params);
-    using TargetAlphabet = Alphabet;
+    std::vector<p_minimizer> target_minimizers;
+    std::optional<fixed_vulkan_target_sketch<p_minimizer>> fixed_target_sketch;
+    minimizer_sketch_execution_stats target_sketch_stats{};
+    const bool is_gpu_target_index_build =
+        ::bioseq::simd::pipe::is_gpu_target_index_build_active(params);
+    using target_alphabet_type = p_alphabet;
     const bool fixed_target_zero_copy_route =
-        fixed_vulkan_target_host_adoption_route_selected<MinimizerT>(
-            phase_c_gpu_index,
+        fixed_vulkan_target_host_adoption_route_selected<p_minimizer>(
+            is_gpu_target_index_build,
             params,
             static_cast<std::uint32_t>(
-                seqan3::alphabet_size<TargetAlphabet>),
+                seqan3::alphabet_size<target_alphabet_type>),
             static_cast<std::uint64_t>(target_seq.bp_size()));
-    if (!phase_c_gpu_index) {
+    if (!is_gpu_target_index_build) {
         if (fixed_target_zero_copy_route) {
             fixed_target_sketch.emplace(
-                sketch_vulkan_into_adopted_host_vector<MinimizerT>(
+                sketch_vulkan_into_adopted_host_vector<p_minimizer>(
                     target_seq, window_len, kmer_len, params));
-            target_sketch_proof = fixed_target_sketch->proof;
+            target_sketch_stats = fixed_target_sketch->stats;
         } else {
-            sketch_collector_t<MinimizerT> target_collector;
-            target_sketch_proof = sketch_into_collector<MinimizerT>(
+            sketch_collector_t<p_minimizer> target_collector;
+            target_sketch_stats = sketch_into_collector<p_minimizer>(
                 target_collector, target_seq, window_len, kmer_len, params);
             target_minimizers =
                 std::move(target_collector).extract_sketches_data();
@@ -8990,139 +8975,139 @@ template <class MinimizerT,
     // Query results are intentionally left on the collector-compatible route.
     // Small/repeated allocations can reuse already-resident allocator pages,
     // so a footprint-delta release is not reliable authority for them.
-    sketch_collector_t<MinimizerT> query_collector;
-    const MinimizerSketchExecutionProof query_sketch_proof =
-        sketch_into_collector<MinimizerT>(
+    sketch_collector_t<p_minimizer> query_collector;
+    const minimizer_sketch_execution_stats query_sketch_stats =
+        sketch_into_collector<p_minimizer>(
             query_collector, query_seq, window_len, kmer_len, params);
     const auto query_minimizers =
         std::move(query_collector).extract_sketches_data();
     const std::uint64_t query_sketch_host_wall_ns =
         pipe::elapsed_host_stage_ns(query_sketch_started_ns);
     const bool query_route_valid =
-        minimizer_sketch_proof_matches_selected_route(
-            params.minimizer_algorithm, query_sketch_proof);
-    const bool target_route_valid = phase_c_gpu_index
-        || minimizer_sketch_proof_matches_selected_route(
-            params.minimizer_algorithm, target_sketch_proof);
-    const bool exact_simd_pair_route_compatible = phase_c_gpu_index
+        minimizer_sketch_stats_matches_selected_route(
+            params.minimizer_algorithm, query_sketch_stats);
+    const bool target_route_valid = is_gpu_target_index_build
+        || minimizer_sketch_stats_matches_selected_route(
+            params.minimizer_algorithm, target_sketch_stats);
+    const bool exact_simd_pair_route_compatible = is_gpu_target_index_build
         || params.minimizer_algorithm
-            != MinimizerAlgorithmType::TWO_STACK_NTHASH
-        || (query_sketch_proof.exact_simd_present
-            && target_sketch_proof.exact_simd_present
-            && pipe::exact_simd_proofs_share_selection_route(
-                query_sketch_proof.exact_simd,
-                target_sketch_proof.exact_simd));
+            != minimizer_algorithm::two_stack_nthash
+        || (query_sketch_stats.exact_simd_available
+            && target_sketch_stats.exact_simd_available
+            && pipe::exact_simd_stats_share_selection_route(
+                query_sketch_stats.exact_simd,
+                target_sketch_stats.exact_simd));
     if (!query_route_valid
         || !target_route_valid
         || !exact_simd_pair_route_compatible) {
-        bioseq_log<ERR>(
-            "Selected minimizer route returned mismatched execution proof or "
-            "incompatible ExactSimd selection schemes");
+        bioseq_log<logging_level::error>(
+            "Selected minimizer route returned mismatched execution stats or "
+            "incompatible exact_simd selection schemes");
         std::abort();
     }
 
     auto owned_target_minimizers = std::move(target_minimizers);
-    std::vector<MinimizerT>{}.swap(target_minimizers);
-    MatchResultCollection result = fixed_target_zero_copy_route
+    std::vector<p_minimizer>{}.swap(target_minimizers);
+    match_result_collection result = fixed_target_zero_copy_route
         ? minimap2_port_with_fixed_vulkan_target_handoff<
-              MinimizerT, Alphabet>(
+              p_minimizer, p_alphabet>(
                   query_seq,
                   target_seq,
                   query_minimizers,
                   std::move(fixed_target_sketch->host),
                   params)
-        : minimap2_port<MinimizerT, Alphabet>(
+        : minimap2_port<p_minimizer, p_alphabet>(
               query_seq,
               target_seq,
               query_minimizers,
               std::move(owned_target_minimizers),
               params);
     result.record_query_sketch_host_time(query_sketch_host_wall_ns);
-    record_minimizer_sketch_execution_proof(
-        result, query_sketch_proof, MinimizerSketchRole::query);
-    if (!phase_c_gpu_index) {
-        record_minimizer_sketch_execution_proof(
-            result, target_sketch_proof, MinimizerSketchRole::target);
+    record_minimizer_sketch_execution_stats(
+        result, query_sketch_stats, minimizer_sketch_role::query);
+    if (!is_gpu_target_index_build) {
+        record_minimizer_sketch_execution_stats(
+            result, target_sketch_stats, minimizer_sketch_role::target);
     }
     return result;
 }
 
 // =============================================================================
-// DOC0256 §4.6 — from-sequence cascade leaf and traits
+// — from-sequence cascade leaf and traits
 // =============================================================================
 //
 // `minimap_port` now collapses to one `dispatch_chain<...>::run<>(...)` over
-// two steps (L, K).  The leaf below pins `(L, K)` into the
-// `MinimizerRepr<L, K>` storage type and delegates to the existing
-// `minimap_port_with_repr<MinimizerT>` body unchanged.
+// two steps (p_bucket_width, p_kmer_size).  The leaf below pins `(p_bucket_width, p_kmer_size)` into the
+// `minimizer_representation<p_bucket_width, p_kmer_size>` storage type and delegates to the existing
+// `minimap_port_with_repr<p_minimizer>` body unchanged.
 
-template <sequence_alphabet Alphabet,
-          std::size_t L, std::size_t K>
+template <sequence_alphabet p_alphabet,
+          std::size_t p_bucket_width, std::size_t p_kmer_size>
 struct minimap_port_repr_leaf {
-    static_assert(std::is_same_v<decltype(L), std::size_t>,
-        "minimap_port_repr_leaf: L must be std::size_t (from seq_len_log2_step).");
-    static_assert(std::is_same_v<decltype(K), std::size_t>,
-        "minimap_port_repr_leaf: K must be std::size_t (from kmer_size_step).");
+    static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>,
+        "minimap_port_repr_leaf: p_bucket_width must be std::size_t (from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>,
+        "minimap_port_repr_leaf: p_kmer_size must be std::size_t (from kmer_size_step).");
 
     BIOSEQ_PIPELINE_INLINE_ATTR
-    static MatchResultCollection call(
-        const Minimap2Params& params,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> t)
+    static match_result_collection call(
+        const minimap2_parameters& params,
+        bioseq::storage::lazy_sequence_view<p_alphabet> q,
+        bioseq::storage::lazy_sequence_view<p_alphabet> t)
     {
-        using MinimizerT = ::bioseq::minimizers::MinimizerRepr<L, K>;
-        return minimap_port_with_repr<MinimizerT, Alphabet>(
+        using p_minimizer = ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>;
+        return minimap_port_with_repr<p_minimizer, p_alphabet>(
             q, t, params);
     }
 };
 
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 struct minimap_port_traits {
-    template <auto K, auto L>
-    using leaf = minimap_port_repr_leaf<Alphabet, L, K>;
+    template <auto p_kmer_size, auto p_bucket_width>
+    using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
 };
 
 } // namespace pipe_entry_detail
 
 /**
  * @brief Top-level minimap2 entry — raw query/target sequences only
- * (DOC0249 §9.7 / legacy `minimap_port`; DOC0256 §4.6 chain rewrite).
+ * ( / previous `minimap_port`; chain rewrite).
  *
  * One `dispatch_chain<...>::run<>(...)` line over `seq_len_log2_step` +
- * `kmer_size_step` — replaces the hand-coded `(K, L)` ladder.  Each pinned
- * `(L, K)` selects a `MinimizerRepr<L, K>` and forwards to
- * `pipe_entry_detail::minimap_port_with_repr<MinimizerT>` which sketches
+ * `kmer_size_step` — replaces the hand-coded `(p_kmer_size, p_bucket_width)` ladder.  Each pinned
+ * `(p_bucket_width, p_kmer_size)` selects a `minimizer_representation<p_bucket_width, p_kmer_size>` and forwards to
+ * `pipe_entry_detail::minimap_port_with_repr<p_minimizer>` which sketches
  * both target and query minimisers, builds the target index, and delegates
  * to `minimap2_port_with_index` (which in turn calls
- * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>`).
+ * `pipe::dispatch_pipeline<p_entry_point::with_prebuilt_minimizers>`).
  */
-template <sequence_alphabet Alphabet>
+template <sequence_alphabet p_alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
-MatchResultCollection minimap_port(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const Minimap2Params& params = Minimap2Params{})
+match_result_collection minimap_port(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params = minimap2_parameters{})
 {
-    using Traits = pipe_entry_detail::minimap_port_traits<Alphabet>;
-    // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
+    using traits_type = pipe_entry_detail::minimap_port_traits<p_alphabet>;
+    //  Stage 1 — p_kmer_size-then-p_bucket_width chain order (per-p_kmer_size p_bucket_width step).
     return ::bioseq::simd::pipe::detail::dispatch_chain<
-        MatchResultCollection,
-        Traits::template leaf,
+        match_result_collection,
+        traits_type::template leaf,
         ::bioseq::simd::pipe::detail::kmer_size_step,
         ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k
     >::template run<>(params, query_seq, target_seq);
 }
 
 /**
- * @brief DOC0276 — memory-bounded recompute entry. Drop-in replacement for
+ * @brief  — memory-bounded recompute entry. Drop-in replacement for
  * `minimap_port` on the production paths, sized for arbitrarily large targets
  * on a fixed-RAM host.
  *
  * The non-segmented `minimap_port` builds ONE minimizer index over the whole
- * target (~6 B/bp at peak → ~37 GB for 6 Gbp), which swaps a 16 GB box to death.
+ * target (~6 p_batch/bp at peak → ~37 GB for 6 Gbp), which swaps a 16 GB box to death.
  * This entry instead indexes the target in budget-sized SEGMENTS (≤200 Mbp core
  * + overlap, sized by `bioseq::memory::default_budget()`), pinning the 8-byte
- * `MinimapSketchData` minimizer (segment-local positions fit its 28-bit field).
+ * `minimap_sketch_data` minimizer (segment-local positions fit its 28-bit field).
  * Each segment index is globalized (`TargetIndex::add_position_offset`) and run
  * through the UNCHANGED `minimap2_port_with_index` against the FULL target, so
  * chaining + DP alignment see correct global coordinates and stream the real
@@ -9139,18 +9124,18 @@ MatchResultCollection minimap_port(
  * `max_occ`, so anchors match the non-segmented path; a global pre-count would
  * restore exact semantics for highly repetitive references (future work).
  */
-template <class MinimizerT>
-struct SegmentFragmentEmission {
+template <class p_minimizer>
+struct segment_fragment_emission {
     std::size_t fragment_no = 0;
     sequence_size_t fragment_len_bp = 0;
-    std::vector<MinimizerT> minimizers{};
+    std::vector<p_minimizer> minimizers{};
 };
 
-template <class MinimizerT>
-[[nodiscard]] std::vector<SegmentFragmentEmission<MinimizerT>>
+template <class p_minimizer>
+[[nodiscard]] std::vector<segment_fragment_emission<p_minimizer>>
 collect_fragment_emissions_for_segment(
-        const ::bioseq::indexing::SegmentUnitRange& range,
-        std::span<const MinimizerT> segment_minimizers,
+        const ::bioseq::indexing::segment_unit_range& range,
+        std::span<const p_minimizer> segment_minimizers,
         sequence_size_t total_bp,
         sequence_size_t frag_bp,
         std::size_t lpu) {
@@ -9161,7 +9146,7 @@ collect_fragment_emissions_for_segment(
     const std::size_t frag_hi =
         static_cast<std::size_t>((range.core_hi_bp + frag_bp - 1) / frag_bp);
 
-    std::vector<SegmentFragmentEmission<MinimizerT>> out;
+    std::vector<segment_fragment_emission<p_minimizer>> out;
     out.reserve(frag_hi > frag_lo ? frag_hi - frag_lo : 0);
     for (std::size_t fragment_no = frag_lo; fragment_no < frag_hi; ++fragment_no) {
         const sequence_size_t fragment_lo_bp =
@@ -9176,10 +9161,10 @@ collect_fragment_emissions_for_segment(
             continue;
         }
 
-        SegmentFragmentEmission<MinimizerT> emission{};
+        segment_fragment_emission<p_minimizer> emission{};
         emission.fragment_no = fragment_no;
         emission.fragment_len_bp = fragment_hi_bp - fragment_lo_bp;
-        for (const MinimizerT& minimizer : segment_minimizers) {
+        for (const p_minimizer& minimizer : segment_minimizers) {
             const sequence_size_t global_pos =
                 emit_base_bp
                 + static_cast<sequence_size_t>(minimizer.last_pos());
@@ -9195,17 +9180,17 @@ collect_fragment_emissions_for_segment(
     return out;
 }
 
-template <class MinimizerT>
-struct PendingFragmentBuild {
+template <class p_minimizer>
+struct pending_fragment_build {
     sequence_size_t fragment_len_bp = 0;
-    std::vector<MinimizerT> minimizers{};
+    std::vector<p_minimizer> minimizers{};
 };
 
-template <class FragmentStorage, class MinimizerT>
-class FragmentPersistAccumulator {
+template <class p_fragment_storage, class p_minimizer>
+class fragment_persist_accumulator {
 public:
-    FragmentPersistAccumulator(
-            FragmentStorage& storage,
+    fragment_persist_accumulator(
+            p_fragment_storage& storage,
             sequence_size_t total_bp,
             sequence_size_t frag_bp)
         : storage_(storage),
@@ -9213,9 +9198,9 @@ public:
           frag_bp_(frag_bp),
           nfrag_(static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp)) {}
 
-    void ingest(std::span<const SegmentFragmentEmission<MinimizerT>> emissions) {
-        for (const SegmentFragmentEmission<MinimizerT>& emission : emissions) {
-            PendingFragmentBuild<MinimizerT>& pending =
+    void ingest(std::span<const segment_fragment_emission<p_minimizer>> emissions) {
+        for (const segment_fragment_emission<p_minimizer>& emission : emissions) {
+            pending_fragment_build<p_minimizer>& pending =
                 pending_[emission.fragment_no];
             pending.fragment_len_bp = emission.fragment_len_bp;
             pending.minimizers.insert(
@@ -9241,10 +9226,10 @@ public:
 
         const std::int64_t manifest = static_cast<std::int64_t>(nfrag_);
         storage_.resize(
-            bioseq::indexing::DIRECTORY_SUB_KEY,
+            bioseq::indexing::k_directory_sub_key,
             sizeof(std::int64_t));
         storage_.template write_to_each<std::int64_t>(
-            bioseq::indexing::DIRECTORY_SUB_KEY,
+            bioseq::indexing::k_directory_sub_key,
             [manifest](
                     std::size_t chunk_no,
                     std::int64_t* manifest_buf,
@@ -9264,7 +9249,7 @@ private:
     }
 
     void flush_one(std::size_t fragment_no) {
-        PendingFragmentBuild<MinimizerT> pending{};
+        pending_fragment_build<p_minimizer> pending{};
         if (auto it = pending_.find(fragment_no); it != pending_.end()) {
             pending = std::move(it->second);
             pending_.erase(it);
@@ -9274,7 +9259,7 @@ private:
                 fragment_hi_bp(fragment_no) - fragment_lo_bp(fragment_no);
         }
 
-        MinimizerHashmapFragmentIndex frag_idx;
+        minimizer_hashmap_fragment_index frag_idx;
         frag_idx.build(pending.minimizers, pending.fragment_len_bp);
 
         std::vector<char> blob(frag_idx.serialize_binary_size());
@@ -9287,7 +9272,7 @@ private:
             sub_key,
             [&blob](std::size_t chunk_no, char* buf, std::size_t cap_bytes) {
                 const std::size_t offset =
-                    chunk_no * bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES;
+                    chunk_no * bioseq::indexing::k_max_index_chunk_size_bytes;
                 const std::size_t n =
                     offset >= blob.size()
                         ? 0
@@ -9299,16 +9284,16 @@ private:
             });
     }
 
-    FragmentStorage& storage_;
+    p_fragment_storage& storage_;
     sequence_size_t total_bp_ = 0;
     sequence_size_t frag_bp_ = 0;
     std::size_t nfrag_ = 0;
     std::size_t next_flush_fragment_ = 0;
-    std::map<std::size_t, PendingFragmentBuild<MinimizerT>> pending_{};
+    std::map<std::size_t, pending_fragment_build<p_minimizer>> pending_{};
 };
 
 // =============================================================================
-// DOC0307 §5.3 — query sketch for persistent-index bucket selection.
+// — query sketch for persistent-index bucket selection.
 // =============================================================================
 //
 // Holds the query minimizers produced for persistent-index bucket filtering,
@@ -9316,29 +9301,29 @@ private:
 // caller's lifetime. The host vector feeds the existing assembly/filter helpers
 // unchanged; the Vulkan branch sketches the query on the GPU so the segmented
 // path's seed lookup consumes byte-identical minimizers.
-template <class MinimizerT>
-struct BudgetedSketchVector {
+template <class p_minimizer>
+struct budgeted_sketch_vector {
     // Reverse destruction is the ownership contract: host capacity and the
     // device lifetime anchor disappear before either reservation can release.
-    std::optional<bioseq::parallelism::MemoryPermit> permit;
-    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device;
-    std::vector<MinimizerT> minimizers;
-    ScalarMinimizerExecutionProof scalar_execution_proof{};
-    bool scalar_execution_proof_present = false;
-    TwoStackExecutionProof exact_simd_execution_proof{};
-    bool exact_simd_execution_proof_present = false;
-    PackedPaperNthashExecutionProof paper_nthash_execution_proof{};
-    bool paper_nthash_execution_proof_present = false;
+    std::optional<bioseq::parallelism::memory_permit> permit;
+    std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device;
+    std::vector<p_minimizer> minimizers;
+    scalar_minimizer_execution_stats scalar_execution_stats{};
+    bool scalar_execution_stats_available = false;
+    two_stack_execution_stats exact_simd_execution_stats{};
+    bool exact_simd_execution_stats_available = false;
+    bounded_nthash_execution_stats bounded_nthash_execution_stats{};
+    bool bounded_nthash_execution_stats_available = false;
 
-    BudgetedSketchVector() = default;
-    BudgetedSketchVector(const BudgetedSketchVector&) = delete;
-    BudgetedSketchVector& operator=(const BudgetedSketchVector&) = delete;
+    budgeted_sketch_vector() = default;
+    budgeted_sketch_vector(const budgeted_sketch_vector&) = delete;
+    budgeted_sketch_vector& operator=(const budgeted_sketch_vector&) = delete;
 
-    BudgetedSketchVector(BudgetedSketchVector&& other) noexcept {
+    budgeted_sketch_vector(budgeted_sketch_vector&& other) noexcept {
         steal_from_(std::move(other));
     }
 
-    BudgetedSketchVector& operator=(BudgetedSketchVector&& other) noexcept {
+    budgeted_sketch_vector& operator=(budgeted_sketch_vector&& other) noexcept {
         if (this != &other) {
             release_owned_memory_before_permit();
             steal_from_(std::move(other));
@@ -9348,19 +9333,19 @@ struct BudgetedSketchVector {
 
     void release_owned_memory_before_permit() noexcept {
         {
-            std::vector<MinimizerT> empty;
+            std::vector<p_minimizer> empty;
             minimizers.swap(empty);
         }
         device.reset();
         permit.reset();
     }
 
-    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept {
+    [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
         return minimizers;
     }
 
 private:
-    void steal_from_(BudgetedSketchVector&& other) noexcept {
+    void steal_from_(budgeted_sketch_vector&& other) noexcept {
         // Transfer allocations while all source admission anchors remain live,
         // then transfer device and host permits. Swap proves the source has no
         // residual vector capacity after the permit move.
@@ -9369,41 +9354,41 @@ private:
         other.device.reset();
         permit = std::move(other.permit);
         other.permit.reset();
-        scalar_execution_proof = other.scalar_execution_proof;
-        scalar_execution_proof_present =
-            std::exchange(other.scalar_execution_proof_present, false);
-        exact_simd_execution_proof = other.exact_simd_execution_proof;
-        exact_simd_execution_proof_present =
-            std::exchange(other.exact_simd_execution_proof_present, false);
-        paper_nthash_execution_proof = other.paper_nthash_execution_proof;
-        paper_nthash_execution_proof_present =
-            std::exchange(other.paper_nthash_execution_proof_present, false);
+        scalar_execution_stats = other.scalar_execution_stats;
+        scalar_execution_stats_available =
+            std::exchange(other.scalar_execution_stats_available, false);
+        exact_simd_execution_stats = other.exact_simd_execution_stats;
+        exact_simd_execution_stats_available =
+            std::exchange(other.exact_simd_execution_stats_available, false);
+        bounded_nthash_execution_stats = other.bounded_nthash_execution_stats;
+        bounded_nthash_execution_stats_available =
+            std::exchange(other.bounded_nthash_execution_stats_available, false);
     }
 };
 
-template <class MinimizerT, sequence_alphabet Alphabet>
-[[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    const Minimap2Params& params,
+template <class p_minimizer, sequence_alphabet p_alphabet>
+[[nodiscard]] budgeted_sketch_vector<p_minimizer> sketch_query_for_index_selection(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    const minimap2_parameters& params,
     std::size_t w,
     std::size_t k)
 {
-    require_representable_minimizer_query_length<MinimizerT>(
+    require_representable_minimizer_query_length<p_minimizer>(
         query_seq.bp_size());
-    if (params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
+    if (params.minimizer_algorithm == minimizer_algorithm::vulkan_minimap_integer)
     {
         if (!params.vulkan_enabled) {
             pipe::throw_vulkan_declined("Vulkan query minimizer sketch");
         }
-        bioseq::gpu::vulkan::VulkanSketchDecline decline{};
+        bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
         if (auto gpu_sketch =
-                bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_result<p_minimizer>(
                     query_seq,
                     w,
                     k,
                     &decline))
         {
-            BudgetedSketchVector<MinimizerT> result;
+            budgeted_sketch_vector<p_minimizer> result;
             result.minimizers.swap(gpu_sketch->host_minimizers);
             result.device = gpu_sketch->device_span();
             result.permit = std::move(gpu_sketch->host_permit);
@@ -9413,12 +9398,12 @@ template <class MinimizerT, sequence_alphabet Alphabet>
             "Vulkan query minimizer sketch", decline);
     }
 
-    sketch_collector_t<MinimizerT> query_collector;
+    sketch_collector_t<p_minimizer> query_collector;
     query_collector.reserve(query_seq.bp_size() / std::max<std::size_t>(w, 1) + 64);
-    // Vulkan query sketching returned above. For the existing all-SIMD tuple,
-    // use the same ExactSimd continuation backend as target preparation;
+    // Vulkan query sketching returned above. For the existing all-simd tuple,
+    // use the same exact_simd continuation backend as target preparation;
     // every other non-GPU tuple retains its explicitly scalar query backend.
-    const MinimizerSketchBackend cpu_query_backend =
+    const minimizer_sketch_backend cpu_query_backend =
         pipe::target_index_sketch_backend_from_params(params);
     // The SQL/bench dna4 query representation is packed in u64 units, while
     // the exact K15/W10/B8 continuation kernel consumes u32 words on NEON.
@@ -9431,68 +9416,68 @@ template <class MinimizerT, sequence_alphabet Alphabet>
     // differential tests freeze the emitted raw minimizer sequence. Native
     // little-endian word order is part of this zero-copy split; other targets
     // retain the existing generic-u64 continuation.
-    const pipe::MinimizerRangeExecutionProof execution_proof =
-        pipe::minimizer_dispatch_indexed_query_whole<MinimizerT>(
+    const pipe::minimizer_range_execution_stats execution_stats =
+        pipe::minimizer_dispatch_indexed_query_whole<p_minimizer>(
             query_collector,
             query_seq,
             w,
             k,
             cpu_query_backend,
             params.highway_kernels);
-    if (!pipe::minimizer_range_proof_matches_backend(
+    if (!pipe::minimizer_range_stats_matches_backend(
             cpu_query_backend,
-            execution_proof,
+            execution_stats,
             /*require_nonempty_vector_work=*/false,
-            pipe::ExactSimdRangeRoute::require_continuation)) {
+            pipe::exact_simd_range_route::require_continuation)) {
         throw std::runtime_error(
             "indexed query minimizer sketch did not execute the required "
             "persisted-index-compatible route");
     }
-    BudgetedSketchVector<MinimizerT> result;
+    budgeted_sketch_vector<p_minimizer> result;
     auto minimizers = std::move(query_collector).extract_sketches_data();
     result.minimizers.swap(minimizers);
-    result.scalar_execution_proof = execution_proof.scalar;
-    result.scalar_execution_proof_present =
-        execution_proof.scalar_present;
-    result.exact_simd_execution_proof = execution_proof.exact_simd;
-    result.exact_simd_execution_proof_present =
-        execution_proof.exact_simd_present;
-    result.paper_nthash_execution_proof = execution_proof.paper_nthash;
-    result.paper_nthash_execution_proof_present =
-        execution_proof.paper_nthash_present;
+    result.scalar_execution_stats = execution_stats.scalar;
+    result.scalar_execution_stats_available =
+        execution_stats.scalar_available;
+    result.exact_simd_execution_stats = execution_stats.exact_simd;
+    result.exact_simd_execution_stats_available =
+        execution_stats.exact_simd_available;
+    result.bounded_nthash_execution_stats = execution_stats.bounded_nthash;
+    result.bounded_nthash_execution_stats_available =
+        execution_stats.bounded_nthash_available;
     return result;
 }
 
-template <sequence_alphabet Alphabet,
-          class FragmentIndexStorage = std::nullptr_t>
-[[nodiscard]] MatchResultCollection minimap_port_segmented(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const Minimap2Params& params = Minimap2Params{},
-    FragmentIndexStorage* fragment_index_out = nullptr)
+template <sequence_alphabet p_alphabet,
+          class p_fragment_index_storage = std::nullptr_t>
+[[nodiscard]] match_result_collection minimap_port_segmented(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params = minimap2_parameters{},
+    p_fragment_index_storage* fragment_index_out = nullptr)
 {
-    using MinimizerT = MinimapSketchData;
+    using p_minimizer = minimap_sketch_data;
     static const auto* _desc =
-        bioseq::instr::register_region_static("minimap_port_segmented");
-    auto _scope = bioseq::instr::region(_desc);
+        bioseq::instrumentation::register_static_region("minimap_port_segmented");
+    auto _scope = bioseq::instrumentation::region(_desc);
 
     const std::size_t w = static_cast<std::size_t>(params.window_size);
     const std::size_t k = static_cast<std::size_t>(params.kmer_size);
     const sequence_size_t query_len  = query_seq.bp_size();
     const sequence_size_t target_len = target_seq.bp_size();
     if (query_len == 0 || target_len == 0) {
-        return MatchResultCollection{};
+        return match_result_collection{};
     }
 
-    // DOC0345 Patch D — resolve the target-index sketch backend once; every
+    //  Patch D — resolve the target-index sketch backend once; every
     // target `minimizer_dispatch_range` call below passes it explicitly so no
     // target seam can silently fall back to scalar.
-    const MinimizerSketchBackend target_sketch_backend =
+    const minimizer_sketch_backend target_sketch_backend =
         pipe::target_index_sketch_backend_from_params(params);
 
-    std::optional<bioseq::indexing::GpuMinimizerIndexCache> segmented_gpu_index_cache;
+    std::optional<bioseq::indexing::gpu_minimizer_index_cache> segmented_gpu_index_cache;
     if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
-        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        bioseq::gpu::vulkan::runtime& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
         std::uint64_t limit = bioseq::gpu::vulkan::hardware_device_available(gpu_rt)
             ? gpu_rt.features().device_local_bytes / 2u
             : (std::uint64_t{512} << 20);
@@ -9500,154 +9485,154 @@ template <sequence_alphabet Alphabet,
         if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
         segmented_gpu_index_cache.emplace(limit);
     }
-    bioseq::indexing::GpuMinimizerIndexCache* segmented_gpu_index_cache_ptr =
+    bioseq::indexing::gpu_minimizer_index_cache* segmented_gpu_index_cache_ptr =
         segmented_gpu_index_cache ? &*segmented_gpu_index_cache : nullptr;
     auto segment_gpu_identity = [](std::size_t segment_index) noexcept {
-        return bioseq::indexing::GpuIndexCacheIdentity{
+        return bioseq::indexing::gpu_index_cache_identity{
             .assembly_identity = 0x9e3779b97f4a7c15ULL
                 ^ (static_cast<std::uint64_t>(segment_index) + 1u),
         };
     };
 
-    // (1) Sketch the query ONCE as MinimapSketchData (query <= 2^28 bp; its
+    // (1) Sketch the query ONCE as minimap_sketch_data (query <= 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
-    //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
-    //     sketches on the GPU when VULKAN_MINIMAP_INT is selected (byte-identical
+    //     `collect_seed_hits` matches identically. — the helper
+    //     sketches on the GPU when vulkan_minimap_integer is selected (byte-identical
     //     minimizers) and otherwise uses the scalar CPU sketch.
     auto query_sketch =
-        sketch_query_for_index_selection<MinimizerT>(query_seq, params, w, k);
-    const pipe::MinimizerBatchView<MinimizerT> query_minimizers{
-        .host = std::span<const MinimizerT>{
+        sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k);
+    const pipe::minimizer_batch_view<p_minimizer> query_minimizers{
+        .host = std::span<const p_minimizer>{
             query_sketch.minimizers.data(), query_sketch.minimizers.size()},
         .device = query_sketch.device,
     };
     const bool exact_simd_segmented_route =
-        target_sketch_backend == MinimizerSketchBackend::ExactSimd;
-    const bool paper_nthash_segmented_route =
-        target_sketch_backend == MinimizerSketchBackend::PaperNtHashSimd;
+        target_sketch_backend == minimizer_sketch_backend::exact_simd;
+    const bool bounded_nthash_segmented_route =
+        target_sketch_backend == minimizer_sketch_backend::bounded_nthash_simd;
     const bool scalar_segmented_route =
-        target_sketch_backend == MinimizerSketchBackend::Scalar;
-    auto record_target_range_proof =
-        [exact_simd_segmented_route, paper_nthash_segmented_route,
+        target_sketch_backend == minimizer_sketch_backend::scalar;
+    auto record_target_range_stats =
+        [exact_simd_segmented_route, bounded_nthash_segmented_route,
          scalar_segmented_route](
-                MatchResultCollection& collection,
-                const pipe::MinimizerRangeExecutionProof& range_proof) {
+                match_result_collection& collection,
+                const pipe::minimizer_range_execution_stats& range_stats) {
             if (exact_simd_segmented_route) {
-                if (!range_proof.exact_simd_present
-                    || !range_proof.exact_simd.accepted(
+                if (!range_stats.exact_simd_available
+                    || !range_stats.exact_simd.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || range_proof.paper_nthash_present
-                    || range_proof.scalar_present) {
-                    bioseq_log<ERR>(
-                        "ExactSimd segmented target range lacks actual proof");
+                    || range_stats.bounded_nthash_available
+                    || range_stats.scalar_available) {
+                    bioseq_log<logging_level::error>(
+                        "exact_simd segmented target range lacks actual stats");
                     std::abort();
                 }
-                collection.record_exact_simd_target_execution_proof(
-                    range_proof.exact_simd);
-            } else if (paper_nthash_segmented_route) {
-                if (!range_proof.paper_nthash_present
-                    || !range_proof.paper_nthash.accepted(
+                collection.record_exact_simd_target_execution_stats(
+                    range_stats.exact_simd);
+            } else if (bounded_nthash_segmented_route) {
+                if (!range_stats.bounded_nthash_available
+                    || !range_stats.bounded_nthash.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || range_proof.exact_simd_present
-                    || range_proof.scalar_present) {
-                    bioseq_log<ERR>(
-                        "PaperNtHashSimd segmented target range lacks actual proof");
+                    || range_stats.exact_simd_available
+                    || range_stats.scalar_available) {
+                    bioseq_log<logging_level::error>(
+                        "bounded_nthash_simd segmented target range lacks actual stats");
                     std::abort();
                 }
-                collection.record_paper_nthash_target_execution_proof(
-                    range_proof.paper_nthash);
+                collection.record_bounded_nthash_target_execution_stats(
+                    range_stats.bounded_nthash);
             } else if (scalar_segmented_route) {
-                if (!range_proof.scalar_present
-                    || !range_proof.scalar.accepted(
+                if (!range_stats.scalar_available
+                    || !range_stats.scalar.is_coherent(
                         /*require_nonempty_work=*/false)
-                    || range_proof.exact_simd_present
-                    || range_proof.paper_nthash_present) {
-                    bioseq_log<ERR>(
-                        "Scalar segmented target range lacks actual proof");
+                    || range_stats.exact_simd_available
+                    || range_stats.bounded_nthash_available) {
+                    bioseq_log<logging_level::error>(
+                        "scalar segmented target range lacks actual stats");
                     std::abort();
                 }
-                collection.record_scalar_target_minimizer_execution_proof(
-                    range_proof.scalar);
-            } else if (range_proof.exact_simd_present
-                       || range_proof.paper_nthash_present
-                       || range_proof.scalar_present) {
-                bioseq_log<ERR>(
-                    "Scalar/Vulkan segmented target range emitted CPU SIMD sketch proof");
+                collection.record_scalar_target_minimizer_execution_stats(
+                    range_stats.scalar);
+            } else if (range_stats.exact_simd_available
+                       || range_stats.bounded_nthash_available
+                       || range_stats.scalar_available) {
+                bioseq_log<logging_level::error>(
+                    "scalar/Vulkan segmented target range emitted CPU simd sketch stats");
                 std::abort();
             }
         };
-    auto finalize_segmented_proof =
+    auto finalize_segmented_stats =
         [&query_sketch, exact_simd_segmented_route,
-         paper_nthash_segmented_route, scalar_segmented_route](
-                MatchResultCollection collection) {
+         bounded_nthash_segmented_route, scalar_segmented_route](
+                match_result_collection collection) {
             if (exact_simd_segmented_route) {
-                if (!query_sketch.exact_simd_execution_proof_present
-                    || !query_sketch.exact_simd_execution_proof.accepted(
+                if (!query_sketch.exact_simd_execution_stats_available
+                    || !query_sketch.exact_simd_execution_stats.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || query_sketch.paper_nthash_execution_proof_present
-                    || query_sketch.scalar_execution_proof_present
-                    || !collection.exact_simd_target_execution_proof_present
-                    || !collection.exact_simd_target_execution_proof.accepted(
+                    || query_sketch.bounded_nthash_execution_stats_available
+                    || query_sketch.scalar_execution_stats_available
+                    || !collection.exact_simd_target_execution_stats_available
+                    || !collection.exact_simd_target_execution_stats.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || collection.paper_nthash_target_execution_proof_present) {
-                    bioseq_log<ERR>(
-                        "ExactSimd segmented query/target proof coverage is incomplete");
+                    || collection.bounded_nthash_target_execution_stats_available) {
+                    bioseq_log<logging_level::error>(
+                        "exact_simd segmented query/target stats coverage is incomplete");
                     std::abort();
                 }
-                collection.record_exact_simd_query_execution_proof(
-                    query_sketch.exact_simd_execution_proof);
-            } else if (paper_nthash_segmented_route) {
-                if (!query_sketch.paper_nthash_execution_proof_present
-                    || !query_sketch.paper_nthash_execution_proof.accepted(
+                collection.record_exact_simd_query_execution_stats(
+                    query_sketch.exact_simd_execution_stats);
+            } else if (bounded_nthash_segmented_route) {
+                if (!query_sketch.bounded_nthash_execution_stats_available
+                    || !query_sketch.bounded_nthash_execution_stats.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || query_sketch.exact_simd_execution_proof_present
-                    || query_sketch.scalar_execution_proof_present
-                    || !collection.paper_nthash_target_execution_proof_present
-                    || !collection.paper_nthash_target_execution_proof.accepted(
+                    || query_sketch.exact_simd_execution_stats_available
+                    || query_sketch.scalar_execution_stats_available
+                    || !collection.bounded_nthash_target_execution_stats_available
+                    || !collection.bounded_nthash_target_execution_stats.is_internally_consistent(
                         /*require_nonempty_vector_work=*/false)
-                    || collection.exact_simd_target_execution_proof_present) {
-                    bioseq_log<ERR>(
-                        "PaperNtHashSimd segmented query/target proof coverage is incomplete");
+                    || collection.exact_simd_target_execution_stats_available) {
+                    bioseq_log<logging_level::error>(
+                        "bounded_nthash_simd segmented query/target stats coverage is incomplete");
                     std::abort();
                 }
-                collection.record_paper_nthash_query_execution_proof(
-                    query_sketch.paper_nthash_execution_proof);
+                collection.record_bounded_nthash_query_execution_stats(
+                    query_sketch.bounded_nthash_execution_stats);
             } else if (scalar_segmented_route) {
-                if (!query_sketch.scalar_execution_proof_present
-                    || !query_sketch.scalar_execution_proof.accepted()
-                    || query_sketch.exact_simd_execution_proof_present
-                    || query_sketch.paper_nthash_execution_proof_present
-                    || !collection.scalar_pipeline_execution_proof_present
-                    || !collection.scalar_pipeline_execution_proof
-                        .target_minimizers.accepted()
-                    || collection.exact_simd_target_execution_proof_present
-                    || collection.paper_nthash_target_execution_proof_present) {
-                    bioseq_log<ERR>(
-                        "Scalar segmented query/target proof coverage is incomplete");
+                if (!query_sketch.scalar_execution_stats_available
+                    || !query_sketch.scalar_execution_stats.is_coherent()
+                    || query_sketch.exact_simd_execution_stats_available
+                    || query_sketch.bounded_nthash_execution_stats_available
+                    || !collection.scalar_pipeline_execution_stats_available
+                    || !collection.scalar_pipeline_execution_stats
+                        .target_minimizers.is_coherent()
+                    || collection.exact_simd_target_execution_stats_available
+                    || collection.bounded_nthash_target_execution_stats_available) {
+                    bioseq_log<logging_level::error>(
+                        "scalar segmented query/target stats coverage is incomplete");
                     std::abort();
                 }
-                collection.record_scalar_query_minimizer_execution_proof(
-                    query_sketch.scalar_execution_proof);
-            } else if (query_sketch.exact_simd_execution_proof_present
-                       || query_sketch.paper_nthash_execution_proof_present
-                       || query_sketch.scalar_execution_proof_present
-                       || collection.exact_simd_target_execution_proof_present
-                       || collection.paper_nthash_target_execution_proof_present
-                       || (collection.scalar_pipeline_execution_proof_present
-                           && collection.scalar_pipeline_execution_proof
+                collection.record_scalar_query_minimizer_execution_stats(
+                    query_sketch.scalar_execution_stats);
+            } else if (query_sketch.exact_simd_execution_stats_available
+                       || query_sketch.bounded_nthash_execution_stats_available
+                       || query_sketch.scalar_execution_stats_available
+                       || collection.exact_simd_target_execution_stats_available
+                       || collection.bounded_nthash_target_execution_stats_available
+                       || (collection.scalar_pipeline_execution_stats_available
+                           && collection.scalar_pipeline_execution_stats
                                .target_minimizers.calls != 0)) {
-                bioseq_log<ERR>(
-                    "Scalar/Vulkan segmented route emitted CPU SIMD sketch proof");
+                bioseq_log<logging_level::error>(
+                    "scalar/Vulkan segmented route emitted CPU simd sketch stats");
                 std::abort();
             }
             return collection;
         };
     boost::unordered_flat_set<std::uint64_t> query_kmer_filter;
     query_kmer_filter.reserve(query_minimizers.size());
-    for (const MinimizerT& minimizer : query_minimizers) {
+    for (const p_minimizer& minimizer : query_minimizers) {
         query_kmer_filter.insert(minimizer.kmer());
     }
-    struct QueryKmerGate {
+    struct query_kmer_gate {
         std::vector<std::uint32_t> words;
         std::uint64_t mask = 0u;
         bool exact = false;
@@ -9687,24 +9672,24 @@ template <sequence_alphabet Alphabet,
             return false;
         }
 
-        [[nodiscard]] bioseq::gpu::vulkan::VulkanSketchQueryGate
+        [[nodiscard]] bioseq::gpu::vulkan::vulkan_sketch_query_gate
         vulkan_gate() const noexcept
         {
-            return bioseq::gpu::vulkan::VulkanSketchQueryGate{
+            return bioseq::gpu::vulkan::vulkan_sketch_query_gate{
                 std::span<const std::uint32_t>{words.data(), words.size()},
                 static_cast<std::uint32_t>(mask)};
         }
     };
-    QueryKmerGate query_kmer_gate;
-    if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+    query_kmer_gate query_kmer_gate;
+    if (target_sketch_backend == minimizer_sketch_backend::vulkan_segment) {
         query_kmer_gate.build(query_kmer_filter, k);
     }
-    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
+    using filtered_minimizer_pair = std::pair<std::uint64_t, std::uint64_t>;
     auto build_query_filtered_segment_index =
         [&query_kmer_filter, &query_kmer_gate, target_len](
-                std::span<const MinimizerT> minimizers,
-                MinimizerHashmapFragmentIndex& index,
-                std::vector<FilteredMinimizerPair>& filtered_pairs,
+                std::span<const p_minimizer> minimizers,
+                minimizer_hashmap_fragment_index& index,
+                std::vector<filtered_minimizer_pair>& filtered_pairs,
                 bool already_query_filtered = false) -> std::size_t {
         filtered_pairs.clear();
         const std::size_t filter_size = query_kmer_filter.size();
@@ -9716,7 +9701,7 @@ template <sequence_alphabet Alphabet,
         if (filtered_pairs.capacity() < reserve_hint) {
             filtered_pairs.reserve(reserve_hint);
         }
-        for (const MinimizerT& minimizer : minimizers) {
+        for (const p_minimizer& minimizer : minimizers) {
             const std::uint64_t kmer = minimizer.kmer();
             if (already_query_filtered
                 || query_kmer_gate.accepts_exactly(kmer)
@@ -9726,19 +9711,19 @@ template <sequence_alphabet Alphabet,
             }
         }
         index.build_from_pairs(
-            std::span<FilteredMinimizerPair>{
+            std::span<filtered_minimizer_pair>{
                 filtered_pairs.data(), filtered_pairs.size()},
             target_len);
         return filtered_pairs.size();
     };
-    using QueryKmerFilter = decltype(query_kmer_filter);
-    struct QueryFilteredPairCollector {
-        using minimizer_type = MinimizerT;
+    using query_kmer_filter_type = decltype(query_kmer_filter);
+    struct query_filtered_pair_collector {
+        using minimizer_type = p_minimizer;
 
-        const QueryKmerFilter* filter = nullptr;
-        const QueryKmerGate* gate = nullptr;
+        const query_kmer_filter_type* filter = nullptr;
+        const query_kmer_gate* gate = nullptr;
         std::uint64_t position_offset = 0u;
-        std::vector<FilteredMinimizerPair> pairs;
+        std::vector<filtered_minimizer_pair> pairs;
 
         void reserve(std::size_t expected_count) {
             const std::size_t filtered_hint = filter == nullptr
@@ -9747,10 +9732,10 @@ template <sequence_alphabet Alphabet,
             pairs.reserve(filtered_hint);
         }
         void clear() { pairs.clear(); }
-        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
-            collect(static_cast<const MinimizerT&>(sketch));
+        [[gnu::always_inline]] void collect(p_minimizer&& sketch) {
+            collect(static_cast<const p_minimizer&>(sketch));
         }
-        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
+        [[gnu::always_inline]] void collect(const p_minimizer& sketch) {
             const std::uint64_t kmer = sketch.kmer();
             if (filter == nullptr
                 || ((gate == nullptr || gate->maybe_contains(kmer))
@@ -9762,13 +9747,13 @@ template <sequence_alphabet Alphabet,
             }
         }
         [[nodiscard]] bool append_raw_storage(
-            const typename MinimizerT::storage_t* raw,
+            const typename p_minimizer::storage_type* raw,
             std::size_t count) {
             if (count > pairs.max_size() - pairs.size()) {
                 return false;
             }
             for (std::size_t index = 0; index < count; ++index) {
-                collect(MinimizerT::from_raw_storage(raw[index]));
+                collect(p_minimizer::from_raw_storage(raw[index]));
             }
             return true;
         }
@@ -9784,34 +9769,34 @@ template <sequence_alphabet Alphabet,
          &query_minimizers, &query_kmer_filter, &query_kmer_gate, &params, fragment_index_out,
          target_sketch_backend, segmented_gpu_index_cache_ptr,
          &segment_gpu_identity, &build_query_filtered_segment_index,
-         &record_target_range_proof,
-         &finalize_segmented_proof]() -> MatchResultCollection {
-        MatchResultCollection merged_collection;
-        std::vector<MatchResult>& merged = merged_collection.results;
-        sketch_collector_t<MinimizerT> seg_collector;
-        MinimizerHashmapFragmentIndex seg_index;
-        std::vector<FilteredMinimizerPair> filtered_pairs;
+         &record_target_range_stats,
+         &finalize_segmented_stats]() -> match_result_collection {
+        match_result_collection merged_collection;
+        std::vector<match_result>& merged = merged_collection.results;
+        sketch_collector_t<p_minimizer> seg_collector;
+        minimizer_hashmap_fragment_index seg_index;
+        std::vector<filtered_minimizer_pair> filtered_pairs;
         const auto ranges =
             pipe::segment_unit_ranges_for_backend(
                 target_len, query_len, lpu, target_sketch_backend);
         constexpr sequence_size_t frag_bp = 32768u;
 
-        bioseq_log_lazy<DBG>([&] {
-            bioseq_log_progress<DBG>("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
+        bioseq_log_lazy<logging_level::debug>([&] {
+            bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
                             "| footprint={}MB avail={}MB",
                     target_len, query_len, ranges.size(),
-                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                    bioseq::common::memory::process_footprint_bytes() >> 20,
+                    bioseq::common::memory::system_available_bytes() >> 20);
         });
 
-        if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
+        if constexpr (!std::is_same_v<p_fragment_index_storage, std::nullptr_t>) {
             if (fragment_index_out != nullptr) {
-                FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
+                fragment_persist_accumulator<p_fragment_index_storage, p_minimizer> acc{
                     *fragment_index_out, target_len, frag_bp};
                 for (std::size_t segment_index = 0;
                      segment_index < ranges.size();
                      ++segment_index) {
-                    const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                    const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
                     const auto [segment_lo_bp, segment_hi_bp] =
                         pipe::validated_segment_bp_bounds(
                             range, lpu, target_len);
@@ -9819,40 +9804,40 @@ template <sequence_alphabet Alphabet,
                     seg_collector.reserve(
                         (range.ce_u - range.cs_u) * lpu
                             / std::max<std::size_t>(w, 1) + 64);
-                    const auto range_proof =
-                        pipe::minimizer_dispatch_range<MinimizerT>(
+                    const auto range_stats =
+                        pipe::minimizer_dispatch_range<p_minimizer>(
                         seg_collector, target_seq,
                         segment_lo_bp, segment_hi_bp, w, k,
                         target_sketch_backend,
-                        pipe::ExactSimdRangeRoute::require_continuation,
+                        pipe::exact_simd_range_route::require_continuation,
                         params.highway_kernels);
-                    record_target_range_proof(merged_collection, range_proof);
-                    const std::vector<MinimizerT>& seg_minimizers =
+                    record_target_range_stats(merged_collection, range_stats);
+                    const std::vector<p_minimizer>& seg_minimizers =
                         seg_collector.extract_sketches_data();
 
                     auto emissions = collect_fragment_emissions_for_segment(
                         range,
-                        std::span<const MinimizerT>(
+                        std::span<const p_minimizer>(
                             seg_minimizers.data(), seg_minimizers.size()),
                         target_len,
                         frag_bp,
                         lpu);
-                    acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                    acc.ingest(std::span<const segment_fragment_emission<p_minimizer>>(
                         emissions.data(), emissions.size()));
                     acc.flush_ready(range.core_hi_bp);
 
                     build_query_filtered_segment_index(
-                        std::span<const MinimizerT>{
+                        std::span<const p_minimizer>{
                             seg_minimizers.data(), seg_minimizers.size()},
                         seg_index,
                         filtered_pairs);
                     seg_index.add_position_offset(segment_lo_bp);
 
-                    MatchResultCollection seg_res = minimap2_port_with_index(
+                    match_result_collection seg_res = minimap2_port_with_index(
                         query_seq, target_seq, query_minimizers, seg_index, params,
                         segmented_gpu_index_cache_ptr,
                         segment_gpu_identity(segment_index));
-                    merged_collection.combine_execution_proof(seg_res);
+                    merged_collection.combine_execution_stats(seg_res);
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp
                             && result.target_start < range.core_hi_bp) {
@@ -9861,27 +9846,27 @@ template <sequence_alphabet Alphabet,
                     }
                 }
                 acc.finish();
-                return finalize_segmented_proof(std::move(merged_collection));
+                return finalize_segmented_stats(std::move(merged_collection));
             }
         }
 
-        QueryFilteredPairCollector filtered_pair_collector{
+        query_filtered_pair_collector filtered_pair_collector{
             &query_kmer_filter, &query_kmer_gate};
         for (std::size_t segment_index = 0;
              segment_index < ranges.size();
              ++segment_index) {
-            const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+            const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
             const auto [segment_lo_bp, segment_hi_bp] =
                 pipe::validated_segment_bp_bounds(range, lpu, target_len);
-            bioseq::indexing::GpuIndexCacheIdentity gpu_identity =
+            bioseq::indexing::gpu_index_cache_identity gpu_identity =
                 segment_gpu_identity(segment_index);
             std::size_t seg_result_count = 0;
-            if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
+            if (target_sketch_backend == minimizer_sketch_backend::vulkan_segment) {
                 filtered_pair_collector.position_offset = segment_lo_bp;
                 filtered_pair_collector.clear();
                 filtered_pair_collector.reserve(
                     (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-                bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<p_minimizer>(
                     filtered_pair_collector,
                     target_seq,
                     segment_lo_bp,
@@ -9892,16 +9877,16 @@ template <sequence_alphabet Alphabet,
                 // Safe with the approximate device gate because the collector
                 // still exact-confirms each emitted kmer against query_kmer_filter.
                 seg_index.build_from_pairs(
-                    std::span<FilteredMinimizerPair>{
+                    std::span<filtered_minimizer_pair>{
                         filtered_pair_collector.pairs.data(),
                         filtered_pair_collector.pairs.size()},
                     target_len);
 
-                MatchResultCollection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res = minimap2_port_with_index(
                     query_seq, target_seq, query_minimizers, seg_index, params,
                     segmented_gpu_index_cache_ptr,
                     gpu_identity);
-                merged_collection.combine_execution_proof(seg_res);
+                merged_collection.combine_execution_stats(seg_res);
                 seg_result_count = seg_res.results.size();
                 for (auto& result : seg_res.results) {
                     if (result.target_start >= range.core_lo_bp
@@ -9913,27 +9898,27 @@ template <sequence_alphabet Alphabet,
                 seg_collector.clear();
                 seg_collector.reserve(
                     (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-                const auto range_proof =
-                    pipe::minimizer_dispatch_range<MinimizerT>(
+                const auto range_stats =
+                    pipe::minimizer_dispatch_range<p_minimizer>(
                     seg_collector, target_seq,
                     segment_lo_bp, segment_hi_bp, w, k,
                     target_sketch_backend,
-                    pipe::ExactSimdRangeRoute::require_continuation,
+                    pipe::exact_simd_range_route::require_continuation,
                     params.highway_kernels);
-                record_target_range_proof(merged_collection, range_proof);
-                const std::vector<MinimizerT>& seg_minimizers =
+                record_target_range_stats(merged_collection, range_stats);
+                const std::vector<p_minimizer>& seg_minimizers =
                     seg_collector.extract_sketches_data();
                 build_query_filtered_segment_index(
-                    std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
+                    std::span<const p_minimizer>{seg_minimizers.data(), seg_minimizers.size()},
                     seg_index,
                     filtered_pairs);
                 seg_index.add_position_offset(segment_lo_bp);
 
-                MatchResultCollection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res = minimap2_port_with_index(
                     query_seq, target_seq, query_minimizers, seg_index, params,
                     segmented_gpu_index_cache_ptr,
                     gpu_identity);
-                merged_collection.combine_execution_proof(seg_res);
+                merged_collection.combine_execution_stats(seg_res);
                 seg_result_count = seg_res.results.size();
                 for (auto& result : seg_res.results) {
                     if (result.target_start >= range.core_lo_bp
@@ -9942,43 +9927,43 @@ template <sequence_alphabet Alphabet,
                     }
                 }
             }
-            bioseq_log_lazy<DBG>([&] {
-                bioseq_log_progress<DBG>("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
+            bioseq_log_lazy<logging_level::debug>([&] {
+                bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
                                 "(merged {}) | footprint={}MB avail={}MB",
                         range.core_lo_bp, range.core_hi_bp,
                         merged.size(), seg_result_count, merged.size(),
-                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                        bioseq::common::memory::process_footprint_bytes() >> 20,
+                        bioseq::common::memory::system_available_bytes() >> 20);
             });
         }
-        return finalize_segmented_proof(std::move(merged_collection));
+        return finalize_segmented_stats(std::move(merged_collection));
     };
 
-    auto run_vulkan_segment_coordinate_batch = [&]() -> MatchResultCollection {
-        auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    auto run_vulkan_segment_coordinate_batch = [&]() -> match_result_collection {
+        auto& runtime = bioseq::gpu::vulkan::runtime::instance();
         if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
-            pipe::throw_vulkan_declined("VulkanSegment resident coordinate batch");
+            pipe::throw_vulkan_declined("vulkan_segment resident coordinate batch");
         }
         const auto ranges =
             pipe::segment_unit_ranges_for_backend(
                 target_len, query_len, lpu, target_sketch_backend);
-        std::span<const MinimizerT> sketch_span{
+        std::span<const p_minimizer> sketch_span{
             query_minimizers.data(), query_minimizers.size()};
-        const bioseq::gpu::vulkan::Buffer* device_words =
+        const bioseq::gpu::vulkan::buffer* device_words =
             (query_minimizers.device && query_minimizers.device->words() != nullptr
              && query_minimizers.device->count() == sketch_span.size())
                 ? query_minimizers.device->words()
                 : nullptr;
 
-        std::vector<std::shared_ptr<bioseq::indexing::GpuResidentMinimizerIndex>>
+        std::vector<std::shared_ptr<bioseq::indexing::gpu_resident_minimizer_index>>
             residents;
-        std::vector<bioseq::gpu::vulkan::PhaseCSeedCoordinateJob> jobs;
+        std::vector<bioseq::gpu::vulkan::gpu_seed_coordinate_job> jobs;
         std::vector<std::size_t> job_segment_indices;
         residents.reserve(ranges.size());
         jobs.reserve(ranges.size());
         job_segment_indices.reserve(ranges.size());
 
-        const auto frozen_query_gate = pipe::freeze_phase_c_query_gate(
+        const auto frozen_query_gate = pipe::freeze_gpu_query_gate(
             query_kmer_gate.vulkan_gate());
         const auto frozen_gate_identity =
             frozen_query_gate.canonical_identity();
@@ -9986,11 +9971,11 @@ template <sequence_alphabet Alphabet,
         for (std::size_t segment_index = 0;
              segment_index < ranges.size();
              ++segment_index) {
-            const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+            const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
             const auto [segment_lo_bp, segment_hi_bp] =
                 pipe::validated_segment_bp_bounds(range, lpu, target_len);
-            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
-            auto built = bioseq::gpu::vulkan::build_gpu_segment_index_on_device<MinimizerT>(
+            bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
+            auto built = bioseq::gpu::vulkan::build_gpu_segment_index_on_device<p_minimizer>(
                 target_seq,
                 segment_lo_bp,
                 segment_hi_bp,
@@ -10000,14 +9985,14 @@ template <sequence_alphabet Alphabet,
                 &decline);
             if (!built) {
                 pipe::throw_vulkan_sketch_declined(
-                    "VulkanSegment GPU resident index build", decline);
+                    "vulkan_segment GPU resident index build", decline);
             }
             if (!built->valid || built->position_count == 0u || built->occupied_slots == 0u) {
                 continue;
             }
 
             auto identity = segment_gpu_identity(segment_index);
-            bioseq::indexing::GpuMinimizerIndexCacheKey key{
+            bioseq::indexing::gpu_minimizer_index_cache_key key{
                 .source_id = 0u,
                 .caller_identity = identity.assembly_identity,
                 .target_len = built->target_len,
@@ -10019,15 +10004,15 @@ template <sequence_alphabet Alphabet,
             auto adopted = bioseq::indexing::adopt_gpu_built_index(
                 runtime, std::move(*built), key);
             if (!adopted) {
-                throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
-                    "VulkanSegment GPU resident index adoption rejected ({})",
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(fmt::format(
+                    "vulkan_segment GPU resident index adoption rejected ({})",
                     bioseq::indexing::gpu_built_index_adoption_error_name(
                         adopted.error())));
             }
             auto resident = std::move(*adopted);
             resident->target_position_offset = segment_lo_bp;
             residents.push_back(resident);
-            jobs.push_back(bioseq::gpu::vulkan::PhaseCSeedCoordinateJob{
+            jobs.push_back(bioseq::gpu::vulkan::gpu_seed_coordinate_job{
                 .slots = &resident->slots,
                 .positions = &resident->positions,
                 .target_len = resident->target_len,
@@ -10039,17 +10024,17 @@ template <sequence_alphabet Alphabet,
             job_segment_indices.push_back(segment_index);
         }
         if (jobs.empty()) {
-            return MatchResultCollection{};
+            return match_result_collection{};
         }
 
-        auto cp = params.to_chaining_params();
+        auto cp = params.make_chaining_parameters();
         std::int32_t max_dist_x = cp.max_gap;
         std::int32_t max_dist_y = cp.max_gap;
         if (max_dist_x < cp.bandwidth) max_dist_x = cp.bandwidth;
         if (max_dist_y < cp.bandwidth) max_dist_y = cp.bandwidth;
         const auto chain_key =
             bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
-        bioseq::gpu::vulkan::PhaseCSeedQueryInputs query_inputs{
+        bioseq::gpu::vulkan::gpu_seed_query_inputs query_inputs{
             .host_minimizer_bytes = device_words != nullptr
                 ? std::span<const std::byte>{}
                 : std::as_bytes(sketch_span),
@@ -10057,22 +10042,22 @@ template <sequence_alphabet Alphabet,
             .minimizer_count = static_cast<std::uint32_t>(sketch_span.size()),
             .minimizer_word_kind =
                 static_cast<std::uint32_t>(
-                    bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::word_kind),
+                    bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_word_kind),
             .minimizer_words32_per_record =
-                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+                bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_words32_per_minimizer,
             .hash_shift =
-                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::hash_shift,
+                bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_hash_shift,
             .pos_bits =
-                bioseq::gpu::vulkan::minimizer_wire_traits<MinimizerT>::pos_bits,
+                bioseq::gpu::vulkan::minimizer_wire_traits<p_minimizer>::k_position_bits,
         };
-        const auto coords = runtime.run_phase_c_seed_to_coordinate_batch_roundtrip(
+        const auto coords = runtime.run_seed_to_coordinate_batch_roundtrip(
             query_inputs,
-            std::span<const bioseq::gpu::vulkan::PhaseCSeedCoordinateJob>{
+            std::span<const bioseq::gpu::vulkan::gpu_seed_coordinate_job>{
                 jobs.data(), jobs.size()},
             query_len,
             static_cast<std::uint32_t>(params.kmer_size),
             params.max_occ,
-            bioseq::gpu::vulkan::PhaseCSeedCoordinateAlgorithm::
+            bioseq::gpu::vulkan::gpu_seed_coordinate_algorithm::
                 vulkan_tiled_dp,
             chain_key,
             max_dist_x,
@@ -10086,48 +10071,48 @@ template <sequence_alphabet Alphabet,
             cp.min_seed_count,
             16u);
 
-        std::vector<MatchResult> merged;
+        std::vector<match_result> merged;
         merged.reserve(coords.size());
         for (std::size_t job_index = 0; job_index < coords.size(); ++job_index) {
             const auto& coord = coords[job_index];
             if (coord.valid == 0u) continue;
-            const ::bioseq::indexing::SegmentUnitRange& range =
+            const ::bioseq::indexing::segment_unit_range& range =
                 ranges[job_segment_indices[job_index]];
             if (coord.target_start >= range.core_lo_bp
                 && coord.target_start < range.core_hi_bp) {
                 merged.push_back(
-                    pipe::phase_c_coordinate_to_match_result(coord, query_len, target_len));
+                    pipe::gpu_coordinate_to_match_result(coord, query_len, target_len));
             }
         }
-        return MatchResultCollection{std::move(merged)};
+        return match_result_collection{std::move(merged)};
     };
 
-    if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment
-        && pipe::phase_c_coordinate_only_active(params)
+    if (target_sketch_backend == minimizer_sketch_backend::vulkan_segment
+        && pipe::is_gpu_coordinate_only_execution_active(params)
         && fragment_index_out == nullptr) {
-        return finalize_segmented_proof(
+        return finalize_segmented_stats(
             run_vulkan_segment_coordinate_batch());
     }
 
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     if (pipe::vulkan_accelerator_requested(params)
-        || !bioseq::parallelism::task_parallel(pool.mode())
-        || pool.max_concurrency() <= 1
-        || target_sketch_backend == MinimizerSketchBackend::VulkanSegment
+        || !bioseq::parallelism::has_parallel_tasks(pool.get_mode())
+        || pool.maximum_concurrency() <= 1
+        || target_sketch_backend == minimizer_sketch_backend::vulkan_segment
         || !lazy_is_worker_shareable(query_seq)
         || !lazy_is_worker_shareable(target_seq)) {
         return run_serial_segmented();
     }
 
-    struct SegmentWaveAdmission {
+    struct segment_wave_admission {
         unsigned fanout = 1;
         unsigned geometry_divisor = 1;
         sequence_size_t segment_bp = 0;
         std::size_t estimated_segments = 0;
         std::size_t estimated_waves = 0;
         std::uint64_t peak_per_segment = 0;
-        bioseq::parallelism::MemoryPermit permit;
-        bool admitted = false;
+        bioseq::parallelism::memory_permit permit;
+        bool is_admitted = false;
     };
 
     constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
@@ -10136,7 +10121,7 @@ template <sequence_alphabet Alphabet,
         const std::uint64_t core = static_cast<std::uint64_t>(core_bp);
         const std::uint64_t overlap = static_cast<std::uint64_t>(overlap_bp);
         const std::uint64_t expanded =
-            bioseq::parallelism::saturating_mul(2, overlap);
+            bioseq::common::saturating_mul(2, overlap);
         const std::uint64_t collected =
             core > (std::numeric_limits<std::uint64_t>::max)() - expanded
                 ? (std::numeric_limits<std::uint64_t>::max)()
@@ -10151,7 +10136,7 @@ template <sequence_alphabet Alphabet,
             collected_bp_upper_bound(core_bp)) + context_reserve;
     };
 
-    struct SegmentWaveCandidate {
+    struct segment_wave_candidate {
         unsigned fanout = 1;
         unsigned geometry_divisor = 1;
         sequence_size_t segment_bp = 0;
@@ -10164,17 +10149,17 @@ template <sequence_alphabet Alphabet,
 
     auto try_admit_segment_geometry =
         [&pool, target_len, &collected_bp_upper_bound,
-         &peak_for_segment_core_bp]() -> SegmentWaveAdmission {
+         &peak_for_segment_core_bp]() -> segment_wave_admission {
         auto& admission =
-            bioseq::parallelism::MemoryAdmissionController::instance();
-        const unsigned max_fanout = pool.max_concurrency();
+            bioseq::parallelism::memory_admission_controller::instance();
+        const unsigned max_fanout = pool.maximum_concurrency();
         if (max_fanout <= 1) {
-            return SegmentWaveAdmission{};
+            return segment_wave_admission{};
         }
 
         const std::uint64_t allocatable =
             admission.allocatable_after_reservations();
-        std::vector<SegmentWaveCandidate> candidates;
+        std::vector<segment_wave_candidate> candidates;
         candidates.reserve(static_cast<std::size_t>(max_fanout));
 
         for (unsigned fanout = max_fanout; fanout > 1; --fanout) {
@@ -10188,7 +10173,7 @@ template <sequence_alphabet Alphabet,
             const std::uint64_t peak = peak_for_segment_core_bp(bp);
 
             const std::uint64_t reserve_bytes =
-                bioseq::parallelism::saturating_mul(
+                bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(fanout), peak);
             if (reserve_bytes > allocatable) {
                 continue;
@@ -10197,10 +10182,10 @@ template <sequence_alphabet Alphabet,
             const std::size_t estimated_waves =
                 (estimated_segments + fanout - 1) / fanout;
             const std::uint64_t estimated_work =
-                bioseq::parallelism::saturating_mul(
+                bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(estimated_waves),
                     collected_bp);
-            candidates.push_back(SegmentWaveCandidate{
+            candidates.push_back(segment_wave_candidate{
                 fanout,
                 geometry_divisor,
                 bp,
@@ -10214,7 +10199,7 @@ template <sequence_alphabet Alphabet,
         std::sort(
             candidates.begin(),
             candidates.end(),
-            [](const SegmentWaveCandidate& lhs, const SegmentWaveCandidate& rhs) {
+            [](const segment_wave_candidate& lhs, const segment_wave_candidate& rhs) {
                 if (lhs.estimated_work_bp != rhs.estimated_work_bp) {
                     return lhs.estimated_work_bp < rhs.estimated_work_bp;
                 }
@@ -10227,9 +10212,9 @@ template <sequence_alphabet Alphabet,
                 return lhs.geometry_divisor < rhs.geometry_divisor;
             });
 
-        for (const SegmentWaveCandidate& candidate : candidates) {
+        for (const segment_wave_candidate& candidate : candidates) {
             if (auto permit = admission.try_reserve(candidate.reserve_bytes)) {
-                return SegmentWaveAdmission{
+                return segment_wave_admission{
                     candidate.fanout,
                     candidate.geometry_divisor,
                     candidate.segment_bp,
@@ -10241,16 +10226,16 @@ template <sequence_alphabet Alphabet,
             }
         }
 
-        return SegmentWaveAdmission{};
+        return segment_wave_admission{};
     };
 
     auto first_wave = try_admit_segment_geometry();
-    if (!first_wave.admitted || first_wave.fanout <= 1) {
+    if (!first_wave.is_admitted || first_wave.fanout <= 1) {
         return run_serial_segmented();
     }
 
-    bioseq_log_lazy<DBG>([&] {
-        bioseq_log_progress<DBG>("[minimap_port_segmented] admitted parallel geometry fanout={} "
+    bioseq_log_lazy<logging_level::debug>([&] {
+        bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] admitted parallel geometry fanout={} "
                         "divisor={} segment_bp={} estimated_segments={} "
                         "estimated_waves={} peak_per_segment={}MB reserve={}MB "
                         "| footprint={}MB avail={}MB",
@@ -10258,69 +10243,69 @@ template <sequence_alphabet Alphabet,
                 first_wave.segment_bp, first_wave.estimated_segments,
                 first_wave.estimated_waves, first_wave.peak_per_segment >> 20,
                 first_wave.permit.bytes() >> 20,
-                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                bioseq::common::memory::process_footprint_bytes() >> 20,
+                bioseq::common::memory::system_available_bytes() >> 20);
     });
 
     const unsigned geometry_divisor = first_wave.geometry_divisor;
     auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu, geometry_divisor);
-    std::vector<MatchResultCollection> seg_out(ranges.size());
-    bioseq::parallelism::TaskParallelScope scope(
-        bioseq::parallelism::TaskParallelRegion::segment_recompute);
+    std::vector<match_result_collection> seg_out(ranges.size());
+    bioseq::parallelism::task_parallel_scope scope(
+        bioseq::parallelism::task_parallel_region::segment_recompute);
     if (!scope.acquired()) {
         return run_serial_segmented();
     }
 
-    if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
+    if constexpr (!std::is_same_v<p_fragment_index_storage, std::nullptr_t>) {
         if (fragment_index_out != nullptr) {
             constexpr sequence_size_t frag_bp = 32768u;
-            FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
+            fragment_persist_accumulator<p_fragment_index_storage, p_minimizer> acc{
                 *fragment_index_out, target_len, frag_bp};
-            MatchResultCollection merged_collection;
-            std::vector<MatchResult>& merged = merged_collection.results;
+            match_result_collection merged_collection;
+            std::vector<match_result>& merged = merged_collection.results;
 
             auto process_segment_serial =
                 [&ranges, &target_seq, &query_seq, &query_minimizers, &params,
                  &acc, &merged_collection, &merged, target_len, frag_bp, w, k, lpu,
                  target_sketch_backend, segmented_gpu_index_cache_ptr,
-                 &segment_gpu_identity, &record_target_range_proof](
+                 &segment_gpu_identity, &record_target_range_stats](
                         std::size_t segment_index) {
-                sketch_collector_t<MinimizerT> collector;
-                MinimizerHashmapFragmentIndex index;
-                const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                sketch_collector_t<p_minimizer> collector;
+                minimizer_hashmap_fragment_index index;
+                const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
                 const auto [segment_lo_bp, segment_hi_bp] =
                     pipe::validated_segment_bp_bounds(
                         range, lpu, target_len);
                 collector.reserve(
                     (range.ce_u - range.cs_u) * lpu
                         / std::max<std::size_t>(w, 1) + 64);
-                const auto range_proof =
-                    pipe::minimizer_dispatch_range<MinimizerT>(
+                const auto range_stats =
+                    pipe::minimizer_dispatch_range<p_minimizer>(
                     collector, target_seq,
                     segment_lo_bp, segment_hi_bp, w, k,
                     target_sketch_backend,
-                    pipe::ExactSimdRangeRoute::require_continuation,
+                    pipe::exact_simd_range_route::require_continuation,
                     params.highway_kernels);
-                record_target_range_proof(merged_collection, range_proof);
-                const std::vector<MinimizerT>& minimizers =
+                record_target_range_stats(merged_collection, range_stats);
+                const std::vector<p_minimizer>& minimizers =
                     collector.extract_sketches_data();
                 auto emissions = collect_fragment_emissions_for_segment(
                     range,
-                    std::span<const MinimizerT>(minimizers.data(), minimizers.size()),
+                    std::span<const p_minimizer>(minimizers.data(), minimizers.size()),
                     target_len,
                     frag_bp,
                     lpu);
-                acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                acc.ingest(std::span<const segment_fragment_emission<p_minimizer>>(
                     emissions.data(), emissions.size()));
                 acc.flush_ready(range.core_hi_bp);
 
                 index.build(minimizers, target_len);
                 index.add_position_offset(segment_lo_bp);
-                MatchResultCollection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res = minimap2_port_with_index(
                     query_seq, target_seq, query_minimizers, index, params,
                     segmented_gpu_index_cache_ptr,
                     segment_gpu_identity(segment_index));
-                merged_collection.combine_execution_proof(seg_res);
+                merged_collection.combine_execution_stats(seg_res);
                 for (auto& result : seg_res.results) {
                     if (result.target_start >= range.core_lo_bp
                         && result.target_start < range.core_hi_bp) {
@@ -10332,13 +10317,13 @@ template <sequence_alphabet Alphabet,
             for (std::size_t wave_lo = 0; wave_lo < ranges.size();) {
                 const std::size_t wave_count = std::min<std::size_t>(
                     first_wave.fanout, ranges.size() - wave_lo);
-                bioseq::parallelism::MemoryPermit wave_permit;
+                bioseq::parallelism::memory_permit wave_permit;
                 if (wave_lo == 0) {
                     wave_permit = std::move(first_wave.permit);
                 } else if (auto permit =
-                        bioseq::parallelism::MemoryAdmissionController::instance()
+                        bioseq::parallelism::memory_admission_controller::instance()
                             .try_reserve(
-                                bioseq::parallelism::saturating_mul(
+                                bioseq::common::saturating_mul(
                                     static_cast<std::uint64_t>(wave_count),
                                     first_wave.peak_per_segment))) {
                     wave_permit = std::move(*permit);
@@ -10355,8 +10340,8 @@ template <sequence_alphabet Alphabet,
 
                 const std::size_t current_wave_lo = wave_lo;
                 const std::size_t wave_hi = wave_lo + wave_count;
-                std::vector<MatchResultCollection> wave_seg_out(wave_count);
-                std::vector<std::vector<SegmentFragmentEmission<MinimizerT>>>
+                std::vector<match_result_collection> wave_seg_out(wave_count);
+                std::vector<std::vector<segment_fragment_emission<p_minimizer>>>
                     wave_frag_out(wave_count);
                 pool.parallel_for_with_context_tracked(
                     wave_lo, wave_hi, 1,
@@ -10365,14 +10350,14 @@ template <sequence_alphabet Alphabet,
                          &target_seq, &query_seq, &query_minimizers, &params,
                          current_wave_lo, target_len, frag_bp, w, k, lpu,
                          target_sketch_backend, segmented_gpu_index_cache_ptr,
-                         &segment_gpu_identity, &record_target_range_proof](
+                         &segment_gpu_identity, &record_target_range_stats](
                                 std::size_t lo, std::size_t hi) {
-                        sketch_collector_t<MinimizerT> collector;
-                        MinimizerHashmapFragmentIndex index;
+                        sketch_collector_t<p_minimizer> collector;
+                        minimizer_hashmap_fragment_index index;
                         for (std::size_t segment_index = lo;
                              segment_index < hi;
                              ++segment_index) {
-                            const ::bioseq::indexing::SegmentUnitRange& range =
+                            const ::bioseq::indexing::segment_unit_range& range =
                                 ranges[segment_index];
                             const auto [segment_lo_bp, segment_hi_bp] =
                                 pipe::validated_segment_bp_bounds(
@@ -10382,19 +10367,19 @@ template <sequence_alphabet Alphabet,
                             collector.reserve(
                                 (range.ce_u - range.cs_u) * lpu
                                     / std::max<std::size_t>(w, 1) + 64);
-                            const auto range_proof =
-                                pipe::minimizer_dispatch_range<MinimizerT>(
+                            const auto range_stats =
+                                pipe::minimizer_dispatch_range<p_minimizer>(
                                 collector, target_seq,
                                 segment_lo_bp, segment_hi_bp, w, k,
                                 target_sketch_backend,
-                                pipe::ExactSimdRangeRoute::require_continuation,
+                                pipe::exact_simd_range_route::require_continuation,
                                 params.highway_kernels);
-                            const std::vector<MinimizerT>& minimizers =
+                            const std::vector<p_minimizer>& minimizers =
                                 collector.extract_sketches_data();
                             wave_frag_out[rel] =
                                 collect_fragment_emissions_for_segment(
                                     range,
-                                    std::span<const MinimizerT>(
+                                    std::span<const p_minimizer>(
                                         minimizers.data(), minimizers.size()),
                                     target_len,
                                     frag_bp,
@@ -10409,19 +10394,19 @@ template <sequence_alphabet Alphabet,
                                 params,
                                 segmented_gpu_index_cache_ptr,
                                 segment_gpu_identity(segment_index));
-                            record_target_range_proof(
-                                wave_seg_out[rel], range_proof);
+                            record_target_range_stats(
+                                wave_seg_out[rel], range_stats);
                         }
                     }},
                     bioseq::parallelism::current_tracked_job_observer());
 
                 for (std::size_t rel = 0; rel < wave_count; ++rel) {
                     const std::size_t segment_index = current_wave_lo + rel;
-                    const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
-                    acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                    const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
+                    acc.ingest(std::span<const segment_fragment_emission<p_minimizer>>(
                         wave_frag_out[rel].data(), wave_frag_out[rel].size()));
                     acc.flush_ready(range.core_hi_bp);
-                    merged_collection.combine_execution_proof(
+                    merged_collection.combine_execution_stats(
                         wave_seg_out[rel]);
                     for (auto& result : wave_seg_out[rel].results) {
                         if (result.target_start >= range.core_lo_bp
@@ -10434,7 +10419,7 @@ template <sequence_alphabet Alphabet,
             }
 
             acc.finish();
-            return finalize_segmented_proof(std::move(merged_collection));
+            return finalize_segmented_stats(std::move(merged_collection));
         }
     }
 
@@ -10447,28 +10432,28 @@ template <sequence_alphabet Alphabet,
          &build_query_filtered_segment_index, &params, target_len,
          w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
          &segment_gpu_identity,
-         &record_target_range_proof](std::size_t segment_index) {
-        sketch_collector_t<MinimizerT> collector;
-        MinimizerHashmapFragmentIndex index;
-        std::vector<FilteredMinimizerPair> filtered_pairs;
-        const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+         &record_target_range_stats](std::size_t segment_index) {
+        sketch_collector_t<p_minimizer> collector;
+        minimizer_hashmap_fragment_index index;
+        std::vector<filtered_minimizer_pair> filtered_pairs;
+        const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
         const auto [segment_lo_bp, segment_hi_bp] =
             pipe::validated_segment_bp_bounds(range, lpu, target_len);
         collector.reserve(
             (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-        const auto range_proof =
-            pipe::minimizer_dispatch_range<MinimizerT>(
+        const auto range_stats =
+            pipe::minimizer_dispatch_range<p_minimizer>(
             collector, target_seq,
             segment_lo_bp, segment_hi_bp, w, k,
             target_sketch_backend,
-            pipe::ExactSimdRangeRoute::require_continuation,
+            pipe::exact_simd_range_route::require_continuation,
             params.highway_kernels);
-        const std::vector<MinimizerT>& minimizers =
+        const std::vector<p_minimizer>& minimizers =
             collector.extract_sketches_data();
         segment_minimizer_counts[segment_index] = minimizers.size();
         segment_filtered_counts[segment_index] =
             build_query_filtered_segment_index(
-                std::span<const MinimizerT>{minimizers.data(), minimizers.size()},
+                std::span<const p_minimizer>{minimizers.data(), minimizers.size()},
                 index,
                 filtered_pairs);
         index.add_position_offset(segment_lo_bp);
@@ -10476,14 +10461,14 @@ template <sequence_alphabet Alphabet,
             query_seq, target_seq, query_minimizers, index, params,
             segmented_gpu_index_cache_ptr,
             segment_gpu_identity(segment_index));
-        record_target_range_proof(seg_out[segment_index], range_proof);
-        bioseq_log_lazy<DBG>([&] {
-            bioseq_log_progress<DBG>("[minimap_port_segmented] adaptive serial segment core [{},{}) "
+        record_target_range_stats(seg_out[segment_index], range_stats);
+        bioseq_log_lazy<logging_level::debug>([&] {
+            bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] adaptive serial segment core [{},{}) "
                             "produced {} results | footprint={}MB avail={}MB",
                     range.core_lo_bp, range.core_hi_bp,
                     seg_out[segment_index].results.size(),
-                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                    bioseq::common::memory::process_footprint_bytes() >> 20,
+                    bioseq::common::memory::system_available_bytes() >> 20);
         });
     };
 
@@ -10491,18 +10476,18 @@ template <sequence_alphabet Alphabet,
         const std::size_t requested_wave_count = std::min<std::size_t>(
             first_wave.fanout, ranges.size() - wave_lo);
         std::size_t wave_count = requested_wave_count;
-        bioseq::parallelism::MemoryPermit wave_permit;
+        bioseq::parallelism::memory_permit wave_permit;
         if (wave_lo == 0) {
             wave_permit = std::move(first_wave.permit);
             wave_permit.shrink_to(
-                bioseq::parallelism::saturating_mul(
+                bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(wave_count),
                     first_wave.peak_per_segment));
         } else {
             for (std::size_t candidate = requested_wave_count; candidate > 1; --candidate) {
                 if (auto permit =
-                        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
-                            bioseq::parallelism::saturating_mul(
+                        bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+                            bioseq::common::saturating_mul(
                                 static_cast<std::uint64_t>(candidate),
                                 first_wave.peak_per_segment))) {
                     wave_count = candidate;
@@ -10512,25 +10497,25 @@ template <sequence_alphabet Alphabet,
             }
         }
         if (!wave_permit) {
-            bioseq_log_lazy<DBG>([&] {
-                bioseq_log_progress<DBG>("[minimap_port_segmented] wave admission failed at segment {} "
+            bioseq_log_lazy<logging_level::debug>([&] {
+                bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] wave admission failed at segment {} "
                                 "of {}; processing one segment serially | footprint={}MB "
                                 "avail={}MB",
                         wave_lo, ranges.size(),
-                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                        bioseq::common::memory::process_footprint_bytes() >> 20,
+                        bioseq::common::memory::system_available_bytes() >> 20);
             });
             process_segment_serial(wave_lo);
             ++wave_lo;
             continue;
         }
         if (wave_count != requested_wave_count) {
-            bioseq_log_lazy<DBG>([&] {
-                bioseq_log_progress<DBG>("[minimap_port_segmented] wave fanout reduced from {} to {} "
+            bioseq_log_lazy<logging_level::debug>([&] {
+                bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] wave fanout reduced from {} to {} "
                                 "at segment {} of {} | footprint={}MB avail={}MB",
                         requested_wave_count, wave_count, wave_lo, ranges.size(),
-                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                        bioseq::common::memory::process_footprint_bytes() >> 20,
+                        bioseq::common::memory::system_available_bytes() >> 20);
             });
         }
 
@@ -10543,31 +10528,31 @@ template <sequence_alphabet Alphabet,
                  &build_query_filtered_segment_index, &params, target_len,
                  w, k, lpu, target_sketch_backend, segmented_gpu_index_cache_ptr,
                  &segment_gpu_identity,
-                 &record_target_range_proof](std::size_t lo, std::size_t hi) {
-                sketch_collector_t<MinimizerT> collector;
-                MinimizerHashmapFragmentIndex index;
-                std::vector<FilteredMinimizerPair> filtered_pairs;
+                 &record_target_range_stats](std::size_t lo, std::size_t hi) {
+                sketch_collector_t<p_minimizer> collector;
+                minimizer_hashmap_fragment_index index;
+                std::vector<filtered_minimizer_pair> filtered_pairs;
                 for (std::size_t segment_index = lo; segment_index < hi; ++segment_index) {
-                    const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                    const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
                     const auto [segment_lo_bp, segment_hi_bp] =
                         pipe::validated_segment_bp_bounds(
                             range, lpu, target_len);
                     collector.clear();
                     collector.reserve(
                         (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-                    const auto range_proof =
-                        pipe::minimizer_dispatch_range<MinimizerT>(
+                    const auto range_stats =
+                        pipe::minimizer_dispatch_range<p_minimizer>(
                         collector, target_seq,
                         segment_lo_bp, segment_hi_bp, w, k,
                         target_sketch_backend,
-                        pipe::ExactSimdRangeRoute::require_continuation,
+                        pipe::exact_simd_range_route::require_continuation,
                         params.highway_kernels);
-                    const std::vector<MinimizerT>& minimizers =
+                    const std::vector<p_minimizer>& minimizers =
                         collector.extract_sketches_data();
                     segment_minimizer_counts[segment_index] = minimizers.size();
                     segment_filtered_counts[segment_index] =
                         build_query_filtered_segment_index(
-                            std::span<const MinimizerT>{
+                            std::span<const p_minimizer>{
                                 minimizers.data(), minimizers.size()},
                             index,
                             filtered_pairs);
@@ -10576,8 +10561,8 @@ template <sequence_alphabet Alphabet,
                         query_seq, target_seq, query_minimizers, index, params,
                         segmented_gpu_index_cache_ptr,
                         segment_gpu_identity(segment_index));
-                    record_target_range_proof(
-                        seg_out[segment_index], range_proof);
+                    record_target_range_stats(
+                        seg_out[segment_index], range_stats);
                 }
             }},
             bioseq::parallelism::current_tracked_job_observer());
@@ -10590,20 +10575,20 @@ template <sequence_alphabet Alphabet,
         total_segment_minimizers += segment_minimizer_counts[segment_index];
         total_filtered_minimizers += segment_filtered_counts[segment_index];
     }
-    bioseq_log_lazy<DBG>([&] {
-        bioseq_log_progress<DBG>("[minimap_port_segmented] query-filtered transient index kept {} "
+    bioseq_log_lazy<logging_level::debug>([&] {
+        bioseq_log_progress<logging_level::debug>("[minimap_port_segmented] query-filtered transient index kept {} "
                         "of {} segment minimizers across {} segments | footprint={}MB "
                         "avail={}MB",
                 total_filtered_minimizers, total_segment_minimizers, ranges.size(),
-                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                bioseq::common::memory::process_footprint_bytes() >> 20,
+                bioseq::common::memory::system_available_bytes() >> 20);
     });
 
-    MatchResultCollection merged_collection;
-    std::vector<MatchResult>& merged = merged_collection.results;
+    match_result_collection merged_collection;
+    std::vector<match_result>& merged = merged_collection.results;
     for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {
-        const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
-        merged_collection.combine_execution_proof(seg_out[segment_index]);
+        const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
+        merged_collection.combine_execution_stats(seg_out[segment_index]);
         for (auto& result : seg_out[segment_index].results) {
             if (result.target_start >= range.core_lo_bp
                 && result.target_start < range.core_hi_bp) {
@@ -10611,7 +10596,7 @@ template <sequence_alphabet Alphabet,
             }
         }
     }
-    return finalize_segmented_proof(std::move(merged_collection));
+    return finalize_segmented_stats(std::move(merged_collection));
 }
 
 } // namespace bioseq::simd

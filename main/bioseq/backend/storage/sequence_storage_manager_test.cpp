@@ -9,7 +9,7 @@
 // bioseq_bucket_math module (the math + seq_locator POD factored out of
 // bioseq_storage:sequence_storage_manager for exactly this reason).
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <array>

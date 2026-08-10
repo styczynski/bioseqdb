@@ -167,10 +167,10 @@ inline void close_descriptor(int& descriptor) noexcept {
         return false;
     }
 
-    constexpr char release = 'G';
+    constexpr char k_release = 'G';
     ssize_t written = -1;
     do {
-        written = ::write(descriptor, &release, sizeof(release));
+        written = ::write(descriptor, &k_release, sizeof(k_release));
     } while (written < 0 && errno == EINTR);
     const int write_error = errno;
     if (written < 0 && write_error == EPIPE && was_pending == 0) {
@@ -203,7 +203,7 @@ public:
 };
 
 /// @brief Explicit input to one shell-free posix_spawn invocation.
-struct process_options {
+struct process_launch_options {
     std::filesystem::path executable;
     std::vector<std::string> arguments;
     std::vector<std::pair<std::string, std::string>> environment;
@@ -214,19 +214,19 @@ struct process_options {
 };
 
 /// @brief Decoded child exit status.
-struct process_exit {
+struct process_exit_status {
     std::optional<int> exit_code;
     std::optional<int> signal;
 
     /// @brief True only for an ordinary zero exit.
-    [[nodiscard]] bool succeeded() const noexcept {
+    [[nodiscard]] bool is_successful() const noexcept {
         return exit_code.has_value() && *exit_code == 0;
     }
 };
 
 /// @brief Produces an allowlisted environment with all ambient PG routing removed.
 [[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
-sanitized_process_environment(
+build_sanitized_process_environment(
     std::span<const std::pair<std::string, std::string>> overrides = {},
     const std::optional<std::filesystem::path>& preferred_path_directory =
         std::nullopt) {
@@ -302,10 +302,10 @@ sanitized_process_environment(
 }
 
 /// @brief Move-only posix_spawn child with process-group and log ownership.
-class spawned_process {
+class owned_process {
 public:
     /// @brief Spawns an absolute executable in a new process group without a shell.
-    [[nodiscard]] static spawned_process spawn(const process_options& options) {
+    [[nodiscard]] static owned_process spawn(const process_launch_options& options) {
         std::scoped_lock spawn_lock{
             process_detail::spawn_serialization_mutex()};
         if (options.executable.empty() || !options.executable.is_absolute()) {
@@ -344,7 +344,7 @@ public:
         arguments.push_back(nullptr);
 
         const auto environment_pairs =
-            sanitized_process_environment(
+            build_sanitized_process_environment(
                 options.environment, options.preferred_path_directory);
         std::vector<std::string> environment_storage;
         environment_storage.reserve(environment_pairs.size());
@@ -428,9 +428,9 @@ public:
         if (status == 0) {
             status = posix_spawnattr_setpgroup(&attributes, 0);
         }
-        std::optional<supervised_process_launch_intent> launch_intent;
+        std::optional<supervision_launch_intent> launch_intent;
         if (status == 0 && options.supervise) {
-            launch_intent = begin_supervised_process_launch();
+            launch_intent = begin_supervised_launch();
             if (!launch_intent) {
                 destroy();
                 if (remove_log) {
@@ -497,7 +497,7 @@ public:
             } catch (...) {
                 close_control_descriptors();
                 static_cast<void>(
-                    cancel_supervised_process_launch(*launch_intent));
+                    cancel_supervised_launch(*launch_intent));
                 destroy();
                 if (remove_log) {
                     std::filesystem::remove(output, file_error);
@@ -520,7 +520,7 @@ public:
             process_detail::close_descriptor(control_write);
             if (launch_intent) {
                 static_cast<void>(
-                    cancel_supervised_process_launch(*launch_intent));
+                    cancel_supervised_launch(*launch_intent));
             }
             if (remove_log) {
                 std::filesystem::remove(output, file_error);
@@ -588,7 +588,7 @@ public:
             };
 
         if (options.supervise
-            && !commit_supervised_process_launch(
+            && !commit_supervised_launch(
                 *launch_intent,
                 static_cast<std::uint64_t>(child),
                 spawn_executable,
@@ -596,7 +596,7 @@ public:
                     std::filesystem::path{}))) {
             if (stop_unreleased_broker()) {
                 static_cast<void>(
-                    cancel_supervised_process_launch(
+                    cancel_supervised_launch(
                         *launch_intent,
                         static_cast<std::uint64_t>(child)));
             }
@@ -613,7 +613,7 @@ public:
             if (!released) {
                 if (stop_unreleased_broker()) {
                     static_cast<void>(
-                        cancel_supervised_process_launch(
+                        cancel_supervised_launch(
                             *launch_intent,
                             static_cast<std::uint64_t>(child)));
                 }
@@ -624,14 +624,14 @@ public:
                     "cannot release durably registered launch broker");
             }
         }
-        return spawned_process(
+        return owned_process(
             child, std::move(output), remove_log, options.supervise);
     }
 
-    spawned_process(const spawned_process&) = delete;
-    spawned_process& operator=(const spawned_process&) = delete;
+    owned_process(const owned_process&) = delete;
+    owned_process& operator=(const owned_process&) = delete;
 
-    spawned_process(spawned_process&& other) noexcept
+    owned_process(owned_process&& other) noexcept
         : pid_(std::exchange(other.pid_, -1)),
           process_group_(std::exchange(other.process_group_, -1)),
           supervision_pid_(std::exchange(other.supervision_pid_, -1)),
@@ -640,7 +640,7 @@ public:
           supervised_(std::exchange(other.supervised_, false)),
           exit_(std::move(other.exit_)) {}
 
-    spawned_process& operator=(spawned_process&& other) noexcept {
+    owned_process& operator=(owned_process&& other) noexcept {
         if (this != &other) {
             terminate(std::chrono::seconds(2));
             remove_owned_log();
@@ -657,13 +657,13 @@ public:
         return *this;
     }
 
-    ~spawned_process() noexcept {
+    ~owned_process() noexcept {
         terminate(std::chrono::seconds(2));
         remove_owned_log();
     }
 
     /// @brief Waits until the absolute deadline or terminates and raises on timeout.
-    [[nodiscard]] process_exit wait_until(
+    [[nodiscard]] process_exit_status wait_until(
         std::chrono::steady_clock::time_point deadline) {
         while (std::chrono::steady_clock::now() < deadline) {
             if (const auto completed = try_wait()) {
@@ -677,7 +677,7 @@ public:
     }
 
     /// @brief Waits for a positive relative budget.
-    [[nodiscard]] process_exit wait_for(std::chrono::milliseconds budget) {
+    [[nodiscard]] process_exit_status wait_for(std::chrono::milliseconds budget) {
         if (budget <= std::chrono::milliseconds::zero()) {
             terminate(std::chrono::seconds(2));
             throw process_timeout("process deadline must be positive");
@@ -686,9 +686,9 @@ public:
     }
 
     /// @brief Polls until the leader is reaped and its owned group is absent.
-    [[nodiscard]] std::optional<process_exit> try_wait() noexcept {
+    [[nodiscard]] std::optional<process_exit_status> try_wait() noexcept {
         poll_leader();
-        if (!exit_ || !owned_group_absent()) {
+        if (!exit_ || !is_owned_group_absent()) {
             return std::nullopt;
         }
         release_supervision();
@@ -753,7 +753,7 @@ public:
     }
 
     /// @brief Observes direct-child exit without reaping or releasing its PID.
-    [[nodiscard]] bool leader_exited_unreaped() const noexcept {
+    [[nodiscard]] bool has_unreaped_exited_leader() const noexcept {
         if (pid_ <= 1) {
             return exit_.has_value();
         }
@@ -782,7 +782,7 @@ public:
         return status == 0 || errno == ESRCH;
     }
 
-    /// @brief Reaps only after the caller proves the owned target tree ended.
+    /// @brief Reaps only after the caller verifies the owned target tree ended.
     ///
     /// Unlike try_wait(), this deliberately clears the recorded PGID at reap:
     /// the caller has already established target-tree termination while the
@@ -810,7 +810,7 @@ public:
                 return !supervised_;
             }
             if (waited < 0 && errno == ECHILD) {
-                exit_ = process_exit{};
+                exit_ = process_exit_status{};
                 pid_ = -1;
                 process_group_ = -1;
                 release_supervision();
@@ -826,7 +826,7 @@ public:
     }
 
 private:
-    spawned_process(
+    owned_process(
         pid_t pid,
         std::filesystem::path output,
         bool remove_output,
@@ -848,12 +848,12 @@ private:
             exit_ = decode_status(status);
             pid_ = -1;
         } else if (waited < 0 && errno == ECHILD) {
-            exit_ = process_exit{};
+            exit_ = process_exit_status{};
             pid_ = -1;
         }
     }
 
-    [[nodiscard]] bool owned_group_absent() noexcept {
+    [[nodiscard]] bool is_owned_group_absent() noexcept {
         if (process_group_ <= 1) {
             return true;
         }
@@ -888,7 +888,7 @@ private:
         if (!supervised_ || supervision_pid_ <= 1) {
             return;
         }
-        if (unregister_supervised_process(
+        if (remove_supervised_process(
                 static_cast<std::uint64_t>(supervision_pid_))) {
             supervised_ = false;
         }
@@ -911,8 +911,8 @@ private:
     }
 
     /// @brief Decodes one waitpid status word.
-    [[nodiscard]] static process_exit decode_status(int status) noexcept {
-        process_exit result;
+    [[nodiscard]] static process_exit_status decode_status(int status) noexcept {
+        process_exit_status result;
         if (WIFEXITED(status)) {
             result.exit_code = WEXITSTATUS(status);
         } else if (WIFSIGNALED(status)) {
@@ -937,7 +937,7 @@ private:
     std::filesystem::path output_file_;
     bool remove_output_{};
     bool supervised_{};
-    std::optional<process_exit> exit_;
+    std::optional<process_exit_status> exit_;
 };
 
 }  // namespace bioseq::postgres_test

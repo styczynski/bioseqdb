@@ -1,14 +1,14 @@
-export module bioseq.sql.bootstrap;
+export module bioseq.postgres.sql.bootstrap;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.sql_guc_settings;
+import bioseq.postgres.configuration.core;
 
 export namespace bioseq::sql_entities {
 
 // Disables extension diagnostic logging for installation statements.
 [[bioseq_sql::session_setting]]
 inline constexpr auto logging_off = ::bioseq::sql::set_after_guard(
-    ::bioseq::settings::logging, false);
+    ::bioseq::settings::diagnostics::logging::enabled, false);
 
 // Namespaces extension-owned SQL objects.
 [[bioseq_sql::schema]]
@@ -31,7 +31,7 @@ inline constexpr ::bioseq::sql::schema_entity bioseq_internal{};
 inline constexpr ::bioseq::sql::schema_entity bioseq{};
 
 static_assert(
-    logging_off.setting == &::bioseq::settings::logging
+    logging_off.setting == &::bioseq::settings::diagnostics::logging::enabled
     && !logging_off.value);
 
 }  // namespace bioseq::sql_entities

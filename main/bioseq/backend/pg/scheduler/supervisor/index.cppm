@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "miscadmin.h"
@@ -26,30 +26,30 @@ export module bioseq.postgres.scheduler.supervisor;
 
 export import :persist_queue_publish;
 import bioseq.indexing.type;
-import bioseq.sequences.kmers.highway_contract;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
-import bioseq.sql_guc_settings;
-import bioseq.storage.bucket_math;
-import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.postgres.configuration.core;
+import bioseq.storage.layout;
+import bioseq.postgres.storage.indexing.chunked_storage;
 
-export namespace bioseq::parallelism::pg {
+export namespace bioseq::postgres::scheduler {
 
-struct BatchTicket {
+struct batch_ticket {
     bool shared = false;
     std::uint32_t generation = 0;
     std::size_t slot = 0;
     std::int64_t queries = 0;
-    bioseq::parallelism::GlobalPool::BatchTicket local{};
+    bioseq::parallelism::global_pool::batch_ticket local{};
 };
 
-struct SchedulerSnapshot {
-    bool supervisor = false;
+struct scheduler_snapshot {
+    bool is_supervisor = false;
     std::uint32_t config_generation = 0;
-    bioseq::parallelism::PipelineConcurrencyMode mode =
-        bioseq::parallelism::PipelineConcurrencyMode::SINGLE;
+    bioseq::parallelism::pipeline_concurrency_mode mode =
+        bioseq::parallelism::pipeline_concurrency_mode::single_thread;
     unsigned min_threads = 1;
     unsigned max_threads = 1;
     unsigned current_threads = 0;
@@ -65,7 +65,7 @@ struct SchedulerSnapshot {
     std::uint64_t index_memory_reserved_bytes = 0;
 };
 
-struct VulkanRuntimeStatusSnapshot {
+struct vulkan_runtime_status_snapshot {
     bool available = false;
     std::string device_name{};
     std::int32_t max_workgroup_count_x = 0;
@@ -75,22 +75,22 @@ struct VulkanRuntimeStatusSnapshot {
     bool software_device = false;
 };
 
-struct AsyncMpsBuildStatsSnapshot {
+struct async_minimizer_sequence_build_stats_snapshot {
     std::uint64_t generation = 0;
-    bioseq::storage::indexing::LastMpsBuildStats stats{};
+    bioseq::storage::indexing::last_mps_build_stats stats{};
     std::uint64_t worker_build_ns = 0;
     std::uint64_t pipeline_mode = 0;
     std::uint64_t max_concurrency = 0;
     std::uint64_t index_memory_cap_mb = 0;
-    std::uint64_t lazy_worker_shareable = 0;
+    std::uint64_t shareable_lazy_workers = 0;
 };
 
 /**
- * One-shot PostgreSQL failure points in the asynchronous MPS worker.  The
+ * One-shot PostgreSQL failure points in the asynchronous minimizer-sequence worker.  The
  * selector is stored in scheduler shared memory, so a normal backend can arm
  * it for the background worker without relying on process-local test state.
  */
-enum class AsyncMpsWorkerPgFailure : std::uint32_t {
+enum class async_minimizer_sequence_worker_pg_failure : std::uint32_t {
     none = 0,
     relation_open = 1,
     relation_identity = 2,
@@ -104,7 +104,7 @@ enum class AsyncMpsWorkerPgFailure : std::uint32_t {
     materialize_scanner_read = 10,
 };
 
-struct AsyncMpsWorkerBoundaryStatsSnapshot {
+struct async_minimizer_sequence_worker_boundary_stats_snapshot {
     std::uint64_t relation_leaf_calls = 0;
     std::uint64_t spi_leaf_calls = 0;
     std::uint64_t materialize_interrupt_leaf_calls = 0;
@@ -115,14 +115,14 @@ struct AsyncMpsWorkerBoundaryStatsSnapshot {
     std::uint64_t materialize_failure_unwinds = 0;
     std::uint64_t materialize_admission_restored = 0;
     std::uint64_t materialize_admission_mismatches = 0;
-    AsyncMpsWorkerPgFailure last_failure_point =
-        AsyncMpsWorkerPgFailure::none;
+    async_minimizer_sequence_worker_pg_failure last_failure_point =
+        async_minimizer_sequence_worker_pg_failure::none;
     bool last_failure_injected = false;
-    AsyncMpsWorkerPgFailure armed_failure_point =
-        AsyncMpsWorkerPgFailure::none;
+    async_minimizer_sequence_worker_pg_failure armed_failure_point =
+        async_minimizer_sequence_worker_pg_failure::none;
 };
 
-enum class AsyncMpsStagePgFailure : std::uint8_t {
+enum class async_minimizer_sequence_stage_pg_failure : std::uint8_t {
     none = 0,
     register_xact_callback = 1,
     dsm_create = 2,
@@ -130,23 +130,13 @@ enum class AsyncMpsStagePgFailure : std::uint8_t {
     dsm_detach = 4,
 };
 
-struct PersistChunk {
-    bioseq::indexing::index_sub_key_t sub_key = 0;
-    std::uint32_t chunk_no = 0;
-    std::span<const char> bytes{};
-};
+[[nodiscard]] bool arm_async_minimizer_sequence_stage_pg_failure(
+    async_minimizer_sequence_stage_pg_failure point) noexcept;
+void disarm_async_minimizer_sequence_stage_pg_failure() noexcept;
 
-[[nodiscard]] bool arm_async_mps_stage_pg_failure(
-    AsyncMpsStagePgFailure point) noexcept;
-void disarm_async_mps_stage_pg_failure() noexcept;
-
-[[nodiscard]] bool stage_async_index_persist(
-    const PersistTarget& target,
-    std::span<const PersistChunk> chunks);
-
-[[nodiscard]] bool stage_async_mps_build(
-    const PersistTarget& target,
-    const bioseq::storage::seq_locator& locator,
+[[nodiscard]] bool stage_async_minimizer_sequence_build(
+    const persist_target& target,
+    const bioseq::storage::sequence_locator& locator,
     std::uint8_t alphabet_code,
     std::uint8_t storage_unit_byte_width,
     std::uint16_t last_fragment_padding,
@@ -155,8 +145,7 @@ void disarm_async_mps_stage_pg_failure() noexcept;
     std::int32_t max_concurrency,
     std::int32_t index_memory_cap_mb,
     std::int32_t index_sketch_backend,
-    std::int64_t highway_executed_target,
-    int requested_provider_wire_value);
+    std::int64_t highway_executed_target);
 
 void install_scheduler_shmem_hooks();
 void register_scheduler_supervisor();
@@ -164,29 +153,29 @@ void register_scheduler_supervisor();
 [[nodiscard]] std::string warmup_backend_local_shader_cache_report();
 void install_pg_shader_provider_if_available() noexcept;
 void prepare_pg_vulkan_runtime_ready();
-[[nodiscard]] VulkanRuntimeStatusSnapshot vulkan_runtime_status_snapshot();
+[[nodiscard]] vulkan_runtime_status_snapshot snapshot_vulkan_runtime_status();
 
 [[nodiscard]] bool supervisor_available() noexcept;
 void backend_sync();
-[[nodiscard]] BatchTicket begin_batch(std::int64_t queries) noexcept;
-void end_batch(BatchTicket ticket, bool completed) noexcept;
+[[nodiscard]] batch_ticket begin_batch(std::int64_t queries) noexcept;
+void end_batch(batch_ticket ticket, bool completed) noexcept;
 void restart_cluster();
-[[nodiscard]] SchedulerSnapshot snapshot();
+[[nodiscard]] scheduler_snapshot snapshot();
 
-[[nodiscard]] AsyncMpsBuildStatsSnapshot async_mps_build_stats_snapshot();
-[[nodiscard]] AsyncMpsWorkerBoundaryStatsSnapshot
-async_mps_worker_boundary_stats_snapshot() noexcept;
-[[nodiscard]] bool arm_async_mps_worker_pg_failure(
-    AsyncMpsWorkerPgFailure point) noexcept;
-void disarm_async_mps_worker_pg_failure() noexcept;
-[[nodiscard]] const char* async_mps_worker_failure_point_name(
-    AsyncMpsWorkerPgFailure point) noexcept;
+[[nodiscard]] async_minimizer_sequence_build_stats_snapshot snapshot_async_minimizer_sequence_build_stats();
+[[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
+snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept;
+[[nodiscard]] bool arm_async_minimizer_sequence_worker_pg_failure(
+    async_minimizer_sequence_worker_pg_failure point) noexcept;
+void disarm_async_minimizer_sequence_worker_pg_failure() noexcept;
+[[nodiscard]] const char* async_minimizer_sequence_worker_failure_point_name(
+    async_minimizer_sequence_worker_pg_failure point) noexcept;
 
-} // namespace bioseq::parallelism::pg
+} // namespace bioseq::postgres::scheduler
 
 // Module-internal worker seam shared by the ordinary implementation units.
 // These declarations are intentionally not exported to importers.
-namespace bioseq::parallelism::pg {
+namespace bioseq::postgres::scheduler {
 
 [[nodiscard]] inline bool is_standalone_backend_process() noexcept {
     return MyBackendType == B_STANDALONE_BACKEND
@@ -194,9 +183,9 @@ namespace bioseq::parallelism::pg {
         && !IsUnderPostmaster;
 }
 
-struct PgSchedulerStats {
-    static constexpr std::size_t kInflightSlots =
-        bioseq::parallelism::SchedulerStats::kInflightSlots;
+struct pg_scheduler_stats {
+    static constexpr std::size_t k_inflight_slots =
+        bioseq::parallelism::scheduler_stats::k_inflight_slots;
     pg_atomic_uint64 batches_scheduled;
     pg_atomic_uint64 batches_processed;
     pg_atomic_uint64 batches_in_flight;
@@ -205,27 +194,27 @@ struct PgSchedulerStats {
     pg_atomic_uint64 rate_window_start_ns;
     pg_atomic_uint64 rate_window_start_queries;
     pg_atomic_uint64 restart_ns;
-    pg_atomic_uint64 inflight_submit_ns[kInflightSlots];
-    pg_atomic_uint32 inflight_generation[kInflightSlots];
+    pg_atomic_uint64 inflight_submit_ns[k_inflight_slots];
+    pg_atomic_uint32 inflight_generation[k_inflight_slots];
     pg_atomic_uint64 inflight_seq;
 };
 
-enum class RuntimeInitState : std::uint32_t {
-    Pending = 0,
-    Ready = 1,
-    Failed = 2,
+enum class runtime_initialization_state : std::uint32_t {
+    pending = 0,
+    ready = 1,
+    failed = 2,
 };
 
-enum class CompileSlotState : std::uint32_t {
-    Free = 0,
-    Filling = 1,
-    Requested = 2,
-    Compiling = 3,
-    DoneOk = 4,
-    DoneErr = 5,
+enum class compile_slot_state : std::uint32_t {
+    free = 0,
+    filling = 1,
+    requested = 2,
+    compiling = 3,
+    done_ok = 4,
+    done_error = 5,
 };
 
-struct ShaderCompileSlot {
+struct shader_compile_slot {
     pg_atomic_uint32 state;
     pg_atomic_uint32 generation;
     bioseq::gpu::vulkan::ShaderVariantKey key{};
@@ -233,9 +222,9 @@ struct ShaderCompileSlot {
     std::uint32_t errc = 0;
 };
 
-inline constexpr std::uint32_t kShaderCacheOkWireValue = 0;
+inline constexpr std::uint32_t k_shader_cache_ok_wire_value = 0;
 
-struct PgMpsBuildStats {
+struct pg_minimizer_sequence_build_stats {
     pg_atomic_uint64 generation;
     pg_atomic_uint64 backend_pid;
     pg_atomic_uint64 db_oid;
@@ -259,17 +248,17 @@ struct PgMpsBuildStats {
     pg_atomic_uint64 pipeline_mode;
     pg_atomic_uint64 max_concurrency;
     pg_atomic_uint64 index_memory_cap_mb;
-    pg_atomic_uint64 lazy_worker_shareable;
+    pg_atomic_uint64 shareable_lazy_workers;
 };
 
 /*
- * Cross-backend evidence for the asynchronous MPS worker's PostgreSQL leaf
+ * Cross-backend evidence for the asynchronous minimizer-sequence worker's PostgreSQL leaf
  * seams.  These counters live in scheduler shared memory because the backend
  * that arms an integration failure is not the background worker that consumes
  * it.  The injection selector is one-shot: the worker atomically clears it
  * before raising the requested ERROR.
  */
-struct PgAsyncMpsWorkerBoundaryStats {
+struct pg_async_minimizer_sequence_worker_boundary_stats {
     pg_atomic_uint64 relation_leaf_calls;
     pg_atomic_uint64 spi_leaf_calls;
     pg_atomic_uint64 materialize_interrupt_leaf_calls;
@@ -284,15 +273,15 @@ struct PgAsyncMpsWorkerBoundaryStats {
     pg_atomic_uint32 armed_failure_point;
 };
 
-struct BioseqSchedulerShared {
+struct scheduler_shared_state {
     pg_atomic_uint32 cfg_max_concurrency;
     pg_atomic_uint32 cfg_generation;
     pg_atomic_uint32 state;
-    PgSchedulerStats stats;
-    PgMpsBuildStats mps_build_stats;
-    PgAsyncMpsWorkerBoundaryStats async_mps_worker_boundary_stats;
-    static constexpr std::size_t kPersistQueueSize = 64;
-    PgPersistQueueSlot persist_queue[kPersistQueueSize];
+    pg_scheduler_stats stats;
+    pg_minimizer_sequence_build_stats minimizer_sequence_build_stats;
+    pg_async_minimizer_sequence_worker_boundary_stats async_minimizer_sequence_worker_boundary_stats;
+    static constexpr std::size_t k_persist_queue_size = 64;
+    pg_persist_queue_slot persist_queue[k_persist_queue_size];
     pg_atomic_uint32 runtime_init_state;
     pg_atomic_uint32 runtime_init_generation;
     ConditionVariable runtime_init_cv;
@@ -300,21 +289,21 @@ struct BioseqSchedulerShared {
     char cache_digest_hex[33];
     pg_atomic_uint32 supervisor_pgprocno;
     pg_atomic_uint32 supervisor_generation;
-    static constexpr std::size_t kCompileQueueSize = 64;
-    ShaderCompileSlot compile_queue[kCompileQueueSize];
+    static constexpr std::size_t k_compile_queue_size = 64;
+    shader_compile_slot compile_queue[k_compile_queue_size];
     ConditionVariable compile_done_cv;
 };
 
-inline BioseqSchedulerShared* g_shared = nullptr;
+inline scheduler_shared_state* g_shared = nullptr;
 
-static_assert(alignof(BioseqSchedulerShared) <= MAXIMUM_ALIGNOF);
+static_assert(alignof(scheduler_shared_state) <= MAXIMUM_ALIGNOF);
 
-inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
-inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 5;
+inline constexpr std::uint32_t k_minimizer_sequence_build_dsm_magic = 0xB1051D5Au;
+inline constexpr std::uint32_t k_minimizer_sequence_build_wire_revision = 6;
 
-struct MpsBuildMetadata {
+struct minimizer_sequence_build_metadata {
     std::string index_name{};
-    bioseq::storage::seq_locator locator{};
+    bioseq::storage::sequence_locator locator{};
     std::uint8_t alphabet_code = 0;
     std::uint8_t storage_unit_byte_width = 0;
     std::uint16_t last_fragment_padding = 0;
@@ -324,59 +313,54 @@ struct MpsBuildMetadata {
     std::int32_t index_memory_cap_mb = 0;
     std::int32_t index_sketch_backend = 0;
     std::int64_t highway_executed_target = 0;
-    IndexPayloadStorageBackend requested_provider =
-        IndexPayloadStorageBackend::postgres_relation;
 };
 
-struct PersistClaim {
+struct persist_claim {
     std::size_t slot_index = 0;
     std::uint32_t generation = 0;
-    PersistTarget target{};
+    persist_target target{};
     dsm_handle dsm = DSM_HANDLE_INVALID;
     std::uint64_t payload_bytes = 0;
-    PersistPayloadKind payload_kind = PersistPayloadKind::none;
-    IndexPayloadStorageBackend requested_provider =
-        IndexPayloadStorageBackend::postgres_relation;
+    persist_payload_kind payload_kind = persist_payload_kind::none;
 };
 
 [[nodiscard]] unsigned effective_max_concurrency(unsigned configured);
-void init_mps_build_stats(PgMpsBuildStats& stats);
-void init_async_mps_worker_boundary_stats(
-    PgAsyncMpsWorkerBoundaryStats& stats);
+void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats& stats);
+void initialize_async_minimizer_sequence_worker_boundary_stats(
+    pg_async_minimizer_sequence_worker_boundary_stats& stats);
 void release_pinned_dsm(dsm_handle handle) noexcept;
 void register_persist_xact_callback_pg_leaf();
 void enqueue_pending_mps_build(
-    const PersistTarget& target,
+    const persist_target& target,
     dsm_handle handle,
-    std::uint64_t payload_bytes,
-    IndexPayloadStorageBackend requested_provider);
-[[nodiscard]] std::optional<MpsBuildMetadata>
+    std::uint64_t payload_bytes);
+[[nodiscard]] std::optional<minimizer_sequence_build_metadata>
 parse_mps_build_metadata(const char* base, Size mapped);
-[[nodiscard]] const bioseq::minimizers::MinimizerKernels*
+[[nodiscard]] const bioseq::minimizers::minimizer_kernels*
 rebind_minimizer_kernels_for_backend(
     std::int32_t backend_value,
     std::int64_t highway_executed_target);
 [[nodiscard]] bool worker_target_accepts_index_persist(
-    const PersistTarget& target,
+    const persist_target& target,
     std::string_view index_name);
-void publish_async_mps_build_stats(
-    const bioseq::storage::indexing::LastMpsBuildStats& stats,
+void publish_async_minimizer_sequence_build_stats(
+    const bioseq::storage::indexing::last_mps_build_stats& stats,
     std::uint64_t worker_build_ns,
     std::uint64_t pipeline_mode,
     std::uint64_t max_concurrency,
     std::uint64_t index_memory_cap_mb,
-    bool lazy_worker_shareable) noexcept;
+    bool has_shareable_lazy_worker) noexcept;
 void record_async_mps_worker_pg_leaf_call(
-    AsyncMpsWorkerPgFailure point) noexcept;
+    async_minimizer_sequence_worker_pg_failure point) noexcept;
 void record_async_mps_worker_pg_leaf_failure(
-    AsyncMpsWorkerPgFailure point) noexcept;
+    async_minimizer_sequence_worker_pg_failure point) noexcept;
 void inject_async_mps_worker_pg_failure_leaf(
-    AsyncMpsWorkerPgFailure point);
+    async_minimizer_sequence_worker_pg_failure point);
 void record_async_mps_materialize_admission() noexcept;
 void record_async_mps_materialize_failure_unwind(
     bool admission_restored) noexcept;
-void process_mps_build_claim(
-    const PersistClaim& claim,
+void process_minimizer_sequence_build_claim(
+    const persist_claim& claim,
     const char* base,
     Size mapped,
     Snapshot registered_snapshot);
@@ -387,4 +371,4 @@ void publish_runtime_init_result(
 void service_pending_shader_compiles();
 void process_one_persist_job_if_ready();
 
-} // namespace bioseq::parallelism::pg
+} // namespace bioseq::postgres::scheduler

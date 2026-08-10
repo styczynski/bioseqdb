@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_storage_physical.cppm
+ * storage_physical.cppm
  *
  * Low-level storage layer for the bioseq columnar table format.
  *   - Translates columnar read/write operations on logical offsets into
@@ -19,7 +19,7 @@
  *
  * Storage layout: metapage in block 0, empty page in block 1, logical
  * data starting at the first byte after the page header in block 2
- * (logical offset BioseqColumnFirstLogicalOffset). A columnar table always
+ * (logical offset first_logical_offset). A columnar table always
  * has at least 2 blocks.
  *
  * Reservation uses a relation extension lock and is concurrency-safe,
@@ -29,68 +29,99 @@
  *-------------------------------------------------------------------------
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include "safe_lib.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <type_traits>
 
-export module bioseq.storage.physical;
-import bioseq.common.mlogging;
-import bioseq.config;     // DOC0322 §6.5 — BIOSEQ_COLUMN_BYTES_PER_PAGE, BIOSEQ_COLUMN_VERSION_* (moved from config.h)
-import bioseq.pg_utils;
+export module bioseq.postgres.storage.physical;
+import bioseq.common.checked_arithmetic;
+import bioseq.common.logging;
+import bioseq.postgres.support;
 
-export constexpr uint64_t BIOSEQ_COLUMN_INVALID_ROW_NUMBER = static_cast<uint64_t>(0);
-export constexpr uint64_t BIOSEQ_COLUMN_FIRST_ROW_NUMBER = static_cast<uint64_t>(1);
+/// @brief On-disk column format identity written to every metapage.
+export constexpr uint32_t column_storage_format_major = 2;
+export constexpr uint32_t column_storage_format_minor = 0;
+/// @brief Payload bytes available after a PostgreSQL page header.
+export constexpr Size usable_column_bytes_per_page =
+	BLCKSZ - SizeOfPageHeaderData;
+
+/// @brief Sentinel and first valid identities for logical column rows.
+export constexpr uint64_t invalid_column_row_number = static_cast<uint64_t>(0);
+export constexpr uint64_t first_column_row_number = static_cast<uint64_t>(1);
 
 /*
- * Number of valid ItemPointer Offsets / BlockNumbers for the row-number <->
- * ItemPointer mapping (formerly the VALID_ITEMPOINTER_OFFSETS /
- * VALID_BLOCKNUMBERS macros in columnar/columnar_tableam.h). offsetNumber is
- * restricted to [FirstOffsetNumber, MaxHeapTuplesPerPage] (bitmap scan
- * tbm_add_tuples constraint) and blockNumber to [0, MaxBlockNumber].
+ * Number of valid ItemPointer offsets and block numbers for the row-number
+ * mapping. PostgreSQL restricts OffsetNumber to
+ * [FirstOffsetNumber, MaxHeapTuplesPerPage] and BlockNumber to
+ * [0, MaxBlockNumber].
  */
-export constexpr uint64_t BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS = (uint64_t)(MaxHeapTuplesPerPage - FirstOffsetNumber + 1);
-export constexpr uint64_t BIOSEQ_COLUMN_VALID_BLOCKNUMBERS = (uint64_t)(MaxBlockNumber + 1);
+export constexpr uint64_t item_pointer_row_capacity =
+	static_cast<uint64_t>(MaxHeapTuplesPerPage - FirstOffsetNumber + 1);
+constexpr uint64_t item_pointer_block_count =
+	static_cast<uint64_t>(MaxBlockNumber) + 1;
 
-export constexpr uint64_t BIOSEQ_COLUMN_MAX_ROW_NUMBER = static_cast<uint64_t>(BIOSEQ_COLUMN_FIRST_ROW_NUMBER + BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS * BIOSEQ_COLUMN_VALID_BLOCKNUMBERS);
+export constexpr uint64_t maximum_column_row_number =
+	item_pointer_row_capacity * item_pointer_block_count - 1;
+constexpr uint64_t maximum_column_row_reservation =
+	maximum_column_row_number + 1;
 
 
 /*
  * Logical offsets never fall on the first two physical pages. See
  * comments in bioseq_storage.c.
  */
-export constexpr uint64_t BioseqColumnInvalidLogicalOffset = 0;
-export constexpr uint64_t BioseqColumnFirstLogicalOffset = ((BLCKSZ - SizeOfPageHeaderData) * 2);
+export constexpr uint64_t invalid_logical_offset = 0;
+export constexpr uint64_t first_logical_offset = ((BLCKSZ - SizeOfPageHeaderData) * 2);
+/*
+ * Buffered relation extension rejects a resulting page count greater than or
+ * equal to MaxBlockNumber. Keep reservations within the largest page count
+ * that ReadBuffer(P_NEW) can materialize.
+ */
+constexpr uint64_t maximum_column_storage_page_count =
+	static_cast<uint64_t>(MaxBlockNumber) - 1;
+constexpr uint64_t maximum_logical_reservation =
+	static_cast<uint64_t>(usable_column_bytes_per_page)
+	* maximum_column_storage_page_count;
+constexpr uint64_t maximum_logical_offset = maximum_logical_reservation - 1;
 
-export template<typename T>
-[[nodiscard]] inline constexpr bool BioseqColumnLogicalOffsetIsValid(T logical_offset) {
-	return logical_offset >= BioseqColumnFirstLogicalOffset;
+[[nodiscard]] inline constexpr bool
+is_valid_logical_offset(uint64_t logical_offset) noexcept {
+	return logical_offset >= first_logical_offset
+		&& logical_offset <= maximum_logical_offset;
+}
+
+[[nodiscard]] inline constexpr bool
+is_valid_logical_reservation(uint64_t logical_reservation) noexcept {
+	return logical_reservation >= first_logical_offset
+		&& logical_reservation <= maximum_logical_reservation;
 }
 
 /*
  * Content of the first page in main fork, which stores metadata at file
  * level.
  */
-struct BioseqColumnMetapage
+struct column_metapage
 {
-	/*
-	 * Store version of file format used, so we can detect files from
-	 * previous versions if we change file format.
-	 */
-	uint32_t versionMajor;
-	uint32_t versionMinor;
+	/* Persistent format identity used to reject incompatible metapages. */
+	uint32_t format_major;
+	uint32_t format_minor;
 
 	/*
-	 * Each of the metadata table rows are identified by a storageId.
+	 * Each of the metadata table rows are identified by a storage_id.
 	 * We store it also in the main fork so we can link metadata rows
 	 * with data files.
 	 */
-	uint64_t storageId;
+	uint64_t storage_id;
 
-	uint64_t reservedStripeId; /* first unused stripe id */
-	uint64_t reservedRowNumber; /* first unused row number */
-	uint64_t reservedOffset; /* first unused byte offset */
+	uint64_t next_stripe_id; /* first unused stripe id */
+	uint64_t next_row_number; /* first unused row number */
+	uint64_t next_logical_offset; /* first unused byte offset */
 
 	/*
 	 * Flag set to true in the init fork. After an unlogged table reset (due
@@ -101,16 +132,26 @@ struct BioseqColumnMetapage
 	 * UNLOGGED, and that the main fork is at the minimum size (no actual
 	 * data).
 	 *
-	 * XXX: Not used yet; reserved field for later support for UNLOGGED.
+	 * Reserved ABI slot for unlogged-reset handling; writers keep it false.
 	 */
-	bool unloggedReset;
+	bool requires_unlogged_reset;
 };
+
+static_assert(std::is_standard_layout_v<column_metapage>);
+static_assert(sizeof(column_metapage) == 48);
+static_assert(offsetof(column_metapage, format_major) == 0);
+static_assert(offsetof(column_metapage, format_minor) == 4);
+static_assert(offsetof(column_metapage, storage_id) == 8);
+static_assert(offsetof(column_metapage, next_stripe_id) == 16);
+static_assert(offsetof(column_metapage, next_row_number) == 24);
+static_assert(offsetof(column_metapage, next_logical_offset) == 32);
+static_assert(offsetof(column_metapage, requires_unlogged_reset) == 40);
 
 
 /* represents a "physical" block+offset address */
-struct PhysicalAddr
+struct physical_address
 {
-	BlockNumber blockno;
+	BlockNumber block_number;
 	uint32_t offset;
 };
 
@@ -118,14 +159,13 @@ struct PhysicalAddr
 /*
  * Layout constants for the metapage and the first data page. The metapage
  * always lives at block 0; block 1 is reserved (empty) and logical data
- * starts at block 2 (see BioseqColumnFirstLogicalOffset).
+ * starts at block 2 (see first_logical_offset).
  */
-inline constexpr BlockNumber BIOSEQ_COLUMN_METAPAGE_BLOCKNO = 0;
-inline constexpr BlockNumber BIOSEQ_COLUMN_EMPTY_BLOCKNO = 1;
-inline constexpr uint64_t BIOSEQ_COLUMN_INVALID_STRIPE_ID = 0;
-inline constexpr uint64_t BIOSEQ_COLUMN_FIRST_STRIPE_ID = 1;
+inline constexpr BlockNumber metadata_block_number = 0;
+inline constexpr BlockNumber reserved_empty_block_number = 1;
+inline constexpr uint64_t first_stripe_id = 1;
 
-inline constexpr const char* OLD_METAPAGE_VERSION_HINT =
+inline constexpr const char* incompatible_format_hint =
 	"Use \"VACUUM\" to upgrade the columnar table format "
 	"version or run \"ALTER EXTENSION bioseq UPDATE\".";
 
@@ -134,50 +174,150 @@ inline constexpr const char* OLD_METAPAGE_VERSION_HINT =
 /*
  * Map logical offsets to a physical page and offset where the data is kept.
  */
-static inline PhysicalAddr
-LogicalToPhysical(uint64_t logicalOffset)
+static inline physical_address
+logical_to_physical_address(uint64_t logical_offset)
 {
-	PhysicalAddr addr;
-
-	addr.blockno = logicalOffset / BIOSEQ_COLUMN_BYTES_PER_PAGE;
-	addr.offset = SizeOfPageHeaderData + (logicalOffset % BIOSEQ_COLUMN_BYTES_PER_PAGE);
-
-	return addr;
+	Assert(is_valid_logical_offset(logical_offset));
+	const uint64_t block_index =
+		logical_offset / static_cast<uint64_t>(usable_column_bytes_per_page);
+	Assert(block_index < maximum_column_storage_page_count);
+	return physical_address{
+		.block_number = static_cast<BlockNumber>(block_index),
+		.offset = static_cast<uint32_t>(
+			SizeOfPageHeaderData
+			+ (logical_offset
+			   % static_cast<uint64_t>(usable_column_bytes_per_page))),
+	};
 }
 
-
-/*
- * Map a physical page and offset address to a logical address.
- */
-static inline uint64_t
-PhysicalToLogical(PhysicalAddr addr)
+[[noreturn]] static void
+raise_logical_storage_range_error(
+	Relation relation,
+	const char* operation,
+	uint64_t logical_offset,
+	uint64_t amount)
 {
-	return BIOSEQ_COLUMN_BYTES_PER_PAGE * addr.blockno + addr.offset - SizeOfPageHeaderData;
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+		{
+			.message = fmt::format(
+				"cannot {} {} bytes at logical offset {} for relation {}",
+				operation,
+				amount,
+				logical_offset,
+				relation->rd_id),
+			.detail = fmt::format(
+				"Column storage logical offsets must stay in [{}, {}].",
+				first_logical_offset,
+				maximum_logical_offset),
+		});
+}
+
+[[noreturn]] static void
+raise_logical_storage_reservation_error(
+	Relation relation,
+	const char* operation,
+	uint64_t logical_reservation)
+{
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+		{
+			.message = fmt::format(
+				"cannot {} logical offset {} for relation {}",
+				operation,
+				logical_reservation,
+				relation->rd_id),
+			.detail = fmt::format(
+				"Column storage reservations must stay in [{}, {}].",
+				first_logical_offset,
+				maximum_logical_reservation),
+		});
+}
+
+[[noreturn]] static void
+raise_column_row_reservation_error(
+	Relation relation,
+	uint64_t first_row_number,
+	uint64_t row_count)
+{
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+		{
+			.message = fmt::format(
+				"cannot reserve {} column rows starting at {} for relation {}",
+				row_count,
+				first_row_number,
+				relation->rd_id),
+			.detail = fmt::format(
+				"The largest row number representable by a PostgreSQL item "
+				"pointer is {}.",
+				maximum_column_row_number),
+		});
+}
+
+[[noreturn]] static void
+raise_column_stripe_reservation_error(Relation relation, uint64_t stripe_id)
+{
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+		{
+			.message = fmt::format(
+				"cannot reserve column stripe {} for relation {}",
+				stripe_id,
+				relation->rd_id),
+			.detail = "The next stripe identifier would overflow its 64-bit "
+					  "storage field.",
+		});
+}
+
+static void
+validate_logical_storage_range(
+	Relation relation,
+	const char* operation,
+	uint64_t logical_offset,
+	uint64_t amount)
+{
+	Assert(amount > 0);
+	const std::optional<uint64_t> last_logical_offset =
+		bioseq::common::checked_add(logical_offset, amount - 1);
+	if (!is_valid_logical_offset(logical_offset)
+		|| !last_logical_offset.has_value()
+		|| !is_valid_logical_offset(*last_logical_offset))
+	{
+		raise_logical_storage_range_error(
+			relation, operation, logical_offset, amount);
+	}
 }
 
 /*
- * ReadFromBlock - read bytes from a page at the given offset. If 'force' is
- * true, don't check pd_lower; useful when reading a metapage of unknown
- * version.
+ * read_from_block - read bytes from a page at the given offset. If 'force' is
+ * true, don't check pd_lower; useful when reading a metapage whose format
+ * has not yet been validated.
  */
 static void
-ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
+read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *buf,
 			  uint32_t len, bool force)
 {
-	Buffer buffer = ReadBuffer(rel, blockno);
+	Buffer buffer = ReadBuffer(rel, block_number);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	Page page = BufferGetPage(buffer);
 	PageHeader phdr = reinterpret_cast<PageHeader>(page);
+	const std::optional<uint64_t> read_end = bioseq::common::checked_add(
+		static_cast<uint64_t>(offset), static_cast<uint64_t>(len));
 
-	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
+	if (!read_end.has_value()
+		|| *read_end > static_cast<uint64_t>(BLCKSZ)
+		|| (!force
+			&& static_cast<uint64_t>(phdr->pd_lower) < *read_end))
 	{
-		bioseq::pg_utils::raise_sql_error(
+		UnlockReleaseBuffer(buffer);
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = fmt::format(
 					"attempt to read columnar data of length {} from offset "
 					"{} of block {} of relation {}",
-					len, offset, blockno, rel->rd_id),
+					len, offset, block_number, rel->rd_id),
 			});
 	}
 
@@ -186,17 +326,17 @@ ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 }
 
 /*
- * WriteToBlock - append data to a block, initializing if necessary, and emit
+ * write_to_block - append data to a block, initializing if necessary, and emit
  * WAL. If 'clear' is true, always clear the data on the page and reinitialize
  * it first, and offset must be SizeOfPageHeaderData. Otherwise, offset must
  * be equal to pd_lower and pd_lower will be set to the end of the written
  * data.
  */
 static void
-WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
+write_to_block(Relation rel, BlockNumber block_number, uint32_t offset, const char *buf,
 			 uint32_t len, bool clear)
 {
-	Buffer buffer = ReadBuffer(rel, blockno);
+	Buffer buffer = ReadBuffer(rel, block_number);
 	GenericXLogState *state = GenericXLogStart(rel);
 
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
@@ -209,115 +349,108 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 		PageInit(page, BLCKSZ, 0);
 	}
 
-	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
+	const std::optional<uint64_t> write_end = bioseq::common::checked_add(
+		static_cast<uint64_t>(offset), static_cast<uint64_t>(len));
+	if (!write_end.has_value()
+		|| offset < SizeOfPageHeaderData
+		|| (clear && offset != SizeOfPageHeaderData)
+		|| offset > phdr->pd_upper
+		|| phdr->pd_lower < offset
+		|| *write_end > static_cast<uint64_t>(phdr->pd_upper))
 	{
-		bioseq::pg_utils::raise_sql_error(
+		GenericXLogAbort(state);
+		UnlockReleaseBuffer(buffer);
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = fmt::format(
 					"attempt to write columnar data of length {} to offset "
 					"{} of block {} of relation {}",
-					len, offset, blockno, rel->rd_id),
+					len, offset, block_number, rel->rd_id),
 			});
 	}
 
-	/*
-	 * After a transaction has been rolled-back, we might be
-	 * over-writing the rolledback write, so phdr->pd_lower can be
-	 * different from addr.offset.
-	 *
-	 * We reset pd_lower to reset the rolledback write.
-	 *
-	 * Given that we always align page reservation to the next page as of
-	 * 10.2, having such a disk page is only possible if write operaion
-	 * failed in an older version of columnar, but now user attempts writing
-	 * to that table in version >= 10.2.
-	 */
+	/* A rolled-back append may leave pd_lower beyond the reserved offset.
+	 * Rewind it before deterministically overwriting those abandoned bytes. */
 	if (phdr->pd_lower > offset)
 	{
 		bioseq_report_pg(DEBUG4)
-			.msg("overwriting page {}", blockno)
-			.detail("This can happen after a roll-back.");
+			.with_message("overwriting page {}", block_number)
+			.with_detail("This can happen after a roll-back.");
 		phdr->pd_lower = offset;
 	}
 
 	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-	phdr->pd_lower += len;
+	phdr->pd_lower = static_cast<LocationIndex>(*write_end);
 
 	GenericXLogFinish(state);
 
 	UnlockReleaseBuffer(buffer);
 }
 
-/*
- * AlignReservation - given an unused logical byte offset, align it so that it
- * falls at the start of a page.
- *
- * XXX: Reconsider whether we want/need to do this at all.
- */
-static uint64_t
-AlignReservation(uint64_t prevReservation)
+/// @brief Advances an unused logical offset to a page payload boundary.
+static std::optional<uint64_t>
+align_storage_reservation(uint64_t previous_reservation)
 {
-	PhysicalAddr prevAddr = LogicalToPhysical(prevReservation);
-	uint64_t alignedReservation = prevReservation;
-
-	if (prevAddr.offset != SizeOfPageHeaderData)
+	if (!is_valid_logical_reservation(previous_reservation))
 	{
-		/* not aligned; align on beginning of next page */
-		PhysicalAddr initial = { 0 };
-		initial.blockno = prevAddr.blockno + 1;
-		initial.offset = SizeOfPageHeaderData;
-		alignedReservation = PhysicalToLogical(initial);
+		return std::nullopt;
 	}
 
-	Assert(alignedReservation >= prevReservation);
-	return alignedReservation;
+	const uint64_t page_payload_bytes =
+		static_cast<uint64_t>(usable_column_bytes_per_page);
+	const uint64_t page_offset = previous_reservation % page_payload_bytes;
+	if (page_offset == 0)
+	{
+		return previous_reservation;
+	}
+
+	const std::optional<uint64_t> aligned_reservation =
+		bioseq::common::checked_add(
+			previous_reservation, page_payload_bytes - page_offset);
+	if (!aligned_reservation.has_value()
+		|| !is_valid_logical_reservation(*aligned_reservation))
+	{
+		return std::nullopt;
+	}
+	return aligned_reservation;
 }
 
-/*
- * BioseqColumnMetapageIsCurrent - is the metapage at the latest version?
- */
+/// @brief Tests whether a metapage has the required storage format identity.
 static bool
-BioseqColumnMetapageIsCurrent(BioseqColumnMetapage *metapage)
+column_metapage_uses_current_format(const column_metapage* metapage) noexcept
 {
-	return (metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			metapage->versionMinor == BIOSEQ_COLUMN_VERSION_MINOR);
+	return (metapage->format_major == column_storage_format_major &&
+			metapage->format_minor == column_storage_format_minor);
 }
 
-/*
- * BioseqColumnMetapageIsOlder - is the metapage older than the current version?
- */
+/// @brief Tests whether a stored format precedes the required format.
 static bool
-BioseqColumnMetapageIsOlder(BioseqColumnMetapage *metapage)
+column_metapage_format_is_older(const column_metapage* metapage) noexcept
 {
-	return (metapage->versionMajor < BIOSEQ_COLUMN_VERSION_MAJOR ||
-			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			 static_cast<int>(metapage->versionMinor) < static_cast<int>(BIOSEQ_COLUMN_VERSION_MINOR)));
+	return (metapage->format_major < column_storage_format_major ||
+			(metapage->format_major == column_storage_format_major &&
+			 metapage->format_minor < column_storage_format_minor));
 }
 
-/*
- * BioseqColumnMetapageIsNewer - is the metapage newer than the current version?
- */
+/// @brief Tests whether a stored format succeeds the required format.
 static bool
-BioseqColumnMetapageIsNewer(BioseqColumnMetapage *metapage)
+column_metapage_format_is_newer(const column_metapage* metapage) noexcept
 {
-	return (metapage->versionMajor > BIOSEQ_COLUMN_VERSION_MAJOR ||
-			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			 metapage->versionMinor > BIOSEQ_COLUMN_VERSION_MINOR));
+	return (metapage->format_major > column_storage_format_major ||
+			(metapage->format_major == column_storage_format_major &&
+			 metapage->format_minor > column_storage_format_minor));
 }
 
-/*
- * BioseqColumnMetapageCheckVersion - throw an error if accessing old
- * version of metapage.
- */
+/// @brief Rejects a metapage whose format identity is not supported.
 static void
-BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage)
+validate_column_metapage_format(Relation rel, column_metapage *metapage)
 {
-	if (!BioseqColumnMetapageIsCurrent(metapage))
+	if (!column_metapage_uses_current_format(metapage))
 	{
 		const char* const relation_name =
 			RelationGetRelationName(rel);
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_FEATURE_NOT_SUPPORTED,
 			{
 				.message = fmt::format(
@@ -327,298 +460,224 @@ BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage)
 				.detail = fmt::format(
 					"BioseqColumn format version {}.{} is required, \"{}\" "
 					"has version {}.{}.",
-					BIOSEQ_COLUMN_VERSION_MAJOR,
-					BIOSEQ_COLUMN_VERSION_MINOR,
+					column_storage_format_major,
+					column_storage_format_minor,
 					relation_name,
-					metapage->versionMajor,
-					metapage->versionMinor),
-				.hint = OLD_METAPAGE_VERSION_HINT,
+					metapage->format_major,
+					metapage->format_minor),
+				.hint = incompatible_format_hint,
 			});
 	}
 }
 
 /*
- * BioseqColumnMetapageRead - read the current contents of the metapage. Error if
- * it does not exist. Throw an error if the metapage is not the current
- * version, unless 'force' is true.
+ * read_column_metapage - read the current contents of the metapage. Error if
+ * it does not exist. Throw an error if the metapage format is incompatible,
+ * unless 'force' is true.
  *
- * NB: it's safe to read a different version of a metapage because we
- * guarantee that fields will only be added and existing fields will never be
- * changed. However, it's important that we don't depend on new fields being
- * set properly when we read an old metapage; an old metapage should only be
- * read for the purposes of upgrading or error checking.
+ * It is safe to read a different format revision because fields are append-only.
+ * However, callers must not depend on fields introduced after the stored
+ * revision being initialized. Forced reads are restricted to format
+ * transitions and diagnostics.
  */
-static BioseqColumnMetapage
-BioseqColumnMetapageRead(Relation rel, bool force)
+static column_metapage
+read_column_metapage(Relation rel, bool force)
 {
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	if (nblocks == 0)
 	{
-		/*
-		 * We only expect this to happen when upgrading citus.so. This is because,
-		 * in current version of columnar, we immediately create the metapage
-		 * for columnar tables, i.e right after creating the table.
-		 * However in older versions, we were creating metapages lazily, i.e
-		 * when ingesting data to columnar table.
-		 */
+		/* An initialized column relation always has a metapage. */
 		const char* const relation_name =
 			RelationGetRelationName(rel);
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = fmt::format(
 					"columnar metapage for relation \"{}\" does not exist",
 					relation_name),
-				.hint = OLD_METAPAGE_VERSION_HINT,
+				.hint = incompatible_format_hint,
 			});
 	}
 
 	/*
 	 * Regardless of "force" parameter, always force read metapage block.
-	 * We will check metapage version in BioseqColumnMetapageCheckVersion
+	 * We will check the metapage format in validate_column_metapage_format
 	 * depending on "force".
 	 */
-	bool forceReadBlock = true;
-	BioseqColumnMetapage metapage;
-	ReadFromBlock(rel, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				  reinterpret_cast<char *>(&metapage), sizeof(BioseqColumnMetapage), forceReadBlock);
+	constexpr bool force_block_read = true;
+	column_metapage metapage;
+	read_from_block(rel, metadata_block_number, SizeOfPageHeaderData,
+				  reinterpret_cast<char *>(&metapage), sizeof(column_metapage), force_block_read);
 
 	if (!force)
 	{
-		BioseqColumnMetapageCheckVersion(rel, &metapage);
+		validate_column_metapage_format(rel, &metapage);
 	}
 
 	return metapage;
 }
 
 /*
- * BioseqColumnOverwriteMetapage writes given bioseqColumnMetapage back to metapage
+ * overwrite_column_metapage writes given metapage back to metapage
  * for given relation.
  */
 static void
-BioseqColumnOverwriteMetapage(Relation relation, BioseqColumnMetapage bioseqColumnMetapage)
+overwrite_column_metapage(Relation relation, const column_metapage& metapage)
 {
 	/* clear metapage because we are overwriting */
-	bool clear = true;
-	WriteToBlock(relation, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				 reinterpret_cast<char *>(&bioseqColumnMetapage), sizeof(BioseqColumnMetapage), clear);
+	constexpr bool clear = true;
+	write_to_block(relation, metadata_block_number, SizeOfPageHeaderData,
+				 reinterpret_cast<const char*>(&metapage), sizeof(column_metapage), clear);
 }
 
 
 
 /*
- * BioseqColumnStorageInit - initialize a new metapage in an empty relation
- * with the given storageId.
+ * initialize_column_storage - initialize a new metapage in an empty relation
+ * with the given storage_id.
  *
  * Caller must hold AccessExclusiveLock on the relation.
  */
 export void
-BioseqColumnStorageInit(SMgrRelation srel, uint64_t storageId)
+initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() entered storage_id={}", storageId);
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() entered storage_id={}", storage_id);
 	BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() existing_blocks={}", nblocks);
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() existing_blocks={}", nblocks);
 	if (nblocks > 0)
 	{
-		bioseq_log<ERR, PG>(
-			 "attempted to initialize metapage, but {} pages already exist",
-			 nblocks);
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"attempted to initialize a columnar metapage, but {} "
+					"pages already exist",
+					nblocks),
+			});
 	}
 
 	/* create two pages */
 	PGIOAlignedBlock block;
 	Page page = block.data;
 
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() initialising metapage");
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() initialising metapage");
 	PageInit(page, BLCKSZ, 0);
 	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 
-	BioseqColumnMetapage metapage = { 0 };
-	metapage.storageId = storageId;
-	metapage.versionMajor = BIOSEQ_COLUMN_VERSION_MAJOR;
-	metapage.versionMinor = BIOSEQ_COLUMN_VERSION_MINOR;
-	metapage.reservedStripeId = BIOSEQ_COLUMN_FIRST_STRIPE_ID;
-	metapage.reservedRowNumber = BIOSEQ_COLUMN_FIRST_ROW_NUMBER;
-	metapage.reservedOffset = BioseqColumnFirstLogicalOffset;
-	metapage.unloggedReset = false;
+	column_metapage metapage = { 0 };
+	metapage.storage_id = storage_id;
+	metapage.format_major = column_storage_format_major;
+	metapage.format_minor = column_storage_format_minor;
+	metapage.next_stripe_id = first_stripe_id;
+	metapage.next_row_number = first_column_row_number;
+	metapage.next_logical_offset = first_logical_offset;
+	metapage.requires_unlogged_reset = false;
 	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
-			 reinterpret_cast<char *>(&metapage), sizeof(BioseqColumnMetapage));
-	phdr->pd_lower += sizeof(BioseqColumnMetapage);
+			 reinterpret_cast<char *>(&metapage), sizeof(column_metapage));
+	phdr->pd_lower += sizeof(column_metapage);
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
-				BIOSEQ_COLUMN_METAPAGE_BLOCKNO, page, true);
+				metadata_block_number, page, true);
 
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() flushing metapage to disk");
-	PageSetChecksumInplace(page, BIOSEQ_COLUMN_METAPAGE_BLOCKNO);
-	smgrextend(srel, MAIN_FORKNUM, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, page, true);
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() flushing metapage to disk");
+	PageSetChecksumInplace(page, metadata_block_number);
+	smgrextend(srel, MAIN_FORKNUM, metadata_block_number, page, true);
 
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() initialising empty page");
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() initialising empty page");
 	PageInit(page, BLCKSZ, 0);
 
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
-				BIOSEQ_COLUMN_EMPTY_BLOCKNO, page, true);
+				reserved_empty_block_number, page, true);
 
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() flushing empty page to disk");
-	PageSetChecksumInplace(page, BIOSEQ_COLUMN_EMPTY_BLOCKNO);
-	smgrextend(srel, MAIN_FORKNUM, BIOSEQ_COLUMN_EMPTY_BLOCKNO, page, true);
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() flushing empty page to disk");
+	PageSetChecksumInplace(page, reserved_empty_block_number);
+	smgrextend(srel, MAIN_FORKNUM, reserved_empty_block_number, page, true);
 
 	/*
 	 * An immediate sync is required even if we xlog'd the page, because the
 	 * write did not go through shared_buffers and therefore a concurrent
 	 * checkpoint may have moved the redo pointer past our xlog record.
 	 */
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnStorageInit() requesting smgr immediate sync");
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() requesting smgr immediate sync");
 	smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
 
-/*
- * BioseqColumnStorageUpdateCurrent - update the metapage to the current
- * version. No effect if the version already matches. If 'upgrade' is true,
- * throw an error if metapage version is newer; if 'upgrade' is false, it's a
- * downgrade, so throw an error if the metapage version is older.
+/** @brief Rewrites an existing metapage with the required format identity.
  *
- * NB: caller must ensure that metapage already exists, which might not be the
- * case on 10.0.
+ * The direction flag rejects a source format on the wrong side of the target.
+ * The caller must ensure that the relation already has a metapage.
  */
 export void
-BioseqColumnStorageUpdateCurrent(Relation rel, bool upgrade, uint64_t reservedStripeId,
-							 uint64_t reservedRowNumber, uint64_t reservedOffset)
+update_column_storage_format(Relation rel, bool is_upgrade, uint64_t next_stripe_id,
+							 uint64_t next_row_number, uint64_t next_logical_offset)
 {
 	LockRelationForExtension(rel, ExclusiveLock);
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, true);
+	column_metapage metapage = read_column_metapage(rel, true);
 
-	if (BioseqColumnMetapageIsCurrent(&metapage))
+	if (column_metapage_uses_current_format(&metapage))
 	{
 		/* nothing to do */
 		UnlockRelationForExtension(rel, ExclusiveLock);
 		return;
 	}
 
-	if (upgrade && BioseqColumnMetapageIsNewer(&metapage))
+	if (is_upgrade && column_metapage_format_is_newer(&metapage))
 	{
 		UnlockRelationForExtension(rel, ExclusiveLock);
-		bioseq_log<ERR, PG>( "found newer columnar metapage while upgrading");
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = "found a newer columnar metapage while upgrading",
+			});
 	}
 
-	if (!upgrade && BioseqColumnMetapageIsOlder(&metapage))
+	if (!is_upgrade && column_metapage_format_is_older(&metapage))
 	{
 		UnlockRelationForExtension(rel, ExclusiveLock);
-		bioseq_log<ERR, PG>( "found older columnar metapage while downgrading");
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = "found an older columnar metapage while downgrading",
+			});
 	}
 
-	metapage.versionMajor = BIOSEQ_COLUMN_VERSION_MAJOR;
-	metapage.versionMinor = BIOSEQ_COLUMN_VERSION_MINOR;
+	metapage.format_major = column_storage_format_major;
+	metapage.format_minor = column_storage_format_minor;
 
-	/* storageId remains the same */
-	metapage.reservedStripeId = reservedStripeId;
-	metapage.reservedRowNumber = reservedRowNumber;
-	metapage.reservedOffset = reservedOffset;
+	/* storage_id remains the same */
+	metapage.next_stripe_id = next_stripe_id;
+	metapage.next_row_number = next_row_number;
+	metapage.next_logical_offset = next_logical_offset;
 
-	BioseqColumnOverwriteMetapage(rel, metapage);
+	overwrite_column_metapage(rel, metapage);
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
 }
 
 
 /*
- * BioseqColumnStorageGetVersionMajor - return major version from the metapage.
+ * column_storage_id - return storage ID from the metapage.
  *
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
 export uint64_t
-BioseqColumnStorageGetVersionMajor(Relation rel, bool force)
+column_storage_id(Relation rel, bool force)
 {
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
+	column_metapage metapage = read_column_metapage(rel, force);
 
-	return metapage.versionMajor;
+	return metapage.storage_id;
 }
 
 
 /*
- * BioseqColumnStorageGetVersionMinor - return minor version from the metapage.
- *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
- */
-export uint64_t
-BioseqColumnStorageGetVersionMinor(Relation rel, bool force)
-{
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
-
-	return metapage.versionMinor;
-}
-
-
-/*
- * BioseqColumnStorageGetStorageId - return storage ID from the metapage.
- *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
- */
-export uint64_t
-BioseqColumnStorageGetStorageId(Relation rel, bool force)
-{
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
-
-	return metapage.storageId;
-}
-
-
-/*
- * BioseqColumnStorageGetReservedStripeId - return reserved stripe ID from the
- * metapage.
- *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
- */
-export uint64_t
-BioseqColumnStorageGetReservedStripeId(Relation rel, bool force)
-{
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
-
-	return metapage.reservedStripeId;
-}
-
-
-/*
- * BioseqColumnStorageGetReservedRowNumber - return reserved row number from the
- * metapage.
- *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
- */
-export uint64_t
-BioseqColumnStorageGetReservedRowNumber(Relation rel, bool force)
-{
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
-
-	return metapage.reservedRowNumber;
-}
-
-
-/*
- * BioseqColumnStorageGetReservedOffset - return reserved offset from the metapage.
- *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
- */
-export uint64_t
-BioseqColumnStorageGetReservedOffset(Relation rel, bool force)
-{
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, force);
-
-	return metapage.reservedOffset;
-}
-
-/*
- * BioseqColumnStorageIsCurrent - return true if metapage exists and is at
+ * column_storage_uses_current_format - return true if metapage exists and is at
  * the current version.
  */
 export bool
-BioseqColumnStorageIsCurrent(Relation rel)
+column_storage_uses_current_format(Relation rel)
 {
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
@@ -627,105 +686,138 @@ BioseqColumnStorageIsCurrent(Relation rel)
 		return false;
 	}
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, true);
-	return BioseqColumnMetapageIsCurrent(&metapage);
+	column_metapage metapage = read_column_metapage(rel, true);
+	return column_metapage_uses_current_format(&metapage);
 }
 
 
 /*
- * BioseqColumnStorageReserveRowNumber returns reservedRowNumber and advances
+ * reserve_column_row_numbers returns next_row_number and advances
  * it for next row number reservation.
  */
 export uint64_t
-BioseqColumnStorageReserveRowNumber(Relation rel, uint64_t nrows)
+reserve_column_row_numbers(Relation rel, uint64_t nrows)
 {
 	LockRelationForExtension(rel, ExclusiveLock);
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, false);
+	column_metapage metapage = read_column_metapage(rel, false);
 
-	uint64_t firstRowNumber = metapage.reservedRowNumber;
-	metapage.reservedRowNumber += nrows;
+	const uint64_t first_row_number = metapage.next_row_number;
+	const std::optional<uint64_t> next_row_number =
+		bioseq::common::checked_add(first_row_number, nrows);
+	if (first_row_number < first_column_row_number
+		|| !next_row_number.has_value()
+		|| *next_row_number > maximum_column_row_reservation)
+	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
+		raise_column_row_reservation_error(rel, first_row_number, nrows);
+	}
+	metapage.next_row_number = *next_row_number;
 
-	BioseqColumnOverwriteMetapage(rel, metapage);
+	overwrite_column_metapage(rel, metapage);
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return firstRowNumber;
+	return first_row_number;
 }
 
 
 /*
- * BioseqColumnStorageReserveStripeId returns stripeId and advances it for next
- * stripeId reservation.
+ * reserve_column_stripe_id returns stripe_id and advances it for next
+ * stripe_id reservation.
  * Note that this function doesn't handle row number reservation.
- * See BioseqColumnStorageReserveRowNumber function.
+ * See reserve_column_row_numbers function.
  */
 export uint64_t
-BioseqColumnStorageReserveStripeId(Relation rel)
+reserve_column_stripe_id(Relation rel)
 {
 	LockRelationForExtension(rel, ExclusiveLock);
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, false);
+	column_metapage metapage = read_column_metapage(rel, false);
 
-	uint64_t stripeId = metapage.reservedStripeId;
-	metapage.reservedStripeId++;
+	const uint64_t stripe_id = metapage.next_stripe_id;
+	const std::optional<uint64_t> next_stripe_id =
+		bioseq::common::checked_add(stripe_id, static_cast<uint64_t>(1));
+	if (stripe_id < first_stripe_id || !next_stripe_id.has_value())
+	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
+		raise_column_stripe_reservation_error(rel, stripe_id);
+	}
+	metapage.next_stripe_id = *next_stripe_id;
 
-	BioseqColumnOverwriteMetapage(rel, metapage);
+	overwrite_column_metapage(rel, metapage);
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return stripeId;
+	return stripe_id;
 }
 
 
 /*
- * BioseqColumnStorageReserveData - reserve logical data offsets for writing.
+ * reserve_column_storage_bytes - reserve logical data offsets for writing.
  */
 export uint64_t
-BioseqColumnStorageReserveData(Relation rel, uint64_t amount)
+reserve_column_storage_bytes(Relation rel, uint64_t amount)
 {
 	if (amount == 0)
 	{
-		return BioseqColumnInvalidLogicalOffset;
+		return invalid_logical_offset;
 	}
 
 	LockRelationForExtension(rel, ExclusiveLock);
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, false);
+	column_metapage metapage = read_column_metapage(rel, false);
 
-	uint64_t alignedReservation = AlignReservation(metapage.reservedOffset);
-	uint64_t nextReservation = alignedReservation + amount;
-	metapage.reservedOffset = nextReservation;
+	const std::optional<uint64_t> aligned_reservation =
+		align_storage_reservation(metapage.next_logical_offset);
+	const std::optional<uint64_t> next_reservation =
+		aligned_reservation.has_value()
+			? bioseq::common::checked_add(*aligned_reservation, amount)
+			: std::nullopt;
+	if (!aligned_reservation.has_value()
+		|| !next_reservation.has_value()
+		|| !is_valid_logical_reservation(*next_reservation))
+	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
+		raise_logical_storage_range_error(
+			rel, "reserve", metapage.next_logical_offset, amount);
+	}
+	metapage.next_logical_offset = *next_reservation;
 
 	/* write new reservation */
-	BioseqColumnOverwriteMetapage(rel, metapage);
+	overwrite_column_metapage(rel, metapage);
 
-	/* last used PhysicalAddr of new reservation */
-	PhysicalAddr final = LogicalToPhysical(nextReservation - 1);
+	/* last used physical_address of new reservation */
+	const physical_address final =
+		logical_to_physical_address(*next_reservation - 1);
 
 	/* extend with new pages */
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
-	while (nblocks <= final.blockno)
+	while (nblocks <= final.block_number)
 	{
-		Buffer newBuffer = ReadBuffer(rel, P_NEW);
-		Assert(BufferGetBlockNumber(newBuffer) == nblocks);
-		ReleaseBuffer(newBuffer);
-		nblocks++;
+		Buffer new_buffer = ReadBuffer(rel, P_NEW);
+		Assert(BufferGetBlockNumber(new_buffer) == nblocks);
+		ReleaseBuffer(new_buffer);
+		if (nblocks == final.block_number)
+		{
+			break;
+		}
+		++nblocks;
 	}
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
 
-	return alignedReservation;
+	return *aligned_reservation;
 }
 
 
 /*
- * BioseqColumnStorageRead - map the logical offset to a block and offset, then
+ * read_column_storage - map the logical offset to a block and offset, then
  * read the buffer from multiple blocks if necessary.
  */
 export void
-BioseqColumnStorageRead(Relation rel, uint64_t logicalOffset, char *data, uint32_t amount)
+read_column_storage(Relation rel, uint64_t logical_offset, char *data, uint32_t amount)
 {
 	/* if there's no work to do, succeed even with invalid offset */
 	if (amount == 0)
@@ -733,21 +825,18 @@ BioseqColumnStorageRead(Relation rel, uint64_t logicalOffset, char *data, uint32
 		return;
 	}
 
-	if (!BioseqColumnLogicalOffsetIsValid(logicalOffset))
-	{
-		bioseq_log<ERR, PG>(
-			 "attempted columnar read on relation {} from invalid logical offset: {}",
-			 rel->rd_id, logicalOffset);
-	}
+	validate_logical_storage_range(rel, "read", logical_offset, amount);
 
 	uint64_t read = 0;
 
 	while (read < amount)
 	{
-		PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
+		const physical_address addr =
+			logical_to_physical_address(logical_offset + read);
 
-		uint32_t to_read = std::min<uint64_t>(amount - read, BLCKSZ - addr.offset);
-		ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
+		const uint32_t to_read = static_cast<uint32_t>(
+			std::min<uint64_t>(amount - read, BLCKSZ - addr.offset));
+		read_from_block(rel, addr.block_number, addr.offset, data + read, to_read,
 					  false);
 
 		read += to_read;
@@ -756,11 +845,11 @@ BioseqColumnStorageRead(Relation rel, uint64_t logicalOffset, char *data, uint32
 
 
 /*
- * BioseqColumnStorageWrite - map the logical offset to a block and offset, then
+ * write_column_storage - map the logical offset to a block and offset, then
  * write the buffer across multiple blocks if necessary.
  */
 export void
-BioseqColumnStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint32_t amount)
+write_column_storage(Relation rel, uint64_t logical_offset, const char *data, uint32_t amount)
 {
 	/* if there's no work to do, succeed even with invalid offset */
 	if (amount == 0)
@@ -768,27 +857,18 @@ BioseqColumnStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint3
 		return;
 	}
 
-	if (!BioseqColumnLogicalOffsetIsValid(logicalOffset))
-	{
-		bioseq::pg_utils::raise_sql_error(
-			ERRCODE_INTERNAL_ERROR,
-			{
-				.message = fmt::format(
-					"attempted columnar write on relation {} to invalid "
-					"logical offset: {}",
-					rel->rd_id,
-					logicalOffset),
-			});
-	}
+	validate_logical_storage_range(rel, "write", logical_offset, amount);
 
 	uint64_t written = 0;
 
 	while (written < amount)
 	{
-		PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
+		const physical_address addr =
+			logical_to_physical_address(logical_offset + written);
 
-		uint64_t to_write = std::min<uint64_t>(amount - written, BLCKSZ - addr.offset);
-		WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
+		const uint32_t to_write = static_cast<uint32_t>(
+			std::min<uint64_t>(amount - written, BLCKSZ - addr.offset));
+		write_to_block(rel, addr.block_number, addr.offset, data + written, to_write,
 					 false);
 
 		written += to_write;
@@ -797,8 +877,8 @@ BioseqColumnStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint3
 
 
 /*
- * BioseqColumnStorageTruncate - truncate the columnar storage such that
- * newDataReservation will be the first unused logical offset available. Free
+ * truncate_column_storage - truncate the columnar storage such that
+ * new_data_reservation will be the first unused logical offset available. Free
  * pages at the end of the relation.
  *
  * Caller must hold AccessExclusiveLock on the relation.
@@ -806,14 +886,27 @@ BioseqColumnStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint3
  * Returns true if pages were truncated; false otherwise.
  */
 export bool
-BioseqColumnStorageTruncate(Relation rel, uint64_t newDataReservation)
+truncate_column_storage(Relation rel, uint64_t new_data_reservation)
 {
-	if (!BioseqColumnLogicalOffsetIsValid(newDataReservation))
+	if (!is_valid_logical_reservation(new_data_reservation))
 	{
-		bioseq_log<ERR, PG>(
-			 "attempted to truncate relation {} to invalid logical offset: {}",
-			 rel->rd_id, newDataReservation);
+		raise_logical_storage_reservation_error(
+			rel, "truncate column storage at", new_data_reservation);
 	}
+	const physical_address final =
+		logical_to_physical_address(new_data_reservation - 1);
+	const std::optional<uint64_t> new_page_count =
+		bioseq::common::checked_add(
+			static_cast<uint64_t>(final.block_number),
+			static_cast<uint64_t>(1));
+	if (!new_page_count.has_value()
+		|| *new_page_count > maximum_column_storage_page_count)
+	{
+		raise_logical_storage_reservation_error(
+			rel, "truncate column storage at", new_data_reservation);
+	}
+	const BlockNumber new_rel_pages =
+		static_cast<BlockNumber>(*new_page_count);
 
 	BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	if (old_rel_pages == 0)
@@ -824,32 +917,49 @@ BioseqColumnStorageTruncate(Relation rel, uint64_t newDataReservation)
 
 	LockRelationForExtension(rel, ExclusiveLock);
 
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(rel, false);
-
-	if (metapage.reservedOffset < newDataReservation)
+	column_metapage metapage = read_column_metapage(rel, false);
+	if (new_rel_pages > old_rel_pages)
 	{
-		bioseq_log<ERR, PG>(
-			 "attempted to truncate relation {} to offset {} which is higher than existing offset {}",
-			 rel->rd_id, newDataReservation, metapage.reservedOffset);
+		UnlockRelationForExtension(rel, ExclusiveLock);
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"cannot truncate relation {} from {} pages to {} pages",
+					rel->rd_id,
+					old_rel_pages,
+					new_rel_pages),
+			});
 	}
 
-	if (metapage.reservedOffset == newDataReservation)
+	if (metapage.next_logical_offset < new_data_reservation)
+	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"attempted to truncate relation {} to offset {}, which "
+					"is higher than its reserved offset {}",
+					rel->rd_id,
+					new_data_reservation,
+					metapage.next_logical_offset),
+			});
+	}
+
+	if (metapage.next_logical_offset == new_data_reservation)
 	{
 		/* nothing to do */
 		UnlockRelationForExtension(rel, ExclusiveLock);
 		return false;
 	}
 
-	metapage.reservedOffset = newDataReservation;
+	metapage.next_logical_offset = new_data_reservation;
 
 	/* write new reservation */
-	BioseqColumnOverwriteMetapage(rel, metapage);
+	overwrite_column_metapage(rel, metapage);
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
-
-	PhysicalAddr final = LogicalToPhysical(newDataReservation - 1);
-	BlockNumber new_rel_pages = final.blockno + 1;
-	Assert(new_rel_pages <= old_rel_pages);
 
 	/*
 	 * Truncate the storage. Note that RelationTruncate() takes care of

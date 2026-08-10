@@ -10,7 +10,7 @@
 #include <string_view>
 #include <variant>
 
-import bioseq.external.run;
+import bioseq.external.providers.run;
 import bioseq.external.provider.base;
 import bioseq.external.provider.query;
 import bioseq.external.provider.messages;
@@ -26,7 +26,7 @@ namespace {
 
 void run_and_report(std::string_view provider_name, query_target target) {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
     external_slot_budget budget;
     budget.provider = provider_id{.value = provider_name};
@@ -64,7 +64,7 @@ void run_and_report(std::string_view provider_name, query_target target) {
 void run_location_and_report(std::string_view provider_name,
                              std::string_view gene_id) {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
     external_slot_budget budget;
     budget.provider = provider_id{.value = provider_name};
@@ -117,7 +117,7 @@ void run_sequence_and_report(std::string_view provider_name,
                              std::string_view genome, std::string_view chrom,
                              std::int64_t start0, std::int64_t end0) {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
     external_slot_budget budget;
     budget.provider = provider_id{.value = provider_name};
@@ -188,7 +188,7 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
                                      std::string_view accession,
                                      query_target target) {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
     external_slot_budget budget;
     budget.provider = provider_id{.value = provider_name};
@@ -248,7 +248,7 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
 void run_named_taxonomy_and_report(std::string_view provider_name,
                                    std::string_view sci_name) {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
     external_slot_budget budget;
     budget.provider = provider_id{.value = provider_name};
@@ -298,45 +298,48 @@ void run_named_taxonomy_and_report(std::string_view provider_name,
 }  // namespace
 
 TEST_CASE("EBI taxonomy Homo sapiens returns taxon 9606",
-          "[external][run-live][ebi][taxonomy]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_named_taxonomy_and_report("ebi", "Homo sapiens");
 }
 
 TEST_CASE("NCBI sequence_chunks NC_012920.1 returns the mitochondrion",
-          "[external][run-live][ncbi][sequence]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_seq_by_accession_and_report("ncbi", "NC_012920.1",
                                     query_target::sequence_chunk);
 }
 
 TEST_CASE("NCBI sequences NC_012920.1 returns one whole record",
-          "[external][run-live][ncbi][sequence]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_seq_by_accession_and_report("ncbi", "NC_012920.1",
                                     query_target::sequence);
 }
 
 TEST_CASE("NCBI record_location gene 7157 yields genomic intervals",
-          "[external][run-live][ncbi][locations]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_location_and_report("ncbi", "7157");
 }
 
 TEST_CASE("UCSC sequence hg38 chrM:0-100 returns 100 bases",
-          "[external][run-live][ucsc][sequence]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_sequence_and_report("ucsc", "hg38", "chrM", 0, 100);
 }
 
-TEST_CASE("NCBI taxonomy run path is crash-free", "[external][run-live][ncbi]") {
+TEST_CASE("NCBI taxonomy run path is crash-free",
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ncbi", query_target::taxonomy);
 }
 
-TEST_CASE("NCBI catalog run path is crash-free", "[external][run-live][ncbi]") {
+TEST_CASE("NCBI catalog run path is crash-free",
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ncbi", query_target::catalog);
 }
 
 TEST_CASE("UniProt catalog run path is crash-free",
-          "[external][run-live][uniprot]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("uniprot", query_target::catalog);
 }
 
-TEST_CASE("EBI catalog run path is crash-free", "[external][run-live][ebi]") {
+TEST_CASE("EBI catalog run path is crash-free",
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ebi", query_target::catalog);
 }

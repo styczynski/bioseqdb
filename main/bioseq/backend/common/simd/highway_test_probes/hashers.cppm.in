@@ -7,7 +7,7 @@
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.lexic;
@@ -66,7 +66,7 @@ template<
     simd_results.reserve(sequence.bp_size());
 
     std::size_t position = 0u;
-    for (const auto rank : sequence.template iterable<BP>()) {
+    for (const auto rank : sequence.template iterable<logical_rank>()) {
         const auto [hash, strand] = scalar_hasher.next(
             static_cast<Input>(rank), static_cast<Input>(rank));
         (void)strand;

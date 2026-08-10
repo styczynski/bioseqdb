@@ -1,38 +1,19 @@
 /**
  * @file pipeline.cppm
- * @brief Async producer/parser + worker pool dispatch for the IO reader.
+ * @brief Producer/parser plus task-pool dispatch for the IO reader.
  *
- * Phase-1 of the spec is the synchronous (`worker_count == 0`) path:
- * `public_api.cppm::run_sync_pipeline` reads, parses, and dispatches
- * batches inline on the calling thread. This module adds the async
- * shape: one producer/parser thread that drives the slab refill +
- * record FSM, plus N worker threads that consume batches via a
- * round-robin SPSC handoff and call the user's `handler_fn` in
- * parallel.
- *
- * The shape is a v1 simplification of the full §12 design:
- *
- *   * Producer + parser are fused into one thread. The macOS file
- *     `read(2)` is fast enough that holding it on a separate thread
- *     gains very little for the corpus sizes the bench exercises;
- *     splitting them is a follow-up optimisation gated on profiling.
- *   * Slab pool of one (the parser owns the slab; producer fills it
- *     in-place via `make_room` + `read_into`).
- *   * Per-worker SPSC ring carries batch handles. Round-robin
- *     dispatch (no work-stealing).
- *   * Free-batch pool is mutex-guarded — recycling rate is < 1×
- *     batch/ms in steady state, well below any contention threshold.
+ * The calling thread owns source reads, slab refill, and record parsing.
+ * Completed batches are moved into task bodies submitted to the shared
+ * parallelism pool. The task group is drained before return, so every
+ * accepted batch has reached the handler when this function completes.
  *
  * The handler-side win is real: a worker pool of N threads parses
  * records as fast as the parser produces batches, and any per-batch
  * post-processing (hashing, indexing, alignment seed extraction) runs
  * concurrently across cores.
- *
- * Spec §12 / Appendix I (SPSC) / Appendix M (orchestration).
  */
 module;
 
-#include "common.h"
 
 #include <atomic>
 #include <cstddef>
@@ -47,8 +28,6 @@ module;
 
 export module bioseq.io.pipeline;
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.io.options;
 import bioseq.io.errors;
@@ -62,12 +41,6 @@ import bioseq.parallelism.pool;
 
 export namespace bioseq::io {
 
-/// Default capacity of the per-worker SPSC ring. 32 slots = ~16 ms
-/// of buffering at 2k batches/sec (the rate a 5 GiB/s parser produces
-/// at 1 MiB batch payloads), enough to absorb worker scheduling
-/// jitter without ballooning memory. Spec §5.4.1.
-constexpr std::size_t kWorkerRingCapacity = 32;
-
 /**
  * @brief Run a record-by-record async dispatch loop.
  *
@@ -78,16 +51,15 @@ constexpr std::size_t kWorkerRingCapacity = 32;
  *   * `reader_options::concurrency.worker_count` — the worker pool size.
  *
  * The function returns when the parser has reached EOF and every
- * pending batch has been delivered to a worker. The worker threads
- * are joined before return.
+ * pending batch has completed in the shared task pool.
  *
- * Parameter shape mirrors `run_sync_pipeline` in `public_api.cppm`,
+ * Parameter shape mirrors `run_sync_pipeline` in the reader module,
  * so the dispatcher can pick async vs sync via a single
  * `if (worker_count > 0) ...` branch.
  */
 template <
     sequence_alphabet alphabet_t,
-    sequence_io_file_type file_type,
+    sequence_file_format file_type,
     io_source source_t,
     typename batch_t,
     typename handler_fn_t,
@@ -104,19 +76,19 @@ template <
 
     constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
     constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
-    constexpr bool is_fastq_format = (file_type == sequence_io_file_type::FASTQ);
+    constexpr bool is_fastq_format = (file_type == sequence_file_format::fastq);
 
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
-    if (!pool.active()) {
+    auto& pool = bioseq::parallelism::global_pool::instance();
+    if (!pool.is_active()) {
         const std::size_t requested_workers = std::max<std::size_t>(
             1, options.concurrency.worker_count);
         const unsigned configured_workers =
             requested_workers > (std::numeric_limits<unsigned>::max)()
                 ? (std::numeric_limits<unsigned>::max)()
                 : static_cast<unsigned>(requested_workers);
-        pool.configure(bioseq::parallelism::PoolConfig{
-            .max_concurrency = configured_workers,
-            .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
+        pool.configure(bioseq::parallelism::pool_config{
+            .maximum_concurrency = configured_workers,
+            .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
         });
     }
     auto task_group = pool.make_task_group();
@@ -162,10 +134,10 @@ template <
         prepare_fresh_batch();
     };
 
-    if constexpr (file_type == sequence_io_file_type::FASTA) {
+    if constexpr (file_type == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(current_batch.header_storage(),
-                                     current_batch.seq_storage());
+                                     current_batch.sequence_storage());
 
         auto emit_fasta_record = [&](std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
@@ -173,8 +145,8 @@ template <
                                      std::size_t /*seq_word_count*/,
                                      std::size_t padding) {
             current_batch.header_offsets().push_back(current_batch.header_storage().size());
-            current_batch.seq_offsets().push_back(current_batch.seq_storage().size());
-            current_batch.seq_paddings().push_back(padding);
+            current_batch.sequence_offsets().push_back(current_batch.sequence_storage().size());
+            current_batch.sequence_paddings().push_back(padding);
             ++records_emitted;
             if (current_batch.size() >= flush_record_threshold) {
                 dispatch_batch();
@@ -208,7 +180,7 @@ template <
             bool finished = false;
             while (!aborted) {
                 parser_state.attach_to_batch(current_batch.header_storage(),
-                                             current_batch.seq_storage());
+                                             current_batch.sequence_storage());
                 const auto step =
                     parse_one_fasta_record<alphabet_t, std::uint64_t>(
                         parser_state,
@@ -220,13 +192,13 @@ template <
                         emit_fasta_record,
                         failure_capture);
                 slab.parse_cursor = step.cursor;
-                if (step.outcome == parse_outcome::COMPLETE) continue;
-                if (step.outcome == parse_outcome::AT_EOF) {
+                if (step.outcome == parse_outcome::complete) continue;
+                if (step.outcome == parse_outcome::at_end_of_file) {
                     dispatch_batch();
                     finished = true;
                     break;
                 }
-                if (step.outcome == parse_outcome::ABORT) {
+                if (step.outcome == parse_outcome::abort) {
                     finished = true;
                     break;
                 }
@@ -246,7 +218,7 @@ template <
     } else {  // FASTQ
         fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(current_batch.header_storage(),
-                                     current_batch.seq_storage(),
+                                     current_batch.sequence_storage(),
                                      current_batch.quality_storage());
 
         auto emit_fastq_record = [&](std::size_t /*header_start*/,
@@ -257,8 +229,8 @@ template <
                                      std::size_t /*qual_start*/,
                                      std::size_t /*qual_size*/) {
             current_batch.header_offsets().push_back(current_batch.header_storage().size());
-            current_batch.seq_offsets().push_back(current_batch.seq_storage().size());
-            current_batch.seq_paddings().push_back(padding);
+            current_batch.sequence_offsets().push_back(current_batch.sequence_storage().size());
+            current_batch.sequence_paddings().push_back(padding);
             current_batch.quality_offsets().push_back(current_batch.quality_storage().size());
             ++records_emitted;
             if (current_batch.size() >= flush_record_threshold) {
@@ -292,7 +264,7 @@ template <
             bool finished = false;
             while (!aborted) {
                 parser_state.attach_to_batch(current_batch.header_storage(),
-                                             current_batch.seq_storage(),
+                                             current_batch.sequence_storage(),
                                              current_batch.quality_storage());
                 const auto step =
                     parse_one_fastq_record<alphabet_t, std::uint64_t>(
@@ -306,13 +278,13 @@ template <
                         emit_fastq_record,
                         failure_capture);
                 slab.parse_cursor = step.cursor;
-                if (step.outcome == parse_outcome::COMPLETE) continue;
-                if (step.outcome == parse_outcome::AT_EOF) {
+                if (step.outcome == parse_outcome::complete) continue;
+                if (step.outcome == parse_outcome::at_end_of_file) {
                     dispatch_batch();
                     finished = true;
                     break;
                 }
-                if (step.outcome == parse_outcome::ABORT) {
+                if (step.outcome == parse_outcome::abort) {
                     finished = true;
                     break;
                 }

@@ -91,7 +91,11 @@ endfunction()
 
 _bioseq_manifest_symbol_array(c_link_symbols c_link_symbol_inventory_count FALSE _bioseq_links)
 _bioseq_manifest_symbol_array(c_finfo_symbols c_finfo_symbol_inventory_count FALSE _bioseq_finfos)
-_bioseq_manifest_symbol_array(external_legacy_macro_symbols external_legacy_macro_symbol_count TRUE _bioseq_external)
+_bioseq_manifest_symbol_array(
+  handwritten_fmgr_export_external_symbols
+  handwritten_fmgr_export_external_symbol_count
+  TRUE
+  _bioseq_external)
 list(LENGTH _bioseq_links _bioseq_link_count)
 list(LENGTH _bioseq_finfos _bioseq_finfo_count)
 if(NOT _bioseq_link_count EQUAL _bioseq_finfo_count)

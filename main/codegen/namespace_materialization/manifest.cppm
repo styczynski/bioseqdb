@@ -24,6 +24,7 @@ export module bioseq.codegen.namespace_materialization:manifest;
 
 import :model;
 import :validator;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
@@ -36,8 +37,6 @@ struct rendered_publication_manifest {
     std::string json;
     std::string manifest_identity;
 };
-
-using rendered_artifact_manifest = rendered_publication_manifest;
 
 /// One path whose ownership was authenticated by an artifacts manifest.
 struct owned_publication_artifact {
@@ -61,7 +60,7 @@ struct previous_publication {
 /// Authenticated configure-time provenance consumed by structural and Highway
 /// generation. `content_sha256` seals the exact configure snapshot bytes.
 struct configure_topology_provenance {
-    std::string generator_version;
+    std::string generator_identity;
     std::string policy;
     std::string name;
     std::filesystem::path source_path;
@@ -78,27 +77,27 @@ struct configure_topology_provenance {
 /// exact authenticated action-trace bytes. The trace also has its own semantic
 /// self-seal; this digest prevents independently substituting the extra custom
 /// command output before GENERATE validates that seal and its PCM joins.
-inline void validate_preparation_action_trace_stamp_binding(
-    const std::string_view stamp_document,
-    const std::string_view action_trace_document) {
+inline void validate_frontend_action_trace_stamp_binding(
+    const std::string_view stamp_content,
+    const std::string_view action_trace_content) {
     constexpr std::string_view schema{
         "bioseq_template_flatten_prepare_stamp/v1\n"};
     constexpr std::string_view prefix{
         "prepare_action_trace_sha256="};
-    if (!stamp_document.starts_with(schema)) {
+    if (!stamp_content.starts_with(schema)) {
         throw std::runtime_error(
             "PREPARE stamp action-trace binding has the wrong schema");
     }
     std::string sealed_digest;
     std::size_t binding_count = 0u;
     std::size_t line_begin = 0u;
-    while (line_begin < stamp_document.size()) {
-        const std::size_t line_end = stamp_document.find(
+    while (line_begin < stamp_content.size()) {
+        const std::size_t line_end = stamp_content.find(
             '\n', line_begin);
-        const std::string_view line = stamp_document.substr(
+        const std::string_view line = stamp_content.substr(
             line_begin,
             line_end == std::string_view::npos
-                ? stamp_document.size() - line_begin
+                ? stamp_content.size() - line_begin
                 : line_end - line_begin);
         if (line.starts_with(prefix)) {
             ++binding_count;
@@ -107,18 +106,16 @@ inline void validate_preparation_action_trace_stamp_binding(
         if (line_end == std::string_view::npos) break;
         line_begin = line_end + 1u;
     }
-    const auto lowercase_sha256 = [](const std::string_view digest) {
-        return digest.size() == 64u
-            && std::ranges::all_of(
-                digest,
-                [](const char value) {
-                    return (value >= '0' && value <= '9')
-                        || (value >= 'a' && value <= 'f');
-                });
-    };
+    const bool has_lowercase_sha256 = sealed_digest.size() == 64u
+        && std::ranges::all_of(
+            sealed_digest,
+            [](const char value) {
+                return (value >= '0' && value <= '9')
+                    || (value >= 'a' && value <= 'f');
+            });
     if (binding_count != 1u
-        || !lowercase_sha256(sealed_digest)
-        || sealed_digest != sha256_hex(action_trace_document)) {
+        || !has_lowercase_sha256
+        || sealed_digest != bioseq::common::sha256_hex(action_trace_content)) {
         throw std::runtime_error(
             "PREPARE stamp action-trace SHA-256 binding is missing, "
             "duplicated, malformed, or stale");
@@ -178,23 +175,23 @@ inline void validate_preparation_action_trace_stamp_binding(
 
 /// Returns the compiler-derived linkage spelling recorded for probe entities.
 [[nodiscard]] inline constexpr std::string_view linkage_name(
-    clang_structural::entity_linkage value) noexcept {
+    structural_analysis::entity_linkage value) noexcept {
     switch (value) {
-        case clang_structural::entity_linkage::none: return "none";
-        case clang_structural::entity_linkage::internal: return "internal";
-        case clang_structural::entity_linkage::module: return "module";
-        case clang_structural::entity_linkage::external: return "external";
+        case structural_analysis::entity_linkage::none: return "none";
+        case structural_analysis::entity_linkage::internal: return "internal";
+        case structural_analysis::entity_linkage::module: return "module";
+        case structural_analysis::entity_linkage::external: return "external";
     }
     return "unknown";
 }
 
 /// Returns the named/global-module attachment spelling for probe entities.
 [[nodiscard]] inline constexpr std::string_view attachment_name(
-    clang_structural::module_attachment value) noexcept {
+    structural_analysis::module_attachment value) noexcept {
     switch (value) {
-        case clang_structural::module_attachment::global_module:
+        case structural_analysis::module_attachment::global_module:
             return "global_module";
-        case clang_structural::module_attachment::named_module:
+        case structural_analysis::module_attachment::named_module:
             return "named_module";
     }
     return "unknown";
@@ -238,7 +235,7 @@ inline void write_string(
 
 inline void write_source_position(
     std::ostringstream& output,
-    const clang_structural::source_position& position) {
+    const structural_analysis::source_position& position) {
     output << "{\"byte\":" << position.byte_offset
            << ",\"line\":" << position.line
            << ",\"column\":" << position.column << '}';
@@ -246,7 +243,7 @@ inline void write_source_position(
 
 inline void write_source_range(
     std::ostringstream& output,
-    const clang_structural::source_range& range) {
+    const structural_analysis::source_range& range) {
     output << "{\"begin\":";
     write_source_position(output, range.begin);
     output << ",\"end\":";
@@ -255,9 +252,9 @@ inline void write_source_range(
 }
 
 [[nodiscard]] inline std::string declaration_identity(
-    const clang_structural::declaration_record& declaration) {
-    if (!declaration.provenance_id.empty()) {
-        return declaration.provenance_id;
+    const structural_analysis::declaration_record& declaration) {
+    if (!declaration.source_identity.empty()) {
+        return declaration.source_identity;
     }
     if (!declaration.stable_usr.empty()) return declaration.stable_usr;
     if (!declaration.qualified_name.empty()) {
@@ -293,7 +290,8 @@ inline void require_sha256(
             std::string{owner} + " contains a non-canonical path separator: "
             + original);
     }
-    const fs::path normalized = checked_owned_output_path(path, owner);
+    const fs::path normalized = validate_owned_artifact_path(
+        path, artifact_owner_view{owner});
     if (normalized.generic_string() != original) {
         throw std::runtime_error(
             std::string{owner} + " is not already normalized: " + original);
@@ -309,6 +307,18 @@ inline void require_sha256(
         }
     }
     return normalized;
+}
+
+[[nodiscard]] inline fs::path checked_source_identity(
+    const fs::path& path,
+    const std::string_view owner) {
+    const fs::path identity = checked_relative_path(path, owner);
+    if (identity.begin() != identity.end() && *identity.begin() == "main") {
+        throw std::runtime_error(
+            std::string{owner}
+            + " must not include the repository's physical main directory");
+    }
+    return identity;
 }
 
 [[nodiscard]] inline fs::path checked_absolute_path(
@@ -341,7 +351,13 @@ inline void require_sha256(
     return checked;
 }
 
-[[nodiscard]] inline std::string repository_relative_source(
+/// Returns the stable source-tree identity written to generated metadata.
+///
+/// Runtime paths remain absolute for filesystem authorization. Serialized
+/// source identities are normalized forward-slash paths relative to the
+/// repository source tree; the repository's physical `main/` container is not
+/// part of that logical identity.
+[[nodiscard]] inline std::string canonical_source_identity(
     const generation_plan& plan) {
     const fs::path repository_root = checked_absolute_path(
         plan.repository_root, "repository root");
@@ -352,8 +368,13 @@ inline void require_sha256(
         throw std::runtime_error(
             "materialization source is not beneath the repository root");
     }
-    return checked_relative_path(
-               relative, "repository-relative materialization source")
+    const fs::path relative_identity = checked_relative_path(
+        relative, "repository-relative materialization source");
+    const std::string identity =
+        structural_analysis::repository_source_identity(relative_identity);
+    return checked_source_identity(
+               fs::path{identity},
+               "canonical materialization source identity")
         .generic_string();
 }
 
@@ -363,8 +384,8 @@ inline void validate_plan_identity(const generation_plan& plan) {
             "materialization name and optimization profile must be non-empty");
     }
     checked_absolute_path(plan.output_root, "materialization output root");
-    const std::string relative_source = repository_relative_source(plan);
-    static_cast<void>(relative_source);
+    const std::string source_identity = canonical_source_identity(plan);
+    static_cast<void>(source_identity);
     if (plan.topology.region.source_module.source_path.lexically_normal()
         != plan.source_path.lexically_normal()) {
         throw std::runtime_error(
@@ -375,7 +396,7 @@ inline void validate_plan_identity(const generation_plan& plan) {
         throw std::runtime_error(
             "materialization source and output module names must be non-empty");
     }
-    if (plan.source_sha256 != sha256_hex(plan.source_text)) {
+    if (plan.source_sha256 != bioseq::common::sha256_hex(plan.source_text)) {
         throw std::runtime_error(
             "materialization source SHA-256 does not match the authored bytes");
     }
@@ -385,7 +406,7 @@ inline void validate_plan_identity(const generation_plan& plan) {
         "compiler_module_inventory_sha256");
     if (plan.topology.canonical_digest_input.empty()
         || plan.topology.topology_digest
-            != sha256_hex(plan.topology.canonical_digest_input)) {
+            != bioseq::common::sha256_hex(plan.topology.canonical_digest_input)) {
         throw std::runtime_error(
             "topology digest does not seal the canonical topology input");
     }
@@ -500,10 +521,10 @@ inline void validate_plan_identity(const generation_plan& plan) {
             "CMake compilation obligations disagree with the generated API, "
             "selector, or enabled implementation topology");
     }
-    for (const clang_structural::translation_unit& probe :
+    for (const structural_analysis::translation_unit& probe :
          plan.declaration_probes) {
-        if (probe.mode != clang_structural::collection_mode::declaration_probe
-            || probe.clang_version != plan.clang_version
+        if (probe.mode != structural_analysis::collection_mode::declaration_probe
+            || probe.clang_release != plan.clang_release
             || probe.source_module.provided_module.empty()) {
             throw std::runtime_error(
                 "declaration probes require body-free mode, the authenticated "
@@ -516,9 +537,9 @@ inline void validate_plan_identity(const generation_plan& plan) {
         require_sha256(probe.source_sha256, "declaration probe source_sha256");
         const bool has_identity = std::ranges::any_of(
             probe.declarations,
-            [](const clang_structural::declaration_record& declaration) {
-                return !declaration.provenance_id.empty()
-                    && !declaration.provenance_coordinate.empty()
+            [](const structural_analysis::declaration_record& declaration) {
+                return !declaration.source_identity.empty()
+                    && !declaration.source_coordinate.empty()
                     && !declaration.stable_usr.empty()
                     && !declaration.qualified_name.empty();
             });
@@ -579,7 +600,7 @@ inline void write_declaration_probes(
     for (std::size_t probe_index = 0;
          probe_index < plan.declaration_probes.size();
          ++probe_index) {
-        const clang_structural::translation_unit& probe =
+        const structural_analysis::translation_unit& probe =
             plan.declaration_probes[probe_index];
         const fs::path relative_source = path_beneath_root(
             probe.source_path,
@@ -592,18 +613,18 @@ inline void write_declaration_probes(
         output << ",\"module\":";
         write_string(output, probe.source_module.provided_module);
         output << ",\"clang_version\":";
-        write_string(output, probe.clang_version);
+        write_string(output, probe.clang_release);
         output << ",\"declarations\":[";
         bool wrote_declaration = false;
-        for (const clang_structural::declaration_record& declaration :
+        for (const structural_analysis::declaration_record& declaration :
              probe.declarations) {
-            if (declaration.provenance_id.empty()) continue;
+            if (declaration.source_identity.empty()) continue;
             if (wrote_declaration) output << ',';
             wrote_declaration = true;
             output << "{\"provenance_id\":";
-            write_string(output, declaration.provenance_id);
+            write_string(output, declaration.source_identity);
             output << ",\"coordinate\":";
-            write_string(output, declaration.provenance_coordinate);
+            write_string(output, declaration.source_coordinate);
             output << ",\"usr\":";
             write_string(output, declaration.stable_usr);
             output << ",\"qualified_name\":";
@@ -969,7 +990,7 @@ inline void require_exact_members(
             std::string{owner} + " must be an unsigned JSON integer");
     }
     std::uint64_t result{};
-    const auto parsed = std::from_chars(
+    const std::from_chars_result parsed = std::from_chars(
         value.scalar.data(), value.scalar.data() + value.scalar.size(), result);
     if (parsed.ec != std::errc{}
         || parsed.ptr != value.scalar.data() + value.scalar.size()) {
@@ -989,13 +1010,14 @@ inline void require_exact_members(
 }
 
 [[nodiscard]] inline std::string seal_manifest(
-    std::string_view unsigned_document,
+    std::string_view unsigned_content,
     std::string_view identity) {
-    if (!unsigned_document.ends_with("\n}\n")) {
+    if (!unsigned_content.ends_with("\n}\n")) {
         throw std::runtime_error(
             "canonical artifacts manifest must end with a JSON object newline");
     }
-    std::string result{unsigned_document.substr(0, unsigned_document.size() - 3)};
+    std::string result{
+        unsigned_content.substr(0, unsigned_content.size() - 3)};
     result += ",\n  \"manifest_identity\": \"";
     result += identity;
     result += "\"\n}\n";
@@ -1004,32 +1026,62 @@ inline void require_exact_members(
 
 [[nodiscard]] inline std::pair<std::string, std::string>
 verify_manifest_self_seal(
-    std::string_view document,
+    std::string_view content,
     std::string_view owner) {
     constexpr std::string_view marker =
         ",\n  \"manifest_identity\": \"";
-    const std::size_t marker_position = document.rfind(marker);
+    const std::size_t marker_position = content.rfind(marker);
     if (marker_position == std::string_view::npos) {
         throw std::runtime_error(
             std::string{owner} + ": missing canonical manifest self-seal");
     }
     const std::size_t identity_begin = marker_position + marker.size();
     constexpr std::size_t identity_size = 64;
-    if (identity_begin + identity_size + 4 != document.size()
-        || document.substr(identity_begin + identity_size) != "\"\n}\n") {
+    if (identity_begin + identity_size + 4 != content.size()
+        || content.substr(identity_begin + identity_size) != "\"\n}\n") {
         throw std::runtime_error(
             std::string{owner} + ": non-canonical manifest self-seal suffix");
     }
     const std::string identity{
-        document.substr(identity_begin, identity_size)};
+        content.substr(identity_begin, identity_size)};
     require_sha256(identity, "manifest_identity");
-    std::string unsigned_document{document.substr(0, marker_position)};
-    unsigned_document += "\n}\n";
-    if (sha256_hex(unsigned_document) != identity) {
+    std::string unsigned_content{content.substr(0, marker_position)};
+    unsigned_content += "\n}\n";
+    if (bioseq::common::sha256_hex(unsigned_content) != identity) {
         throw std::runtime_error(
             std::string{owner} + ": manifest self-seal does not match its bytes");
     }
-    return {std::move(unsigned_document), identity};
+    return {std::move(unsigned_content), identity};
+}
+
+inline void replace_authenticated_identity(
+    std::string& content,
+    const std::string_view marker,
+    const bool allow_empty,
+    const bool use_last_occurrence,
+    const std::string_view owner) {
+    const std::size_t marker_position = use_last_occurrence
+        ? content.rfind(marker)
+        : content.find(marker);
+    if (marker_position == std::string::npos) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": canonical publication identity field is missing");
+    }
+    const std::size_t value_begin = marker_position + marker.size();
+    const std::size_t value_end = content.find('"', value_begin);
+    if (value_end == std::string::npos) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": canonical publication identity field is unterminated");
+    }
+    const std::size_t value_size = value_end - value_begin;
+    if ((!allow_empty || value_size != 0u) && value_size != 64u) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": canonical publication identity has an invalid length");
+    }
+    content.replace(value_begin, value_size, "<authenticated-identity>");
 }
 
 /// Canonical renderers necessarily change the predecessor/self identities on
@@ -1037,53 +1089,37 @@ verify_manifest_self_seal(
 /// so the publisher can recognize an otherwise byte-identical no-op without
 /// weakening any policy evidence or artifact digest.
 [[nodiscard]] inline std::string publication_noop_projection(
-    std::string_view document,
+    std::string_view content,
     std::string_view owner) {
-    static_cast<void>(verify_manifest_self_seal(document, owner));
-    std::string projected{document};
-    const auto normalize_identity = [&](std::string_view marker,
-                                        const bool allow_empty,
-                                        const bool use_last_occurrence) {
-        const std::size_t marker_position = use_last_occurrence
-            ? projected.rfind(marker)
-            : projected.find(marker);
-        if (marker_position == std::string::npos) {
-            throw std::runtime_error(
-                std::string{owner}
-                + ": canonical publication identity field is missing");
-        }
-        const std::size_t value_begin = marker_position + marker.size();
-        const std::size_t value_end = projected.find('"', value_begin);
-        if (value_end == std::string::npos) {
-            throw std::runtime_error(
-                std::string{owner}
-                + ": canonical publication identity field is unterminated");
-        }
-        const std::size_t value_size = value_end - value_begin;
-        if ((!allow_empty || value_size != 0u) && value_size != 64u) {
-            throw std::runtime_error(
-                std::string{owner}
-                + ": canonical publication identity has an invalid length");
-        }
-        projected.replace(value_begin, value_size, "<authenticated-identity>");
-    };
-    normalize_identity(
-        "\n  \"prior_manifest_identity\": \"", true, false);
-    normalize_identity(
-        ",\n  \"manifest_identity\": \"", false, true);
+    static_cast<void>(verify_manifest_self_seal(content, owner));
+    std::string projected{content};
+    replace_authenticated_identity(
+        projected,
+        "\n  \"prior_manifest_identity\": \"",
+        true,
+        false,
+        owner);
+    replace_authenticated_identity(
+        projected,
+        ",\n  \"manifest_identity\": \"",
+        false,
+        true,
+        owner);
     return projected;
 }
 
 [[nodiscard]] inline previous_publication parse_publication_manifest(
-    std::string_view document,
+    std::string_view content,
     std::string_view owner,
     const fs::path& expected_output_root,
     std::string_view expected_policy,
     std::string_view expected_topology_digest) {
-    const auto [unsigned_document, sealed_identity] =
-        verify_manifest_self_seal(document, owner);
-    static_cast<void>(unsigned_document);
-    const json_value root = json_parser{document, owner}.parse();
+    const std::pair<std::string, std::string> sealed =
+        verify_manifest_self_seal(content, owner);
+    const std::string& unsigned_content = sealed.first;
+    const std::string& sealed_identity = sealed.second;
+    static_cast<void>(unsigned_content);
+    const json_value root = json_parser{content, owner}.parse();
     require_exact_members(
         root,
         std::array{
@@ -1102,7 +1138,7 @@ verify_manifest_self_seal(
     if (require_unsigned(
             require_member(root, "publication_schema_version", owner),
             "publication_schema_version")
-        != publication_schema_version) {
+        != publication_format_revision) {
         throw std::runtime_error(
             std::string{owner} + ": unsupported publication manifest schema");
     }
@@ -1224,17 +1260,17 @@ verify_manifest_self_seal(
 }
 
 inline void validate_template_flatten_publication_manifest(
-    std::string_view document,
+    std::string_view content,
     std::string_view owner,
     const fs::path& expected_output_root,
     std::string_view expected_topology_digest) {
     const previous_publication publication = parse_publication_manifest(
-        document,
+        content,
         owner,
         expected_output_root,
         template_flatten_policy,
         expected_topology_digest);
-    const json_value outer = json_parser{document, owner}.parse();
+    const json_value outer = json_parser{content, owner}.parse();
     const json_value& root = require_member(outer, "evidence", owner);
     require_exact_members(
         root,
@@ -1255,7 +1291,7 @@ inline void validate_template_flatten_publication_manifest(
     if (require_unsigned(
             require_member(root, "schema_version", owner),
             "evidence.schema_version")
-        != artifact_schema_version) {
+        != artifact_format_revision) {
         throw std::runtime_error(
             std::string{owner}
             + ": unsupported template_flatten evidence schema");
@@ -1263,7 +1299,7 @@ inline void validate_template_flatten_publication_manifest(
     if (require_string(
             require_member(root, "generator_version", owner),
             "evidence.generator_version")
-        != generator_version) {
+        != materialization_generator_identity) {
         throw std::runtime_error(
             std::string{owner}
             + ": unsupported materialization generator version");
@@ -1289,7 +1325,7 @@ inline void validate_template_flatten_publication_manifest(
             std::string_view{"sha256"},
         },
         "template_flatten evidence source");
-    static_cast<void>(checked_relative_path(
+    static_cast<void>(checked_source_identity(
         fs::path{require_string(
             require_member(source, "path", owner), "source.path")},
         "template_flatten evidence source path"));
@@ -1496,7 +1532,7 @@ inline void validate_template_flatten_publication_manifest(
                 require_member(declaration, "attachment", owner),
                 "probe declaration attachment");
             std::uint32_t coordinate_ordinal{};
-            const auto parsed_coordinate = std::from_chars(
+            const std::from_chars_result parsed_coordinate = std::from_chars(
                 coordinate.data(),
                 coordinate.data() + coordinate.size(),
                 coordinate_ordinal);
@@ -1762,13 +1798,13 @@ parse_configure_cases(
 
 [[nodiscard]] inline configure_topology_provenance
 parse_configure_topology_provenance(
-    std::string_view document,
+    std::string_view content,
     std::string_view owner) {
-    if (document.empty() || document.contains('\0')) {
+    if (content.empty() || content.contains('\0')) {
         throw std::runtime_error(
             std::string{owner} + ": configure topology is empty or contains NUL");
     }
-    const json_value root = json_parser{document, owner}.parse();
+    const json_value root = json_parser{content, owner}.parse();
     require_exact_members(
         root,
         std::array{
@@ -1794,16 +1830,16 @@ parse_configure_topology_provenance(
     if (require_unsigned(
             require_member(root, "schema_version", owner),
             "schema_version")
-        != topology_schema_version) {
+        != topology_format_revision) {
         throw std::runtime_error(
             std::string{owner} + ": unsupported configure topology schema");
     }
-    const std::string parsed_generator_version{require_string(
+    const std::string parsed_generator_identity{require_string(
         require_member(root, "generator_version", owner),
         "generator_version")};
     const std::string policy{require_string(
         require_member(root, "policy", owner), "policy")};
-    if (parsed_generator_version != generator_version
+    if (parsed_generator_identity != materialization_generator_identity
         || policy != template_flatten_policy) {
         throw std::runtime_error(
             std::string{owner}
@@ -1835,7 +1871,7 @@ parse_configure_topology_provenance(
     const std::string profile{require_string(
         require_member(root, "profile", owner), "profile")};
     unsigned profile_level{};
-    const auto parsed_profile = std::from_chars(
+    const std::from_chars_result parsed_profile = std::from_chars(
         profile.data(), profile.data() + profile.size(), profile_level);
     if (profile.empty() || parsed_profile.ec != std::errc{}
         || parsed_profile.ptr != profile.data() + profile.size()
@@ -2194,7 +2230,7 @@ parse_configure_topology_provenance(
         }
         canonical << '\n';
     }
-    if (sha256_hex(canonical.str()) != topology_digest) {
+    if (bioseq::common::sha256_hex(canonical.str()) != topology_digest) {
         throw std::runtime_error(
             std::string{owner}
             + ": topology digest does not seal ordered assignment authority");
@@ -2243,7 +2279,7 @@ parse_configure_topology_provenance(
     }
 
     return configure_topology_provenance{
-        .generator_version = parsed_generator_version,
+        .generator_identity = parsed_generator_identity,
         .policy = policy,
         .name = name,
         .source_path = source_path,
@@ -2252,7 +2288,7 @@ parse_configure_topology_provenance(
         .output_module = output_module,
         .profile = profile,
         .topology_digest = topology_digest,
-        .content_sha256 = sha256_hex(document),
+        .content_sha256 = bioseq::common::sha256_hex(content),
         .coordinate_count = coordinates.size(),
     };
 }
@@ -2406,7 +2442,7 @@ inline void write_new_staging_file(
                 std::string{owner} + ": cannot finish writing " + path.string());
         }
     }
-    if (read_file(path) != content) {
+    if (read_artifact_bytes(path) != content) {
         throw std::runtime_error(
             std::string{owner} + ": staged bytes failed readback validation: "
             + path.string());
@@ -2444,18 +2480,19 @@ inline void prune_empty_publication_directories(
 [[nodiscard]] inline std::string render_topology_manifest(
     const generation_plan& plan) {
     detail::validate_plan_identity(plan);
-    const std::string source_path = detail::repository_relative_source(plan);
-    const auto& region = plan.topology.region;
+    const std::string source_identity =
+        detail::canonical_source_identity(plan);
+    const materialization_region& region = plan.topology.region;
     std::ostringstream output;
-    output << "{\n  \"schema_version\": " << topology_schema_version
+    output << "{\n  \"schema_version\": " << topology_format_revision
            << ",\n  \"generator_version\": ";
-    detail::write_string(output, generator_version);
+    detail::write_string(output, materialization_generator_identity);
     output << ",\n  \"policy\": ";
     detail::write_string(output, template_flatten_policy);
     output << ",\n  \"name\": ";
     detail::write_string(output, plan.name);
     output << ",\n  \"source\": {\"path\":";
-    detail::write_string(output, source_path);
+    detail::write_string(output, source_identity);
     output << ",\"sha256\":";
     detail::write_string(output, plan.source_sha256);
     output << "},\n  \"source_module\": {\"name\":";
@@ -2475,7 +2512,7 @@ inline void prune_empty_publication_directories(
     output << ",\"usr\":";
     detail::write_string(output, region.boundary.stable_usr);
     output << ",\"provenance_id\":";
-    detail::write_string(output, region.boundary.provenance_id);
+    detail::write_string(output, region.boundary.source_identity);
     output << ",\"declaration_range\":";
     detail::write_source_range(output, region.boundary.declaration_range);
     output << ",\"body_range\":";
@@ -2489,7 +2526,7 @@ inline void prune_empty_publication_directories(
         output << ",\"usr\":";
         detail::write_string(output, region.support_island->stable_usr);
         output << ",\"provenance_id\":";
-        detail::write_string(output, region.support_island->provenance_id);
+        detail::write_string(output, region.support_island->source_identity);
         output << ",\"declaration_range\":";
         detail::write_source_range(
             output, region.support_island->declaration_range);
@@ -2552,7 +2589,7 @@ inline void prune_empty_publication_directories(
         output << ",\"probe_usr\":";
         detail::write_string(output, binding.declaration.stable_usr);
         output << ",\"provenance_id\":";
-        detail::write_string(output, binding.declaration.provenance_id);
+        detail::write_string(output, binding.declaration.source_identity);
         output << ",\"name\":";
         detail::write_string(output, binding.declaration.qualified_name);
         output << ",\"declared_type\":";
@@ -2592,7 +2629,7 @@ inline void prune_empty_publication_directories(
         output << ",\"probe_usr\":";
         detail::write_string(output, declaration.declaration.stable_usr);
         output << ",\"provenance_id\":";
-        detail::write_string(output, declaration.declaration.provenance_id);
+        detail::write_string(output, declaration.declaration.source_identity);
         output << ",\"entry_role\":";
         detail::write_string(output, declaration.entry_role);
         output << ",\"generated_api_entry\":"
@@ -2775,7 +2812,7 @@ render_publication_manifest(const publication_manifest_request& request) {
                 "publication artifact extension disagrees with its class: "
                 + current_path);
         }
-        const std::string digest = sha256_hex(artifact->content);
+        const std::string digest = bioseq::common::sha256_hex(artifact->content);
         if (artifact->content_sha256 != digest) {
             throw std::runtime_error(
                 "publication artifact content SHA-256 mismatch: "
@@ -2785,7 +2822,7 @@ render_publication_manifest(const publication_manifest_request& request) {
 
     std::ostringstream output;
     output << "{\n  \"publication_schema_version\": "
-           << publication_schema_version << ",\n  \"policy\": ";
+           << publication_format_revision << ",\n  \"policy\": ";
     detail::write_string(output, request.policy);
     output << ",\n  \"name\": ";
     detail::write_string(output, request.name);
@@ -2808,10 +2845,10 @@ render_publication_manifest(const publication_manifest_request& request) {
         output << '}' << (index + 1 == ordered.size() ? "\n" : ",\n");
     }
     output << "  ],\n  \"evidence\": " << evidence << "\n}\n";
-    const std::string unsigned_document = output.str();
-    const std::string identity = sha256_hex(unsigned_document);
+    const std::string unsigned_content = output.str();
+    const std::string identity = bioseq::common::sha256_hex(unsigned_content);
     const std::string sealed = detail::seal_manifest(
-        unsigned_document, identity);
+        unsigned_content, identity);
     static_cast<void>(detail::parse_publication_manifest(
         sealed,
         "rendered publication manifest",
@@ -2826,7 +2863,7 @@ render_publication_manifest(const publication_manifest_request& request) {
 
 /// Renders and self-seals template_flatten policy evidence inside the shared
 /// ownership envelope.
-[[nodiscard]] inline rendered_artifact_manifest render_artifact_manifest(
+[[nodiscard]] inline rendered_publication_manifest render_artifact_manifest(
     const generation_plan& plan,
     const std::vector<materialization_artifact>& artifacts,
     std::string_view prior_identity) {
@@ -2838,7 +2875,8 @@ render_publication_manifest(const publication_manifest_request& request) {
         throw std::runtime_error(
             "generation plan and renderer disagree on prior manifest identity");
     }
-    const std::string source_path = detail::repository_relative_source(plan);
+    const std::string source_identity =
+        detail::canonical_source_identity(plan);
     std::vector<const materialization_artifact*> ordered;
     ordered.reserve(artifacts.size());
     for (const materialization_artifact& artifact : artifacts) {
@@ -2869,7 +2907,7 @@ render_publication_manifest(const publication_manifest_request& request) {
                 "rendered artifact paths must be unique");
         }
         previous_path = current_path;
-        const std::string digest = sha256_hex(artifact->content);
+        const std::string digest = bioseq::common::sha256_hex(artifact->content);
         if (!artifact->content_sha256.empty()
             && artifact->content_sha256 != digest) {
             throw std::runtime_error(
@@ -2884,13 +2922,14 @@ render_publication_manifest(const publication_manifest_request& request) {
         }
     }
     std::set<const materialization_artifact*> matched_probe_artifacts;
-    for (const clang_structural::translation_unit& probe :
+    for (const structural_analysis::translation_unit& probe :
          plan.declaration_probes) {
         const std::filesystem::path probe_source = detail::path_beneath_root(
             probe.source_path,
             plan.output_root,
             "declaration probe source");
-        const auto artifact = std::ranges::find_if(
+        const std::vector<const materialization_artifact*>::const_iterator
+            artifact = std::ranges::find_if(
             ordered,
             [&probe, &probe_source, &matched_probe_artifacts](
                 const materialization_artifact* candidate) {
@@ -2899,7 +2938,7 @@ render_publication_manifest(const publication_manifest_request& request) {
                     && candidate->relative_path == probe_source
                     && candidate->module_name
                         == probe.source_module.provided_module
-                    && sha256_hex(candidate->content) == probe.source_sha256
+                    && bioseq::common::sha256_hex(candidate->content) == probe.source_sha256
                     && !matched_probe_artifacts.contains(candidate);
             });
         if (artifact == ordered.end()) {
@@ -2923,13 +2962,13 @@ render_publication_manifest(const publication_manifest_request& request) {
     }
 
     std::ostringstream evidence;
-    evidence << "{\n  \"schema_version\": " << artifact_schema_version
+    evidence << "{\n  \"schema_version\": " << artifact_format_revision
            << ",\n  \"generator_version\": ";
-    detail::write_string(evidence, generator_version);
+    detail::write_string(evidence, materialization_generator_identity);
     evidence << ",\n  \"profile\": ";
     detail::write_string(evidence, plan.profile);
     evidence << ",\n  \"source\": {\"path\":";
-    detail::write_string(evidence, source_path);
+    detail::write_string(evidence, source_identity);
     evidence << ",\"sha256\":";
     detail::write_string(evidence, plan.source_sha256);
     evidence << "},\n  \"source_module\": ";
@@ -2959,7 +2998,7 @@ render_publication_manifest(const publication_manifest_request& request) {
            << ",\"body_bearing_implementation_units\":"
            << plan.compilation_obligations.body_bearing_implementation_units
            << "},\n  \"compiler\": {\"clang_version\":";
-    detail::write_string(evidence, plan.clang_version);
+    detail::write_string(evidence, plan.clang_release);
     evidence << ",\"compilation_signature\":";
     detail::write_string(evidence, plan.compilation_signature);
     evidence << ",\"compiler_module_inventory_sha256\":";
@@ -2996,7 +3035,7 @@ render_publication_manifest(const publication_manifest_request& request) {
         publication.push_back(publication_artifact{
             .relative_path = artifact.relative_path,
             .content = artifact.content,
-            .content_sha256 = sha256_hex(artifact.content),
+            .content_sha256 = bioseq::common::sha256_hex(artifact.content),
             .artifact_class = production
                 ? publication_artifact_class::production_cppm
                 : publication_artifact_class::metadata_json,
@@ -3032,13 +3071,13 @@ read_configure_topology_provenance(
         throw std::runtime_error(
             "configure topology manifest does not exist: " + path.string());
     }
-    const std::string document = read_file(path);
-    if (document.contains('\0')) {
+    const std::string content = read_artifact_bytes(path);
+    if (content.contains('\0')) {
         throw std::runtime_error(
             path.string() + ": configure topology manifest contains NUL");
     }
     return detail::parse_configure_topology_provenance(
-        document, path.string());
+        content, path.string());
 }
 
 /// Reads only the digest while retaining the strict provenance validation.
@@ -3054,7 +3093,7 @@ namespace detail {
 
 struct previous_publication_snapshot {
     previous_publication publication;
-    std::string document;
+    std::string content;
 };
 
 enum class publication_fault_point : std::uint8_t {
@@ -3102,8 +3141,8 @@ struct publication_protocol_paths {
 [[nodiscard]] inline bool publication_paths_overlap(
     const std::filesystem::path& left,
     const std::filesystem::path& right) noexcept {
-    auto left_component = left.begin();
-    auto right_component = right.begin();
+    std::filesystem::path::iterator left_component = left.begin();
+    std::filesystem::path::iterator right_component = right.begin();
     while (left_component != left.end() && right_component != right.end()
            && *left_component == *right_component) {
         ++left_component;
@@ -3193,17 +3232,17 @@ read_previous_publication_snapshot(
     if (status.type() == std::filesystem::file_type::not_found) return {};
     detail::require_regular_or_missing(
         manifest_path, "previous publication manifest");
-    std::string document = read_file(manifest_path);
-    if (document.contains('\0')) {
+    std::string content = read_artifact_bytes(manifest_path);
+    if (content.contains('\0')) {
         throw std::runtime_error(
             manifest_path.string() + ": artifacts manifest contains NUL");
     }
     previous_publication publication = detail::parse_publication_manifest(
-        document, manifest_path.string(), expected_output_root, expected_policy,
+        content, manifest_path.string(), expected_output_root, expected_policy,
         expected_topology_digest);
     return previous_publication_snapshot{
         .publication = std::move(publication),
-        .document = std::move(document),
+        .content = std::move(content),
     };
 }
 
@@ -3222,7 +3261,7 @@ inline void require_unchanged_previous_publication_snapshot(
     require_regular_or_missing(
         manifest_path, "revalidated previous publication manifest");
     if (status.type() == std::filesystem::file_type::not_found
-        || read_file(manifest_path) != snapshot.document) {
+        || read_artifact_bytes(manifest_path) != snapshot.content) {
         throw std::runtime_error(
             "previous publication manifest changed after authentication");
     }
@@ -3279,13 +3318,14 @@ inline void validate_protocol_ownership_paths(
     if (status.type() == std::filesystem::file_type::not_found) {
         return std::nullopt;
     }
-    return sha256_hex(read_file(path));
+    return bioseq::common::sha256_hex(read_artifact_bytes(path));
 }
 
 [[nodiscard]] inline const owned_publication_artifact* find_owned_artifact(
     const previous_publication& publication,
     const std::filesystem::path& relative) noexcept {
-    const auto found = std::ranges::find_if(
+    const std::vector<owned_publication_artifact>::const_iterator found =
+        std::ranges::find_if(
         publication.artifacts,
         [&relative](const owned_publication_artifact& artifact) {
             return artifact.relative_path == relative;
@@ -3301,7 +3341,7 @@ enum class pending_publication_phase : std::uint8_t {
 struct pending_publication {
     pending_publication_phase phase{};
     std::filesystem::path path;
-    std::string document;
+    std::string content;
     previous_publication desired;
 };
 
@@ -3313,11 +3353,17 @@ read_pending_publication(
         protocol.manifest.string() + ".tmp"};
     const std::filesystem::path stamp_scratch{protocol.stamp.string() + ".tmp"};
     const std::filesystem::path ready_scratch{protocol.ready.string() + ".tmp"};
-    for (const auto& [path, owner] : std::array{
-             std::pair{manifest_scratch, std::string_view{"manifest scratch"}},
-             std::pair{stamp_scratch, std::string_view{"stamp scratch"}},
-             std::pair{ready_scratch, std::string_view{"READY scratch"}},
-         }) {
+    const std::array<
+        std::pair<std::filesystem::path, std::string_view>,
+        3> scratch_paths{
+        std::pair{manifest_scratch, std::string_view{"manifest scratch"}},
+        std::pair{stamp_scratch, std::string_view{"stamp scratch"}},
+        std::pair{ready_scratch, std::string_view{"READY scratch"}},
+    };
+    for (const std::pair<std::filesystem::path, std::string_view>& scratch
+         : scratch_paths) {
+        const std::filesystem::path& path = scratch.first;
+        const std::string_view owner = scratch.second;
         require_regular_or_missing(path, owner);
         if (symlink_status_or_missing(path, owner).type()
             != std::filesystem::file_type::not_found) {
@@ -3369,13 +3415,13 @@ read_pending_publication(
         phase == pending_publication_phase::preparing ? protocol.transaction
                                                        : protocol.ready;
     require_regular_or_missing(path, "pending publication intent");
-    std::string document = read_file(path);
-    if (document.contains('\0')) {
+    std::string content = read_artifact_bytes(path);
+    if (content.contains('\0')) {
         throw std::runtime_error(
             "pending publication intent contains NUL bytes");
     }
     previous_publication desired = parse_publication_manifest(
-        document,
+        content,
         "pending publication intent",
         protocol.output_root,
         expected_policy,
@@ -3383,15 +3429,15 @@ read_pending_publication(
     return pending_publication{
         .phase = phase,
         .path = path,
-        .document = std::move(document),
+        .content = std::move(content),
         .desired = std::move(desired),
     };
 }
 
-inline void require_pending_document_unchanged(
+inline void require_pending_content_unchanged(
     const pending_publication& pending) {
     require_regular_or_missing(pending.path, "revalidated publication intent");
-    if (read_file(pending.path) != pending.document) {
+    if (read_artifact_bytes(pending.path) != pending.content) {
         throw std::runtime_error(
             "pending publication intent changed after authentication");
     }
@@ -3401,7 +3447,7 @@ inline void abort_preparing_publication(
     const publication_protocol_paths& protocol,
     const pending_publication& pending,
     const previous_publication_snapshot& previous_snapshot) {
-    require_pending_document_unchanged(pending);
+    require_pending_content_unchanged(pending);
     require_unchanged_previous_publication_snapshot(
         protocol.manifest, previous_snapshot);
     for (const owned_publication_artifact& artifact :
@@ -3410,7 +3456,7 @@ inline void abort_preparing_publication(
             (protocol.output_root / artifact.relative_path).string() + ".tmp"};
         remove_regular_file(staging, "aborted publication staging artifact");
     }
-    require_pending_document_unchanged(pending);
+    require_pending_content_unchanged(pending);
     require_unchanged_previous_publication_snapshot(
         protocol.manifest, previous_snapshot);
     remove_regular_file(pending.path, "aborted publication PREPARING intent");
@@ -3485,7 +3531,7 @@ inline void roll_forward_ready_publication(
         stale_artifacts.push_back(&artifact);
     }
 
-    require_pending_document_unchanged(pending);
+    require_pending_content_unchanged(pending);
     require_unchanged_previous_publication_snapshot(
         protocol.manifest, previous_snapshot);
     for (std::size_t ordinal = 0u; ordinal < promotions.size(); ++ordinal) {
@@ -3536,12 +3582,12 @@ inline void roll_forward_ready_publication(
         maybe_inject_publication_fault(
             publication_fault_point::stale_artifact_removed, ordinal);
     }
-    require_pending_document_unchanged(pending);
+    require_pending_content_unchanged(pending);
     require_unchanged_previous_publication_snapshot(
         protocol.manifest, previous_snapshot);
     atomic_replace_regular_file(
         protocol.ready, protocol.manifest, "publication manifest commit");
-    if (read_file(protocol.manifest) != pending.document) {
+    if (read_artifact_bytes(protocol.manifest) != pending.content) {
         throw std::runtime_error(
             "committed publication manifest bytes differ from READY intent");
     }
@@ -3630,7 +3676,7 @@ inline void publish_artifacts(const publication_request& request) {
     const previous_publication& previous = previous_snapshot.publication;
     const bool idempotent_republication = previous.present
         && detail::publication_noop_projection(
-               previous_snapshot.document,
+               previous_snapshot.content,
                "previous artifacts manifest")
             == detail::publication_noop_projection(
                 request.artifact_manifest_json,
@@ -3659,7 +3705,7 @@ inline void publish_artifacts(const publication_request& request) {
             throw std::runtime_error(
                 "duplicate desired publication path: " + relative.string());
         }
-        const std::string digest = sha256_hex(artifact.content);
+        const std::string digest = bioseq::common::sha256_hex(artifact.content);
         if (artifact.content_sha256 != digest) {
             throw std::runtime_error(
                 "desired publication content digest mismatch: "
@@ -3709,9 +3755,10 @@ inline void publish_artifacts(const publication_request& request) {
             detail::symlink_status_or_missing(
                 destination, "desired publication artifact");
         if (status.type() == std::filesystem::file_type::not_found) continue;
-        const std::string existing_digest = sha256_hex(read_file(destination));
+        const std::string existing_digest = bioseq::common::sha256_hex(read_artifact_bytes(destination));
         if (existing_digest == artifact.content_sha256) continue;
-        const auto prior_owner = std::ranges::find_if(
+        const std::vector<owned_publication_artifact>::const_iterator
+            prior_owner = std::ranges::find_if(
             previous.artifacts,
             [&artifact](const owned_publication_artifact& candidate) {
                 return candidate.relative_path == artifact.relative_path;
@@ -3734,7 +3781,7 @@ inline void publish_artifacts(const publication_request& request) {
             detail::symlink_status_or_missing(
                 stale, "authenticated stale publication artifact");
         if (status.type() != std::filesystem::file_type::not_found
-            && sha256_hex(read_file(stale)) != artifact.content_sha256) {
+            && bioseq::common::sha256_hex(read_artifact_bytes(stale)) != artifact.content_sha256) {
             throw std::runtime_error(
                 "refusing to delete a modified stale publication artifact: "
                 + stale.string());
@@ -3744,7 +3791,7 @@ inline void publish_artifacts(const publication_request& request) {
     detail::require_unchanged_previous_publication_snapshot(
         request.artifact_manifest, previous_snapshot);
     if (idempotent_republication) {
-        touch_stamp(request.stamp);
+        mark_artifact_complete(request.stamp);
         return;
     }
 
@@ -3778,7 +3825,7 @@ inline void publish_artifacts(const publication_request& request) {
 
     detail::require_unchanged_previous_publication_snapshot(
         request.artifact_manifest, previous_snapshot);
-    if (read_file(protocol.transaction) != request.artifact_manifest_json) {
+    if (read_artifact_bytes(protocol.transaction) != request.artifact_manifest_json) {
         throw std::runtime_error(
             "publication PREPARING intent changed during staging");
     }
@@ -3791,12 +3838,12 @@ inline void publish_artifacts(const publication_request& request) {
     const detail::pending_publication ready{
         .phase = detail::pending_publication_phase::ready,
         .path = protocol.ready,
-        .document = request.artifact_manifest_json,
+        .content = request.artifact_manifest_json,
         .desired = desired_manifest,
     };
     detail::roll_forward_ready_publication(
         protocol, ready, previous_snapshot);
-    touch_stamp(request.stamp);
+    mark_artifact_complete(request.stamp);
 }
 
 }  // namespace bioseq::codegen::namespace_materialization

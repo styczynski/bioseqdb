@@ -4,26 +4,15 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
-#include <filesystem>
 #include <limits>
 #include <span>
 #include <string>
-#include <string_view>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:stable_read_at;
 import :types;
@@ -33,15 +22,15 @@ import :path;
 import :open;
 import :positional_io;
 
-namespace bioseq::durable_file_io::detail {
+namespace bioseq::common::durable_file_io::detail {
 
-[[nodiscard]] inline std::expected<stable_regular_file, file_io_error>
+[[nodiscard]] inline std::expected<stable_regular_file, file_error>
 read_stable_regular_file_at(
     int directory_descriptor,
     const std::string& name,
     const stable_read_options& options,
-    const file_io_hooks& hooks,
-    const positional_io_operations& operations) {
+    const fault_injection_hooks& hooks,
+    const positional_io_callbacks& callbacks) {
     if (directory_descriptor < 0
         || !valid_leaf_name(name)
         || options.minimum_bytes > options.maximum_bytes
@@ -49,22 +38,22 @@ read_stable_regular_file_at(
             && (options.exact_bytes < options.minimum_bytes
                 || options.exact_bytes > options.maximum_bytes))) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::open_file,
+            file_error_code::invalid_argument,
+            file_operation::open_regular_file,
             EINVAL));
     }
     auto opened = open_regular_file_at(
         directory_descriptor,
         name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto before = capture_identity(
-        descriptor.get(), file_io_operation::stat_before, hooks);
+    auto before = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, hooks);
     if (!before.has_value()) {
         return std::unexpected(before.error());
     }
@@ -80,31 +69,31 @@ read_stable_regular_file_at(
                     || before->size
                         > static_cast<std::uint64_t>(
                             (std::numeric_limits<std::size_t>::max)())
-                ? file_io_errc::size_limit_exceeded
-                : file_io_errc::invalid_file_size,
-            file_io_operation::stat_before,
+                ? file_error_code::size_limit_exceeded
+                : file_error_code::invalid_file_size,
+            file_operation::inspect_before_io,
             0));
     }
     stable_regular_file result{};
     result.bytes.resize(static_cast<std::size_t>(before->size));
-    if (auto read = positional_read_exact(
+    if (auto read = read_exact_at(
             descriptor.get(),
             0,
             std::span<std::byte>{
                 result.bytes.data(), result.bytes.size()},
-            operations);
+            callbacks);
         !read.has_value()) {
         return std::unexpected(read.error());
     }
-    auto after = capture_identity(
-        descriptor.get(), file_io_operation::stat_after, hooks);
+    auto after = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!after.has_value()) {
         return std::unexpected(after.error());
     }
     if (*before != *after) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     if (auto closed = descriptor.close(); !closed.has_value()) {
@@ -114,21 +103,21 @@ read_stable_regular_file_at(
         directory_descriptor,
         name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!current_opened.has_value()) {
         return std::unexpected(current_opened.error());
     }
     file_descriptor current_descriptor = std::move(*current_opened);
-    auto current = capture_identity(
-        current_descriptor.get(), file_io_operation::stat_after, hooks);
+    auto current = capture_regular_file_identity_snapshot(
+        current_descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
     if (*current != *after) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     result.identity = *after;
@@ -136,4 +125,4 @@ read_stable_regular_file_at(
 }
 
 
-}  // namespace bioseq::durable_file_io::detail
+}  // namespace bioseq::common::durable_file_io::detail

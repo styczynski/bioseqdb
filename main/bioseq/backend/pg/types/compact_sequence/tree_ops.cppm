@@ -13,9 +13,9 @@ module;
 #include <span>
 #include <utility>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.types.pg_compact_sequence:tree_ops;
+export module bioseq.postgres.types.compact_sequence:tree_ops;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -23,6 +23,7 @@ import :source_abi;
 import :tree_types;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
+import bioseq.storage.layout;
 
 /* Exported inline tree factories may be emitted from any importing TU at
  * optimization level zero.  Keep the fault-injection seam in one out-of-line
@@ -205,8 +206,8 @@ same_source_handle(pg_sequence_source_handle left,
 }
 
 [[nodiscard]] inline bool
-same_locator(bioseq::storage::seq_locator const &left,
-             bioseq::storage::seq_locator const &right) noexcept {
+same_locator(bioseq::storage::sequence_locator const &left,
+             bioseq::storage::sequence_locator const &right) noexcept {
   return std::memcmp(std::addressof(left), std::addressof(right),
                      sizeof(left)) == 0;
 }
@@ -1072,7 +1073,7 @@ export [[nodiscard]] inline piece_edge make_source_node(
         bioseq::storage::sequence_transform::identity)
 {
     if (piece.from > piece.to
-        || piece.to > piece.locator.total_bp_size) {
+        || piece.to > piece.locator.logical_length) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq source piece is outside its locator")));
@@ -2306,7 +2307,7 @@ inline void validate_retired_join_root_storage(
         const auto& source = node.payload.source;
         if (!pg_sequence_source_handle_valid(source.source)
             || source.from > source.to
-            || source.to > source.locator.total_bp_size
+            || source.to > source.locator.logical_length
             || source.to - source.from != node.bp_length
             || !alphabet_bound
             || node.payload.source.stored_type_params.alphabet_code
@@ -2472,7 +2473,7 @@ inline void validate_bounded_join_leaf(
         const auto& source = node.payload.source;
         if (!alphabet_bound || !pg_sequence_source_handle_valid(source.source)
             || source.from > source.to
-            || source.to > source.locator.total_bp_size
+            || source.to > source.locator.logical_length
             || source.to - source.from != node.bp_length
             || source.stored_type_params.alphabet_code
                 != result_type.alphabet_code) {
@@ -3116,7 +3117,7 @@ factory_failure_source_worker_shareable(void const *) noexcept {
 [[nodiscard]] inline pg_sequence_source_read_status
 factory_failure_source_read(
     void const *argument, pg_sequence_read_session &,
-    bioseq::storage::seq_locator const &,
+    bioseq::storage::sequence_locator const &,
     compact_sequence_stdc_type_params,
     bioseq::storage::sequence_transform transform,
     std::uint64_t source_from, std::span<std::uint8_t> output) {
@@ -3213,9 +3214,9 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
-  const bioseq::storage::seq_locator locator{
-      .num_fragments = 1u,
-      .total_bp_size = 1u,
+  const bioseq::storage::sequence_locator locator{
+      .fragment_count = 1u,
+      .logical_length = 1u,
       .source_epoch = 1u,
   };
   const source_piece source_leaf{
@@ -3506,7 +3507,7 @@ make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
     };
     const auto make_leaf = [&fixture, source](
         std::uint64_t from, std::uint64_t to,
-        bioseq::storage::seq_locator locator) {
+        bioseq::storage::sequence_locator locator) {
       return make_source_node(
           *fixture->arena,
           source_piece{
@@ -3520,25 +3521,25 @@ make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
     };
 
     if (shape == tracked_join_failure_shape::source_coalesce) {
-      const bioseq::storage::seq_locator locator{
-          .num_fragments = 1u,
-          .total_bp_size = 2u,
+      const bioseq::storage::sequence_locator locator{
+          .fragment_count = 1u,
+          .logical_length = 2u,
           .source_epoch = 1u,
       };
       fixture->left = make_leaf(0u, 1u, locator);
       fixture->right = make_leaf(1u, 2u, locator);
     } else if (shape == tracked_join_failure_shape::branch) {
-      const bioseq::storage::seq_locator locator{
-          .num_fragments = 1u,
-          .total_bp_size = 1u,
+      const bioseq::storage::sequence_locator locator{
+          .fragment_count = 1u,
+          .logical_length = 1u,
           .source_epoch = 1u,
       };
       fixture->left = make_leaf(0u, 1u, locator);
       fixture->right = make_leaf(0u, 1u, locator);
     } else {
-      const bioseq::storage::seq_locator locator{
-          .num_fragments = 1u,
-          .total_bp_size = 1u,
+      const bioseq::storage::sequence_locator locator{
+          .fragment_count = 1u,
+          .logical_length = 1u,
           .source_epoch = 1u,
       };
       std::array<piece_edge, 7u> leaves{};
@@ -3836,8 +3837,8 @@ inline void tracked_join_failure_reset(void *argument) noexcept {
       source_piece{
           .source = source,
           .locator = {
-              .num_fragments = 1u,
-              .total_bp_size = 4u,
+              .fragment_count = 1u,
+              .logical_length = 4u,
               .source_epoch = 1u,
           },
           .stored_type_params = bound_type,
@@ -4545,9 +4546,9 @@ trusted_join_source_mismatch_raises_data_corrupted() {
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
-  const bioseq::storage::seq_locator locator{
-      .num_fragments = 1u,
-      .total_bp_size = 1u,
+  const bioseq::storage::sequence_locator locator{
+      .fragment_count = 1u,
+      .logical_length = 1u,
       .source_epoch = 1u,
   };
   auto *arena = make_piece_tree_arena();
@@ -4686,7 +4687,7 @@ emit_rotation_regression_edge(piece_edge edge) {
     piece_tree_arena &arena,
     pg_sequence_source_handle source,
     compact_sequence_stdc_type_params bound_type,
-    bioseq::storage::seq_locator locator,
+    bioseq::storage::sequence_locator locator,
     std::uint64_t leaf_ordinal,
     bioseq::storage::sequence_transform transform) {
   constexpr std::uint64_t leaf_stride = 4u;
@@ -4737,9 +4738,9 @@ emit_rotation_regression_edge(piece_edge edge) {
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
-  const bioseq::storage::seq_locator locator{
-      .num_fragments = 1u,
-      .total_bp_size = source_state.rank_count,
+  const bioseq::storage::sequence_locator locator{
+      .fragment_count = 1u,
+      .logical_length = source_state.rank_count,
       .source_epoch = 1u,
   };
 
@@ -4868,9 +4869,9 @@ emit_rotation_regression_edge(piece_edge edge) {
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
-  const bioseq::storage::seq_locator locator{
-      .num_fragments = 1u,
-      .total_bp_size = 1u,
+  const bioseq::storage::sequence_locator locator{
+      .fragment_count = 1u,
+      .logical_length = 1u,
       .source_epoch = 1u,
   };
   const source_piece leaf_value{

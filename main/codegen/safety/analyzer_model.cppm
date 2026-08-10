@@ -4,6 +4,7 @@ module;
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 export module bioseq.codegen.safety:analyzer_model;
@@ -12,6 +13,7 @@ import :model;
 
 export namespace bioseq::codegen::safety {
 
+/// Compiler-classified ownership domain for a resolved call target.
 enum class callee_domain : std::uint8_t {
     project,
     postgresql_server,
@@ -21,7 +23,8 @@ enum class callee_domain : std::uint8_t {
     unknown,
 };
 
-[[nodiscard]] inline constexpr const char* callee_domain_name(
+/// Returns the stable wire name for a callee domain.
+[[nodiscard]] inline constexpr std::string_view callee_domain_name(
     callee_domain value) noexcept {
     switch (value) {
         case callee_domain::project: return "project";
@@ -38,6 +41,7 @@ enum class callee_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Origin of a compiler-stable lifetime-object identity.
 enum class object_identity_kind : std::uint8_t {
     declaration_usr,
     synthetic_temporary,
@@ -45,7 +49,8 @@ enum class object_identity_kind : std::uint8_t {
     synthetic_coroutine_state,
 };
 
-[[nodiscard]] inline constexpr const char* object_identity_kind_name(
+/// Returns the stable wire name for an object identity kind.
+[[nodiscard]] inline constexpr std::string_view object_identity_kind_name(
     object_identity_kind value) noexcept {
     switch (value) {
         case object_identity_kind::declaration_usr:
@@ -60,6 +65,7 @@ enum class object_identity_kind : std::uint8_t {
     return "unknown";
 }
 
+/// Analysis policy for a call target outside the project.
 enum class external_call_mode : std::uint8_t {
     not_external,
     audited_no_user_code,
@@ -67,7 +73,8 @@ enum class external_call_mode : std::uint8_t {
     unknown,
 };
 
-[[nodiscard]] inline constexpr const char* external_call_mode_name(
+/// Returns the stable wire name for an external call mode.
+[[nodiscard]] inline constexpr std::string_view external_call_mode_name(
     external_call_mode value) noexcept {
     switch (value) {
         case external_call_mode::not_external:
@@ -82,11 +89,13 @@ enum class external_call_mode : std::uint8_t {
     return "unknown";
 }
 
+/// Source range paired with its normalized source path.
 struct located_source_range {
     std::string source_file;
     source_range span;
 };
 
+/// One compiler-reported macro expansion in a call-site expansion chain.
 struct macro_expansion_record {
     std::string name;
     located_source_range invocation;
@@ -94,11 +103,13 @@ struct macro_expansion_record {
     std::string definition_sha256;
 };
 
+/// Compiler-evaluated integer argument at a zero-based call ordinal.
 struct constant_integer_argument {
     std::size_t ordinal{};
     std::optional<std::int64_t> value;
 };
 
+/// Compiler-derived lifetime object live at a call site.
 struct flow_object {
     std::string stable_object_id;
     std::optional<std::string> declaration_usr;
@@ -110,6 +121,7 @@ struct flow_object {
     bool trivially_destructible{};
 };
 
+/// Source-authenticated provenance for an external declaration.
 struct external_declaration_provenance {
     std::string record_id;
     std::string source_file;
@@ -119,6 +131,7 @@ struct external_declaration_provenance {
     bool user_code_callback_free{};
 };
 
+/// One compiler-resolved target of a flow call site.
 struct flow_call_target {
     std::string target_usr;
     std::string target_qualified_name;
@@ -131,6 +144,7 @@ struct flow_call_target {
         pg_no_longjmp_allowlist_evidence;
 };
 
+/// Compiler evidence that a call enters a reviewed bridge implementation.
 struct bridge_transition_evidence {
     provenance_reference primitive;
     std::string target_usr;
@@ -146,6 +160,7 @@ struct bridge_transition_evidence {
     std::string protected_region_id;
 };
 
+/// Complete compiler-derived call-site and live-lifetime facts.
 struct flow_call_site {
     std::string stable_site_id;
     std::string caller_usr;
@@ -165,6 +180,7 @@ struct flow_call_site {
         bridge_primitive_evidence;
 };
 
+/// CFG, lifetime, call, and completeness facts for one function body.
 struct function_flow {
     std::string stable_usr;
     std::string qualified_name;
@@ -193,6 +209,7 @@ struct function_flow {
     std::vector<std::string> control_flow_assembly_sites;
 };
 
+/// Compiler-derived relationship between site, visit, and trigger calls.
 struct runtime_probe_fact {
     std::string fault_key;
     runtime_relation relation{runtime_relation::natural_at_site};
@@ -201,6 +218,7 @@ struct runtime_probe_fact {
     std::optional<std::string> trigger_call_stable_id;
 };
 
+/// PostgreSQL callback registration and its exact project target.
 struct postgres_callback_root {
     std::string stable_callback_id;
     std::string family;
@@ -213,6 +231,7 @@ struct postgres_callback_root {
     located_source_range target_definition;
 };
 
+/// Canonical compiler fact product for one prepared compilation closure.
 struct compiler_analysis_facts {
     std::uint32_t schema_version{2};
     compilation_profile profile{compilation_profile::production};

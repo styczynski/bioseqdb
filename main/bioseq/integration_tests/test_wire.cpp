@@ -11,7 +11,7 @@
 //     direct SQL invocation fails immediately, which still demonstrates the
 //     right thing (no crash, just an error).
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 #include <filesystem>

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * metadata-tuple-ops.cppm
+ * tuple_ops.cppm
  *
  * Tuple modification helpers shared by storage_metadata catalog code.
  * Keeping executor-state setup and tuple insert/delete plumbing in this leaf
@@ -9,89 +9,87 @@
  *-------------------------------------------------------------------------
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 #include "safe_lib.h"
 
 #include <cstring>
 
-export module bioseq.storage.metadata:tuple_ops;
+export module bioseq.postgres.storage.metadata:tuple_ops;
 
-import bioseq.pg_utils;
+import bioseq.postgres.support;
 
-export namespace bioseq::metadata::tuple_ops {
+export namespace bioseq::storage::metadata::tuple_ops {
 
-struct ModifyState
+struct relation_modification_state
 {
-	Relation rel;
-	EState *estate;
-	ResultRelInfo *resultRelInfo;
+	Relation relation;
+	EState *executor_state;
+	ResultRelInfo *result_rel_info;
 };
 
-/*
- * Based on similar code from postgres/src/backend/replication/logical/worker.c
- * and copy.c.
- */
+/// @brief Creates executor state configured for catalog tuple modification.
 EState *
-create_estate_for_relation(Relation rel)
+create_relation_executor_state(Relation relation)
 {
-	EState *estate = CreateExecutorState();
+	EState *executor_state = CreateExecutorState();
 
-	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	rte->rtekind = RTE_RELATION;
-	rte->relid = RelationGetRelid(rel);
-	rte->relkind = rel->rd_rel->relkind;
-	rte->rellockmode = AccessShareLock;
+	RangeTblEntry *range_table_entry = makeNode(RangeTblEntry);
+	range_table_entry->rtekind = RTE_RELATION;
+	range_table_entry->relid = RelationGetRelid(relation);
+	range_table_entry->relkind = relation->rd_rel->relkind;
+	range_table_entry->rellockmode = AccessShareLock;
 
-	List *perminfos = NIL;
-	addRTEPermissionInfo(&perminfos, rte);
-	ExecInitRangeTable_compat(estate, list_make1(rte), perminfos);
+	List *permission_info = NIL;
+	addRTEPermissionInfo(&permission_info, range_table_entry);
+	bioseq_exec_init_range_table_without_pruning(
+		executor_state, list_make1(range_table_entry), permission_info);
 
-	estate->es_output_cid = GetCurrentCommandId(true);
+	executor_state->es_output_cid = GetCurrentCommandId(true);
 
 	/* Prepare to catch AFTER triggers. */
 	AfterTriggerBeginQuery();
 
-	return estate;
+	return executor_state;
 }
 
-/*
- * StartModifyRelation allocates resources for modifications.
- */
-ModifyState *
-start_modify_relation(Relation rel)
+/// @brief Opens indexes and allocates state for relation modification.
+relation_modification_state *
+begin_relation_modification(Relation relation)
 {
-	EState *estate = create_estate_for_relation(rel);
-	ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
+	EState *executor_state = create_relation_executor_state(relation);
+	ResultRelInfo *result_rel_info = makeNode(ResultRelInfo);
 
-	InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
+	InitResultRelInfo(result_rel_info, relation, 1, nullptr, 0);
 
 	/* ExecSimpleRelationInsert, ... require caller to open indexes */
-	ExecOpenIndices(resultRelInfo, false);
+	ExecOpenIndices(result_rel_info, false);
 
-	ModifyState *modifyState = make0<ModifyState>();
-	modifyState->rel = rel;
-	modifyState->estate = estate;
-	modifyState->resultRelInfo = resultRelInfo;
+	relation_modification_state *state =
+		bioseq::postgres::support::allocate_zeroed_object<
+			relation_modification_state>();
+	state->relation = relation;
+	state->executor_state = executor_state;
+	state->result_rel_info = result_rel_info;
 
-	return modifyState;
+	return state;
 }
 
 /*
- * insert_tuple_and_enforce_constraints inserts a tuple into a relation and makes
+ * insert_catalog_tuple inserts a tuple into a relation and makes
  * sure that inserted tuple obeys the constraints.
  */
 void
-insert_tuple_and_enforce_constraints(ModifyState *state, Datum *values, bool *nulls)
+insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nulls)
 {
-	TupleDesc tupleDesc = RelationGetDescr(state->rel);
-	HeapTuple tuple = heap_form_tuple(tupleDesc, values, nulls);
+	TupleDesc tuple_desc = RelationGetDescr(state->relation);
+	HeapTuple tuple = heap_form_tuple(tuple_desc, values, nulls);
 
-	TupleTableSlot *slot = ExecInitExtraTupleSlot(state->estate, tupleDesc,
+	TupleTableSlot *slot = ExecInitExtraTupleSlot(state->executor_state, tuple_desc,
 												  &TTSOpsHeapTuple);
 
 	/*
 	 * The tuple has no other reference. Therefore, we can safely set
-	 * shouldFree to true, which can avoid duplicate memory allocation.
+	 * should_free to true, which can avoid duplicate memory allocation.
 	 *
 	 * When working with low-memory machines, it's important to be mindful
 	 * of duplicate memory allocation for large values. This can lead to
@@ -101,43 +99,44 @@ insert_tuple_and_enforce_constraints(ModifyState *state, Datum *values, bool *nu
 	ExecStoreHeapTuple(tuple, slot, true);
 
 	/* use ExecSimpleRelationInsert to enforce constraints */
-	ExecSimpleRelationInsert_compat(state->resultRelInfo, state->estate, slot);
+	ExecSimpleRelationInsert(state->result_rel_info, state->executor_state, slot);
 }
 
 /*
- * delete_tuple_and_enforce_constraints deletes a tuple from a relation and
+ * delete_catalog_tuple deletes a tuple from a relation and
  * enforces constraints by checking index constraints.
  */
 void
-delete_tuple_and_enforce_constraints(ModifyState *state, HeapTuple heapTuple)
+delete_catalog_tuple(relation_modification_state *state, HeapTuple heap_tuple)
 {
-	EState *estate = state->estate;
-	ResultRelInfo *resultRelInfo = state->resultRelInfo;
+	EState *executor_state = state->executor_state;
+	ResultRelInfo *result_rel_info = state->result_rel_info;
 
-	ItemPointer tid = &(heapTuple->t_self);
-	simple_heap_delete(state->rel, tid);
+	ItemPointer tuple_id = &(heap_tuple->t_self);
+	simple_heap_delete(state->relation, tuple_id);
 
 	/* execute AFTER ROW DELETE Triggers to enforce constraints */
-	ExecARDeleteTriggers(estate, resultRelInfo, tid, NULL, NULL, true);
+	ExecARDeleteTriggers(
+		executor_state, result_rel_info, tuple_id, nullptr, nullptr, true);
 }
 
 /*
- * finish_modify_relation cleans up resources after modifications are done.
+ * finish_relation_modification cleans up resources after modifications are done.
  */
 void
-finish_modify_relation(ModifyState *state)
+finish_relation_modification(relation_modification_state *state)
 {
-	ExecCloseIndices(state->resultRelInfo);
+	ExecCloseIndices(state->result_rel_info);
 
-	AfterTriggerEndQuery(state->estate);
+	AfterTriggerEndQuery(state->executor_state);
 
-	ExecCloseResultRelations(state->estate);
-	ExecCloseRangeTableRelations(state->estate);
+	ExecCloseResultRelations(state->executor_state);
+	ExecCloseRangeTableRelations(state->executor_state);
 
-	ExecResetTupleTable(state->estate->es_tupleTable, false);
-	FreeExecutorState(state->estate);
+	ExecResetTupleTable(state->executor_state->es_tupleTable, false);
+	FreeExecutorState(state->executor_state);
 
 	CommandCounterIncrement();
 }
 
-} // namespace bioseq::metadata::tuple_ops
+} // namespace bioseq::storage::metadata::tuple_ops

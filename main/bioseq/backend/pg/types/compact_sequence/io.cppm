@@ -14,8 +14,8 @@ module;
 #include <string_view>
 #include <variant>
 
-#include "headers/pg_build_config.h"
-#include "headers/pg_compat.h"
+#include <bioseq/pg_build_profile.h>
+#include <bioseq/pg_compat.h>
 extern "C" {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wregister"
@@ -24,7 +24,7 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:io;
+export module bioseq.postgres.types.compact_sequence:io;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -32,12 +32,12 @@ import :tree_types;
 import :tree_ops;
 import :view_session;
 import :packed_output;
-import bioseq.common.mlogging;
-import bioseq.pg_utils.safety_runtime_probe;
+import bioseq.common.logging;
+import bioseq.postgres.support;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.simd;
 import bioseq.storage.coordinates;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 
 export [[nodiscard]] compact_sequence_stdc_type_params
 decode_seq_typmod_checked(int32_t typmod)
@@ -170,7 +170,7 @@ namespace {
             const auto alphabet =
                 pgseq_supported_alphabets::name_of_alphabet_code(
                     target.alphabet_code);
-            bioseq::pg_utils::safety_runtime_probe::
+            bioseq::postgres::support::safety_runtime_probe::
                 record_site_visit("seq_in.invalid_symbol");
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
@@ -332,7 +332,7 @@ void stream_view_to_wire(
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{&buffer, expected_units}};
-    bioseq::storage::stream_transformed_packed<
+    bioseq::storage::stream_transformed_ranks<
         bioseq::storage::sequence_transform::identity>(
             view, 0u, length, writer);
     const auto result = writer.finish(length, expected_units);
@@ -343,7 +343,7 @@ void stream_view_to_wire(
 
 template<class Alphabet>
 void view_to_ascii(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> view,
+    bioseq::storage::lazy_sequence_view<Alphabet> view,
     char* output)
 {
     std::array<std::uint8_t, 256> scratch{};
@@ -351,7 +351,7 @@ void view_to_ascii(
     while (position < view.bp_size()) {
         const std::size_t count = static_cast<std::size_t>(
             std::min<std::uint64_t>(scratch.size(), view.bp_size() - position));
-        view.template to_encoded_into<false, false>(
+        view.template copy_ranks<false, false>(
             std::span<std::uint8_t>{scratch.data(), count},
             static_cast<std::size_t>(position),
             static_cast<std::size_t>(position + count));

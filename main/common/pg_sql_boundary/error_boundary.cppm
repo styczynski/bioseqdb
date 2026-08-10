@@ -9,4 +9,4 @@
  */
 export module bioseq.pg_sql_boundary:error_boundary;
 
-export import bioseq.pg_support;
+export import bioseq.postgres.support;

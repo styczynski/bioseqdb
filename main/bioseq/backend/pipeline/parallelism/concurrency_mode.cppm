@@ -11,41 +11,50 @@ export module bioseq.parallelism.mode;
 
 export namespace bioseq::parallelism {
 
-enum class PipelineConcurrencyMode : std::uint8_t {
-    SINGLE = 0,
-    PARALLEL = 1,
-    TASK_PARALLEL = 2,
+/// Scheduler concurrency policy selected for one pipeline invocation.
+enum class pipeline_concurrency_mode : std::uint8_t {
+    single_thread = 0,
+    dispatch_parallel = 1,
+    task_parallel = 2,
 };
 
-[[nodiscard]] constexpr std::string_view to_string(PipelineConcurrencyMode mode) noexcept {
+/// Return the stable configuration spelling of a concurrency mode.
+[[nodiscard]] constexpr std::string_view concurrency_mode_name(
+        pipeline_concurrency_mode mode) noexcept {
     switch (mode) {
-        case PipelineConcurrencyMode::SINGLE:
-            return "SINGLE";
-        case PipelineConcurrencyMode::PARALLEL:
-            return "PARALLEL";
-        case PipelineConcurrencyMode::TASK_PARALLEL:
-            return "TASK_PARALLEL";
+        case pipeline_concurrency_mode::single_thread:
+            return "single_thread";
+        case pipeline_concurrency_mode::dispatch_parallel:
+            return "dispatch_parallel";
+        case pipeline_concurrency_mode::task_parallel:
+            return "task_parallel";
     }
-    return "SINGLE";
+    return "single_thread";
 }
 
-[[nodiscard]] constexpr bool dispatch_parallel(PipelineConcurrencyMode mode) noexcept {
-    return mode == PipelineConcurrencyMode::PARALLEL
-        || mode == PipelineConcurrencyMode::TASK_PARALLEL;
+/// Return whether dispatch-level work may use the shared pool.
+[[nodiscard]] constexpr bool has_parallel_dispatch(
+        pipeline_concurrency_mode mode) noexcept {
+    return mode == pipeline_concurrency_mode::dispatch_parallel
+        || mode == pipeline_concurrency_mode::task_parallel;
 }
 
-[[nodiscard]] constexpr bool task_parallel(PipelineConcurrencyMode mode) noexcept {
-    return mode == PipelineConcurrencyMode::TASK_PARALLEL;
+/// Return whether coarse pipeline regions may create parallel tasks.
+[[nodiscard]] constexpr bool has_parallel_tasks(
+        pipeline_concurrency_mode mode) noexcept {
+    return mode == pipeline_concurrency_mode::task_parallel;
 }
 
-[[nodiscard]] constexpr PipelineConcurrencyMode mode_from_int(int value) noexcept {
+/// Decode the PostgreSQL integer setting without admitting unknown values.
+[[nodiscard]] constexpr pipeline_concurrency_mode
+pipeline_concurrency_mode_from_int(int value) noexcept {
     if (value == 1) {
-        return PipelineConcurrencyMode::PARALLEL;
+        return pipeline_concurrency_mode::dispatch_parallel;
     }
     if (value == 2) {
-        return PipelineConcurrencyMode::TASK_PARALLEL;
+        return pipeline_concurrency_mode::task_parallel;
     }
-    return PipelineConcurrencyMode::SINGLE;
+    return pipeline_concurrency_mode::single_thread;
 }
 
 } // namespace bioseq::parallelism

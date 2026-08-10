@@ -18,7 +18,7 @@ module;
 
 export module bioseq.test.postgres:explain;
 
-import bioseq.libpq.client;
+import bioseq.common.libpq;
 
 export namespace bioseq::postgres_test {
 
@@ -29,21 +29,21 @@ public:
 };
 
 /// @brief Owning JSON value used by the source-neutral EXPLAIN walker.
-class json_value {
+class explain_json_value {
 public:
-    using array = std::vector<json_value>;
-    using object = std::map<std::string, json_value, std::less<>>;
+    using array = std::vector<explain_json_value>;
+    using object = std::map<std::string, explain_json_value, std::less<>>;
     using storage = std::variant<std::nullptr_t, bool, std::int64_t, double,
                                  std::string, array, object>;
 
-    json_value() : value_(nullptr) {}
-    explicit json_value(std::nullptr_t) : value_(nullptr) {}
-    explicit json_value(bool value) : value_(value) {}
-    explicit json_value(std::int64_t value) : value_(value) {}
-    explicit json_value(double value) : value_(value) {}
-    explicit json_value(std::string value) : value_(std::move(value)) {}
-    explicit json_value(array value) : value_(std::move(value)) {}
-    explicit json_value(object value) : value_(std::move(value)) {}
+    explain_json_value() : value_(nullptr) {}
+    explicit explain_json_value(std::nullptr_t) : value_(nullptr) {}
+    explicit explain_json_value(bool value) : value_(value) {}
+    explicit explain_json_value(std::int64_t value) : value_(value) {}
+    explicit explain_json_value(double value) : value_(value) {}
+    explicit explain_json_value(std::string value) : value_(std::move(value)) {}
+    explicit explain_json_value(array value) : value_(std::move(value)) {}
+    explicit explain_json_value(object value) : value_(std::move(value)) {}
 
     [[nodiscard]] bool is_null() const noexcept {
         return std::holds_alternative<std::nullptr_t>(value_);
@@ -68,7 +68,7 @@ public:
     }
 
     /// @brief Returns an object property, or null when absent/not an object.
-    [[nodiscard]] const json_value* find(std::string_view key) const noexcept {
+    [[nodiscard]] const explain_json_value* find(std::string_view key) const noexcept {
         const object* properties = as_object();
         if (properties == nullptr) {
             return nullptr;
@@ -91,9 +91,9 @@ public:
     explicit parser(std::string_view input) : input_(input) {}
 
     /// @brief Parses one complete JSON document with no trailing tokens.
-    [[nodiscard]] json_value parse() {
+    [[nodiscard]] explain_json_value parse() {
         skip_whitespace();
-        json_value value = parse_value(0);
+        explain_json_value value = parse_value(0);
         skip_whitespace();
         if (position_ != input_.size()) {
             fail("trailing data");
@@ -103,7 +103,7 @@ public:
 
 private:
     /// @brief Parses one recursively nested value.
-    [[nodiscard]] json_value parse_value(std::size_t depth) {
+    [[nodiscard]] explain_json_value parse_value(std::size_t depth) {
         if (depth > 256) {
             fail("nesting exceeds 256 levels");
         }
@@ -114,28 +114,28 @@ private:
         switch (input_[position_]) {
         case 'n':
             consume_literal("null");
-            return json_value(nullptr);
+            return explain_json_value(nullptr);
         case 't':
             consume_literal("true");
-            return json_value(true);
+            return explain_json_value(true);
         case 'f':
             consume_literal("false");
-            return json_value(false);
+            return explain_json_value(false);
         case '"':
-            return json_value(parse_string());
+            return explain_json_value(parse_string());
         case '[':
-            return json_value(parse_array(depth + 1));
+            return explain_json_value(parse_array(depth + 1));
         case '{':
-            return json_value(parse_object(depth + 1));
+            return explain_json_value(parse_object(depth + 1));
         default:
             return parse_number();
         }
     }
 
     /// @brief Parses an array including empty arrays.
-    [[nodiscard]] json_value::array parse_array(std::size_t depth) {
+    [[nodiscard]] explain_json_value::array parse_array(std::size_t depth) {
         consume('[');
-        json_value::array values;
+        explain_json_value::array values;
         skip_whitespace();
         if (consume_if(']')) {
             return values;
@@ -151,9 +151,9 @@ private:
     }
 
     /// @brief Parses an object and rejects duplicate property names.
-    [[nodiscard]] json_value::object parse_object(std::size_t depth) {
+    [[nodiscard]] explain_json_value::object parse_object(std::size_t depth) {
         consume('{');
-        json_value::object properties;
+        explain_json_value::object properties;
         skip_whitespace();
         if (consume_if('}')) {
             return properties;
@@ -166,7 +166,7 @@ private:
             std::string key = parse_string();
             skip_whitespace();
             consume(':');
-            json_value value = parse_value(depth);
+            explain_json_value value = parse_value(depth);
             if (!properties.emplace(std::move(key), std::move(value)).second) {
                 fail("duplicate object key");
             }
@@ -238,7 +238,7 @@ private:
     }
 
     /// @brief Parses one JSON integer or finite floating-point number.
-    [[nodiscard]] json_value parse_number() {
+    [[nodiscard]] explain_json_value parse_number() {
         const std::size_t begin = position_;
         consume_if('-');
         if (consume_if('0')) {
@@ -271,7 +271,7 @@ private:
                 token.data(), token.data() + token.size(), integer);
             if (error == std::errc{}
                 && end == token.data() + token.size()) {
-                return json_value(integer);
+                return explain_json_value(integer);
             }
         }
         std::string owned(token);
@@ -280,7 +280,7 @@ private:
         if (end != owned.c_str() + owned.size() || !std::isfinite(number)) {
             fail("invalid or non-finite number");
         }
-        return json_value(number);
+        return explain_json_value(number);
     }
 
     /// @brief Requires one or more decimal digits.
@@ -391,9 +391,9 @@ private:
 
 /// @brief Recursively collects every object representing a plan node.
 inline void collect_plan_nodes(
-    const json_value& value,
-    std::vector<const json_value*>& output) {
-    if (const json_value::object* object = value.as_object()) {
+    const explain_json_value& value,
+    std::vector<const explain_json_value*>& output) {
+    if (const explain_json_value::object* object = value.as_object()) {
         if (object->contains("Node Type")
             || object->contains("Custom Plan Provider")) {
             output.push_back(&value);
@@ -402,8 +402,8 @@ inline void collect_plan_nodes(
             static_cast<void>(name);
             collect_plan_nodes(child, output);
         }
-    } else if (const json_value::array* array = value.as_array()) {
-        for (const json_value& child : *array) {
+    } else if (const explain_json_value::array* array = value.as_array()) {
+        for (const explain_json_value& child : *array) {
             collect_plan_nodes(child, output);
         }
     }
@@ -414,38 +414,38 @@ inline void collect_plan_nodes(
 export namespace bioseq::postgres_test {
 
 /// @brief Owning parsed EXPLAIN (FORMAT JSON) document with recursive queries.
-class explain_document {
+class explain_plan_document {
 public:
     /// @brief Parses a complete JSON document.
-    [[nodiscard]] static explain_document parse(std::string_view json) {
-        return explain_document(explain_detail::parser(json).parse());
+    [[nodiscard]] static explain_plan_document parse(std::string_view json) {
+        return explain_plan_document(explain_detail::parser(json).parse());
     }
 
     /// @brief Converts the single-cell text result returned by PostgreSQL.
-    [[nodiscard]] static explain_document from_result(
-        const bioseq::libpq::result& result) {
-        if (result.rows() != 1 || result.columns() != 1
-            || result.is_null(0, 0)) {
+    [[nodiscard]] static explain_plan_document from_result(
+        const bioseq::libpq::command_result& result) {
+        if (result.row_count() != 1 || result.column_count() != 1
+            || result.cell_is_null(0, 0)) {
             throw explain_error(
                 "EXPLAIN JSON must return one non-null cell");
         }
-        return parse(result.value(0, 0));
+        return parse(result.text_value(0, 0));
     }
 
     /// @brief Returns all plan-node objects in recursive document order.
-    [[nodiscard]] std::vector<const json_value*> plan_nodes() const {
-        std::vector<const json_value*> result;
+    [[nodiscard]] std::vector<const explain_json_value*> plan_nodes() const {
+        std::vector<const explain_json_value*> result;
         explain_detail::collect_plan_nodes(root_, result);
         return result;
     }
 
     /// @brief Returns plan nodes whose string property equals the requested value.
-    [[nodiscard]] std::vector<const json_value*> find_plan_nodes(
+    [[nodiscard]] std::vector<const explain_json_value*> find_plan_nodes(
         std::string_view property,
         std::string_view expected) const {
-        std::vector<const json_value*> matches;
-        for (const json_value* node : plan_nodes()) {
-            const json_value* value = node->find(property);
+        std::vector<const explain_json_value*> matches;
+        for (const explain_json_value* node : plan_nodes()) {
+            const explain_json_value* value = node->find(property);
             if (value != nullptr && value->as_string() != nullptr
                 && *value->as_string() == expected) {
                 matches.push_back(node);
@@ -455,35 +455,37 @@ public:
     }
 
     /// @brief Returns the owning JSON root for specialized assertions.
-    [[nodiscard]] const json_value& root() const noexcept { return root_; }
+    [[nodiscard]] const explain_json_value& root() const noexcept { return root_; }
 
 private:
-    explicit explain_document(json_value root) : root_(std::move(root)) {}
-    json_value root_;
+    explicit explain_plan_document(explain_json_value root) : root_(std::move(root)) {}
+    explain_json_value root_;
 };
 
 /// @brief Returns one string-valued plan property when present and typed.
-[[nodiscard]] inline std::optional<std::string_view> explain_property_string(
-    const json_value& object, std::string_view name) noexcept {
-    const json_value* value = object.find(name);
+[[nodiscard]] inline std::optional<std::string_view>
+read_plan_string_property(
+    const explain_json_value& object, std::string_view name) noexcept {
+    const explain_json_value* value = object.find(name);
     return value != nullptr && value->as_string() != nullptr
         ? std::optional<std::string_view>(*value->as_string())
         : std::nullopt;
 }
 
 /// @brief Returns one integer-valued plan property when present and typed.
-[[nodiscard]] inline std::optional<std::int64_t> explain_property_integer(
-    const json_value& object, std::string_view name) noexcept {
-    const json_value* value = object.find(name);
+[[nodiscard]] inline std::optional<std::int64_t>
+read_plan_integer_property(
+    const explain_json_value& object, std::string_view name) noexcept {
+    const explain_json_value* value = object.find(name);
     return value != nullptr && value->as_integer() != nullptr
         ? std::optional<std::int64_t>(*value->as_integer())
         : std::nullopt;
 }
 
 /// @brief Returns one numeric plan property, accepting integer or floating JSON.
-[[nodiscard]] inline std::optional<double> explain_property_number(
-    const json_value& object, std::string_view name) noexcept {
-    const json_value* value = object.find(name);
+[[nodiscard]] inline std::optional<double> read_plan_number_property(
+    const explain_json_value& object, std::string_view name) noexcept {
+    const explain_json_value* value = object.find(name);
     if (value == nullptr) {
         return std::nullopt;
     }
@@ -497,17 +499,17 @@ private:
 }
 
 /// @brief Returns one Boolean plan property when present and typed.
-[[nodiscard]] inline std::optional<bool> explain_property_bool(
-    const json_value& object, std::string_view name) noexcept {
-    const json_value* value = object.find(name);
+[[nodiscard]] inline std::optional<bool> read_plan_boolean_property(
+    const explain_json_value& object, std::string_view name) noexcept {
+    const explain_json_value* value = object.find(name);
     return value != nullptr && value->as_bool() != nullptr
         ? std::optional<bool>(*value->as_bool())
         : std::nullopt;
 }
 
 /// @brief Executes and parses EXPLAIN JSON through the shared libpq client.
-[[nodiscard]] inline explain_document run_explain(
-    bioseq::libpq::connection& connection,
+[[nodiscard]] inline explain_plan_document execute_explain(
+    bioseq::libpq::client_connection& connection,
     std::string_view sql,
     bool analyze,
     std::chrono::milliseconds deadline,
@@ -517,8 +519,8 @@ private:
         ? "EXPLAIN (ANALYZE, VERBOSE, COSTS, BUFFERS, FORMAT JSON) "
               + std::string(sql)
         : "EXPLAIN (VERBOSE, COSTS, FORMAT JSON) " + std::string(sql);
-    return explain_document::from_result(
-        connection.exec(command, deadline, policy));
+    return explain_plan_document::from_result(
+        connection.execute(command, deadline, policy));
 }
 
 }  // namespace bioseq::postgres_test

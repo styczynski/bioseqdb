@@ -20,8 +20,8 @@
 //     targetlists; the inner side had no MatchResult to back the
 //     placeholder Const and the executor crashed.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 
 #include <chrono>
 #include <libpq-fe.h>

@@ -1,5 +1,5 @@
 /* Operator classes for bioseq.letter and bioseq.seq. */
-export module bioseq.types.pg_compact_sequence:sql_catalog;
+export module bioseq.postgres.types.compact_sequence:sql_catalog;
 
 import bioseq.codegen.sql.annotation_model;
 import :content;

@@ -9,8 +9,8 @@ module;
 #include <span>
 #include <string_view>
 
-#include "headers/pg_build_config.h"
-#include "headers/pg_compat.h"
+#include <bioseq/pg_build_profile.h>
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -18,13 +18,13 @@ extern "C" {
 #include "utils/syscache.h"
 }
 
-export module bioseq.types.pg_compact_sequence:flat_abi;
+export module bioseq.postgres.types.compact_sequence:flat_abi;
 
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_utils.sql_boundary;
+import bioseq.postgres.support.sql_boundary;
 import bioseq.sequences;
-import bioseq.storage.bucket_math;
+import bioseq.storage.layout;
 
 export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 
@@ -73,10 +73,10 @@ using seq [[bioseq_sql::type({
 
 }  // namespace bioseq::pg_types
 
-export namespace bioseq::pg_utils::detail {
+export namespace bioseq::postgres::support::detail {
 
 template<>
-struct sql_scalar_conversion<bioseq::pg_types::seq*> final {
+struct scalar_codec<bioseq::pg_types::seq*> final {
     static constexpr const char* key = "bioseq.seq/opaque_pointer";
 
     [[nodiscard]] static bioseq::pg_types::seq* read(
@@ -91,16 +91,16 @@ struct sql_scalar_conversion<bioseq::pg_types::seq*> final {
     }
 };
 
-}  // namespace bioseq::pg_utils::detail
+}  // namespace bioseq::postgres::support::detail
 
 export inline constexpr std::uint8_t pgseq_unbound_alphabet_code = 0xffu;
 export inline constexpr std::uint8_t pgseq_unbound_width_tag = 0x40u;
 export inline constexpr std::uint8_t pgseq_physical_width_mask = 0x0fu;
 
 static_assert((pgseq_unbound_width_tag
-               & bioseq::storage::k_seq_locator_stub_marker) == 0u);
+               & bioseq::storage::sequence_locator_stub_width_marker) == 0u);
 static_assert((pgseq_unbound_width_tag & pgseq_physical_width_mask) == 0u);
-static_assert((bioseq::storage::k_seq_locator_stub_marker
+static_assert((bioseq::storage::sequence_locator_stub_width_marker
                & pgseq_physical_width_mask) == 0u);
 static_assert(pgseq_unbound_alphabet_code
               >= pgseq_supported_alphabets::alphabet_count);
@@ -162,7 +162,7 @@ classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
     }
     const auto width =
         static_cast<std::uint8_t>(value->storage_unit_byte_width);
-    if (bioseq::storage::is_seq_locator_stub_width(width)) {
+    if (bioseq::storage::is_sequence_locator_stub_width(width)) {
         return pg_sequence_flat_kind::locator;
     }
     if (value->alphabet_code == pgseq_unbound_alphabet_code

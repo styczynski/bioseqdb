@@ -1,11 +1,11 @@
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <cstdint>
 #include <type_traits>
 
-export module bioseq.sql.functions.sql_rows;
+export module bioseq.postgres.sql.functions.sql_rows;
 
 import bioseq.codegen.sql.annotation_model;
 

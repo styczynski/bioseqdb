@@ -8,281 +8,281 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <utility>
 
-export module bioseq.vector.types.date;
+export module bioseq.postgres.vectorization.types.date;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.column.vector_compare_pg;
-import bioseq.pg_utils.sql_boundary;
+import bioseq.postgres.vectorization.compare;
+import bioseq.postgres.support.sql_boundary;
 
 export namespace bioseq::vector::sql_routines {
 
-using bioseq::column::vec::CmpOp;
+using bioseq::column::vec::comparison_operation;
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_eq(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::eq>(
+    return bioseq::column::compare_vector_operands<comparison_operation::equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_ne(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ne>(
+    return bioseq::column::compare_vector_operands<comparison_operation::not_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_gt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::gt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_lt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::lt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_le(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::le>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vdate_ge(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::date, DateADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ge>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_eq(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::eq>(
+    return bioseq::column::compare_vector_operands<comparison_operation::equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_ne(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ne>(
+    return bioseq::column::compare_vector_operands<comparison_operation::not_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_gt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::gt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_lt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::lt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_le(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::le>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtime_ge(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::time, TimeADT> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ge>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_eq(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::eq>(
+    return bioseq::column::compare_vector_operands<comparison_operation::equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_ne(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ne>(
+    return bioseq::column::compare_vector_operands<comparison_operation::not_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_gt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::gt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_lt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::lt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_le(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::le>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamp_ge(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamp, Timestamp> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ge>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_eq(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::eq>(
+    return bioseq::column::compare_vector_operands<comparison_operation::equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_ne(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ne>(
+    return bioseq::column::compare_vector_operands<comparison_operation::not_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_gt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::gt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_lt(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::lt>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_le(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::le>(
+    return bioseq::column::compare_vector_operands<comparison_operation::less_equal>(
         std::move(left), std::move(right));
 }
 
 [[bioseq_sql::function({.volatility = bioseq::sql::volatility::immutable})]]
-bioseq::pg_utils::vector_result<bioseq::sql::pg::boolean, bool>
+bioseq::postgres::support::vector_result<bioseq::sql::pg::boolean, bool>
 vtimestamptz_ge(
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> left,
-    bioseq::pg_utils::vector_operand<
+    bioseq::postgres::support::vector_operand<
         bioseq::sql::pg::timestamptz, TimestampTz> right) {
-    return bioseq::column::compare_vector_operands<CmpOp::ge>(
+    return bioseq::column::compare_vector_operands<comparison_operation::greater_equal>(
         std::move(left), std::move(right));
 }
 

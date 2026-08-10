@@ -1,110 +1,107 @@
 /**
  * @file instrumentation/loop.cppm
- * @brief LoopScope<Args> RAII type with tick().
+ * @brief Scoped loop timing, iteration, work, and hardware-counter metrics.
  *
- * Two flavours of `loop()` ship; the non-templated overload fixes
- * Args = context_args_profiling_full so legacy EASY_BLOCK call sites
- * inside non-templated helpers can opt into the profiler without
- * threading Args through their callers. See region.cppm for the same
- * pattern and rationale.
+ * The templated overload follows pipeline dispatch. The non-templated overload
+ * uses the separately installed benchmark profiler state.
  */
 module;
 
 #include <cstdint>
 
-export module bioseq.instr.loop;
+export module bioseq.instrumentation.loop;
 
-import bioseq.instr.config;
-import bioseq.instr.descriptor;
-import bioseq.instr.aggregate;
-import bioseq.instr.thread_state;
-import bioseq.instr.clock;
-import bioseq.instr.global_state;
-import bioseq.instr.pmu;
+import bioseq.instrumentation.configuration;
+import bioseq.instrumentation.descriptor;
+import bioseq.instrumentation.aggregation;
+import bioseq.instrumentation.profiler_state;
+import bioseq.instrumentation.clock;
+import bioseq.instrumentation.runtime;
+import bioseq.instrumentation.pmu;
 
-export namespace bioseq::instr {
+export namespace bioseq::instrumentation {
 
-template<is_context_args Args>
-struct [[nodiscard]] LoopScope {
-    const LoopDescriptor* desc = nullptr;
-    std::uint64_t         t_begin_ns = 0;
-    std::uint64_t         iterations = 0;
-    std::uint64_t         work = 0;
-    bool                  skipped = true;
-    pmu::counters_t       pmu_begin{};
+template<profiling_configuration configuration_type>
+struct [[nodiscard]] loop_scope {
+    const loop_descriptor* descriptor = nullptr;
+    std::uint64_t start_time_ns = 0;
+    std::uint64_t iterations = 0;
+    std::uint64_t work = 0;
+    bool is_skipped = true;
+    pmu::counter_sample counter_start{};
 
     [[gnu::always_inline]]
-    explicit LoopScope(const LoopDescriptor* d) noexcept {
-        if constexpr (Args::enable_profiling) {
-            if (!runtime_enabled() || d == nullptr || d->id == 0) return;
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            desc = d;
-            t_begin_ns = clock::now_ns();
-            if constexpr (Args::enable_counters) {
-                pmu_begin = pmu::read_thread_counters();
+    explicit loop_scope(const loop_descriptor* loop_descriptor) noexcept {
+        if constexpr (configuration_type::enable_profiling) {
+            if (!is_runtime_enabled() || loop_descriptor == nullptr || loop_descriptor->id == 0) return;
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            descriptor = loop_descriptor;
+            start_time_ns = clock::now_ns();
+            if constexpr (configuration_type::enable_counters) {
+                counter_start = pmu::read_thread_counters();
             }
-            prof->stack_depth += 1;
-            skipped = false;
+            profiler->stack_depth += 1;
+            is_skipped = false;
         } else {
-            (void)d;
+            (void)loop_descriptor;
         }
     }
 
-    [[gnu::always_inline]] ~LoopScope() noexcept {
-        if constexpr (Args::enable_profiling) {
-            if (skipped) return;
+    [[gnu::always_inline]] ~loop_scope() noexcept {
+        if constexpr (configuration_type::enable_profiling) {
+            if (is_skipped) return;
             const auto end_ns = clock::now_ns();
-            const auto delta_ns = end_ns - t_begin_ns;
-            pmu::counters_t pmu_delta{};
-            if constexpr (Args::enable_counters) {
-                const auto pmu_end = pmu::read_thread_counters();
-                pmu_delta = pmu::sub_clamped(pmu_end, pmu_begin);
+            const auto duration_ns = end_ns - start_time_ns;
+            pmu::counter_sample counter_delta{};
+            if constexpr (configuration_type::enable_counters) {
+                const auto counter_end = pmu::read_thread_counters();
+                counter_delta = pmu::subtract_clamped(counter_end, counter_start);
             }
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            if (prof->stack_depth > 0) prof->stack_depth -= 1;
-            auto* agg = prof->loop_aggregates.get_or_create(desc->id);
-            if (agg != nullptr) {
-                loop_aggregate_record(*agg, delta_ns, iterations, work);
-                if constexpr (Args::enable_counters) {
-                    agg->total_cycles        += pmu_delta.cycles;
-                    agg->total_instructions  += pmu_delta.instructions;
-                    agg->total_branches      += pmu_delta.branches;
-                    agg->total_branch_misses += pmu_delta.branch_misses;
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            if (profiler->stack_depth > 0) profiler->stack_depth -= 1;
+            auto* aggregate = profiler->loop_aggregates.find_or_create(descriptor->id);
+            if (aggregate != nullptr) {
+                record_loop_duration(*aggregate, duration_ns, iterations, work);
+                if constexpr (configuration_type::enable_counters) {
+                    aggregate->total_cycles += counter_delta.cycles;
+                    aggregate->total_instructions += counter_delta.instructions;
+                    aggregate->total_branches += counter_delta.branches;
+                    aggregate->total_branch_misses += counter_delta.branch_misses;
                 }
             }
         }
     }
 
-    [[gnu::always_inline]] void tick(std::uint64_t units = 1) noexcept {
-        if constexpr (Args::enable_profiling) {
+    [[gnu::always_inline]] void record_iteration(std::uint64_t work_units = 1) noexcept {
+        if constexpr (configuration_type::enable_profiling) {
             iterations += 1;
-            work += units;
+            work += work_units;
         } else {
-            (void)units;
+            (void)work_units;
         }
     }
 
-    LoopScope(LoopScope&&) = delete;
-    LoopScope(const LoopScope&) = delete;
-    LoopScope& operator=(LoopScope&&) = delete;
-    LoopScope& operator=(const LoopScope&) = delete;
+    loop_scope(loop_scope&&) = delete;
+    loop_scope(const loop_scope&) = delete;
+    loop_scope& operator=(loop_scope&&) = delete;
+    loop_scope& operator=(const loop_scope&) = delete;
 };
 
-template<is_context_args Args>
+template<profiling_configuration configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline LoopScope<Args> loop(const LoopDescriptor* d) noexcept {
-    return LoopScope<Args>(d);
+inline loop_scope<configuration_type> loop(const loop_descriptor* descriptor) noexcept {
+    return loop_scope<configuration_type>(descriptor);
 }
 
 /// Non-templated convenience overload — see region.cppm for rationale.
-/// Pins to `context_args_profiling_timing_only` so the per-iteration
+/// Pins to `benchmark_profiling_configuration` so the per-iteration
 /// loop scope skips the PMU read on construction/destruction.
 [[nodiscard, gnu::always_inline]]
-inline LoopScope<context_args_profiling_timing_only>
-loop(const LoopDescriptor* d) noexcept {
-    return LoopScope<context_args_profiling_timing_only>(d);
+inline loop_scope<benchmark_profiling_configuration>
+loop(const loop_descriptor* descriptor) noexcept {
+    return loop_scope<benchmark_profiling_configuration>(descriptor);
 }
 
-}  // namespace bioseq::instr
+}  // namespace bioseq::instrumentation

@@ -4,10 +4,6 @@
  *        and index residency features.
  */
 module;
-// DOC0372 §413-424 — the controller lives in the single-owner
-// bioseq_memory_admission_core leaf and imports only the sysinfo partition it
-// uses the shared no-PG memory budget directly, not the bioseq.instr umbrella,
-// so the leaf carries no edge back into the broad non-PG target.
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -19,31 +15,33 @@ module;
 #include <vector>
 
 export module bioseq.parallelism.memory_admission;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
 
 export namespace bioseq::parallelism {
 
-class MemoryAdmissionController;
+class memory_admission_controller;
 
-using MemoryFootprintProbe = std::uint64_t (*)() noexcept;
+using memory_footprint_probe = std::uint64_t (*)() noexcept;
 
 /// Machine-readable reason returned when a non-blocking reservation is
 /// refused.  Callers that do not need diagnostics may keep using
 /// `try_reserve(bytes)`; strict accelerator paths pass an output record so a
 /// fail-closed decline names the actual predicate instead of collapsing every
 /// refusal into a generic "GPU path declined" error.
-enum class MemoryAdmissionFailureReason : std::uint8_t {
+enum class memory_admission_failure_reason : std::uint8_t {
     none,
     system_pressure,
     reservation_counter_overflow,
     budget_exhausted,
 };
 
-struct MemoryAdmissionFailure {
+/// Immutable snapshot explaining one rejected non-blocking reservation.
+struct memory_admission_failure {
     // Every live-memory field below comes from one predicate snapshot captured
     // before the reservation CAS loop; diagnostics never resample the OS after
     // deciding which predicate rejected the request.
-    MemoryAdmissionFailureReason reason = MemoryAdmissionFailureReason::none;
+    memory_admission_failure_reason reason = memory_admission_failure_reason::none;
     std::uint64_t requested_bytes = 0;
     std::uint64_t reserved_bytes = 0;
     std::uint64_t budget_ceiling_bytes =
@@ -55,16 +53,17 @@ struct MemoryAdmissionFailure {
     std::uint64_t system_total_bytes = 0;
     std::uint64_t process_soft_cap_bytes = 0;
 
-    [[nodiscard]] constexpr bool failed() const noexcept {
-        return reason != MemoryAdmissionFailureReason::none;
+    /// Return whether this record describes a rejected reservation.
+    [[nodiscard]] constexpr bool has_failure() const noexcept {
+        return reason != memory_admission_failure_reason::none;
     }
 };
 
 /// Read-only controller and host-memory snapshot used by fail-closed callers
 /// that need to explain an allocator or post-allocation reconciliation failure
 /// after the admission predicate itself succeeded.  A rejected `try_reserve`
-/// still returns the stronger single-predicate `MemoryAdmissionFailure` above.
-struct MemoryAdmissionSnapshot {
+/// still returns the stronger single-predicate `memory_admission_failure` above.
+struct memory_admission_snapshot {
     std::uint64_t reserved_bytes = 0;
     std::uint64_t budget_ceiling_bytes =
         (std::numeric_limits<std::uint64_t>::max)();
@@ -78,72 +77,48 @@ struct MemoryAdmissionSnapshot {
 
 [[nodiscard]] inline constexpr std::string_view
 memory_admission_failure_reason_name(
-    MemoryAdmissionFailureReason reason) noexcept
+    memory_admission_failure_reason reason) noexcept
 {
     switch (reason) {
-        case MemoryAdmissionFailureReason::none:
+        case memory_admission_failure_reason::none:
             return "none";
-        case MemoryAdmissionFailureReason::system_pressure:
+        case memory_admission_failure_reason::system_pressure:
             return "system_pressure";
-        case MemoryAdmissionFailureReason::reservation_counter_overflow:
+        case memory_admission_failure_reason::reservation_counter_overflow:
             return "reservation_counter_overflow";
-        case MemoryAdmissionFailureReason::budget_exhausted:
+        case memory_admission_failure_reason::budget_exhausted:
             return "budget_exhausted";
     }
     return "unknown";
 }
 
-inline constexpr std::uint64_t kMinimizerIndexPeakBytesPerBp = 6;
+inline constexpr std::uint64_t k_minimizer_index_peak_bytes_per_bp = 6;
 
-[[nodiscard]] inline constexpr std::uint64_t saturating_mul(
-        std::uint64_t lhs,
-        std::uint64_t rhs) noexcept {
-    if (lhs == 0 || rhs == 0) {
-        return 0;
-    }
-    constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
-    if (lhs > max_value / rhs) {
-        return max_value;
-    }
-    return lhs * rhs;
+[[nodiscard]] inline std::uint64_t minimizer_index_peak_bytes_for_bp(
+        std::uint64_t base_pair_count) noexcept {
+    return bioseq::common::saturating_mul(
+        base_pair_count, k_minimizer_index_peak_bytes_per_bp);
 }
 
-/// Saturating 64-bit add. Clamps at UINT64_MAX instead of wrapping so byte/size
-/// estimators (e.g. `PhaseCMemoryEstimate::total`, DOC0310 §22) never overflow
-/// into a small admitted value. The single shared definition lives here beside
-/// `saturating_mul`; do not add a local copy.
-[[nodiscard]] inline constexpr std::uint64_t saturating_add(
-        std::uint64_t lhs,
-        std::uint64_t rhs) noexcept {
-    constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
-    if (lhs > max_value - rhs) {
-        return max_value;
-    }
-    return lhs + rhs;
-}
-
-[[nodiscard]] inline std::uint64_t minimizer_index_peak_bytes_for_bp(std::uint64_t bp) noexcept {
-    return saturating_mul(bp, kMinimizerIndexPeakBytesPerBp);
-}
-
-class MemoryPermit {
+/// Move-only ownership of bytes admitted by the process memory controller.
+class memory_permit {
 public:
-    MemoryPermit() = default;
-    MemoryPermit(MemoryAdmissionController* owner, std::uint64_t bytes) noexcept
+    memory_permit() = default;
+    memory_permit(memory_admission_controller* owner, std::uint64_t bytes) noexcept
         : owner_(owner), bytes_(bytes) {}
-    MemoryPermit(MemoryPermit&& other) noexcept {
+    memory_permit(memory_permit&& other) noexcept {
         move_from(other);
     }
-    MemoryPermit& operator=(MemoryPermit&& other) noexcept {
+    memory_permit& operator=(memory_permit&& other) noexcept {
         if (this != &other) {
             release();
             move_from(other);
         }
         return *this;
     }
-    MemoryPermit(const MemoryPermit&) = delete;
-    MemoryPermit& operator=(const MemoryPermit&) = delete;
-    ~MemoryPermit() {
+    memory_permit(const memory_permit&) = delete;
+    memory_permit& operator=(const memory_permit&) = delete;
+    ~memory_permit() {
         release();
     }
 
@@ -151,12 +126,12 @@ public:
     void shrink_to(std::uint64_t bytes) noexcept;
     [[nodiscard]] bool grow_to(
         std::uint64_t bytes,
-        MemoryAdmissionFailure* failure = nullptr) noexcept;
+        memory_admission_failure* failure = nullptr) noexcept;
     /// Consolidate two reservations owned by the same controller without
     /// changing the controller's global reserved-byte counter.  This is used
     /// after parallel workers hand independently admitted allocations to one
     /// aggregate lifetime owner.
-    [[nodiscard]] bool absorb(MemoryPermit&& other) noexcept;
+    [[nodiscard]] bool absorb(memory_permit&& other) noexcept;
 
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
@@ -167,21 +142,21 @@ public:
     }
 
 private:
-    void move_from(MemoryPermit& other) noexcept {
+    void move_from(memory_permit& other) noexcept {
         owner_ = other.owner_;
         bytes_ = other.bytes_;
         other.owner_ = nullptr;
         other.bytes_ = 0;
     }
 
-    MemoryAdmissionController* owner_ = nullptr;
+    memory_admission_controller* owner_ = nullptr;
     std::uint64_t bytes_ = 0;
 };
 
 /// Pre-allocation reservation multiplier for std::vector capacity ownership.
 /// Callers reserve this headroom before `reserve()`, then verify actual summed
 /// capacities fit and shrink the permit to exact retained capacity bytes.
-inline constexpr std::uint64_t kVectorPreallocationHeadroomFactor = 2u;
+inline constexpr std::uint64_t k_vector_preallocation_headroom_factor = 2u;
 
 /**
  * Destroy/deallocate admitted vector capacity before returning its reservation.
@@ -189,51 +164,51 @@ inline constexpr std::uint64_t kVectorPreallocationHeadroomFactor = 2u;
  * swap and is fully destroyed before `permit.release()` can make those bytes
  * available to another worker.
  */
-template <class T>
+template <class p_value_type>
 void release_admitted_vector_capacity_before_permit(
-        std::vector<T>& values,
-        MemoryPermit& permit) noexcept {
+        std::vector<p_value_type>& values,
+        memory_permit& permit) noexcept {
     {
-        std::vector<T> empty;
+        std::vector<p_value_type> empty;
         values.swap(empty);
     }
     permit.release();
 }
 
 /** Same ordering contract for two buffers covered by one reservation. */
-template <class First, class Second>
+template <class p_first_value_type, class p_second_value_type>
 void release_admitted_vector_capacities_before_permit(
-        std::vector<First>& first,
-        std::vector<Second>& second,
-        MemoryPermit& permit) noexcept {
+        std::vector<p_first_value_type>& first,
+        std::vector<p_second_value_type>& second,
+        memory_permit& permit) noexcept {
     {
-        std::vector<First> empty_first;
-        std::vector<Second> empty_second;
+        std::vector<p_first_value_type> empty_first;
+        std::vector<p_second_value_type> empty_second;
         first.swap(empty_first);
         second.swap(empty_second);
     }
     permit.release();
 }
 
-/// Typed evidence returned by the materialization callable.  `actual_*` is the
+/// Allocation snapshot returned by the materialization callable. `actual_*` is the
 /// Vulkan/allocator allocation size, not merely the logical buffer range.
-struct MemoryMaterializationEvidence {
+struct memory_materialization_snapshot {
     std::uint64_t actual_allocation_bytes = 0;
     std::uint64_t fully_touched_bytes = 0;
-    bool host_visible = false;
-    bool host_coherent = false;
-    bool process_footprint_reflected = false;
+    bool is_host_visible = false;
+    bool is_host_coherent = false;
+    bool is_process_footprint_reflected = false;
 };
 
-/// Evidence produced when a serialized allocation is committed.  Device-local
-/// or otherwise unproven allocations retain their permit for their lifetime.
-struct MemoryMaterializationCommit {
+/// Result produced when a serialized allocation is committed. Device-local
+/// allocations whose footprint is not reflected retain their permit for life.
+struct memory_materialization_result {
     std::uint64_t footprint_before_bytes = 0;
     std::uint64_t footprint_after_bytes = 0;
     std::uint64_t reflected_delta_bytes = 0;
     std::uint64_t admitted_bytes = 0;
-    MemoryMaterializationEvidence evidence{};
-    bool permit_released = false;
+    memory_materialization_snapshot allocation_snapshot{};
+    bool is_permit_released = false;
 };
 
 [[nodiscard]] inline bool footprint_delta_covers_admission(
@@ -250,16 +225,18 @@ struct MemoryMaterializationCommit {
     return bioseq::common::memory::default_budget().footprint_bytes();
 }
 
-struct BudgetedWave {
+/// One memory-admitted fan-out wave and its lifetime reservation.
+struct budgeted_wave {
     unsigned fanout = 1;
-    MemoryPermit permit;
-    bool admitted = false;
+    memory_permit permit;
+    bool is_admitted = false;
 };
 
-class MemoryAdmissionController {
+/// Process-wide non-blocking memory reservation controller.
+class memory_admission_controller {
 public:
-    static MemoryAdmissionController& instance() noexcept {
-        static MemoryAdmissionController controller;
+    static memory_admission_controller& instance() noexcept {
+        static memory_admission_controller controller;
         return controller;
     }
 
@@ -270,36 +247,38 @@ public:
     /// Non-escapable serialized materialization transaction.  The lock is held
     /// before the first footprint sample and through allocation, complete touch,
     /// and the second sample, so two controlled commits cannot claim one delta.
-    template <class MaterializeFn>
-    [[nodiscard]] MemoryMaterializationCommit materialize(
-            MemoryPermit& permit,
-            MaterializeFn&& materialize_fn,
-            MemoryFootprintProbe probe = live_process_footprint_probe) {
+    template <class p_materialize_callable>
+    [[nodiscard]] memory_materialization_result materialize(
+            memory_permit& permit,
+            p_materialize_callable&& materialize_callable,
+            memory_footprint_probe probe = live_process_footprint_probe) {
         std::lock_guard<std::mutex> guard(materialization_mutex_);
-        MemoryMaterializationCommit result{
+        memory_materialization_result result{
             .footprint_before_bytes = probe != nullptr ? probe() : 0u,
         };
-        result.evidence = std::forward<MaterializeFn>(materialize_fn)();
+        result.allocation_snapshot =
+            std::forward<p_materialize_callable>(materialize_callable)();
         result.admitted_bytes = permit.bytes();
         result.footprint_after_bytes = probe != nullptr ? probe() : 0u;
         if (result.footprint_after_bytes >= result.footprint_before_bytes) {
             result.reflected_delta_bytes =
                 result.footprint_after_bytes - result.footprint_before_bytes;
         }
-        const bool exact_owned_allocation =
-            result.evidence.actual_allocation_bytes == result.admitted_bytes
-            && result.evidence.fully_touched_bytes
-                >= result.evidence.actual_allocation_bytes;
-        if (exact_owned_allocation
-            && result.evidence.host_visible
-            && result.evidence.host_coherent
-            && result.evidence.process_footprint_reflected
+        const bool has_exact_owned_allocation =
+            result.allocation_snapshot.actual_allocation_bytes
+                == result.admitted_bytes
+            && result.allocation_snapshot.fully_touched_bytes
+                >= result.allocation_snapshot.actual_allocation_bytes;
+        if (has_exact_owned_allocation
+            && result.allocation_snapshot.is_host_visible
+            && result.allocation_snapshot.is_host_coherent
+            && result.allocation_snapshot.is_process_footprint_reflected
             && footprint_delta_covers_admission(
                 result.footprint_before_bytes,
                 result.footprint_after_bytes,
                 result.admitted_bytes)) {
             permit.release();
-            result.permit_released = true;
+            result.is_permit_released = true;
         }
         return result;
     }
@@ -336,11 +315,11 @@ public:
 
     /// Capture the memory values available to a diagnostic without reserving
     /// or releasing anything.  The OS probes are sampled once each; callers
-    /// must prefer `MemoryAdmissionFailure` when a reservation was rejected,
-    /// because that record is tied to the exact failed predicate snapshot.
-    [[nodiscard]] MemoryAdmissionSnapshot diagnostic_snapshot() const noexcept {
+    /// must prefer `memory_admission_failure` when a reservation was rejected,
+    /// because that record is tied to the exact has_failure predicate snapshot.
+    [[nodiscard]] memory_admission_snapshot diagnostic_snapshot() const noexcept {
         auto& live_budget = bioseq::common::memory::default_budget();
-        MemoryAdmissionSnapshot snapshot{
+        memory_admission_snapshot snapshot{
             .reserved_bytes = reserved_bytes(),
             .process_footprint_bytes = live_budget.footprint_bytes(),
             .system_available_bytes = live_budget.available_bytes(),
@@ -383,30 +362,30 @@ public:
         return snapshot;
     }
 
-    [[nodiscard]] std::optional<MemoryPermit> try_reserve(
+    [[nodiscard]] std::optional<memory_permit> try_reserve(
             std::uint64_t bytes,
-            MemoryAdmissionFailure* failure = nullptr) noexcept {
+            memory_admission_failure* failure = nullptr) noexcept {
         if (failure != nullptr) {
-            *failure = MemoryAdmissionFailure{
+            *failure = memory_admission_failure{
                 .requested_bytes = bytes,
             };
         }
         if (bytes == 0) {
-            return MemoryPermit{this, 0};
+            return memory_permit{this, 0};
         }
 
         auto& live_budget = bioseq::common::memory::default_budget();
-        struct BudgetSnapshot {
+        struct budget_snapshot {
             std::uint64_t process_footprint_bytes = 0;
             std::uint64_t system_available_bytes = 0;
             std::uint64_t system_total_bytes = 0;
             std::uint64_t process_soft_cap_bytes = 0;
             std::uint64_t ceiling_bytes =
                 (std::numeric_limits<std::uint64_t>::max)();
-            bool under_pressure = false;
+            bool is_under_pressure = false;
         };
-        const BudgetSnapshot budget_snapshot = [&]() noexcept {
-            BudgetSnapshot snapshot{
+        const budget_snapshot budget_snapshot = [&]() noexcept {
+            budget_snapshot snapshot{
                 .process_footprint_bytes = live_budget.footprint_bytes(),
                 .system_available_bytes = live_budget.available_bytes(),
                 .system_total_bytes = live_budget.total_bytes(),
@@ -432,7 +411,7 @@ public:
                             - live_budget.min_free_bytes
                         : 0u;
                 allocatable = std::min(by_cap, by_free);
-                snapshot.under_pressure =
+                snapshot.is_under_pressure =
                     snapshot.process_footprint_bytes
                             > snapshot.process_soft_cap_bytes
                     || snapshot.system_available_bytes
@@ -448,16 +427,16 @@ public:
             return snapshot;
         }();
         const auto refuse = [failure, bytes, &budget_snapshot](
-                MemoryAdmissionFailureReason reason,
+                memory_admission_failure_reason reason,
                 std::uint64_t reserved) noexcept
-                -> std::optional<MemoryPermit> {
+                -> std::optional<memory_permit> {
             if (failure != nullptr) {
                 const std::uint64_t ceiling = budget_snapshot.ceiling_bytes;
                 const std::uint64_t after_reservations =
                     ceiling == (std::numeric_limits<std::uint64_t>::max)()
                         ? ceiling
                         : reserved < ceiling ? ceiling - reserved : 0u;
-                *failure = MemoryAdmissionFailure{
+                *failure = memory_admission_failure{
                     .reason = reason,
                     .requested_bytes = bytes,
                     .reserved_bytes = reserved,
@@ -475,11 +454,11 @@ public:
             return std::nullopt;
         };
 
-        if (budget_snapshot.under_pressure) {
+        if (budget_snapshot.is_under_pressure) {
             const std::uint64_t current =
                 reserved_.load(std::memory_order_relaxed);
             return refuse(
-                MemoryAdmissionFailureReason::system_pressure,
+                memory_admission_failure_reason::system_pressure,
                 current);
         }
 
@@ -487,14 +466,14 @@ public:
         for (;;) {
             if (bytes > (std::numeric_limits<std::uint64_t>::max)() - current) {
                 return refuse(
-                    MemoryAdmissionFailureReason::reservation_counter_overflow,
+                    memory_admission_failure_reason::reservation_counter_overflow,
                     current);
             }
             const std::uint64_t budget = budget_snapshot.ceiling_bytes;
             if (budget != (std::numeric_limits<std::uint64_t>::max)()) {
                 if (current > budget || bytes > budget - current) {
                     return refuse(
-                        MemoryAdmissionFailureReason::budget_exhausted,
+                        memory_admission_failure_reason::budget_exhausted,
                         current);
                 }
             }
@@ -502,30 +481,30 @@ public:
                     current, current + bytes,
                     std::memory_order_acq_rel,
                     std::memory_order_relaxed)) {
-                return MemoryPermit{this, bytes};
+                return memory_permit{this, bytes};
             }
         }
     }
 
-    [[nodiscard]] BudgetedWave try_reserve_wave(
+    [[nodiscard]] budgeted_wave try_reserve_wave(
             unsigned requested,
             std::uint64_t bytes_per_task) noexcept {
         requested = std::max(1u, requested);
         if (bytes_per_task == 0) {
-            return BudgetedWave{requested, {}, true};
+            return budgeted_wave{requested, {}, true};
         }
 
         for (unsigned fanout = requested; fanout > 1; --fanout) {
-            const std::uint64_t bytes = saturating_mul(
+            const std::uint64_t bytes = bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(fanout), bytes_per_task);
             if (auto permit = try_reserve(bytes)) {
-                return BudgetedWave{fanout, std::move(*permit), true};
+                return budgeted_wave{fanout, std::move(*permit), true};
             }
         }
         if (auto permit = try_reserve(bytes_per_task)) {
-            return BudgetedWave{1, std::move(*permit), true};
+            return budgeted_wave{1, std::move(*permit), true};
         }
-        return BudgetedWave{1, {}, false};
+        return budgeted_wave{1, {}, false};
     }
 
     void release(std::uint64_t bytes) noexcept {
@@ -538,7 +517,7 @@ private:
     std::atomic<std::uint64_t> index_memory_cap_bytes_{0};
 };
 
-inline void MemoryPermit::release() noexcept {
+inline void memory_permit::release() noexcept {
     if (owner_ != nullptr) {
         owner_->release(bytes_);
         owner_ = nullptr;
@@ -546,7 +525,7 @@ inline void MemoryPermit::release() noexcept {
     }
 }
 
-inline void MemoryPermit::shrink_to(std::uint64_t bytes) noexcept {
+inline void memory_permit::shrink_to(std::uint64_t bytes) noexcept {
     if (owner_ == nullptr || bytes_ <= bytes) {
         return;
     }
@@ -555,9 +534,9 @@ inline void MemoryPermit::shrink_to(std::uint64_t bytes) noexcept {
     owner_->release(delta);
 }
 
-inline bool MemoryPermit::grow_to(
+inline bool memory_permit::grow_to(
         std::uint64_t bytes,
-        MemoryAdmissionFailure* failure) noexcept {
+        memory_admission_failure* failure) noexcept {
     if (owner_ == nullptr) {
         return bytes == 0u;
     }
@@ -576,7 +555,7 @@ inline bool MemoryPermit::grow_to(
     return true;
 }
 
-inline bool MemoryPermit::absorb(MemoryPermit&& other) noexcept {
+inline bool memory_permit::absorb(memory_permit&& other) noexcept {
     if (this == &other) {
         return true;
     }
@@ -594,10 +573,10 @@ inline bool MemoryPermit::absorb(MemoryPermit&& other) noexcept {
     return true;
 }
 
-[[nodiscard]] inline BudgetedWave try_reserve_budgeted_wave(
+[[nodiscard]] inline budgeted_wave try_reserve_budgeted_wave(
         unsigned requested,
         std::uint64_t peak_bytes_per_task) noexcept {
-    return MemoryAdmissionController::instance().try_reserve_wave(
+    return memory_admission_controller::instance().try_reserve_wave(
         requested, peak_bytes_per_task);
 }
 

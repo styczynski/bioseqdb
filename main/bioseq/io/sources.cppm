@@ -1,6 +1,5 @@
 module;
 
-#include "common.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -21,13 +20,13 @@ module;
 
 export module bioseq.io.sources;
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.io.options;
 
-// read_result + the io_source concept now live in the lightweight
-// bioseq.io.source_core module (DOC0372 §369-374); re-export them so every
+// source_read_result + the io_source concept now live in the lightweight
+// bioseq.io.source module; re-export them so every
 // existing importer of bioseq.io.sources sees them unchanged.
-export import bioseq.io.source_core;
+export import bioseq.io.source;
 
 export namespace bioseq::io {
 
@@ -89,10 +88,10 @@ public:
         return source;
     }
 
-    [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
+    [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_fd < 0) {
             _last_error_message = "posix_read_source: file descriptor closed";
-            return read_result{0, false, true};
+            return source_read_result{0, false, true};
         }
         ssize_t bytes_read = 0;
         for (;;) {
@@ -102,10 +101,10 @@ public:
             _last_error_message = fmt::format(
                 "read error at file position {}: {}",
                 _global_offset, std::strerror(errno));
-            return read_result{0, false, true};
+            return source_read_result{0, false, true};
         }
         if (bytes_read == 0) {
-            return read_result{0, true, false};
+            return source_read_result{0, true, false};
         }
         std::size_t scaled = static_cast<std::size_t>(bytes_read);
         if (!_bom_consumed && _global_offset == 0) {
@@ -117,7 +116,7 @@ public:
             _bom_consumed = true;
         }
         _global_offset += static_cast<std::size_t>(bytes_read);
-        return read_result{scaled, false, false};
+        return source_read_result{scaled, false, false};
     }
 
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
@@ -149,7 +148,7 @@ struct mmap_source_with_magic;
 /// `mmap(2)`-backed source. The file is mapped read-only and `read_into`
 /// performs a `memcpy` into the caller's slab. The zero-copy direct
 /// mode (parser sees mmap'd bytes directly) is a future optimisation —
-/// for v1 we always copy. Spec Appendix L / §6.3.
+/// compressed input is always copied through the decompressor.
 class mmap_source {
 public:
     mmap_source() = default;
@@ -199,11 +198,11 @@ public:
     [[nodiscard]] static std::expected<mmap_source_with_magic, std::string>
     try_open_with_magic(std::string_view path, const reader_options& options);
 
-    [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
+    [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         const std::size_t available = (_cursor < _size) ? (_size - _cursor) : 0;
         const std::size_t copy_size = std::min(cap, available);
         if (copy_size == 0) {
-            return read_result{0, true, false};
+            return source_read_result{0, true, false};
         }
         std::memcpy(dst, static_cast<const std::uint8_t*>(_addr) + _cursor, copy_size);
         _cursor += copy_size;
@@ -216,13 +215,13 @@ public:
             }
             _bom_consumed = true;
         }
-        return read_result{scaled, _cursor >= _size, false};
+        return source_read_result{scaled, _cursor >= _size, false};
     }
 
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
 
     /// Direct view of the mapped region. Used by the zero-copy fast
-    /// path in `run_sync_pipeline_mmap_direct` (public_api.cppm) to
+    /// path in `run_sync_pipeline_mmap_direct` (reader.cppm) to
     /// hand the parser the whole file in one contiguous span without
     /// the slab refill / `make_room` memmove overhead. The leading
     /// UTF-8 BOM is stripped from the returned `(ptr, size)` pair.
@@ -263,7 +262,7 @@ private:
     std::string _last_error_message;
 };
 
-/// Magic-byte sniff result. The dispatcher (`public_api.cppm`) uses
+/// Magic-byte sniff result. The dispatcher (`reader.cppm`) uses
 /// this to route gzipped files to the parallel decoder. Aggregate so
 /// `std::expected` can move-construct it from designated-init.
 struct mmap_source_with_magic {
@@ -388,10 +387,10 @@ public:
         return source;
     }
 
-    [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
+    [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_file == nullptr) {
             _last_error_message = "gzip_source: file handle closed";
-            return read_result{0, false, true};
+            return source_read_result{0, false, true};
         }
         const unsigned to_read = static_cast<unsigned>(
             std::min<std::size_t>(cap, static_cast<std::size_t>(UINT_MAX)));
@@ -404,7 +403,7 @@ public:
                 _global_offset,
                 (message != nullptr ? message : "<null>"),
                 errnum);
-            return read_result{0, false, true};
+            return source_read_result{0, false, true};
         }
         if (n == 0) {
             int errnum = 0;
@@ -413,9 +412,9 @@ public:
                 _last_error_message = fmt::format(
                     "gzip stream error at file position {}: errno={}",
                     _global_offset, errnum);
-                return read_result{0, false, true};
+                return source_read_result{0, false, true};
             }
-            return read_result{0, true, false};
+            return source_read_result{0, true, false};
         }
         std::size_t scaled = static_cast<std::size_t>(n);
         if (!_bom_consumed && _global_offset == 0) {
@@ -427,7 +426,7 @@ public:
             _bom_consumed = true;
         }
         _global_offset += static_cast<std::size_t>(n);
-        return read_result{scaled, false, false};
+        return source_read_result{scaled, false, false};
     }
 
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }

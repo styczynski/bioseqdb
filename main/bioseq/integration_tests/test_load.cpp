@@ -9,8 +9,8 @@
  * index parity (update_index_on_insert on/off) with the §4.4 write-state flush
  * as the regression guard; and the column-rule / malformed-file error paths.
  */
-#include "common_tests.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/common.hpp>
+#include <bioseq/pg_build_profile.h>
 #include "common.h"
 
 #include <algorithm>

@@ -17,8 +17,8 @@
 //   'NNNNN'::dna5            -> N=5 (rank of N in dna5 is 4), A=C=G=T=0
 //   'ACGTN'::dna5            -> A=1, C=1, G=1, T=1, N=1
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

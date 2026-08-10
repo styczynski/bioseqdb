@@ -51,7 +51,7 @@
 // than only checking "is some valid CIGAR" — the prior test bug was
 // that "valid CIGAR" could be satisfied by an empty string.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <set>
 #include <string>

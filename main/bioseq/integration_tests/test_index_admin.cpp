@@ -23,8 +23,8 @@
 // are DELETED; row-count assertions go through the new
 // bioseq.index_table_row_count() libpq wrapper (index_table_row_count()).
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>

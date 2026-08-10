@@ -218,7 +218,7 @@ def _read_manifest(path: Path) -> dict[str, Any]:
 def _normalize_profile_sql(
     sql_bytes: bytes,
     manifest: dict[str, Any],
-) -> tuple[bytes, int]:
+) -> bytes:
     profile = manifest.get("compiler_profile")
     if profile not in {"production", "test_indexes"}:
         raise RuntimeError(
@@ -227,13 +227,11 @@ def _normalize_profile_sql(
         )
 
     entities = manifest.get("entities")
-    statements = manifest.get("physical_statements")
+    statements = manifest.get("statements")
     if not isinstance(entities, list):
         raise RuntimeError("generated SQL manifest has no entity array")
     if not isinstance(statements, list):
-        raise RuntimeError(
-            "generated SQL manifest has no physical statement array"
-        )
+        raise RuntimeError("generated SQL manifest has no statement array")
     ksw_entities = [
         entity
         for entity in entities
@@ -256,7 +254,7 @@ def _normalize_profile_sql(
             raise RuntimeError(
                 "production SQL contains the test-indexes-only KSW receipt"
             )
-        return sql_bytes, 0
+        return sql_bytes
 
     if (
         sql_bytes.count(KSW_TEST_SQL_SUFFIX) != 1
@@ -267,13 +265,16 @@ def _normalize_profile_sql(
             "receipt projection"
         )
 
-    physical_count = manifest.get("physical_statement_count")
-    if not isinstance(physical_count, int) or physical_count < 2:
+    if len(ksw_statements) != 2:
         raise RuntimeError(
-            "test-indexes manifest has an invalid physical statement count"
+            "test-indexes manifest does not have exactly two KSW statements"
         )
-    function_statement_id = f"S{physical_count - 1:03d}"
-    revoke_statement_id = f"S{physical_count:03d}"
+    function_statement_id = ksw_statements[0].get("statement_id")
+    revoke_statement_id = ksw_statements[1].get("statement_id")
+    if not isinstance(function_statement_id, str) or not isinstance(
+        revoke_statement_id, str
+    ):
+        raise RuntimeError("test-indexes KSW statements have invalid identities")
     active_condition = "(defined(BIOSEQ_TEST_INDEXES))"
 
     entity_projection = tuple(
@@ -289,7 +290,6 @@ def _normalize_profile_sql(
             if isinstance(entity.get("statement_ids"), list)
             else None,
             entity.get("result_sql_type"),
-            entity.get("typed_install_owner"),
             (
                 entity.get("routine_properties", {}).get("c_symbol"),
                 entity.get("routine_properties", {}).get(
@@ -326,7 +326,6 @@ def _normalize_profile_sql(
             ("sql:schema:bioseq_internal",),
             (function_statement_id,),
             "text",
-            False,
             (
                 "highway_ksw_boundary_receipt_for_test",
                 True,
@@ -355,7 +354,6 @@ def _normalize_profile_sql(
             (KSW_TEST_FUNCTION_IDENTITY,),
             (revoke_statement_id,),
             "",
-            False,
             None,
             None,
         ),
@@ -369,15 +367,9 @@ def _normalize_profile_sql(
     statement_projection = tuple(
         (
             statement.get("statement_id"),
-            statement.get("baseline_physical_id"),
-            statement.get("baseline_ordinal"),
             statement.get("kind"),
-            statement.get("facet"),
             statement.get("owner_identity"),
-            statement.get("render_source"),
             statement.get("text_sha256"),
-            statement.get("baseline_text_sha256"),
-            statement.get("order_identity"),
             statement.get("source_module"),
         )
         for statement in ksw_statements
@@ -385,41 +377,29 @@ def _normalize_profile_sql(
     expected_statement_projection = (
         (
             function_statement_id,
-            None,
-            None,
             "function",
-            "primary",
             KSW_TEST_FUNCTION_IDENTITY,
-            "natural_projection",
             "6865781db32b7798d1313dc1baa1f1223c9961fc4ca37d4c3299f72d613b14d7",
-            None,
-            "",
             KSW_TEST_SOURCE_MODULE,
         ),
         (
             revoke_statement_id,
-            None,
-            None,
             "revoke",
-            "primary",
             KSW_TEST_REVOKE_IDENTITY,
-            "natural_projection",
             "7c424756b149781cd013a53381106ef4328ef1d4eb1e8d3abcbf7f1d772999cc",
-            None,
-            "",
             KSW_TEST_SOURCE_MODULE,
         ),
     )
     if statement_projection != expected_statement_projection:
         raise RuntimeError(
             "test-indexes manifest does not contain the exact reviewed KSW "
-            "receipt physical projection"
+            "receipt statement projection"
         )
     if statements[-2:] != ksw_statements:
         raise RuntimeError(
             "test-indexes KSW receipt is not the terminal natural SQL delta"
         )
-    return sql_bytes[: -len(KSW_TEST_SQL_SUFFIX)], 2
+    return sql_bytes[: -len(KSW_TEST_SQL_SUFFIX)]
 
 
 def _parse_table_columns(body: str, table: str) -> tuple[tuple[str, str, bool], ...]:
@@ -560,7 +540,6 @@ def _external_entities(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _verify_enabled_manifest(
     manifest: dict[str, Any],
-    profile_statement_delta: int,
 ) -> None:
     entities = _external_entities(manifest)
     top_level = {
@@ -592,10 +571,6 @@ def _verify_enabled_manifest(
             "generated external SQL surface"
         )
     for entity in entities:
-        if entity.get("typed_install_owner") is not False:
-            raise RuntimeError(
-                "external SQL entity is not naturally C++ owned"
-            )
         condition = entity.get("active_condition")
         if (
             not isinstance(condition, str)
@@ -669,52 +644,33 @@ def _verify_enabled_manifest(
                     f"{identity}"
                 )
 
-    statements = manifest.get("physical_statements")
+    statements = manifest.get("statements")
     if not isinstance(statements, list):
-        raise RuntimeError(
-            "generated SQL manifest has no physical statement array"
-        )
-    external_statement_ids = [
-        statement.get("baseline_physical_id")
+        raise RuntimeError("generated SQL manifest has no statement array")
+    external_statement_owners = {
+        statement.get("owner_identity")
         for statement in statements
         if isinstance(statement, dict)
         and statement.get("source_path") in EXTERNAL_SOURCE_PATHS
-    ]
-    expected_statement_ids = [
-        f"P{ordinal:03d}" for ordinal in range(492, 505)
-    ]
-    if external_statement_ids != expected_statement_ids:
+    }
+    if external_statement_owners != EXPECTED_TOP_LEVEL_IDENTITIES:
         raise RuntimeError(
-            "external physical ledger projection is not exactly P492-P504"
-        )
-    if manifest.get("physical_statement_count") != (
-        504 + profile_statement_delta
-    ):
-        raise RuntimeError(
-            "enabled package does not close over the expected physical "
-            "statements for its compiler profile"
+            "enabled package statements do not exactly cover the reviewed "
+            "external owner set"
         )
 
 
 def verify(args: argparse.Namespace) -> str:
     sql_path = args.install_sql.resolve(strict=True)
     manifest_path = args.manifest.resolve(strict=True)
-    base_golden_path = args.base_golden.resolve(strict=True)
     sql_bytes = sql_path.read_bytes()
-    base_golden_bytes = base_golden_path.read_bytes()
-    if not base_golden_bytes.endswith(b"\n"):
-        raise RuntimeError(
-            "checked base SQL golden must end with one newline"
-        )
     manifest = _read_manifest(manifest_path)
     digest = hashlib.sha256(sql_bytes).hexdigest()
     if manifest.get("script_sha256") != digest:
         raise RuntimeError(
             "external feature contract received a stale SQL manifest"
         )
-    base_sql_bytes, profile_statement_delta = _normalize_profile_sql(
-        sql_bytes, manifest
-    )
+    base_sql_bytes = _normalize_profile_sql(sql_bytes, manifest)
     sql = base_sql_bytes.decode("utf-8")
     if manifest.get("external_legacy_macro_symbols") != [
         "bioseq_external_handler"
@@ -737,20 +693,9 @@ def verify(args: argparse.Namespace) -> str:
         )
 
     if args.expect == "enabled":
-        expected_base_prefix = base_golden_bytes[:-1] + b"\n\n"
-        if not base_sql_bytes.startswith(expected_base_prefix):
-            raise RuntimeError(
-                "enabled external package changed the checked P001-P491 "
-                "base SQL projection"
-            )
         _verify_enabled_sql(sql)
-        _verify_enabled_manifest(manifest, profile_statement_delta)
+        _verify_enabled_manifest(manifest)
     else:
-        if base_sql_bytes != base_golden_bytes:
-            raise RuntimeError(
-                "disabled external package differs from the checked "
-                "P001-P491 base SQL golden"
-            )
         if "bioseq_external" in sql:
             raise RuntimeError(
                 "disabled SQL profile contains external catalog SQL"
@@ -759,13 +704,6 @@ def verify(args: argparse.Namespace) -> str:
             raise RuntimeError(
                 "disabled SQL profile manifest contains external entities"
             )
-        if manifest.get("physical_statement_count") != (
-            491 + profile_statement_delta
-        ):
-            raise RuntimeError(
-                "disabled package changed the expected base closure for its "
-                "compiler profile"
-            )
     return digest
 
 
@@ -773,7 +711,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--install-sql", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--base-golden", type=Path, required=True)
     parser.add_argument(
         "--expect",
         choices=("enabled", "disabled"),

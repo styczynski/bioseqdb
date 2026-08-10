@@ -47,7 +47,7 @@
     }
   },
   "bench_e2e": {
-    "tags": ["e2e", "performance", "cold-index", "mpf", "fragment-local", "bioseq-only", "doc0383", "p3-packed", "single-wave", "16-query", "p5", "evidence-v4"],
+    "tags": ["e2e", "performance", "cold-index", "mpf", "fragment-local", "bioseq-only", "p3-packed", "single-wave", "16-query", "p5", "evidence-v4"],
     "description": "Bioseq-only measurement companion for comparison against an existing canonical minimap2 report.",
     "fast": false,
     "concurrency": {

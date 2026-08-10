@@ -11,8 +11,6 @@ import :options;
 export namespace bioseq::sql {
 
 enum class annotation_kind : std::uint8_t {
-    alter,
-    comment,
     session_setting,
     function,
     procedure,
@@ -44,7 +42,6 @@ enum class annotation_kind : std::uint8_t {
     phase,
     type_role,
     catalog_dependencies,
-    install_action,
 };
 
 template<class Options>

@@ -5,7 +5,7 @@
 // per-fragment rows back into a contiguous varlena, bounded by
 // MaxAllocSize) and dispatches through `with_lazy_in_memory`.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

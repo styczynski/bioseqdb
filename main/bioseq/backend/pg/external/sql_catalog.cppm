@@ -1,3 +1,4 @@
+/// @brief Declarative SQL schema for external-provider relations.
 module;
 
 #include <cstdint>
@@ -5,13 +6,13 @@ module;
 #include <string>
 #include <vector>
 
-export module bioseq.pg.external.sql_catalog;
+export module bioseq.postgres.external.sql_catalog;
 
 import bioseq.codegen.sql.annotation_model;
 
 #if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
 
-export namespace bioseq::external::sql_rows {
+export namespace bioseq::postgres::external::sql_rows {
 
 [[bioseq_sql::schema]]
 [[bioseq_sql::revoke({
@@ -254,6 +255,6 @@ struct [[bioseq_sql::table({
     std::int64_t retrieved_at;
 };
 
-}  // namespace bioseq::external::sql_rows
+} // namespace bioseq::postgres::external::sql_rows
 
 #endif

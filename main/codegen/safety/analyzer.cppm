@@ -544,10 +544,10 @@ inline void validate_runtime_probe_facts(
     const compiler_analysis_facts& facts,
     const postgresql_severity_authority& severity_authority) {
     static constexpr std::string_view visit_name =
-        "bioseq::pg_utils::safety_runtime_probe::"
+        "bioseq::postgres::support::safety_runtime_probe::"
         "record_site_visit";
     static constexpr std::string_view trigger_name =
-        "bioseq::pg_utils::safety_runtime_probe::"
+        "bioseq::postgres::support::safety_runtime_probe::"
         "consume_fault";
     struct owned_call {
         const function_flow* owner{};
@@ -844,37 +844,42 @@ inline void validate_bridge_transition(
     std::string expected_contract_sha256;
     if (call.bridge_transition == bridge_kind::invoke_pg_as_cpp) {
         expected_implementation =
-            "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
+            "bioseq::postgres::support::invoke_pg_as_cpp";
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
         expected_region =
-            "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
+            "bioseq.postgres.support.error_boundary/"
+            "invoke_pg_as_cpp";
         expected_contract_id =
-            "bioseq.pg_utils.error_bridge/error_capture/v1";
+            "bioseq.postgres.support.error_boundary/error_capture";
         expected_contract_sha256 =
-            "cbf583abe710257bf2a1999718c076fa"
-            "2d70e203ae424bbba083eee0b4fcc83c";
-    } else if (
-        call.bridge_transition == bridge_kind::sql_call_context) {
-        expected_implementation =
-            "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
-        expected_region =
-            "bioseq.pg_utils.error_bridge/"
-            "invoke_pg_across_transactions_as_cpp";
-        expected_contract_id =
-            "bioseq.pg_utils.error_bridge/error_capture/v1";
-        expected_contract_sha256 =
-            "cbf583abe710257bf2a1999718c076fa"
-            "2d70e203ae424bbba083eee0b4fcc83c";
+            "f217b3f824a03a5d3cf977fb25c8ace"
+            "4a8765904e13e46dcfcc0fbd8c67f3099";
     } else if (
         call.bridge_transition
-        == bridge_kind::sql_subtransaction) {
+        == bridge_kind::cross_transaction_callback) {
+        expected_implementation =
+            "bioseq::postgres::support::"
+            "invoke_pg_across_transactions_as_cpp";
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
+        expected_region =
+            "bioseq.postgres.support.error_boundary/"
+            "invoke_pg_across_transactions_as_cpp";
+        expected_contract_id =
+            "bioseq.postgres.support.error_boundary/error_capture";
+        expected_contract_sha256 =
+            "f217b3f824a03a5d3cf977fb25c8ace"
+            "4a8765904e13e46dcfcc0fbd8c67f3099";
+    } else if (
+        call.bridge_transition
+        == bridge_kind::subtransaction) {
         static const std::set<std::string, std::less<>>
             exact_regions{
-                "bioseq::pg_utils::sql_subtransaction::begin",
-                "bioseq::pg_utils::sql_subtransaction::commit",
-                "bioseq::pg_utils::sql_subtransaction::rollback",
-                "bioseq::pg_utils::sql_subtransaction::~sql_subtransaction",
+                "bioseq::postgres::support::subtransaction::begin",
+                "bioseq::postgres::support::subtransaction::commit",
+                "bioseq::postgres::support::subtransaction::rollback",
+                "bioseq::postgres::support::subtransaction::~subtransaction",
             };
         if (!exact_regions.contains(
                 evidence.implementation_qualified_name)) {
@@ -887,17 +892,17 @@ inline void validate_bridge_transition(
             evidence.implementation_qualified_name;
         expected_module = "bioseq.pg_sql_boundary";
         expected_region =
-            "bioseq.pg_utils.sql_boundary.context/"
+            "bioseq.postgres.support.sql_boundary.context/"
             + std::string{expected_implementation.substr(
                 expected_implementation.rfind("::") + 2)};
     } else if (
         call.bridge_transition
         == bridge_kind::generated_boundary_tail) {
         expected_implementation =
-            "bioseq::pg_utils::invoke_sql_boundary";
+            "bioseq::postgres::support::invoke_postgres_callback";
         expected_module = "bioseq.pg_sql_boundary";
         expected_region =
-            "bioseq.pg_utils.sql_boundary/rethrow_tail";
+            "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
         analysis_failure(
             call.stable_site_id,
@@ -1004,8 +1009,9 @@ inline void validate_bridge_transition(
         std::string fact =
             target.target_usr + "\t"
             + target.target_qualified_name + "\t"
-            + callee_domain_name(target.domain) + "\t"
-            + external_call_mode_name(target.external_mode);
+            + std::string{callee_domain_name(target.domain)} + "\t"
+            + std::string{
+                  external_call_mode_name(target.external_mode)};
         if (target.external_provenance) {
             fact += "\tX\t"
                 + target.external_provenance->record_id + "\t"
@@ -1078,8 +1084,8 @@ inline void validate_bridge_transition(
             for (const flow_object& object : objects) {
                 facts.push_back(
                     object.stable_object_id + "\t"
-                    + object_identity_kind_name(
-                        object.identity_kind)
+                    + std::string{object_identity_kind_name(
+                        object.identity_kind)}
                     + "\t"
                     + (object.declaration_usr
                            ? *object.declaration_usr
@@ -1234,7 +1240,7 @@ inline void require_complete_function(
         && lowercase_sha256(
             function.lifetime_inventory_sha256)
         && function.lifetime_inventory_sha256
-            == sha256_hex(lifetime_material);
+            == bioseq::common::sha256_hex(lifetime_material);
     completeness.unresolved_indirect_targets.insert(
         completeness.unresolved_indirect_targets.end(),
         function.unresolved_indirect_targets.begin(),
@@ -1503,7 +1509,7 @@ inline void require_complete_function(
                         && call->bridge_transition
                             != bridge_kind::generated_boundary_tail
                         && call->bridge_transition
-                            != bridge_kind::sql_subtransaction) {
+                            != bridge_kind::subtransaction) {
                         analysis_failure(
                             call->stable_site_id,
                             "bridge transition does not enter its "
@@ -1525,7 +1531,7 @@ inline void require_complete_function(
                             call->stable_site_id);
                     } else if (
                         call->bridge_transition
-                        == bridge_kind::sql_subtransaction) {
+                        == bridge_kind::subtransaction) {
                         next_crossings =
                             call->live_objects;
                         next_captures.clear();
@@ -1875,8 +1881,9 @@ ledger_crossings(const std::vector<flow_object>& objects) {
         }
         return site_classification::bridged;
     }
-    if (site.active_bridge == bridge_kind::sql_subtransaction
-        || site.active_bridge == bridge_kind::sql_call_context) {
+    if (site.active_bridge == bridge_kind::subtransaction
+        || site.active_bridge
+            == bridge_kind::cross_transaction_callback) {
         if (std::ranges::any_of(
                 site.crossing_objects, nontrivial)
             || std::ranges::any_of(
@@ -1911,8 +1918,8 @@ converter_families(const safety_manifest_overload& overload) {
             : key.substr(direction + 1);
         if (body.starts_with("aggregate_state")) {
             result.insert("aggregate_state");
-        } else if (body.starts_with("returns_table[")
-                   || body.starts_with("setof")) {
+        } else if (body.starts_with("table_rows[")
+                   || body.starts_with("set_of")) {
             result.insert("set_returning_function");
         } else if (body.starts_with("vector_")
                    || body.starts_with("vector.")) {
@@ -1966,11 +1973,11 @@ converter_families(const safety_manifest_overload& overload) {
     std::set<std::string, std::less<>> result;
     switch (site.active_bridge) {
         case bridge_kind::invoke_pg_as_cpp:
-        case bridge_kind::sql_call_context:
+        case bridge_kind::cross_transaction_callback:
             result.insert("memory_context_restore");
             result.insert("resource_owner_restore");
             break;
-        case bridge_kind::sql_subtransaction:
+        case bridge_kind::subtransaction:
             result.insert("subtransaction_abort");
             result.insert("subtransaction_begin");
             result.insert("subtransaction_commit");
@@ -1983,9 +1990,9 @@ converter_families(const safety_manifest_overload& overload) {
         const std::string_view name = step->qualified_name;
         if (step->module_name == "bioseq.pg_sql_boundary"
             && (name
-                    == "bioseq::pg_utils::scoped_spi_session::connect"
+                    == "bioseq::postgres::support::spi_session::connect"
                 || name
-                    == "bioseq::pg_utils::scoped_spi_session::finish")) {
+                    == "bioseq::postgres::support::spi_session::finish")) {
             result.insert("spi_connect");
             result.insert("spi_finish");
         }
@@ -2020,7 +2027,7 @@ converter_families(const safety_manifest_overload& overload) {
             reachable.active_bridge
                 == bridge_kind::invoke_pg_as_cpp
             || reachable.active_bridge
-                == bridge_kind::sql_call_context,
+                == bridge_kind::cross_transaction_callback,
         .generated_boundary_tail = call.generated_boundary_tail,
         .converter_families = converter_families(overload),
         .owner_families = owner_families(identity),
@@ -2078,7 +2085,7 @@ converter_families(const safety_manifest_overload& overload) {
         + target.target_usr + "\n"
         + target.target_qualified_name;
     result.site_id = std::string{profile_name(profile)}
-        + ":" + sha256_hex(site_material).substr(0, 24);
+        + ":" + bioseq::common::sha256_hex(site_material).substr(0, 24);
     result.transitive_call_path.reserve(reachable.path.size());
     for (const function_flow* step : reachable.path) {
         result.transitive_call_path.push_back({
@@ -2129,7 +2136,7 @@ converter_families(const safety_manifest_overload& overload) {
     audited_stop result{
         .stop_id = std::string{profile_name(profile)}
             + ":stop:"
-            + sha256_hex(stop_material).substr(0, 24),
+            + bioseq::common::sha256_hex(stop_material).substr(0, 24),
         .source_file = call.expansion.source_file,
         .expanded_source_span = call.expansion.span,
         .target_usr = target.target_usr,
@@ -2308,7 +2315,7 @@ converter_families(const safety_manifest_overload& overload) {
                 root->registration.span.end.byte_offset);
         if (root->stable_callback_id
             != "pg-callback:"
-                + sha256_hex(stable_material).substr(0, 32)) {
+                + bioseq::common::sha256_hex(stable_material).substr(0, 32)) {
             analyzer_detail::analysis_failure(
                 root->stable_callback_id,
                 "PostgreSQL callback stable identity is stale");
@@ -2379,7 +2386,7 @@ converter_families(const safety_manifest_overload& overload) {
         .callback_closure_sha256 =
             callback_roots.empty()
             ? std::string{}
-            : sha256_hex(callback_closure_material),
+            : bioseq::common::sha256_hex(callback_closure_material),
     };
     result.parents.reserve(policy.expected_parent_count);
     result.symbol_groups.reserve(policy.expected_symbol_count);
@@ -2426,7 +2433,7 @@ converter_families(const safety_manifest_overload& overload) {
                 .generated_wrapper = wrapper.qualified_name,
                 .public_symbol = owner.public_symbol,
                 .profile = facts.profile,
-                .transitive_closure_sha256 = sha256_hex(
+                .transitive_closure_sha256 = bioseq::common::sha256_hex(
                     closure.canonical_facts),
                 .terminal_site_count = 0,
                 .analysis = closure.completeness,

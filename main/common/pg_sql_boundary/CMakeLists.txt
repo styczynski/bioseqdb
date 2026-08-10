@@ -13,7 +13,7 @@ target_include_directories(
   bioseq_pg_sql_boundary PUBLIC ${PostgreSQL_INCLUDE_DIRS})
 target_sources(bioseq_pg_sql_boundary
   PRIVATE
-    "${CMAKE_CURRENT_LIST_DIR}/call_context_implementation.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/call_context_implementation.cppm"
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES

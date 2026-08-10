@@ -29,7 +29,7 @@ export import :model;
 import :contract_tests;
 import :renderer;
 import :validator;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
@@ -88,7 +88,7 @@ parse_options(
                 ? value.size() - begin
                 : separator - begin);
         std::uint32_t ordinal{};
-        const auto parsed = std::from_chars(
+        const std::from_chars_result parsed = std::from_chars(
             item.data(), item.data() + item.size(), ordinal);
         if (item.empty() || parsed.ec != std::errc{}
             || parsed.ptr != item.data() + item.size()
@@ -124,7 +124,8 @@ parse_options(
         "--source",
         "--stamp",
     };
-    const auto options = parse_options(args, allowed, "prepare");
+    const std::map<std::string, std::string, std::less<>> options =
+        parse_options(args, allowed, "prepare");
     return prepare_command_line{
         .source = options.at("--source"),
         .signature_source = options.at("--signature-source"),
@@ -180,7 +181,8 @@ parse_options(
         "--stamp",
         "--topology-manifest",
     };
-    const auto options = parse_options(args, allowed, "generate");
+    const std::map<std::string, std::string, std::less<>> options =
+        parse_options(args, allowed, "generate");
     return command_line{
         .name = options.at("--name"),
         .source = options.at("--source"),
@@ -273,13 +275,15 @@ inline void require_regular_file(
         [](const std::filesystem::path& path) {
             return path.generic_string();
         });
-    const auto unique = std::ranges::unique(
-        dependencies,
-        {},
-        [](const std::filesystem::path& path) {
-            return path.generic_string();
-        });
-    dependencies.erase(unique.begin(), unique.end());
+    const std::vector<std::filesystem::path>::iterator unique_end =
+        std::ranges::unique(
+            dependencies,
+            {},
+            [](const std::filesystem::path& path) {
+                return path.generic_string();
+            })
+            .begin();
+    dependencies.erase(unique_end, dependencies.end());
     std::ostringstream output;
     output << depfile_escape(target) << ':';
     for (const std::filesystem::path& dependency : dependencies) {
@@ -429,7 +433,10 @@ inline void validate_prepare_fixed_output_paths(
         {command.depfile, "prepare.d"},
         {command.stamp, "prepare.stamp"},
     };
-    for (const auto& [configured, filename] : outputs) {
+    for (const std::pair<std::filesystem::path, std::string_view>& output_record
+         : outputs) {
+        const std::filesystem::path& configured = output_record.first;
+        const std::string_view filename = output_record.second;
         const std::filesystem::path output =
             absolute_spelling(configured);
         const std::filesystem::path expected =
@@ -580,7 +587,7 @@ inline void write_prepare_output(
     const std::filesystem::path path =
         canonical_prepare_output(authority, configured_path);
     if (std::filesystem::is_regular_file(path)
-        && read_file(path) == content) {
+        && read_artifact_bytes(path) == content) {
         return;
     }
     static std::atomic_uint64_t sequence{0};
@@ -667,15 +674,15 @@ capture_prepare_file_snapshot(
         result.push_back(prepare_file_snapshot{
             .configured_spelling = spelling,
             .identity = identity,
-            .sha256 = sha256_hex(read_file(identity)),
+            .sha256 = bioseq::common::sha256_hex(read_artifact_bytes(identity)),
         });
     }
     return result;
 }
 
 [[nodiscard]] inline bool same_preparation_identity(
-    const clang_structural::preparation_module_identity& left,
-    const clang_structural::preparation_module_identity& right) {
+    const structural_analysis::dependency_module_identity& left,
+    const structural_analysis::dependency_module_identity& right) {
     return left.module_name == right.module_name
         && path_identity(left.source_path)
             == path_identity(right.source_path)
@@ -683,8 +690,8 @@ capture_prepare_file_snapshot(
 }
 
 inline void require_same_dependency_authority(
-    const clang_structural::dependency_compilation_authority& expected,
-    const clang_structural::dependency_compilation_authority& actual,
+    const structural_analysis::dependency_compilation_authority& expected,
+    const structural_analysis::dependency_compilation_authority& actual,
     std::string_view role) {
     const bool roots_match =
         expected.root_source_paths.size()
@@ -716,7 +723,7 @@ inline void require_same_dependency_authority(
 }
 
 struct prepare_entry_authority {
-    clang_structural::dependency_compilation_authority dependency;
+    structural_analysis::dependency_compilation_authority dependency;
     prepare_file_snapshot raw_compile_database;
     prepare_file_snapshot clang_binary;
     prepare_file_snapshot clang_scan_deps;
@@ -749,7 +756,7 @@ seal_prepare_entry_authority(
         command, output_authority);
     prepare_entry_authority authority{
         .dependency =
-            clang_structural::derive_dependency_compilation_authority(
+            structural_analysis::derive_dependency_compilation_authority(
                 {command.source},
                 command.signature_source,
                 command.raw_compile_database,
@@ -789,7 +796,7 @@ inline void revalidate_prepare_entry_authority(
     const prepare_command_line& command,
     const prepare_output_authority& output_authority,
     const prepare_entry_authority& expected,
-    const clang_structural::prepared_compilation_environment*
+    const structural_analysis::dependency_compilation_environment*
         prepared = nullptr) {
     validate_prepare_fixed_output_paths(
         command, output_authority);
@@ -818,8 +825,8 @@ inline void revalidate_prepare_entry_authority(
         throw std::runtime_error(
             "PREPARE raw compile database or tool authority changed");
     }
-    const clang_structural::dependency_compilation_authority actual =
-        clang_structural::derive_dependency_compilation_authority(
+    const structural_analysis::dependency_compilation_authority actual =
+        structural_analysis::derive_dependency_compilation_authority(
             {command.source},
             command.signature_source,
             command.raw_compile_database,
@@ -830,7 +837,7 @@ inline void revalidate_prepare_entry_authority(
         if (prepared->canonical_token_import_sha256
                 != expected.dependency.canonical_token_import_sha256
             || prepared->authority
-                != clang_structural::dependency_compilation_manifest_authority(
+                != structural_analysis::dependency_compilation_manifest_authority(
                     "core", expected.dependency)
             || prepared->dependency_root_sources.size()
                 != expected.dependency.root_source_paths.size()
@@ -848,7 +855,7 @@ inline void revalidate_prepare_entry_authority(
     }
 }
 
-inline void require_prepare_document(
+inline void require_prepare_content(
     const prepare_command_line& command,
     const prepare_output_authority& authority,
     const std::filesystem::path& configured_path,
@@ -858,7 +865,7 @@ inline void require_prepare_document(
     const std::filesystem::path path =
         canonical_prepare_output(authority, configured_path);
     require_regular_file(path, role);
-    if (read_file(path) != expected_content) {
+    if (read_artifact_bytes(path) != expected_content) {
         throw std::runtime_error(
             "published PREPARE " + std::string{role}
             + " changed before completion");
@@ -880,8 +887,8 @@ inline void require_prepare_document(
     ensure_prepare_metadata_directory(command, output_authority);
     const prepare_entry_authority entry_authority =
         seal_prepare_entry_authority(command, output_authority);
-    clang_structural::prepared_compilation_environment prepared =
-        clang_structural::prepare_dependency_compilation_environment(
+    structural_analysis::dependency_compilation_environment prepared =
+        structural_analysis::prepare_dependency_compilation_environment(
             entry_authority.dependency.canonical_inputs.front()
                 .source_path,
             entry_authority.dependency.signature_donor.source_path,
@@ -902,7 +909,7 @@ inline void require_prepare_document(
     revalidate_prepare_entry_authority(
         command, output_authority, entry_authority, &prepared);
     const std::string action_trace =
-        clang_structural::render_preparation_action_trace(prepared);
+        structural_analysis::render_frontend_action_trace(prepared);
     prepared.dependencies.push_back(command.source);
     prepared.dependencies.push_back(command.signature_source);
     const std::string depfile = render_depfile(
@@ -928,17 +935,17 @@ inline void require_prepare_document(
         canonical_prepare_output(
             output_authority, command.pcm_manifest);
     const std::string manifest_authority =
-        clang_structural::dependency_compilation_manifest_authority(
+        structural_analysis::dependency_compilation_manifest_authority(
             "core", entry_authority.dependency);
-    clang_structural::validate_dependency_compilation_authority_seal(
+    structural_analysis::validate_dependency_compilation_roots(
         entry_authority.dependency, compile_database);
     const std::vector<prepare_file_snapshot>
         pre_validation_completion_snapshot =
             capture_prepare_file_snapshot(
                 prepared.completion_authority_files,
                 "completion authority dependency");
-    const clang_structural::prepared_compilation_validation validated =
-        clang_structural::validate_prepared_compilation_environment(
+    const structural_analysis::dependency_compilation_validation validated =
+        structural_analysis::validate_dependency_compilation_environment(
             entry_authority.dependency.root_source_paths,
             compile_database,
             output_authority.canonical_root,
@@ -970,9 +977,9 @@ inline void require_prepare_document(
         || validated.compiler_profile != prepared.compiler_profile
         || validated.authority != prepared.authority
         || validated.owned_compile_database_sha256
-            != sha256_hex(prepared.compile_database_json)
+            != bioseq::common::sha256_hex(prepared.compile_database_json)
         || validated.manifest_sha256
-            != sha256_hex(prepared.pcm_manifest_json)
+            != bioseq::common::sha256_hex(prepared.pcm_manifest_json)
         || validated.clang_binary_sha256
             != prepared.clang_binary_sha256
         || validated.clang_scan_deps_sha256
@@ -987,7 +994,7 @@ inline void require_prepare_document(
     write_prepare_output(
         command, output_authority, command.action_trace, action_trace);
     static_cast<void>(
-        clang_structural::validate_preparation_action_trace(
+        structural_analysis::validate_frontend_action_trace(
             canonical_prepare_output(
                 output_authority, command.action_trace),
             entry_authority.dependency,
@@ -1001,25 +1008,25 @@ inline void require_prepare_document(
         prepare_publication_checkpoint::before_completion_stamp);
     revalidate_prepare_entry_authority(
         command, output_authority, entry_authority, &prepared);
-    require_prepare_document(
+    require_prepare_content(
         command,
         output_authority,
         command.compile_database_output,
         prepared.compile_database_json,
         "compile database");
-    require_prepare_document(
+    require_prepare_content(
         command,
         output_authority,
         command.pcm_manifest,
         prepared.pcm_manifest_json,
         "PCM manifest");
-    require_prepare_document(
+    require_prepare_content(
         command,
         output_authority,
         command.action_trace,
         action_trace,
         "action trace");
-    require_prepare_document(
+    require_prepare_content(
         command,
         output_authority,
         command.depfile,
@@ -1035,10 +1042,10 @@ inline void require_prepare_document(
         "canonical_token_import_sha256="
             + prepared.canonical_token_import_sha256 + "\n"
         "compile_database_sha256="
-            + sha256_hex(prepared.compile_database_json) + "\n"
-        "pcm_manifest_sha256=" + sha256_hex(prepared.pcm_manifest_json)
+            + bioseq::common::sha256_hex(prepared.compile_database_json) + "\n"
+        "pcm_manifest_sha256=" + bioseq::common::sha256_hex(prepared.pcm_manifest_json)
             + "\nprepare_action_trace_sha256="
-            + sha256_hex(action_trace)
+            + bioseq::common::sha256_hex(action_trace)
             + "\n";
     if (capture_prepare_file_snapshot(
             prepared.completion_authority_files,
@@ -1063,7 +1070,7 @@ inline void validate_configure_handshake(
     const topology_plan& topology) {
     validate_configure_topology_digest(
         topology, command.expected_topology_digest);
-    if (configure.generator_version != generator_version
+    if (configure.generator_identity != materialization_generator_identity
         || configure.policy != template_flatten_policy
         || configure.name != command.name
         || path_identity(configure.source_path) != path_identity(command.source)
@@ -1090,18 +1097,18 @@ inline void validate_configure_handshake(
     require_regular_file(
         command.prepare_action_trace, "PREPARE action trace");
     require_regular_file(command.prepare_stamp, "PREPARE stamp");
-    const std::string preparation_action_trace_document =
-        read_file(command.prepare_action_trace);
-    validate_preparation_action_trace_stamp_binding(
-        read_file(command.prepare_stamp),
-        preparation_action_trace_document);
-    const std::string source = read_file(command.source);
-    const std::string source_sha256 = sha256_hex(source);
+    const std::string preparation_action_trace_content =
+        read_artifact_bytes(command.prepare_action_trace);
+    validate_frontend_action_trace_stamp_binding(
+        read_artifact_bytes(command.prepare_stamp),
+        preparation_action_trace_content);
+    const std::string source = read_artifact_bytes(command.source);
+    const std::string source_sha256 = bioseq::common::sha256_hex(source);
     const configure_topology_provenance configure =
         read_configure_topology_provenance(
             command.configure_topology_manifest);
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice(command.source, source);
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(command.source, source);
     materialization_region region = extract_materialization_region(
         sliced, command.output_module, source);
     topology_plan topology = build_topology_plan(std::move(region));
@@ -1111,17 +1118,17 @@ inline void validate_configure_handshake(
         topology, command.profile, command.enabled_ordinals);
     validate_entry_ownership(topology);
 
-    const clang_structural::dependency_compilation_authority
+    const structural_analysis::dependency_compilation_authority
         dependency_authority =
-            clang_structural::derive_dependency_compilation_authority(
+            structural_analysis::derive_dependency_compilation_authority(
                 {command.source},
                 command.signature_source,
                 command.compile_database,
                 "production");
-    clang_structural::validate_dependency_compilation_authority_seal(
+    structural_analysis::validate_dependency_compilation_roots(
         dependency_authority, command.compile_database);
-    const clang_structural::prepared_compilation_validation prepared =
-        clang_structural::validate_prepared_compilation_environment(
+    const structural_analysis::dependency_compilation_validation prepared =
+        structural_analysis::validate_dependency_compilation_environment(
             dependency_authority.root_source_paths,
             command.compile_database,
             command.pcm_root,
@@ -1135,13 +1142,13 @@ inline void validate_configure_handshake(
             command.llvm_config_sha256,
             command.compiler_module_inventory_sha256,
             "production",
-            clang_structural::dependency_compilation_manifest_authority(
+            structural_analysis::dependency_compilation_manifest_authority(
                 "core", dependency_authority));
     validate_scheduler_highway_prepared_closure(
         command.output_module, prepared);
-    const clang_structural::preparation_action_trace_validation
+    const structural_analysis::frontend_trace_validation
         preparation_actions =
-            clang_structural::validate_preparation_action_trace(
+            structural_analysis::validate_frontend_action_trace(
                 command.prepare_action_trace,
                 dependency_authority,
                 prepared);
@@ -1165,8 +1172,8 @@ inline void validate_configure_handshake(
         .name = command.name,
         .profile = command.profile,
         .enabled_ordinals = command.enabled_ordinals,
-        .clang_version = clang_structural::clang_api_version(),
-        .compilation_signature = sha256_hex(
+        .clang_release = structural_analysis::linked_clang_release(),
+        .compilation_signature = bioseq::common::sha256_hex(
             "bioseq_template_flatten_relocatable_prepared_closure/v1\n"
             + prepared.relocatable_compilation_signature + "\n"),
         .compiler_module_inventory_sha256 =
@@ -1177,7 +1184,7 @@ inline void validate_configure_handshake(
     std::uint32_t artifact_render_passes = 0u;
     generation_result provisional = render_generation(plan, false);
     ++artifact_render_passes;
-    std::vector<clang_structural::translation_unit> probes;
+    std::vector<structural_analysis::translation_unit> probes;
     for (const materialization_artifact& artifact : provisional.artifacts) {
         if (artifact.artifact_kind
             != materialization_artifact::kind::declaration_probe) {
@@ -1186,7 +1193,7 @@ inline void validate_configure_handshake(
         const std::filesystem::path probe_path =
             command.output_root / artifact.relative_path;
         probes.push_back(
-            clang_structural::scan_declaration_probe_from_database(
+            structural_analysis::scan_declaration_probe_from_database(
                 probe_path,
                 artifact.content,
                 command.signature_source,
@@ -1196,7 +1203,7 @@ inline void validate_configure_handshake(
     }
     validate_declaration_probes(plan.topology, probes);
     plan.declaration_probes = std::move(probes);
-    plan.frontend_actions = frontend_action_ledger{
+    plan.frontend_actions = frontend_action_counts{
         .dependency_preparation_validations = 1u,
         // One direct structural extraction plus the canonical-source scan
         // performed while re-deriving dependency authority in this command.
@@ -1209,7 +1216,7 @@ inline void validate_configure_handshake(
             static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .artifact_render_passes = artifact_render_passes + 1u,
         .body_bearing_compiler_invocations =
-            preparation_actions.summary
+            preparation_actions.counts
                 .canonical_semantic_frontend_actions,
     };
     plan.compilation_obligations = cmake_compilation_obligations{
@@ -1238,7 +1245,7 @@ inline void validate_configure_handshake(
                 : publication_artifact_class::metadata_json,
         });
     }
-    write_if_different(
+    publish_artifact_if_changed(
         command.depfile,
         render_depfile(
             command.stamp,
@@ -1264,10 +1271,12 @@ inline void validate_configure_handshake(
 
 }  // namespace detail
 
+/// Executes dependency preparation for the in-module contract partition.
 int execute_prepare_contract(prepare_command_line command) {
     return detail::execute_prepare(std::move(command));
 }
 
+/// Runs namespace-materialization contract checks.
 inline int self_test() {
     try {
         run_namespace_materialization_contract_tests();
@@ -1281,6 +1290,7 @@ inline int self_test() {
     }
 }
 
+/// Dispatches the `prepare` and `generate` command-line operations.
 inline int run(std::span<std::string_view const> args) {
     if (args.empty()
         || (args.front() != "prepare" && args.front() != "generate")) {

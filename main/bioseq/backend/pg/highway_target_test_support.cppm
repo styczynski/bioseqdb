@@ -21,8 +21,8 @@ export module bioseq.highway_target_test_support;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.highway.dispatch_contract;
-import bioseq.pg_utils;
-import bioseq.scheduler.dispatch_processor;
+import bioseq.postgres.support;
+import bioseq.postgres.scheduler.dispatch_processor;
 
 namespace {
 
@@ -49,7 +49,7 @@ struct HighwayTargetTestState {
 		|| info.planned_target == 0
 		|| info.runnable_targets
 			!= (info.compiled_targets & info.cpu_supported_targets)) {
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = "Highway test target inventory is invalid",
@@ -76,7 +76,7 @@ export namespace bioseq::pg::sql_routines {
     .from = bioseq::sql::public_role,
 })]]
 bool cpu_prepared_target_same_object_reprepare_probe() {
-	return bioseq::simd::BatchProcessor::
+	return bioseq::simd::batch_processor::
 		cpu_prepared_target_same_object_reprepare_probe();
 }
 
@@ -92,7 +92,7 @@ std::int64_t highway_baseline_runnable_targets_for_test() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return highway_baseline_runnable_targets();
 #else
-	bioseq::pg_utils::raise_sql_error(
+	bioseq::postgres::support::raise_sql_error(
 		ERRCODE_FEATURE_NOT_SUPPORTED,
 		{
 			.message = "Highway target forcing is unavailable",
@@ -118,7 +118,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	}
 	const auto target_bits = static_cast<std::uint64_t>(target);
 	if (target < 0 || !std::has_single_bit(target_bits)) {
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
 			{
 				.message = "Highway test target must be one positive bit",
@@ -126,7 +126,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	}
 	const std::int64_t baseline = highway_baseline_runnable_targets();
 	if ((baseline & target) != target) {
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
 			{
 				.message = "Highway test target is not runnable",
@@ -137,7 +137,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	}
 	const char* target_name = hwy::TargetName(target);
 	if (target_name == nullptr || std::strcmp(target_name, "Unknown") == 0) {
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = "Highway forced target has no canonical name",
@@ -153,7 +153,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 		|| forced.planned_target != target
 		|| (forced.compiled_targets & target) != target) {
 		hwy::SetSupportedTargetsForTest(0);
-		bioseq::pg_utils::raise_sql_error(
+		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
 				.message = "Highway forced-target inventory is inconsistent",
@@ -165,7 +165,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	return canonical_target_name;
 #else
 	(void)target;
-	bioseq::pg_utils::raise_sql_error(
+	bioseq::postgres::support::raise_sql_error(
 		ERRCODE_FEATURE_NOT_SUPPORTED,
 		{
 			.message = "Highway target forcing is unavailable",

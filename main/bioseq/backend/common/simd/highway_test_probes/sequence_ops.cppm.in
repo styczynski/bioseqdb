@@ -7,7 +7,7 @@
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import :sequence_ops;
 
@@ -62,7 +62,7 @@ public:
     explicit iteration_receipt(const range_t& source)
         : source_(source) {
         expected_.reserve(source.bp_size());
-        for (const auto rank : source.template iterable<BP>()) {
+        for (const auto rank : source.template iterable<logical_rank>()) {
             expected_.push_back(static_cast<std::uint8_t>(rank));
         }
     }

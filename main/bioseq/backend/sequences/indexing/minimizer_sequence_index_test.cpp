@@ -10,7 +10,7 @@
 // types are named fully-qualified.
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>
@@ -48,7 +48,7 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
 import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — hardware Vulkan skip guard
-import bioseq.gpu.vulkan.phase_c_abi;
+import bioseq.gpu.vulkan.abi;
 
 #include "index_test_fakes.h"
 

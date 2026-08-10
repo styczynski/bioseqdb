@@ -2,7 +2,7 @@
  * @file writer.cppm
  * @brief Public entry point for the IO writer.
  *
- * Mirror of `public_api.cppm` for the inverse direction. Holds the
+ * Mirror of `reader.cppm` for the inverse direction. Holds the
  * user-visible types (`sequence_writer`, `write_sequences_file`) and
  * the lock-free per-thread chunk pipeline.
  *
@@ -42,7 +42,6 @@ module;
 
 #include <hwy/highway.h>
 
-#include "common.h"
 
 #include <atomic>
 #include <cstddef>
@@ -62,12 +61,11 @@ module;
 
 export module bioseq.io.writer;
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.logging;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.io.options;
-import bioseq.io.public_api;
+import bioseq.io.reader;
 import bioseq.io.sinks;
 
 export namespace bioseq::io {
@@ -139,12 +137,12 @@ struct writer_producer_state {
 
 /// Thread-safe FASTA / FASTQ writer.
 template <sequence_alphabet alphabet_t,
-          sequence_io_file_type file_type>
+          sequence_file_format file_type>
 class sequence_writer {
 public:
     using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
-    using sequence_view_t = compact_sequence_view<alphabet_config>;
+    using sequence_view = compact_sequence_view<alphabet_config>;
     using traits = typename compact_sequence_range<alphabet_config>::traits;
     static constexpr std::size_t bits_per_char = traits::bits_per_char;
     static constexpr std::size_t letters_per_unit = traits::letters_per_unit;
@@ -220,7 +218,7 @@ public:
     /// errored.
     [[nodiscard]] bool write_record(
         std::string_view header,
-        const sequence_view_t& seq,
+        const sequence_view& seq,
         std::span<const std::uint8_t> quality = {}) {
         if (_failed.load(std::memory_order_relaxed)) return false;
 
@@ -228,7 +226,7 @@ public:
         const std::size_t total_letters =
             seq.size() * letters_per_unit - seq.padding();
 
-        if constexpr (file_type == sequence_io_file_type::FASTQ) {
+        if constexpr (file_type == sequence_file_format::fastq) {
             if (_options.strict_fastq_quality_length &&
                 quality.size() != total_letters) {
                 stamp_error(fmt::format(
@@ -253,7 +251,7 @@ public:
 
         emit_header(producer.chunk, header);
         emit_body(producer, seq, total_letters);
-        if constexpr (file_type == sequence_io_file_type::FASTQ) {
+        if constexpr (file_type == sequence_file_format::fastq) {
             // Append the FASTQ separator + qual + newline as one bulk
             // write per record. Layout: '\n' '+' '\n' <qual> '\n'.
             const std::size_t qsize = std::min(quality.size(), total_letters);
@@ -276,7 +274,7 @@ public:
         return true;
     }
 
-    /// DOC0286 §10.0c — append one record while bounding peak memory to a
+    /// Append one record while bounding peak memory to a
     /// single `max_body_bp`-letter slice. Unlike `write_record` (which
     /// decodes the whole body into one ASCII buffer — fine for ≤5 Mbp, but a
     /// 6 Gbp reference would materialise a >6 GB buffer), this emits the
@@ -289,7 +287,7 @@ public:
     /// prior/own flush error.
     [[nodiscard]] bool write_record_streamed(
         std::string_view header,
-        const sequence_view_t& seq,
+        const sequence_view& seq,
         std::size_t max_body_bp) {
         if (_failed.load(std::memory_order_relaxed)) return false;
 
@@ -305,7 +303,7 @@ public:
         emit_header(producer.chunk, header);
 
         const std::size_t wrap_width =
-            (file_type == sequence_io_file_type::FASTA)
+            (file_type == sequence_file_format::fasta)
                 ? _options.fasta_line_width
                 : 0;
         const std::size_t units_per_slice =
@@ -347,7 +345,7 @@ public:
             if (!flush_producer(producer)) return false;
         }
 
-        if constexpr (file_type == sequence_io_file_type::FASTQ) {
+        if constexpr (file_type == sequence_file_format::fastq) {
             // No quality is supplied on the streamed path; emit a Phred-0
             // ('!') quality of matching length in bounded chunks. (Quality is
             // dropped on bioseq.load anyway.) Layout: '\n' '+' '\n' <qual> '\n'.
@@ -402,7 +400,7 @@ public:
                 if (!flush_producer(producer)) return false;
             }
 
-            if constexpr (file_type == sequence_io_file_type::FASTQ) {
+            if constexpr (file_type == sequence_file_format::fastq) {
                 const auto quality_view = batch.quality(record_index);
                 if (_options.strict_fastq_quality_length &&
                     quality_view.size() != total_letters) {
@@ -511,7 +509,7 @@ private:
     inline void emit_header(writer_byte_buffer& chunk,
                              std::string_view header) {
         constexpr std::uint8_t sigil =
-            (file_type == sequence_io_file_type::FASTA)
+            (file_type == sequence_file_format::fasta)
                 ? static_cast<std::uint8_t>('>')
                 : static_cast<std::uint8_t>('@');
         std::uint8_t* dst = chunk.extend(1 + header.size() + 1);
@@ -535,11 +533,11 @@ private:
     /// the chunk is empty (or contains only complete records) before
     /// each new record begins.
     inline void emit_body(writer_producer_state& producer,
-                           const sequence_view_t& seq,
+                           const sequence_view& seq,
                            std::size_t total_letters) {
         if (total_letters == 0) return;
         const std::size_t wrap_width =
-            (file_type == sequence_io_file_type::FASTA)
+            (file_type == sequence_file_format::fasta)
                 ? _options.fasta_line_width
                 : 0;
         if (wrap_width == 0) {
@@ -596,14 +594,14 @@ private:
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = std::move(msg);
-            bioseq_log<ERR>("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}", _first_error_message);
         }
     }
     void stamp_error(const std::string& msg) {
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = msg;
-            bioseq_log<ERR>("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}", _first_error_message);
         }
     }
 
@@ -623,7 +621,7 @@ private:
 /// `batches` into it, close. Returns the count of records written or
 /// the first error.
 template <sequence_alphabet alphabet_t,
-          sequence_io_file_type file_type,
+          sequence_file_format file_type,
           typename PathLike,
           typename batch_iterable>
 [[nodiscard]] std::expected<std::size_t, std::string> write_sequences_file(

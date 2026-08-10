@@ -1,29 +1,21 @@
 /**
  * @file common/durable_file_io/staging.cppm
- * @brief Internal temporary-file staging and verification.
+ * @brief Internal staging-file creation, synchronization, and verification.
  */
 module;
 
-#include <algorithm>
-#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
-#include <filesystem>
-#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
 #include <unistd.h>
 #include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:staging;
 import :types;
@@ -35,9 +27,9 @@ import :path;
 import :positional_io;
 import :cleanup;
 
-namespace bioseq::durable_file_io::detail {
+namespace bioseq::common::durable_file_io::detail {
 
-[[nodiscard]] inline std::string unique_temporary_name(
+[[nodiscard]] inline std::string next_staging_name(
     std::string_view destination_name) {
     static std::atomic<std::uint64_t> sequence{1};
     const std::uint64_t value =
@@ -47,47 +39,47 @@ namespace bioseq::durable_file_io::detail {
         + "." + std::to_string(value);
 }
 
-struct staged_file {
+struct staged_regular_file {
     std::string name;
     regular_file_identity identity{};
 };
 
-[[nodiscard]] inline std::expected<staged_file, file_io_error> stage_bytes(
+[[nodiscard]] inline std::expected<staged_regular_file, file_error>
+stage_regular_file(
     int directory_descriptor,
     const std::string& destination_name,
     std::span<const std::byte> bytes,
-    const durable_publish_options& options,
-    const file_io_hooks& hooks,
-    const positional_io_operations& operations) {
+    const publication_options& options,
+    const fault_injection_hooks& hooks,
+    const positional_io_callbacks& callbacks) {
     if (directory_descriptor < 0
         || !valid_leaf_name(destination_name)
-        || options.mode == 0
-        || (options.mode & ~(S_IRWXU | S_IRWXG | S_IRWXO)) != 0) {
+        || !valid_creation_mode(options.mode)) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_temporary,
+            file_error_code::invalid_argument,
+            file_operation::create_staging_file,
             EINVAL));
     }
 #if !defined(O_NOFOLLOW)
     static_cast<void>(bytes);
     static_cast<void>(hooks);
-    static_cast<void>(operations);
+    static_cast<void>(callbacks);
     return std::unexpected(make_error(
-        file_io_errc::unsupported_platform,
-        file_io_operation::create_temporary,
+        file_error_code::unsupported_platform,
+        file_operation::create_staging_file,
         0));
 #else
     constexpr std::size_t maximum_attempts = 64;
-    std::string temporary{};
+    std::string staging_name{};
     int raw_descriptor = -1;
     for (std::size_t attempt = 0; attempt < maximum_attempts; ++attempt) {
-        temporary = unique_temporary_name(destination_name);
-        if (const int injected = injected_error(
-                hooks, file_io_operation::create_temporary);
+        staging_name = next_staging_name(destination_name);
+        if (const int injected = injected_errno(
+                hooks, file_operation::create_staging_file);
             injected != 0) {
             return std::unexpected(make_error(
-                file_io_errc::open_failed,
-                file_io_operation::create_temporary,
+                file_error_code::file_open_failed,
+                file_operation::create_staging_file,
                 injected));
         }
         int flags = O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW;
@@ -96,7 +88,7 @@ struct staged_file {
 #endif
         raw_descriptor = ::openat(
             directory_descriptor,
-            temporary.c_str(),
+            staging_name.c_str(),
             flags,
             options.mode);
         if (raw_descriptor >= 0) {
@@ -104,192 +96,192 @@ struct staged_file {
         }
         if (errno != EEXIST) {
             return std::unexpected(make_error(
-                file_io_errc::open_failed,
-                file_io_operation::create_temporary,
+                file_error_code::file_open_failed,
+                file_operation::create_staging_file,
                 errno));
         }
     }
     if (raw_descriptor < 0) {
         return std::unexpected(make_error(
-            file_io_errc::open_failed,
-            file_io_operation::create_temporary,
+            file_error_code::file_open_failed,
+            file_operation::create_staging_file,
             EEXIST));
     }
     file_descriptor descriptor{raw_descriptor};
-    auto pinned_identity = capture_identity(
-        descriptor.get(), file_io_operation::stat_before, {});
+    auto pinned_identity = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, {});
     if (!pinned_identity.has_value()) {
-        const file_io_error primary = pinned_identity.error();
+        const file_error primary = pinned_identity.error();
         descriptor.reset();
         auto removed = remove_name_at(
             directory_descriptor,
-            temporary,
+            staging_name,
             publication_state::unchanged,
             hooks);
         return std::unexpected(
             removed.has_value() ? primary : removed.error());
     }
-    auto identity = capture_identity(
-        descriptor.get(), file_io_operation::stat_before, hooks);
+    auto identity = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, hooks);
     const mode_t actual_permissions = identity.has_value()
         ? static_cast<mode_t>(
-            identity->mode & (S_IRWXU | S_IRWXG | S_IRWXO))
+            identity->mode & creation_permission_mask)
         : 0;
     if (!identity.has_value()
         || identity->link_count != 1
         || (actual_permissions & ~options.mode) != 0) {
-        const file_io_error primary = identity.has_value()
+        const file_error primary = identity.has_value()
             ? make_error(
-                file_io_errc::not_regular_file,
-                file_io_operation::stat_before,
+                file_error_code::not_regular_file,
+                file_operation::inspect_before_io,
                 0)
             : identity.error();
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::positional_write);
+    if (const int injected = injected_errno(
+            hooks, file_operation::positional_write);
         injected != 0) {
-        const file_io_error primary = make_error(
-            file_io_errc::write_failed,
-            file_io_operation::positional_write,
+        const file_error primary = make_error(
+            file_error_code::write_failed,
+            file_operation::positional_write,
             injected);
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
-    if (auto written = positional_write_all(
-            descriptor.get(), bytes, 0, operations);
+    if (auto written = write_all_at(
+            descriptor.get(), bytes, 0, callbacks);
         !written.has_value()) {
-        const file_io_error primary = written.error();
+        const file_error primary = written.error();
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
-    if (auto synced = sync_descriptor(
+    if (auto synced = fsync_descriptor(
             descriptor.get(),
-            file_io_operation::sync_file,
+            file_operation::fsync_file,
             hooks);
         !synced.has_value()) {
-        const file_io_error primary = synced.error();
+        const file_error primary = synced.error();
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
-    auto final_identity = capture_identity(
-        descriptor.get(), file_io_operation::stat_after, hooks);
+    auto final_identity = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!final_identity.has_value()
-        || !same_file_object(*identity, *final_identity)
+        || !same_regular_file_object(*identity, *final_identity)
         || final_identity->size != bytes.size()) {
-        const file_io_error primary = final_identity.has_value()
+        const file_error primary = final_identity.has_value()
             ? make_error(
-                file_io_errc::identity_changed,
-                file_io_operation::stat_after,
+                file_error_code::identity_changed,
+                file_operation::inspect_after_io,
                 0)
             : final_identity.error();
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::close_file);
+    if (const int injected = injected_errno(
+            hooks, file_operation::close_file);
         injected != 0) {
-        const file_io_error primary = make_error(
-            file_io_errc::close_failed,
-            file_io_operation::close_file,
+        const file_error primary = make_error(
+            file_error_code::descriptor_close_failed,
+            file_operation::close_file,
             injected);
         descriptor.reset();
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             primary,
             hooks));
     }
     if (auto closed = descriptor.close(); !closed.has_value()) {
-        return std::unexpected(cleanup_error_or(
+        return std::unexpected(staging_cleanup_error(
             directory_descriptor,
-            temporary,
+            staging_name,
             *pinned_identity,
             publication_state::unchanged,
             closed.error(),
             hooks));
     }
-    return staged_file{
-        .name = std::move(temporary),
+    return staged_regular_file{
+        .name = std::move(staging_name),
         .identity = *final_identity,
     };
 #endif
 }
 
-[[nodiscard]] inline std::expected<regular_file_identity, file_io_error>
+[[nodiscard]] inline std::expected<regular_file_identity, file_error>
 sync_existing_regular_file_at(
     int directory_descriptor,
     const std::string& name,
-    const file_io_hooks& hooks,
+    const fault_injection_hooks& hooks,
     const regular_file_identity* expected = nullptr) {
     auto opened = open_regular_file_at(
         directory_descriptor,
         name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto identity = capture_identity(
-        descriptor.get(), file_io_operation::stat_before, hooks);
+    auto identity = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, hooks);
     if (!identity.has_value()) {
         return std::unexpected(identity.error());
     }
     if (expected != nullptr && *identity != *expected) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_before,
+            file_error_code::identity_changed,
+            file_operation::inspect_before_io,
             0));
     }
-    if (auto synced = sync_descriptor(
-            descriptor.get(), file_io_operation::sync_file, hooks);
+    if (auto synced = fsync_descriptor(
+            descriptor.get(), file_operation::fsync_file, hooks);
         !synced.has_value()) {
         return std::unexpected(synced.error());
     }
-    auto after = capture_identity(
-        descriptor.get(), file_io_operation::stat_after, hooks);
+    auto after = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!after.has_value()) {
         return std::unexpected(after.error());
     }
     if (*after != *identity) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     if (auto closed = descriptor.close(); !closed.has_value()) {
@@ -299,54 +291,87 @@ sync_existing_regular_file_at(
         directory_descriptor,
         name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!current_opened.has_value()) {
         return std::unexpected(current_opened.error());
     }
     file_descriptor current_descriptor = std::move(*current_opened);
-    auto current = capture_identity(
-        current_descriptor.get(), file_io_operation::stat_after, hooks);
+    auto current = capture_regular_file_identity_snapshot(
+        current_descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
     if (*current != *after) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     return *after;
 }
 
-[[nodiscard]] inline std::expected<void, file_io_error>
-verify_staged_path(
+[[nodiscard]] inline std::expected<void, file_error>
+verify_staged_file(
     int directory_descriptor,
-    const staged_file& staged,
-    const file_io_hooks& hooks) {
+    const staged_regular_file& staged,
+    const fault_injection_hooks& hooks) {
     auto opened = open_regular_file_at(
         directory_descriptor,
         staged.name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto current = capture_identity(
-        descriptor.get(), file_io_operation::stat_after, hooks);
+    auto current = capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
     if (*current != staged.identity) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     return {};
 }
 
+/** Stage, fsync, close, reopen, and identity-check one publication payload. */
+[[nodiscard]] inline std::expected<staged_regular_file, file_error>
+stage_verified_regular_file(
+    int directory_descriptor,
+    const std::string& destination_name,
+    std::span<const std::byte> bytes,
+    const publication_options& options,
+    const fault_injection_hooks& hooks,
+    const positional_io_callbacks& callbacks) {
+    auto staged = stage_regular_file(
+        directory_descriptor,
+        destination_name,
+        bytes,
+        options,
+        hooks,
+        callbacks);
+    if (!staged.has_value()) {
+        return std::unexpected(staged.error());
+    }
+    if (auto verified = verify_staged_file(
+            directory_descriptor, *staged, hooks);
+        !verified.has_value()) {
+        return std::unexpected(staging_cleanup_error(
+            directory_descriptor,
+            staged->name,
+            staged->identity,
+            verified.error().publication,
+            verified.error(),
+            hooks));
+    }
+    return std::move(*staged);
+}
 
-}  // namespace bioseq::durable_file_io::detail
+
+}  // namespace bioseq::common::durable_file_io::detail

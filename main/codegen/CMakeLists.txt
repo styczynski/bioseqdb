@@ -153,13 +153,12 @@ set(_codegen_src "${CMAKE_CURRENT_SOURCE_DIR}")
 # Shared support footprint, always compiled.
 set(_codegen_module_files
   "${_codegen_src}/support/diagnostics.cppm"
-  "${_codegen_src}/support/text.cppm"
-  "${_codegen_src}/support/artifact_store.cppm"
-  "${_codegen_src}/support/sha256.cppm"
+  "${_codegen_src}/support/source_text.cppm"
+  "${_codegen_src}/support/artifact_io.cppm"
   "${_codegen_src}/support/index.cppm"
   "${_codegen_src}/cli.cppm"
   "${_codegen_src}/index.cppm"
-  "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/hashing.cppm")
+  "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/hashing/index.cppm")
 set(_codegen_base_dirs
   "${_codegen_src}"
   "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq"
@@ -336,7 +335,6 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/safety/fact_producer_contract_tests.cppm"
     "${_codegen_src}/safety/runtime_matrix.cppm"
     "${_codegen_src}/safety/dso.cppm"
-    "${_codegen_src}/safety/fmgr_ledger.cppm"
     "${_codegen_src}/safety/analyzer_contract_tests.cppm"
     "${_codegen_src}/safety/contract_tests.cppm"
     "${_codegen_src}/safety/cli.cppm"
@@ -345,35 +343,23 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/sql/annotation_model/options.cppm"
     "${_codegen_src}/sql/annotation_model/validation.cppm"
     "${_codegen_src}/sql/annotation_model/index.cppm"
-    "${_codegen_src}/sql/annotation_model/migration.cppm"
     "${_codegen_src}/sql/signature.cppm"
     "${_codegen_src}/sql/collector/model.cppm"
     "${_codegen_src}/sql/collector/options.cppm"
     "${_codegen_src}/sql/collector/gucs.cppm"
     "${_codegen_src}/sql/collector/index.cppm"
     "${_codegen_src}/sql/graph/model.cppm"
-    "${_codegen_src}/sql/graph/compatibility.cppm"
-    "${_codegen_src}/sql/graph/fmgr.cppm"
     "${_codegen_src}/sql/graph/index.cppm"
-    "${_codegen_src}/sql/physical_ledger.cppm"
     "${_codegen_src}/sql/renderer/model.cppm"
     "${_codegen_src}/sql/renderer/sql.cppm"
     "${_codegen_src}/sql/renderer/cpp_facets.cppm"
     "${_codegen_src}/sql/renderer/gucs.cppm"
     "${_codegen_src}/sql/renderer/fmgr.cppm"
-    "${_codegen_src}/sql/renderer/sql_contract_tests.cppm"
-    "${_codegen_src}/sql/renderer/fmgr_contract_tests.cppm"
-    "${_codegen_src}/sql/renderer/compact_fmgr_contract_tests.cppm"
     "${_codegen_src}/sql/renderer/manifest.cppm"
     "${_codegen_src}/sql/renderer/index.cppm"
     "${_codegen_src}/sql/tests/annotation_probe.cppm"
     "${_codegen_src}/sql/model.cppm"
-    "${_codegen_src}/sql/parser.cppm"
-    "${_codegen_src}/sql/migration.cppm"
     "${_codegen_src}/sql/policy.cppm"
-    "${_codegen_src}/sql/renderer.cppm"
-    "${_codegen_src}/sql/contract_tests.cppm"
-    "${_codegen_src}/sql/guc_contract_tests.cppm"
     "${_codegen_src}/sql/index.cppm")
   string(APPEND _codegen_component_imports
     "import bioseq.codegen.safety;\n")
@@ -426,12 +412,12 @@ if(BIOSEQ_CODEGEN_ENABLE_EXTERNAL)
     "${_codegen_src}/external/builder.cppm"
     "${_codegen_src}/external/contract_tests.cppm"
     "${_codegen_src}/external/index.cppm"
-    "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/external/http_validation.cppm")
+    "${BIOSEQ_REPOSITORY_ROOT}/main/bioseq/backend/common/http/validation/index.cppm")
   list(APPEND _codegen_link_libs cppast)
   string(APPEND _codegen_component_imports "import bioseq.codegen.external;\n")
   string(APPEND _codegen_component_entries
-    "        {\"external\", &bioseq::codegen::external::self_test, "
-    "&bioseq::codegen::external::run},\n")
+    "        {\"external\", &bioseq::codegen::external::run_self_tests, "
+    "&bioseq::codegen::external::run_command},\n")
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
@@ -492,20 +478,20 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${BIOSEQ_REPOSITORY_ROOT}/main/common/libpq/index.cppm"
     "${_codegen_src}/website/model/index.cppm"
     "${_codegen_src}/website/front_matter.cppm"
-    "${_codegen_src}/website/markdown_extensions.cppm"
+    "${_codegen_src}/website/markdown_directives.cppm"
     "${_codegen_src}/website/markdown.cppm"
-    "${_codegen_src}/website/doxygen_xml.cppm"
-    "${_codegen_src}/website/clang_entity_index.cppm"
-    "${_codegen_src}/website/entity_index.cppm"
-    "${_codegen_src}/website/html_render.cppm"
-    "${_codegen_src}/website/json.cppm"
-    "${_codegen_src}/website/search.cppm"
+    "${_codegen_src}/website/doxygen_reference.cppm"
+    "${_codegen_src}/website/cpp_reference_index.cppm"
+    "${_codegen_src}/website/reference_index.cppm"
+    "${_codegen_src}/website/html_renderer.cppm"
+    "${_codegen_src}/website/serialization.cppm"
+    "${_codegen_src}/website/search_index.cppm"
     "${_codegen_src}/website/template_renderer.cppm"
-    "${_codegen_src}/website/version_assembler.cppm"
+    "${_codegen_src}/website/release_assembly.cppm"
     "${_codegen_src}/website/postgres/executor.cppm"
     "${_codegen_src}/website/postgres/catalog.cppm"
     "${_codegen_src}/website/postgres/index.cppm"
-    "${_codegen_src}/website/site_builder.cppm"
+    "${_codegen_src}/website/build_pipeline.cppm"
     "${_codegen_src}/website/contract_tests.cppm"
     "${_codegen_src}/website/index.cppm")
   list(APPEND _codegen_link_libs

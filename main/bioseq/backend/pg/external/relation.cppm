@@ -1,42 +1,20 @@
-/*-------------------------------------------------------------------------
- *
- * external/relation.cppm
- *
- * The bioseq_external table access method and its relation-option surface.
- *
- * This is the read-only, storage-free counterpart of the columnar TAM in
- * backend/pg/table/access_method.cppm. Its TableAmRoutine advertises a
- * distinct identity (GetBioseqExternalTableAmRoutine) so the planner hook
- * can recognise external relations, but every physical callback either:
- *   - defers to the CustomScan (scan_begin/rescan/getnextslot),
- *   - raises a read-only SQL error (all DML), or
- *   - is a safe no-op / zero (vacuum, size, analyze).
- * No physical storage fork is ever created and no provider is ever called
- * from this file — it imports NO external/provider module on purpose (the
- * CustomScan bridges to provider core; see scan_state.cppm).
- *
- * It also owns the `entity` / `alphabet` / `storage_width` / `chunk_bases`
- * relation options.
- *
- *-------------------------------------------------------------------------
- */
+/// @brief Read-only PostgreSQL table access method for external relations.
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <climits>
 #include <cstddef>
 
-/* Not pulled in by pg_compat.h; needed for the relation-option API below. */
 extern "C" {
 #include "access/reloptions.h"
 }
 
-export module bioseq.pg.external.relation;
+export module bioseq.postgres.external.relation;
 
 #if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
 import bioseq.codegen.sql.annotation_model;
 
-namespace bioseq::external::sql_routines {
+namespace bioseq::postgres::external::sql_routines {
 
 extern "C" {
 [[bioseq_sql::function({
@@ -58,145 +36,130 @@ PGDLLEXPORT Datum bioseq_external_handler(
     FunctionCallInfo fcinfo);
 }
 
-}  // namespace bioseq::external::sql_routines
+} // namespace bioseq::postgres::external::sql_routines
 #endif
 
-/*
- * The required `entity` option selects one of the six logical relation
- * shapes. UNSPECIFIED is the sentinel used as the enum-reloption default so a
- * missing `entity` is rejected rather than defaulting to a real entity.
- */
-export enum BioseqExternalEntityKind : int
+export namespace bioseq::postgres::external {
+
+/** @brief Logical row shape selected by a relation's required `entity` option. */
+enum class relation_entity : int
 {
-	EXTERNAL_ENTITY_UNSPECIFIED = 0,
-	EXTERNAL_ENTITY_TAXONOMY,
-	EXTERNAL_ENTITY_CATALOG,
-	EXTERNAL_ENTITY_RECORD_GENE,
-	EXTERNAL_ENTITY_RECORD_LOCATION,
-	EXTERNAL_ENTITY_SEQUENCE,
-	EXTERNAL_ENTITY_SEQUENCE_CHUNK
+	unspecified = 0,
+	taxonomy,
+	catalog,
+	record_gene,
+	record_location,
+	sequence,
+	sequence_chunk
 };
 
-/*
- * Parsed relation options. Layout follows the standard reloptions contract
- * (see StdRdOptions): first member is the varlena header, string options are
- * stored as byte offsets into the trailing region (0 == unset), and
- * enum/int options are stored inline. build_reloptions() fills this from the
- * WITH (...) clause; read it back through external_entity_kind_from_options()
- * or the GET_STRING_RELOPTION() macro for `alphabet`.
+/**
+ * @brief PostgreSQL varlena payload for external-relation options.
+ *
+ * Field order and representation are PostgreSQL reloptions ABI: `vl_len_`
+ * remains first, string values are offsets into trailing storage, and numeric
+ * values are stored inline.
  */
-export struct BioseqExternalRelationOptions
+struct relation_options
 {
-	int32 vl_len_;      /* varlena header — do not touch directly */
-	int   entity;       /* BioseqExternalEntityKind (enum symbol_val) */
-	int   alphabet;     /* offset of `alphabet` string; 0 when unset */
-	int   storage_width;/* sequence storage unit width; 0 when unset */
-	int   chunk_bases;  /* sequence_chunk length in bases; 0 when unset */
+	int32 vl_len_;
+	int entity;
+	int alphabet;
+	int storage_width;
+	int chunk_bases;
 };
 
-/*
- * Parse `reloptions` into a BioseqExternalRelationOptions bytea. Intended to
- * be the relation-option parser for bioseq_external relations; the integrator
- * routes DDL WITH-option parsing here (via the existing table-options hook)
- * so rel->rd_options holds this struct for external relations. Registration
- * of the option names happens in bioseq_external_tableam_init().
- */
-export bytea *bioseq_external_reloptions(Datum reloptions, bool validate);
+/** @brief Parses a `WITH (...)` datum into PostgreSQL-owned relation options. */
+[[nodiscard]] bytea *parse_relation_options(Datum options, bool validate);
 
-/*
- * Return the entity kind for a bioseq_external relation, raising a DDL/usage
- * error when the required `entity` option is missing or unknown. Only valid
- * on relations that use this AM (guard with relation_uses_bioseq_external_am).
- */
-export BioseqExternalEntityKind external_entity_kind_from_options(Relation rel);
+/** @brief Returns the required logical entity or raises a PostgreSQL error. */
+[[nodiscard]] relation_entity entity_from_options(Relation relation);
 
-/* Distinct TAM identity; also the value the planner hook compares against. */
-export const TableAmRoutine *GetBioseqExternalTableAmRoutine(void);
+/** @brief Returns the stable `TableAmRoutine` registered for external tables. */
+[[nodiscard]] const TableAmRoutine *table_access_method() noexcept;
 
-/* True iff `rel` uses the bioseq_external access method. */
-export bool relation_uses_bioseq_external_am(Relation rel);
+/** @brief Tests whether a relation uses the external table access method. */
+[[nodiscard]] bool uses_table_access_method(Relation relation) noexcept;
 
-/* Register the relation-option kind + option names. Called once from _PG_init. */
+/** @brief Returns the SQL option spelling for a logical relation entity. */
+[[nodiscard]] const char *to_string(relation_entity entity) noexcept;
+
+} // namespace bioseq::postgres::external
+
+/** Registers the external table access method's relation options. */
 extern "C" void bioseq_external_tableam_init(void);
 
 /* ======================================================================== */
 /* Relation options                                                          */
 /* ======================================================================== */
 
+namespace bioseq::postgres::external {
+
 namespace {
 
 /* Allocated in bioseq_external_tableam_init(); 0 until then. */
-relopt_kind bioseq_external_relopt_kind = static_cast<relopt_kind>(0);
+relopt_kind relation_option_kind = static_cast<relopt_kind>(0);
 
 /* Acceptable `entity` values, null-terminated as the API requires. */
-relopt_enum_elt_def bioseq_external_entity_members[] = {
-	{ "taxonomy",        EXTERNAL_ENTITY_TAXONOMY },
-	{ "catalog",         EXTERNAL_ENTITY_CATALOG },
-	{ "record_gene",     EXTERNAL_ENTITY_RECORD_GENE },
-	{ "record_location", EXTERNAL_ENTITY_RECORD_LOCATION },
-	{ "sequence",        EXTERNAL_ENTITY_SEQUENCE },
-	{ "sequence_chunk",  EXTERNAL_ENTITY_SEQUENCE_CHUNK },
+relopt_enum_elt_def entity_option_values[] = {
+	{ "taxonomy",        static_cast<int>(relation_entity::taxonomy) },
+	{ "catalog",         static_cast<int>(relation_entity::catalog) },
+	{ "record_gene",     static_cast<int>(relation_entity::record_gene) },
+	{ "record_location", static_cast<int>(relation_entity::record_location) },
+	{ "sequence",        static_cast<int>(relation_entity::sequence) },
+	{ "sequence_chunk",  static_cast<int>(relation_entity::sequence_chunk) },
 	{ nullptr,           0 }
 };
 
-/* Maps each option name to its field in BioseqExternalRelationOptions. */
-const relopt_parse_elt bioseq_external_relopt_tab[] = {
-	{ "entity",        RELOPT_TYPE_ENUM,   offsetof(BioseqExternalRelationOptions, entity) },
-	{ "alphabet",      RELOPT_TYPE_STRING, offsetof(BioseqExternalRelationOptions, alphabet) },
-	{ "storage_width", RELOPT_TYPE_INT,    offsetof(BioseqExternalRelationOptions, storage_width) },
-	{ "chunk_bases",   RELOPT_TYPE_INT,    offsetof(BioseqExternalRelationOptions, chunk_bases) },
+const relopt_parse_elt relation_option_fields[] = {
+	{ "entity", RELOPT_TYPE_ENUM, offsetof(relation_options, entity) },
+	{ "alphabet", RELOPT_TYPE_STRING, offsetof(relation_options, alphabet) },
+	{ "storage_width", RELOPT_TYPE_INT,
+	  offsetof(relation_options, storage_width) },
+	{ "chunk_bases", RELOPT_TYPE_INT,
+	  offsetof(relation_options, chunk_bases) },
 };
 
 /*
- * Light validator for the `alphabet` string option. Kept dependency-light on
- * purpose: it only rejects an empty value. The integrator tightens this to
- * check the registered alphabet set (e.g. dna5) once the sequence/alphabet
- * modules are in scope — doing so here would pull an alphabet module into the
- * otherwise self-contained table-AM translation unit.
+ * PostgreSQL invokes string validators for both the null default and supplied
+ * values. Alphabet interpretation belongs to sequence materialization, so the
+ * relation boundary accepts the stored spelling without changing it.
  */
 void
-validate_bioseq_external_alphabet(const char *value)
+accept_alphabet_option(const char *value)
 {
-	/*
-	 * PostgreSQL calls this validator once at registration time with the option
-	 * default (NULL here) to sanity-check it, and again for any user-supplied
-	 * value. A NULL/empty value is the unset default and must be accepted, or
-	 * add_string_reloption() in bioseq_external_tableam_init() would raise during
-	 * _PG_init and break CREATE EXTENSION. The concrete alphabet set is enforced
-	 * by the sequence data plane; this layer accepts any non-null value.
-	 */
 	(void) value;
 }
 
 } // namespace
 
 bytea *
-bioseq_external_reloptions(Datum reloptions, bool validate)
+parse_relation_options(Datum options, bool validate)
 {
 	return static_cast<bytea *>(
-		build_reloptions(reloptions, validate, bioseq_external_relopt_kind,
-						 sizeof(BioseqExternalRelationOptions),
-						 bioseq_external_relopt_tab,
-						 lengthof(bioseq_external_relopt_tab)));
+		build_reloptions(options, validate, relation_option_kind,
+						 sizeof(relation_options), relation_option_fields,
+						 lengthof(relation_option_fields)));
 }
 
-BioseqExternalEntityKind
-external_entity_kind_from_options(Relation rel)
+relation_entity
+entity_from_options(Relation relation)
 {
-	BioseqExternalRelationOptions *opts =
-		reinterpret_cast<BioseqExternalRelationOptions *>(rel->rd_options);
+	relation_options *options =
+		reinterpret_cast<relation_options *>(relation->rd_options);
 
-	if (opts == nullptr || opts->entity == EXTERNAL_ENTITY_UNSPECIFIED)
+	if (options == nullptr ||
+		options->entity == static_cast<int>(relation_entity::unspecified))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("bioseq_external relation \"%s\" is missing the required \"entity\" option",
-						RelationGetRelationName(rel)),
+						RelationGetRelationName(relation)),
 				 errhint("Valid entity values are taxonomy, catalog, record_gene, "
 						 "record_location, sequence, and sequence_chunk.")));
 	}
 
-	return static_cast<BioseqExternalEntityKind>(opts->entity);
+	return static_cast<relation_entity>(options->entity);
 }
 
 /* ======================================================================== */
@@ -207,7 +170,7 @@ namespace {
 
 /* A physical scan callback fired: the CustomScan must own external reads. */
 [[noreturn]] void
-external_requires_custom_scan()
+raise_custom_scan_required()
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -220,7 +183,7 @@ external_requires_custom_scan()
 
 /* Any write path fired against an inherently read-only external relation. */
 [[noreturn]] void
-external_read_only()
+raise_read_only()
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -230,7 +193,7 @@ external_read_only()
 
 /* An unsupported physical capability (index/parallel/sample/rewrite) fired. */
 [[noreturn]] void
-external_not_supported(const char *feature)
+raise_unsupported_operation(const char *feature)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -250,7 +213,7 @@ namespace {
 /* --- slot ops: virtual slots, as the CustomScan produces --------------- */
 
 const TupleTableSlotOps *
-bioseq_external_slot_callbacks(Relation relation)
+slot_callbacks(Relation relation)
 {
 	return &TTSOpsVirtual;
 }
@@ -258,94 +221,94 @@ bioseq_external_slot_callbacks(Relation relation)
 /* --- sequential scan: owned by the CustomScan -------------------------- */
 
 TableScanDesc
-bioseq_external_scan_begin(Relation relation, Snapshot snapshot,
+begin_physical_scan(Relation relation, Snapshot snapshot,
 						   int nkeys, ScanKey key,
 						   ParallelTableScanDesc parallel_scan,
 						   uint32 flags)
 {
-	external_requires_custom_scan();
+	raise_custom_scan_required();
 }
 
 void
-bioseq_external_scan_end(TableScanDesc scan)
+end_physical_scan(TableScanDesc scan)
 {
 	/* Idempotent no-op: scan_begin never returns a descriptor, so there is
 	 * nothing to tear down. Safe to call regardless. */
 }
 
 void
-bioseq_external_rescan(TableScanDesc scan, ScanKey key, bool set_params,
+rescan_physical_scan(TableScanDesc scan, ScanKey key, bool set_params,
 					   bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
-	external_requires_custom_scan();
+	raise_custom_scan_required();
 }
 
 bool
-bioseq_external_getnextslot(TableScanDesc scan, ScanDirection direction,
+next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 							TupleTableSlot *slot)
 {
-	external_requires_custom_scan();
+	raise_custom_scan_required();
 }
 
 /* --- parallel scan: external paths are always non-parallel ------------- */
 
 Size
-bioseq_external_parallelscan_estimate(Relation rel)
+estimate_parallel_scan(Relation rel)
 {
-	external_not_supported("parallel scan");
+	raise_unsupported_operation("parallel scan");
 }
 
 Size
-bioseq_external_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
+initialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
-	external_not_supported("parallel scan");
+	raise_unsupported_operation("parallel scan");
 }
 
 void
-bioseq_external_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
+reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
-	external_not_supported("parallel scan");
+	raise_unsupported_operation("parallel scan");
 }
 
 /* --- index fetch: external relations reject index DDL ------------------ */
 
 IndexFetchTableData *
-bioseq_external_index_fetch_begin(Relation rel)
+begin_index_fetch(Relation rel)
 {
-	external_not_supported("index scan");
+	raise_unsupported_operation("index scan");
 }
 
 void
-bioseq_external_index_fetch_reset(IndexFetchTableData *scan)
+reset_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
 void
-bioseq_external_index_fetch_end(IndexFetchTableData *scan)
+end_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
 bool
-bioseq_external_index_fetch_tuple(IndexFetchTableData *scan, ItemPointer tid,
+fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot,
 								  bool *call_again, bool *all_dead)
 {
-	external_not_supported("index scan");
+	raise_unsupported_operation("index scan");
 }
 
 /* --- tuple fetch / tid / snapshot -------------------------------------- */
 
 bool
-bioseq_external_fetch_row_version(Relation relation, ItemPointer tid,
+fetch_row_version(Relation relation, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot)
 {
-	external_requires_custom_scan();
+	raise_custom_scan_required();
 }
 
 bool
-bioseq_external_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 {
 	/* No physical tuples exist; a tid is never valid. Returning false (rather
 	 * than raising) keeps predicate-style callers well-behaved. */
@@ -353,13 +316,13 @@ bioseq_external_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 }
 
 void
-bioseq_external_get_latest_tid(TableScanDesc scan, ItemPointer tid)
+get_latest_tuple_identifier(TableScanDesc scan, ItemPointer tid)
 {
-	external_not_supported("tuple version chains");
+	raise_unsupported_operation("tuple version chains");
 }
 
 bool
-bioseq_external_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
+tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 										 Snapshot snapshot)
 {
 	/* No stored tuple can satisfy a snapshot. */
@@ -367,7 +330,7 @@ bioseq_external_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 }
 
 TransactionId
-bioseq_external_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
+delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
 	/* External relations have no indexes; nothing to delete. */
 	delstate->ndeltids = 0;
@@ -377,70 +340,70 @@ bioseq_external_index_delete_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 /* --- all DML is rejected (read-only) ----------------------------------- */
 
 void
-bioseq_external_tuple_insert(Relation relation, TupleTableSlot *slot,
+insert_tuple(Relation relation, TupleTableSlot *slot,
 							 CommandId cid, int options, BulkInsertState bistate)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 void
-bioseq_external_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
+insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										 CommandId cid, int options,
 										 BulkInsertState bistate, uint32 specToken)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 void
-bioseq_external_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
+complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										   uint32 specToken, bool succeeded)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 void
-bioseq_external_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
+insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 							 CommandId cid, int options, BulkInsertState bistate)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 TM_Result
-bioseq_external_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
+delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,
 							 TM_FailureData *tmfd, bool changingPart)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 TM_Result
-bioseq_external_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
+update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *tmfd,
 							 LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 TM_Result
-bioseq_external_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
+lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 						   TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 						   LockWaitPolicy wait_policy, uint8 flags,
 						   TM_FailureData *tmfd)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 void
-bioseq_external_finish_bulk_insert(Relation relation, int options)
+finish_bulk_insert(Relation relation, int options)
 {
-	external_read_only();
+	raise_read_only();
 }
 
 /* --- storage lifecycle: validate, but create no physical storage ------- */
 
 void
-bioseq_external_relation_set_new_filelocator(Relation rel,
+set_new_file_locator(Relation rel,
 											 const RelFileLocator *newrlocator,
 											 char persistence,
 											 TransactionId *freezeXid,
@@ -453,15 +416,10 @@ bioseq_external_relation_set_new_filelocator(Relation rel,
 				 errmsg("bioseq_external relations cannot be TEMPORARY")));
 	}
 
-	/*
-	 * Validate the options that were parsed into rd_options for this relation
-	 * (a missing/unknown entity is a DDL error). When rd_options is null the
-	 * WITH clause was absent entirely; the integrator's DDL/table-options hook
-	 * is the authoritative gate for that case, so we do not hard-fail here.
-	 */
+	/* Validate an attached option payload without creating physical storage. */
 	if (rel->rd_options != nullptr)
 	{
-		(void) external_entity_kind_from_options(rel);
+		(void) entity_from_options(rel);
 	}
 
 	/*
@@ -474,19 +432,19 @@ bioseq_external_relation_set_new_filelocator(Relation rel,
 }
 
 void
-bioseq_external_relation_nontransactional_truncate(Relation rel)
+truncate_nontransactional(Relation rel)
 {
-	external_not_supported("TRUNCATE");
+	raise_unsupported_operation("TRUNCATE");
 }
 
 void
-bioseq_external_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
+copy_relation_data(Relation rel, const RelFileLocator *newrlocator)
 {
-	external_not_supported("storage rewrite");
+	raise_unsupported_operation("storage rewrite");
 }
 
 void
-bioseq_external_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
+copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 										  Relation OldIndex, bool use_sort,
 										  TransactionId OldestXmin,
 										  TransactionId *xid_cutoff,
@@ -495,11 +453,11 @@ bioseq_external_relation_copy_for_cluster(Relation OldTable, Relation NewTable,
 										  double *tups_vacuumed,
 										  double *tups_recently_dead)
 {
-	external_not_supported("CLUSTER / VACUUM FULL");
+	raise_unsupported_operation("CLUSTER / VACUUM FULL");
 }
 
 void
-bioseq_external_relation_vacuum(Relation rel, VacuumParams *params,
+vacuum_relation(Relation rel, VacuumParams *params,
 								BufferAccessStrategy bstrategy)
 {
 	/* Safe no-op: external relations have zero physical pages, so VACUUM and
@@ -509,14 +467,14 @@ bioseq_external_relation_vacuum(Relation rel, VacuumParams *params,
 /* --- analyze: no local rows, no remote I/O ----------------------------- */
 
 bool
-bioseq_external_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
+next_analyze_block(TableScanDesc scan, ReadStream *stream)
 {
 	/* No physical blocks to sample. */
 	return false;
 }
 
 bool
-bioseq_external_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
+next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
 										double *liverows, double *deadrows,
 										TupleTableSlot *slot)
 {
@@ -527,7 +485,7 @@ bioseq_external_scan_analyze_next_tuple(TableScanDesc scan, TransactionId Oldest
 /* --- index build/validate: external relations reject index DDL --------- */
 
 double
-bioseq_external_index_build_range_scan(Relation table_rel, Relation index_rel,
+build_index_range_scan(Relation table_rel, Relation index_rel,
 									   IndexInfo *index_info, bool allow_sync,
 									   bool anyvisible, bool progress,
 									   BlockNumber start_blockno,
@@ -535,48 +493,43 @@ bioseq_external_index_build_range_scan(Relation table_rel, Relation index_rel,
 									   IndexBuildCallback callback,
 									   void *callback_state, TableScanDesc scan)
 {
-	external_not_supported("index build");
+	raise_unsupported_operation("index build");
 }
 
 void
-bioseq_external_index_validate_scan(Relation table_rel, Relation index_rel,
+validate_index_scan(Relation table_rel, Relation index_rel,
 									IndexInfo *index_info, Snapshot snapshot,
 									ValidateIndexState *state)
 {
-	external_not_supported("index validate");
+	raise_unsupported_operation("index validate");
 }
 
 /* --- size / toast / estimate: zero physical footprint ------------------ */
 
 uint64
-bioseq_external_relation_size(Relation rel, ForkNumber forkNumber)
+relation_size(Relation rel, ForkNumber forkNumber)
 {
 	/* No physical storage. */
 	return 0;
 }
 
 bool
-bioseq_external_relation_needs_toast_table(Relation rel)
+relation_needs_toast_table(Relation rel)
 {
 	/* No tuples are stored, so no TOAST table is ever needed. */
 	return false;
 }
 
-/*
- * Conservative, provider-free size estimate. Uses a fixed default row count
- * and the local column widths only; never issues a remote request. The
- * integrator may replace BIOSEQ_EXTERNAL_DEFAULT_ESTIMATED_ROWS with a GUC or
- * provider-supplied estimate later.
- */
-constexpr double BIOSEQ_EXTERNAL_DEFAULT_ESTIMATED_ROWS = 1000.0;
+/* Provider-free estimate: fixed cardinality and local type widths only. */
+constexpr double default_estimated_rows = 1000.0;
 
 void
-bioseq_external_estimate_rel_size(Relation rel, int32 *attr_widths,
+estimate_relation_size(Relation rel, int32 *attr_widths,
 								  BlockNumber *pages, double *tuples,
 								  double *allvisfrac)
 {
 	*pages = 0;
-	*tuples = BIOSEQ_EXTERNAL_DEFAULT_ESTIMATED_ROWS;
+	*tuples = default_estimated_rows;
 	*allvisfrac = 0.0;
 
 	/* Local (statistics/type) column widths only — no remote I/O. */
@@ -586,144 +539,160 @@ bioseq_external_estimate_rel_size(Relation rel, int32 *attr_widths,
 /* --- sample scan: rejected (also blocked at plan time) ----------------- */
 
 bool
-bioseq_external_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
+next_sample_block(TableScanDesc scan, SampleScanState *scanstate)
 {
-	external_not_supported("TABLESAMPLE");
+	raise_unsupported_operation("TABLESAMPLE");
 }
 
 bool
-bioseq_external_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
+next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 									   TupleTableSlot *slot)
 {
-	external_not_supported("TABLESAMPLE");
+	raise_unsupported_operation("TABLESAMPLE");
 }
 
-/*
- * The routine itself. Field set and ORDER mirror bioseq_am_methods in
- * access_method.cppm exactly (PG17 TableAmRoutine); unset fields are
- * value-initialised to NULL. Bitmap callbacks are NULL so the planner never
- * generates a bitmap-heap path for external relations.
- */
-const TableAmRoutine bioseq_external_am_methods = {
+/* Stable PostgreSQL callback table. Null bitmap callbacks prevent bitmap paths. */
+const TableAmRoutine table_access_methods = {
 	.type = T_TableAmRoutine,
 
-	.slot_callbacks = bioseq_external_slot_callbacks,
+	.slot_callbacks = slot_callbacks,
 
-	.scan_begin = bioseq_external_scan_begin,
-	.scan_end = bioseq_external_scan_end,
-	.scan_rescan = bioseq_external_rescan,
-	.scan_getnextslot = bioseq_external_getnextslot,
+	.scan_begin = begin_physical_scan,
+	.scan_end = end_physical_scan,
+	.scan_rescan = rescan_physical_scan,
+	.scan_getnextslot = next_physical_tuple,
 
-	.parallelscan_estimate = bioseq_external_parallelscan_estimate,
-	.parallelscan_initialize = bioseq_external_parallelscan_initialize,
-	.parallelscan_reinitialize = bioseq_external_parallelscan_reinitialize,
+	.parallelscan_estimate = estimate_parallel_scan,
+	.parallelscan_initialize = initialize_parallel_scan,
+	.parallelscan_reinitialize = reinitialize_parallel_scan,
 
-	.index_fetch_begin = bioseq_external_index_fetch_begin,
-	.index_fetch_reset = bioseq_external_index_fetch_reset,
-	.index_fetch_end = bioseq_external_index_fetch_end,
-	.index_fetch_tuple = bioseq_external_index_fetch_tuple,
+	.index_fetch_begin = begin_index_fetch,
+	.index_fetch_reset = reset_index_fetch,
+	.index_fetch_end = end_index_fetch,
+	.index_fetch_tuple = fetch_index_tuple,
 
-	.tuple_fetch_row_version = bioseq_external_fetch_row_version,
-	.tuple_tid_valid = bioseq_external_tuple_tid_valid,
-	.tuple_get_latest_tid = bioseq_external_get_latest_tid,
-	.tuple_satisfies_snapshot = bioseq_external_tuple_satisfies_snapshot,
-	.index_delete_tuples = bioseq_external_index_delete_tuples,
+	.tuple_fetch_row_version = fetch_row_version,
+	.tuple_tid_valid = tuple_identifier_is_valid,
+	.tuple_get_latest_tid = get_latest_tuple_identifier,
+	.tuple_satisfies_snapshot = tuple_satisfies_snapshot,
+	.index_delete_tuples = delete_index_tuples,
 
-	.tuple_insert = bioseq_external_tuple_insert,
-	.tuple_insert_speculative = bioseq_external_tuple_insert_speculative,
-	.tuple_complete_speculative = bioseq_external_tuple_complete_speculative,
-	.multi_insert = bioseq_external_multi_insert,
-	.tuple_delete = bioseq_external_tuple_delete,
-	.tuple_update = bioseq_external_tuple_update,
-	.tuple_lock = bioseq_external_tuple_lock,
-	.finish_bulk_insert = bioseq_external_finish_bulk_insert,
+	.tuple_insert = insert_tuple,
+	.tuple_insert_speculative = insert_speculative_tuple,
+	.tuple_complete_speculative = complete_speculative_tuple,
+	.multi_insert = insert_multiple_tuples,
+	.tuple_delete = delete_tuple,
+	.tuple_update = update_tuple,
+	.tuple_lock = lock_tuple,
+	.finish_bulk_insert = finish_bulk_insert,
 
-	.relation_set_new_filelocator = bioseq_external_relation_set_new_filelocator,
-	.relation_nontransactional_truncate = bioseq_external_relation_nontransactional_truncate,
-	.relation_copy_data = bioseq_external_relation_copy_data,
-	.relation_copy_for_cluster = bioseq_external_relation_copy_for_cluster,
-	.relation_vacuum = bioseq_external_relation_vacuum,
-	.scan_analyze_next_block = bioseq_external_scan_analyze_next_block,
-	.scan_analyze_next_tuple = bioseq_external_scan_analyze_next_tuple,
-	.index_build_range_scan = bioseq_external_index_build_range_scan,
-	.index_validate_scan = bioseq_external_index_validate_scan,
+	.relation_set_new_filelocator = set_new_file_locator,
+	.relation_nontransactional_truncate = truncate_nontransactional,
+	.relation_copy_data = copy_relation_data,
+	.relation_copy_for_cluster = copy_relation_for_cluster,
+	.relation_vacuum = vacuum_relation,
+	.scan_analyze_next_block = next_analyze_block,
+	.scan_analyze_next_tuple = next_analyze_tuple,
+	.index_build_range_scan = build_index_range_scan,
+	.index_validate_scan = validate_index_scan,
 
-	.relation_size = bioseq_external_relation_size,
-	.relation_needs_toast_table = bioseq_external_relation_needs_toast_table,
+	.relation_size = relation_size,
+	.relation_needs_toast_table = relation_needs_toast_table,
 
-	.relation_estimate_size = bioseq_external_estimate_rel_size,
+	.relation_estimate_size = estimate_relation_size,
 
-/*
- * PG-18 dropped the per-block bitmap callback; keep the PG-17 field guarded so
- * this mirrors access_method.cppm and compiles on both.
- */
+/* PostgreSQL 18 removed the per-block bitmap callback. */
 #if PG_VERSION_NUM < PG_VERSION_18
 	.scan_bitmap_next_block = NULL,
 #endif
 	.scan_bitmap_next_tuple = NULL,
-	.scan_sample_next_block = bioseq_external_scan_sample_next_block,
-	.scan_sample_next_tuple = bioseq_external_scan_sample_next_tuple
+	.scan_sample_next_block = next_sample_block,
+	.scan_sample_next_tuple = next_sample_tuple
 };
 
 } // namespace
 
 const TableAmRoutine *
-GetBioseqExternalTableAmRoutine(void)
+table_access_method() noexcept
 {
-	return &bioseq_external_am_methods;
+	return &table_access_methods;
 }
 
 bool
-relation_uses_bioseq_external_am(Relation rel)
+uses_table_access_method(Relation relation) noexcept
 {
-	return rel != nullptr && rel->rd_tableam == &bioseq_external_am_methods;
+	return relation != nullptr && relation->rd_tableam == &table_access_methods;
 }
 
-extern "C" void
-bioseq_external_tableam_init(void)
+const char *
+to_string(relation_entity entity) noexcept
 {
-	if (bioseq_external_relopt_kind != static_cast<relopt_kind>(0))
+	switch (entity)
 	{
-		/* Idempotent: already registered. */
+		case relation_entity::taxonomy:
+			return "taxonomy";
+		case relation_entity::catalog:
+			return "catalog";
+		case relation_entity::record_gene:
+			return "record_gene";
+		case relation_entity::record_location:
+			return "record_location";
+		case relation_entity::sequence:
+			return "sequence";
+		case relation_entity::sequence_chunk:
+			return "sequence_chunk";
+		case relation_entity::unspecified:
+			return "unspecified";
+	}
+	return "unspecified";
+}
+
+void
+initialize_relation_options()
+{
+	if (relation_option_kind != static_cast<relopt_kind>(0))
+	{
 		return;
 	}
 
-	bioseq_external_relopt_kind = add_reloption_kind();
+	relation_option_kind = add_reloption_kind();
 
-	add_enum_reloption(bioseq_external_relopt_kind, "entity",
+	add_enum_reloption(relation_option_kind, "entity",
 					   "Logical entity kind for a bioseq_external relation.",
-					   bioseq_external_entity_members, EXTERNAL_ENTITY_UNSPECIFIED,
+					   entity_option_values,
+					   static_cast<int>(relation_entity::unspecified),
 					   "Valid entity values are \"taxonomy\", \"catalog\", "
 					   "\"record_gene\", \"record_location\", \"sequence\", "
 					   "and \"sequence_chunk\".",
 					   AccessExclusiveLock);
 
-	add_string_reloption(bioseq_external_relopt_kind, "alphabet",
+	add_string_reloption(relation_option_kind, "alphabet",
 						 "Sequence alphabet for sequence/sequence_chunk entities.",
-						 nullptr, validate_bioseq_external_alphabet,
+						 nullptr, accept_alphabet_option,
 						 AccessExclusiveLock);
 
-	add_int_reloption(bioseq_external_relopt_kind, "storage_width",
+	add_int_reloption(relation_option_kind, "storage_width",
 					  "Sequence storage unit width for sequence entities.",
 					  0, 0, 64, AccessExclusiveLock);
 
-	add_int_reloption(bioseq_external_relopt_kind, "chunk_bases",
+	add_int_reloption(relation_option_kind, "chunk_bases",
 					  "Chunk length in bases for sequence_chunk entities.",
 					  0, 0, INT_MAX, AccessExclusiveLock);
 }
 
-/* ======================================================================== */
-/* C-ABI table access-method handler                                         */
-/* ======================================================================== */
+} // namespace bioseq::postgres::external
 
-/*
- * Return the table access-method routine for external logical relations.
- */
-namespace bioseq::external::sql_routines {
+extern "C" void
+bioseq_external_tableam_init(void)
+{
+	bioseq::postgres::external::initialize_relation_options();
+}
+
+namespace bioseq::postgres::external::sql_routines {
 
 POSTGRES_FN(bioseq_external_handler)
 {
-	PG_RETURN_POINTER(::GetBioseqExternalTableAmRoutine());
+	PG_RETURN_POINTER(bioseq::postgres::external::table_access_method());
 }
 
-}  // namespace bioseq::external::sql_routines
+} // namespace bioseq::postgres::external::sql_routines

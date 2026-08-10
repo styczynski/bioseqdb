@@ -1,4 +1,8 @@
-export module bioseq.table;
+/**
+ * @file
+ * @brief Primary Bioseq PostgreSQL table module interface.
+ */
+export module bioseq.postgres.table;
 
 /*
  * GCC 16.1 ICEs while compiling this aggregate when it re-exports heavy table

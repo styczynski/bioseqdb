@@ -1,15 +1,14 @@
 /**
- * @file ksw2.cppm
- * @brief Highway (HWY) SIMD port of the KSW2 extension alignment algorithms.
+ * @file ksw2_kernel.cppm
+ * @brief Highway SIMD implementation of KSW2 extension alignment.
  *
  * Portable SIMD implementations of the KSW2 extension alignment (Suzuki-
  * Kasahara diagonal formulation). Uses Google Highway so the code compiles
  * and runs on x86 (SSE2–AVX-512), ARM NEON/SVE, WASM, and any future target
  * Highway supports.
  *
- * Both single-affine-gap (z2) and dual-affine-gap (d2) are implemented by
- * a single unified kernel `ksw2_core_align<mode>`, templated on
- * `KswAlignerMode`. Public entry points live in `HwyKsw2Aligner`.
+ * Single- and dual-affine gaps share one recurrence implementation and retain
+ * the current KSW2 banding, traceback, Z-drop, and score semantics.
  *
  * Naming follows Suzuki's paper notation:
  *   - `anti_diagonal`       : `r` — anti-diagonal index, r = i + j
@@ -38,83 +37,96 @@ module;
 export module bioseq.highway.sources.ksw2;
 
 import std;
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.sources.alignment_utils;
 import bioseq.common.context;
-import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view
+import bioseq.storage.scanner;
+import bioseq.storage.lazy_sequence;
 
 export namespace bioseq::simd {
 
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// DOC0263 §9.2 — the KSW2 encode path runs through the lazy wrapper's
-// `encoded_iter<…>().ptr_at(...)` slot ring (§7), not `to_encoded_into`; the
-// shared helper lives in bioseq_storage_lazy.
+// The encode path uses the lazy wrapper's slot-ring accessor so target workers
+// share the canonical bounded sequence materialization path.
 using bioseq::storage::encode_region_via_ptr_at;
 
 // =============================================================================
-// KswAlignerMode — selects single- or dual-affine-gap formulation.
+// ksw_aligner_mode — selects single- or dual-affine-gap formulation.
 // =============================================================================
 
-enum class KswAlignerMode {
-    SINGLE_AFFINE,  ///< z2: cost(k) = q + k*e
-    DUAL_AFFINE,    ///< d2: cost(k) = min(q + k*e, q2 + k*e2)
+/** Affine-gap recurrence selected for one KSW2 invocation. */
+enum class ksw_aligner_mode {
+    single_affine,  ///< cost(k) = q + k*e
+    dual_affine,    ///< cost(k) = min(q + k*e, q2 + k*e2)
 };
 
 // =============================================================================
-// SIMD helpers — templated by tag D so no global type aliases are needed.
+// SIMD helpers — templated by tag p_simd_tag so no global type aliases are needed.
 // =============================================================================
 
-template<typename D, typename VecT = hn::Vec<D>>
-[[maybe_unused]] [[always_inline]] inline VecT max_u8(
-    const D& d, VecT left, VecT right) noexcept
-{
-    hn::RebindToUnsigned<D> ud;
-    return hn::BitCast(d, hn::Max(hn::BitCast(ud, left), hn::BitCast(ud, right)));
+/** Return the per-lane maximum under unsigned-byte ordering. */
+template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
+[[maybe_unused]] [[always_inline]] inline p_vector_type maximum_unsigned_bytes(
+    const p_simd_tag& simd_tag,
+    p_vector_type left,
+    p_vector_type right) noexcept {
+    hn::RebindToUnsigned<p_simd_tag> unsigned_tag;
+    return hn::BitCast(simd_tag, hn::Max(hn::BitCast(unsigned_tag, left), hn::BitCast(unsigned_tag, right)));
 }
 
-template<typename D, typename VecT = hn::Vec<D>>
-[[maybe_unused]] [[always_inline]] inline VecT min_u8(
-    const D& d, VecT left, VecT right) noexcept
-{
-    hn::RebindToUnsigned<D> ud;
-    return hn::BitCast(d, hn::Min(hn::BitCast(ud, left), hn::BitCast(ud, right)));
+/** Return the per-lane minimum under unsigned-byte ordering. */
+template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
+[[maybe_unused]] [[always_inline]] inline p_vector_type minimum_unsigned_bytes(
+    const p_simd_tag& simd_tag,
+    p_vector_type left,
+    p_vector_type right) noexcept {
+    hn::RebindToUnsigned<p_simd_tag> unsigned_tag;
+    return hn::BitCast(simd_tag, hn::Min(hn::BitCast(unsigned_tag, left), hn::BitCast(unsigned_tag, right)));
 }
 
-template<typename D, typename VecT = hn::Vec<D>>
-[[always_inline]] inline VecT set_lane_zero(
-    const D& d, hn::TFromD<D> value) noexcept
-{
+/** Return a zero vector with its first lane set to a scalar value. */
+template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
+[[always_inline]] inline p_vector_type set_lane_zero(
+    const p_simd_tag& simd_tag,
+    hn::TFromD<p_simd_tag> value) noexcept {
     return hn::IfThenElse(
-        hn::FirstN(d, 1u), hn::Set(d, value), hn::Zero(d));
+        hn::FirstN(simd_tag, 1u), hn::Set(simd_tag, value), hn::Zero(simd_tag));
 }
 
-template<typename D, typename VecT = hn::Vec<D>>
-[[always_inline]] inline VecT shift_left_insert(
-    const D& d, VecT vec, VecT& lane0) noexcept
-{
-    constexpr size_t kElemBytes = sizeof(hn::TFromD<D>);
-    constexpr size_t kMaxVectorBytes =
-        hn::MaxLanes(D{}) * sizeof(hn::TFromD<D>);
-    if constexpr (kMaxVectorBytes <= 16u) {
+/** Shift a vector left by one lane while carrying across vector boundaries. */
+template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
+[[always_inline]] inline p_vector_type shift_left_insert(
+    const p_simd_tag& simd_tag,
+    p_vector_type vector,
+    p_vector_type& inserted_lane) noexcept {
+    constexpr size_t k_element_bytes = sizeof(hn::TFromD<p_simd_tag>);
+    constexpr size_t k_maximum_vector_bytes =
+        hn::MaxLanes(p_simd_tag{}) * sizeof(hn::TFromD<p_simd_tag>);
+    if constexpr (k_maximum_vector_bytes <= 16u) {
         auto carry_out =
-            hn::ShiftRightBytes<kMaxVectorBytes - kElemBytes>(d, vec);
-        auto shifted = hn::Or(hn::ShiftLeftBytes<kElemBytes>(d, vec), lane0);
-        lane0 = carry_out;
+            hn::ShiftRightBytes<k_maximum_vector_bytes - k_element_bytes>(
+                simd_tag,
+                vector);
+        auto shifted = hn::Or(
+            hn::ShiftLeftBytes<k_element_bytes>(simd_tag, vector),
+            inserted_lane);
+        inserted_lane = carry_out;
         return shifted;
     } else {
-        auto shifted = hn::SlideUpLanes(d, vec, 1u);
-        shifted = hn::IfThenElse(hn::FirstN(d, 1u), lane0, shifted);
-        // Lanes(d), rather than its constexpr upper bound, is required for
-        // scalable SVE/RVV vectors. SlideDown leaves the former last lane in
+        auto shifted = hn::SlideUpLanes(simd_tag, vector, 1u);
+        shifted = hn::IfThenElse(hn::FirstN(simd_tag, 1u), inserted_lane, shifted);
+        // Lanes(simd_tag), rather than its constexpr upper bound, is required for
+        // scalable SVE/RVV vectors. SlideDown leaves the vacated last lane in
         // lane zero and zeros the remaining lanes, matching ShiftRightBytes.
-        lane0 = hn::SlideDownLanes(d, vec, hn::Lanes(d) - 1u);
+        inserted_lane = hn::SlideDownLanes(
+            simd_tag,
+            vector,
+            hn::Lanes(simd_tag) - 1u);
         return shifted;
     }
 }
@@ -127,23 +139,24 @@ template<typename D, typename VecT = hn::Vec<D>>
 // Z-drop heuristic
 // =============================================================================
 
-[[nodiscard]] inline bool apply_zdrop_heuristic(
-    KswAlignResult& result,
-    bool use_rotated_coords,
+/** Update maximum-score coordinates and report whether Z-drop terminated. */
+[[nodiscard]] inline bool apply_z_drop_heuristic(
+    ksw_alignment_result& result,
+    bool use_rotated_coordinates,
     int32_t current_score,
-    int first_coord,
-    int second_coord,
-    int zdrop_threshold,
+    int first_coordinate,
+    int second_coordinate,
+    int z_drop_threshold,
     int8_t gap_extension_penalty) noexcept
 {
     int anti_diagonal;
     int target_position;
-    if (use_rotated_coords) {
-        anti_diagonal   = first_coord;
-        target_position = second_coord;
+    if (use_rotated_coordinates) {
+        anti_diagonal   = first_coordinate;
+        target_position = second_coordinate;
     } else {
-        anti_diagonal   = first_coord + second_coord;
-        target_position = first_coord;
+        anti_diagonal   = first_coordinate + second_coordinate;
+        target_position = first_coordinate;
     }
     if (current_score > result.max) {
         result.max   = current_score;
@@ -157,11 +170,11 @@ template<typename D, typename VecT = hn::Vec<D>>
         const int td = target_position - result.max_t;
         const int qd = (anti_diagonal - target_position) - result.max_q;
         const int cd = td > qd ? td - qd : qd - td;
-        if (zdrop_threshold >= 0
+        if (z_drop_threshold >= 0
             && result.max - current_score
-               > zdrop_threshold + cd * gap_extension_penalty)
+               > z_drop_threshold + cd * gap_extension_penalty)
         {
-            result.zdropped = true;
+            result.is_z_dropped = true;
             return true;
         }
     }
@@ -169,61 +182,68 @@ template<typename D, typename VecT = hn::Vec<D>>
 }
 
 // =============================================================================
-// KswDpState — named-field DP arena.
+// ksw_dp_state — named-field DP arena.
 // =============================================================================
 
-class KswDpState {
+/** Arena-backed dynamic-programming state for the single-affine recurrence. */
+class ksw_dp_state {
 public:
-    int8_t*  diff_up_base       = nullptr;
-    int8_t*  diff_left_base     = nullptr;
-    int8_t*  gap_e_offset_base  = nullptr;
-    int8_t*  gap_f_offset_base  = nullptr;
-    int8_t*  diag_score_base    = nullptr;
-    uint8_t* target_bytes       = nullptr;
-    uint8_t* query_reversed     = nullptr;
+    int8_t*  diff_up_base       = nullptr;  ///< Vertical score-difference rows.
+    int8_t*  diff_left_base     = nullptr;  ///< Horizontal score-difference rows.
+    int8_t*  gap_e_offset_base  = nullptr;  ///< Horizontal gap offsets.
+    int8_t*  gap_f_offset_base  = nullptr;  ///< Vertical gap offsets.
+    int8_t*  diag_score_base    = nullptr;  ///< Generic-score diagonal rows.
+    uint8_t* target_bytes       = nullptr;  ///< Encoded target ranks.
+    uint8_t* query_reversed     = nullptr;  ///< Encoded query ranks in DP order.
 
-    KswDpState() = default;
+    /** Construct an empty state handle. */
+    ksw_dp_state() = default;
 
-    KswDpState(size_t target_len, size_t query_len, size_t vec_bytes)
-        : KswDpState(target_len, query_len, vec_bytes, 5, /*zero_state_arrays=*/true) {}
+    /** Allocate single-affine state for the requested sequence extents. */
+    ksw_dp_state(size_t target_len, size_t query_len, size_t vector_bytes)
+        : ksw_dp_state(target_len, query_len, vector_bytes, 5, /*zero_state_arrays=*/true) {}
 
-    [[nodiscard]] int target_vec_count() const noexcept { return target_vec_count_; }
-    [[nodiscard]] int query_vec_count()  const noexcept { return query_vec_count_; }
+    /** Return the number of vector slots in one target row. */
+    [[nodiscard]] int target_vector_count() const noexcept { return target_vec_count_; }
+    /** Return the number of vector slots needed for the query encoding. */
+    [[nodiscard]] int query_vector_count()  const noexcept { return query_vec_count_; }
+    /** Return the byte size of one target-oriented state array. */
     [[nodiscard]] size_t array_byte_count() const noexcept {
         return static_cast<size_t>(target_vec_count_) * vec_bytes_;
     }
 
-    void fill_first_n_arrays(int n, uint8_t value) noexcept {
+    /** Fill the first state arrays with one byte value. */
+    void fill_leading_arrays(int n, uint8_t value) noexcept {
         std::memset(diff_up_base, value, static_cast<size_t>(n) * array_byte_count());
     }
 
+    /** Fill one state array with one byte value. */
     void fill_array(int8_t* base, uint8_t value) noexcept {
         std::memset(base, value, array_byte_count());
     }
 
 protected:
-    // Storage comes from the per-phase align arena (SPEC §5.2). We only
-    // zero the DP-state prefix of the slab; target_bytes / query_reversed
-    // are immediately overwritten by the encode step, so skipping the
-    // zero-fill there (SPEC §6.44) saves ~20 KiB of writes per region.
+    // Storage comes from the per-alignment arena. Only DP state that can be
+    // observed before its first write is zeroed; the encoded query and target
+    // byte regions are overwritten immediately by the encoding step.
     //
     // The `zero_state_arrays` constructor switch lets the dual-affine
-    // subclass opt out of the broad memset(0): KswDpStateDual immediately
+    // subclass opt out of the broad memset(0): ksw_dual_affine_dp_state immediately
     // overwrites arrays 0..3 with `-q-e` and arrays 4..5 with
     // `-q2-e2`, so zeroing them first is wasted bandwidth — for very-long
     // alignments this is megabyte-scale memset traffic per call. The
     // diag_score array (the last DP-state slot) is still zero-filled
     // because the generic-score code path may read it before writing,
     // and it's only one stride wide.
-    KswDpState(size_t target_len, size_t query_len, size_t vec_bytes,
+    ksw_dp_state(size_t target_len, size_t query_len, size_t vector_bytes,
                int state_count, bool zero_state_arrays)
-        : target_vec_count_(static_cast<int>((target_len + vec_bytes - 1) / vec_bytes))
-        , query_vec_count_(static_cast<int>((query_len + vec_bytes - 1) / vec_bytes))
-        , vec_bytes_(vec_bytes)
+        : target_vec_count_(static_cast<int>((target_len + vector_bytes - 1) / vector_bytes))
+        , query_vec_count_(static_cast<int>((query_len + vector_bytes - 1) / vector_bytes))
+        , vec_bytes_(vector_bytes)
     {
-        const size_t stride = static_cast<size_t>(target_vec_count_) * vec_bytes;
+        const size_t stride = static_cast<size_t>(target_vec_count_) * vector_bytes;
         const size_t total  = (static_cast<size_t>(state_count + 1) * target_vec_count_
-                              + static_cast<size_t>(query_vec_count_) + 1) * vec_bytes;
+                              + static_cast<size_t>(query_vec_count_) + 1) * vector_bytes;
         storage_ = context::current().alloc_align_array<int8_t, 64>(total);
         const size_t dp_bytes = static_cast<size_t>(state_count) * stride;
         if (zero_state_arrays) {
@@ -234,8 +254,8 @@ protected:
             std::memset(storage_.data() + static_cast<size_t>(state_count - 1) * stride,
                         0, stride);
         }
-        // Wipe the single extra byte that diag_score_base writes read just
-        // past the DP-state arrays to keep the boundary deterministic.
+        // Wipe the single extra byte read just past the DP-state arrays through
+        // diag_score_base so the boundary remains deterministic.
         if (storage_.size() > dp_bytes) {
             storage_[dp_bytes] = 0;
         }
@@ -252,7 +272,7 @@ protected:
             base + static_cast<size_t>(state_count + 1) * stride);
     }
 
-    [[nodiscard]] int8_t* array_ptr(int index) noexcept {
+    [[nodiscard]] int8_t* array_pointer(int index) noexcept {
         return storage_.data()
             + static_cast<size_t>(index) * target_vec_count_ * vec_bytes_;
     }
@@ -263,80 +283,91 @@ protected:
     std::span<int8_t> storage_;
 };
 
-class KswDpStateDual : public KswDpState {
+/** Extended DP state carrying the second affine-gap recurrence. */
+class ksw_dual_affine_dp_state : public ksw_dp_state {
 public:
-    int8_t* gap_e2_offset_base = nullptr;
-    int8_t* gap_f2_offset_base = nullptr;
+    int8_t* gap_e2_offset_base = nullptr;  ///< Long horizontal-gap offsets.
+    int8_t* gap_f2_offset_base = nullptr;  ///< Long vertical-gap offsets.
 
-    KswDpStateDual() = default;
+    /** Construct an empty dual-affine state handle. */
+    ksw_dual_affine_dp_state() = default;
 
-    KswDpStateDual(size_t target_len, size_t query_len, size_t vec_bytes)
-        // Skip the broad zero-fill: ksw2_core_align fills arrays 0..5
-        // explicitly via fill_first_n_arrays(4, -q-e) +
+    /** Allocate dual-affine state for the requested sequence extents. */
+    ksw_dual_affine_dp_state(size_t target_len, size_t query_len, size_t vector_bytes)
+        // Skip the broad zero-fill: align_ksw2_core fills arrays 0..5
+        // explicitly via fill_leading_arrays(4, -q-e) +
         // fill_array(x2|y2, -q2-e2) right after construction. The
         // diag_score slot (array 6) still gets a one-stride zero-fill
         // inside the parent constructor.
-        : KswDpState(target_len, query_len, vec_bytes, 7,
+        : ksw_dp_state(target_len, query_len, vector_bytes, 7,
                      /*zero_state_arrays=*/false)
     {
-        gap_e2_offset_base = array_ptr(4);
-        gap_f2_offset_base = array_ptr(5);
+        gap_e2_offset_base = array_pointer(4);
+        gap_f2_offset_base = array_pointer(5);
     }
 };
 
-template<KswAlignerMode mode>
-using KswStateFor = std::conditional_t<
-    mode == KswAlignerMode::DUAL_AFFINE,
-    KswDpStateDual,
-    KswDpState>;
+/** Select the arena-backed DP state required by an affine-gap mode. */
+template <ksw_aligner_mode p_mode>
+using ksw_state_for = std::conditional_t<
+    p_mode == ksw_aligner_mode::dual_affine,
+    ksw_dual_affine_dp_state,
+    ksw_dp_state>;
 
 // =============================================================================
-// KswBacktrackMatrix
+// ksw_backtrack_matrix
 // =============================================================================
 
-class KswBacktrackMatrix {
+/** Arena-backed banded traceback matrix and per-row band bounds. */
+class ksw_backtrack_matrix {
 public:
-    KswBacktrackMatrix() noexcept = default;
+    /** Construct an empty traceback matrix. */
+    ksw_backtrack_matrix() noexcept = default;
 
-    // Storage and band metadata all come from the align arena (SPEC §5.2).
-    // The DP forward pass writes every in-band slot before traceback reads
-    // it, so we skip the old `memset(0, total_bytes)` (SPEC §6.52) — for
-    // a 10 kbp × 10 kbp alignment that saves ~15 MiB of writes per phase.
-    void allocate(int anti_diagonal_count, int band_vec_capacity, size_t vec_bytes) {
-        vec_bytes_ = vec_bytes;
-        cols_in_vectors_ = band_vec_capacity;
-        byte_cols_per_row_ = band_vec_capacity * static_cast<int>(vec_bytes);
+    /** Allocate storage for the admitted anti-diagonals and band capacity. */
+    void allocate(int anti_diagonal_count, int band_vector_capacity, size_t vector_bytes) {
+        vec_bytes_ = vector_bytes;
+        cols_in_vectors_ = band_vector_capacity;
+        byte_cols_per_row_ = band_vector_capacity * static_cast<int>(vector_bytes);
         total_vector_slots_ =
             static_cast<size_t>(anti_diagonal_count) * cols_in_vectors_ + 1;
-        const size_t total_bytes = total_vector_slots_ * vec_bytes;
+        const size_t total_bytes = total_vector_slots_ * vector_bytes;
         auto& ctx = context::current();
         storage_ = ctx.alloc_align_array<int8_t, 64>(total_bytes);
         band_range_ = ctx.alloc_align_array<int32_t>(
             2 * static_cast<size_t>(anti_diagonal_count));
     }
 
+    /** Return whether traceback storage has been allocated. */
     [[nodiscard]] bool is_allocated() const noexcept { return !storage_.empty(); }
 
-    [[nodiscard]] int8_t* vec_slot_bytes(int anti_diagonal, int local_band_vec) noexcept {
+    /** Return the byte storage for one vector slot in an anti-diagonal. */
+    [[nodiscard]] int8_t* vector_slot_bytes(int anti_diagonal, int local_band_vec) noexcept {
         const size_t slot =
             static_cast<size_t>(anti_diagonal) * cols_in_vectors_
             + static_cast<size_t>(local_band_vec);
         return storage_.data() + slot * vec_bytes_;
     }
 
+    /** Return the immutable traceback byte stream. */
     [[nodiscard]] const uint8_t* bytes() const noexcept {
         return reinterpret_cast<const uint8_t*>(storage_.data());
     }
-    [[nodiscard]] int byte_cols_per_row() const noexcept { return byte_cols_per_row_; }
+    /** Return the byte stride between consecutive anti-diagonal rows. */
+    [[nodiscard]] int byte_columns_per_row() const noexcept { return byte_cols_per_row_; }
+    /** Return mutable start coordinates for every anti-diagonal band. */
     [[nodiscard]] std::span<int32_t> band_starts() noexcept {
         return band_range_.subspan(0, band_range_.size() / 2);
     }
+    /** Return mutable end coordinates for every anti-diagonal band. */
     [[nodiscard]] std::span<int32_t> band_ends() noexcept {
         return band_range_.subspan(band_range_.size() / 2);
     }
+    /** Return immutable start coordinates for every anti-diagonal band. */
     [[nodiscard]] std::span<const int32_t> band_starts() const noexcept {
         return std::span<const int32_t>(band_range_.data(), band_range_.size() / 2);
     }
+    /** Return immutable end coordinates for every anti-diagonal band. */
     [[nodiscard]] std::span<const int32_t> band_ends() const noexcept {
         return std::span<const int32_t>(band_range_.data() + band_range_.size() / 2,
                                         band_range_.size() / 2);
@@ -355,17 +386,18 @@ private:
 // CIGAR traceback
 // =============================================================================
 
+/** Reconstruct a packed CIGAR from the banded traceback matrix. */
 inline void ksw_backtrack_cigar(
-    const KswBacktrackMatrix& matrix,
-    bool use_rotated_coords,
+    const ksw_backtrack_matrix& matrix,
+    bool use_rotated_coordinates,
     bool output_reversed,
-    int min_intron_length,
-    int start_row,
-    int start_col,
-    std::vector<uint32_t>& out_cigar)
+    int minimum_intron_length,
+    int starting_row,
+    int starting_column,
+    std::vector<uint32_t>& output_cigar)
 {
-    out_cigar.clear();
-    // The traceback walks (start_row + start_col + 1) cells. Each cell
+    output_cigar.clear();
+    // The traceback walks (starting_row + starting_column + 1) cells. Each cell
     // emits one packed-cigar push, but `push_packed_cigar` merges with
     // the previous op when the opcode matches — so for a typical
     // low-error long-read alignment the final CIGAR is ~5 ops per 100 bp
@@ -375,20 +407,20 @@ inline void ksw_backtrack_cigar(
     // 1 Mbp alignment dominates the traceback wall-clock. Slight over-
     // estimation is fine — the vector is short-lived (lives on the
     // result struct, returned by value) and the alternative is the
-    // log2(N) realloc storm we've been paying.
-    const size_t cell_estimate = static_cast<size_t>(start_row + start_col + 1);
-    out_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
+    // repeated geometric reallocation for long reads.
+    const size_t cell_estimate = static_cast<size_t>(starting_row + starting_column + 1);
+    output_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
 
     const uint8_t* bt = matrix.bytes();
     const std::span<const int32_t> off = matrix.band_starts();
     const std::span<const int32_t> off_end = matrix.band_ends();
-    const int n_col = matrix.byte_cols_per_row();
+    const int n_col = matrix.byte_columns_per_row();
 
-    int i = start_row, k = start_col, state = 0;
+    int i = starting_row, k = starting_column, state = 0;
     while (i >= 0 && k >= 0) {
         int force = -1;
         uint32_t bv = 0;
-        if (use_rotated_coords) {
+        if (use_rotated_coordinates) {
             const int r = i + k;
             if (i < off[static_cast<size_t>(r)]) force = 2;
             if (i > off_end[static_cast<size_t>(r)]) force = 1;
@@ -408,128 +440,138 @@ inline void ksw_backtrack_cigar(
         if (state == 0) state = static_cast<int>(bv & 7U);
         if (force >= 0) state = force;
 
-        if (state == 0)      { push_packed_cigar(out_cigar, CIGAR_MATCH, 1); --i; --k; }
-        else if (state == 1 || (state == 3 && min_intron_length <= 0))
-                             { push_packed_cigar(out_cigar, CIGAR_DEL, 1); --i; }
-        else if (state == 3 && min_intron_length > 0)
-                             { push_packed_cigar(out_cigar, CIGAR_N_SKIP, 1); --i; }
-        else                 { push_packed_cigar(out_cigar, CIGAR_INS, 1); --k; }
+        if (state == 0)      { push_packed_cigar(output_cigar, cigar_match_opcode, 1); --i; --k; }
+        else if (state == 1 || (state == 3 && minimum_intron_length <= 0))
+                             { push_packed_cigar(output_cigar, cigar_deletion_opcode, 1); --i; }
+        else if (state == 3 && minimum_intron_length > 0)
+                             { push_packed_cigar(output_cigar, cigar_reference_skip_opcode, 1); --i; }
+        else                 { push_packed_cigar(output_cigar, cigar_insertion_opcode, 1); --k; }
     }
 
     if (i >= 0) {
-        const uint32_t op = (min_intron_length > 0 && i >= min_intron_length)
-            ? CIGAR_N_SKIP : CIGAR_DEL;
-        push_packed_cigar(out_cigar, op, static_cast<uint32_t>(i + 1));
+        const uint32_t op = (minimum_intron_length > 0 && i >= minimum_intron_length)
+            ? cigar_reference_skip_opcode : cigar_deletion_opcode;
+        push_packed_cigar(output_cigar, op, static_cast<uint32_t>(i + 1));
     }
-    if (k >= 0) push_packed_cigar(out_cigar, CIGAR_INS, static_cast<uint32_t>(k + 1));
-    if (!output_reversed) std::reverse(out_cigar.begin(), out_cigar.end());
+    if (k >= 0) push_packed_cigar(output_cigar, cigar_insertion_opcode, static_cast<uint32_t>(k + 1));
+    if (!output_reversed) std::reverse(output_cigar.begin(), output_cigar.end());
 }
 
 // =============================================================================
-// KswDpCell — return type for the DP load step (replaces KSW_DP_LOAD macro).
+// ksw_dp_cell — values loaded for one DP update.
 // =============================================================================
 
-template<typename D>
-struct KswDpCell {
-    hn::Vec<D> score_max_cell;
-    hn::Vec<D> diff_left_sh;
-    hn::Vec<D> diff_up_cur;
-    hn::Vec<D> diag_chain;
-    hn::Vec<D> vert_chain;
-    hn::Vec<D> diag_chain2;
-    hn::Vec<D> vert_chain2;
+/** Vector state returned by one KSW2 DP load step. */
+template <class p_simd_tag>
+struct ksw_dp_cell {
+    hn::Vec<p_simd_tag> score_max_cell;  ///< Selected score for every lane.
+    hn::Vec<p_simd_tag> diff_left_sh;    ///< Shifted horizontal differences.
+    hn::Vec<p_simd_tag> diff_up_cur;     ///< Current vertical differences.
+    hn::Vec<p_simd_tag> diag_chain;      ///< Short horizontal-gap candidates.
+    hn::Vec<p_simd_tag> vert_chain;      ///< Short vertical-gap candidates.
+    hn::Vec<p_simd_tag> diag_chain2;     ///< Long horizontal-gap candidates.
+    hn::Vec<p_simd_tag> vert_chain2;     ///< Long vertical-gap candidates.
 
     // A project-declared body gives the generator a callable on which to put
     // HWY_ATTR. Default-initialization still leaves every vector uninitialized.
-    [[gnu::always_inline]] KswDpCell() noexcept {}
+    /** Leave lane vectors uninitialized for immediate kernel population. */
+    [[gnu::always_inline]] ksw_dp_cell() noexcept {}
 };
 
 // =============================================================================
-// ksw_dp_load — template replacement for the KSW_DP_LOAD macro.
+// load_ksw_dp_cell — load one SIMD DP cell.
 //
-// When fused_score == true the cell score is computed inline from sequence
-// data (the diag_score fusion optimisation from CAN_WE_REMOVE_LOAD_STORE.md).
+// When p_is_fused_score == true the cell score is computed inline from sequence
+// data while preserving fused diagonal-score storage.
 // When false the score is loaded from diag_score_base (generic_score path).
 // =============================================================================
 
-template<KswAlignerMode mode, bool fused_score, typename D, typename StateT>
-[[always_inline]] inline KswDpCell<D> ksw_dp_load(
-    D pst, int off,
-    StateT& HWY_RESTRICT state,
+/** Load recurrence state and construct one vector of candidate scores. */
+template <
+    ksw_aligner_mode p_mode,
+    bool p_is_fused_score,
+    class p_simd_tag,
+    class p_state_type>
+[[always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
+    p_simd_tag simd_tag, int off,
+    p_state_type& HWY_RESTRICT state,
     const uint8_t* HWY_RESTRICT query_reversed_aligned,
-    hn::Vec<D>& bx_vec, hn::Vec<D>& bv_vec,
-    [[maybe_unused]] hn::Vec<D>& bx2_vec,
-    hn::Vec<D> double_gap_cost_vec,
-    hn::Vec<D> match_score_vec,
-    hn::Vec<D> mismatch_score_vec,
-    hn::Vec<D> wildcard_score_vec,
-    hn::Vec<D> wildcard_rank_vec) noexcept
+    hn::Vec<p_simd_tag>& bx_vec, hn::Vec<p_simd_tag>& bv_vec,
+    [[maybe_unused]] hn::Vec<p_simd_tag>& bx2_vec,
+    hn::Vec<p_simd_tag> double_gap_cost_vec,
+    hn::Vec<p_simd_tag> match_score_vec,
+    hn::Vec<p_simd_tag> mismatch_score_vec,
+    hn::Vec<p_simd_tag> wildcard_score_vec,
+    hn::Vec<p_simd_tag> wildcard_rank_vec) noexcept
 {
-    constexpr bool is_dual = (mode == KswAlignerMode::DUAL_AFFINE);
-    using partial_t = hn::TFromD<D>;
-    KswDpCell<D> c;
+    constexpr bool k_is_dual_affine =
+        p_mode == ksw_aligner_mode::dual_affine;
+    using partial_score_type = hn::TFromD<p_simd_tag>;
+    ksw_dp_cell<p_simd_tag> c;
 
     // --- Cell score ---
-    if constexpr (fused_score) {
-        auto tl = hn::LoadU(pst,
-            reinterpret_cast<const partial_t*>(&state.target_bytes[off]));
-        auto ql = hn::LoadU(pst,
-            reinterpret_cast<const partial_t*>(&query_reversed_aligned[off]));
+    if constexpr (p_is_fused_score) {
+        auto tl = hn::LoadU(simd_tag,
+            reinterpret_cast<const partial_score_type*>(&state.target_bytes[off]));
+        auto ql = hn::LoadU(simd_tag,
+            reinterpret_cast<const partial_score_type*>(&query_reversed_aligned[off]));
         auto wm = hn::Or(
-            hn::VecFromMask(pst, hn::Eq(tl, wildcard_rank_vec)),
-            hn::VecFromMask(pst, hn::Eq(ql, wildcard_rank_vec)));
-        auto eq = hn::VecFromMask(pst, hn::Eq(tl, ql));
+            hn::VecFromMask(simd_tag, hn::Eq(tl, wildcard_rank_vec)),
+            hn::VecFromMask(simd_tag, hn::Eq(ql, wildcard_rank_vec)));
+        auto eq = hn::VecFromMask(simd_tag, hn::Eq(tl, ql));
         c.score_max_cell = hn::IfThenElse(
             hn::MaskFromVec(eq), match_score_vec, mismatch_score_vec);
         c.score_max_cell = hn::IfThenElse(
             hn::MaskFromVec(wm), wildcard_score_vec, c.score_max_cell);
     } else {
-        c.score_max_cell = hn::Load(pst, state.diag_score_base + off);
+        c.score_max_cell = hn::Load(simd_tag, state.diag_score_base + off);
     }
 
-    if constexpr (!is_dual) {
+    if constexpr (!k_is_dual_affine) {
         c.score_max_cell = hn::Add(c.score_max_cell, double_gap_cost_vec);
     }
 
     // --- Gap / diff state ---
-    auto gap_e_sh = hn::Load(pst, state.gap_e_offset_base + off);
-    gap_e_sh = shift_left_insert(pst, gap_e_sh, bx_vec);
-    c.diff_left_sh = hn::Load(pst, state.diff_left_base + off);
-    c.diff_left_sh = shift_left_insert(pst, c.diff_left_sh, bv_vec);
+    auto gap_e_sh = hn::Load(simd_tag, state.gap_e_offset_base + off);
+    gap_e_sh = shift_left_insert(simd_tag, gap_e_sh, bx_vec);
+    c.diff_left_sh = hn::Load(simd_tag, state.diff_left_base + off);
+    c.diff_left_sh = shift_left_insert(simd_tag, c.diff_left_sh, bv_vec);
     c.diag_chain = hn::Add(gap_e_sh, c.diff_left_sh);
-    c.diff_up_cur = hn::Load(pst, state.diff_up_base + off);
+    c.diff_up_cur = hn::Load(simd_tag, state.diff_up_base + off);
     c.vert_chain = hn::Add(
-        hn::Load(pst, state.gap_f_offset_base + off), c.diff_up_cur);
+        hn::Load(simd_tag, state.gap_f_offset_base + off), c.diff_up_cur);
 
-    c.diag_chain2 = hn::Zero(pst);
-    c.vert_chain2 = hn::Zero(pst);
-    if constexpr (is_dual) {
-        auto ge2_sh = hn::Load(pst, state.gap_e2_offset_base + off);
-        ge2_sh = shift_left_insert(pst, ge2_sh, bx2_vec);
+    c.diag_chain2 = hn::Zero(simd_tag);
+    c.vert_chain2 = hn::Zero(simd_tag);
+    if constexpr (k_is_dual_affine) {
+        auto ge2_sh = hn::Load(simd_tag, state.gap_e2_offset_base + off);
+        ge2_sh = shift_left_insert(simd_tag, ge2_sh, bx2_vec);
         c.diag_chain2 = hn::Add(ge2_sh, c.diff_left_sh);
         c.vert_chain2 = hn::Add(
-            hn::Load(pst, state.gap_f2_offset_base + off), c.diff_up_cur);
+            hn::Load(simd_tag, state.gap_f2_offset_base + off), c.diff_up_cur);
     }
 
     return c;
 }
 
 // =============================================================================
-// ksw_dp_max_reduce — template replacement for KSW_DP_MAX_REDUCE.
+// reduce_ksw_dp_maximum — reduce per-lane maxima into the result state.
 // =============================================================================
 
-template<KswAlignerMode mode, typename D>
-[[always_inline]] inline void ksw_dp_max_reduce(
-    D pst, KswDpCell<D>& c,
-    hn::Vec<D> max_plausible_score_vec,
-    hn::Vec<D> match_score_vec) noexcept
+/** Reduce one vector of recurrence candidates to the selected cell scores. */
+template <ksw_aligner_mode p_mode, class p_simd_tag>
+[[always_inline]] inline void reduce_ksw_dp_maximum(
+    p_simd_tag simd_tag, ksw_dp_cell<p_simd_tag>& c,
+    hn::Vec<p_simd_tag> max_plausible_score_vec,
+    hn::Vec<p_simd_tag> match_score_vec) noexcept
 {
-    constexpr bool is_dual = (mode == KswAlignerMode::DUAL_AFFINE);
+    constexpr bool k_is_dual_affine =
+        p_mode == ksw_aligner_mode::dual_affine;
 
     c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
-    if constexpr (!is_dual) {
-        c.score_max_cell = max_u8(pst, c.score_max_cell, c.vert_chain);
-        c.score_max_cell = min_u8(pst, c.score_max_cell, max_plausible_score_vec);
+    if constexpr (!k_is_dual_affine) {
+        c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
+        c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
     } else {
         c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain);
         c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain2);
@@ -539,35 +581,40 @@ template<KswAlignerMode mode, typename D>
 }
 
 // =============================================================================
-// ksw_dp_store — template replacement for KSW_DP_UPDATE.
+// store_ksw_dp_cell — store one SIMD DP update.
 // =============================================================================
 
-template<KswAlignerMode mode, typename D, typename StateT>
-[[always_inline]] inline void ksw_dp_store(
-    D pst, int off,
-    KswDpCell<D>& c,
-    StateT& HWY_RESTRICT state,
-    hn::Vec<D> gap_open_vec,
-    hn::Vec<D> gap_open_short_vec,
-    hn::Vec<D> gap_open_long_vec,
-    hn::Vec<D> short_gap_cost_vec,
-    hn::Vec<D> long_gap_cost_vec,
-    hn::Vec<D> zero_vec) noexcept
+/** Store one vector of selected scores and updated gap offsets. */
+template <
+    ksw_aligner_mode p_mode,
+    class p_simd_tag,
+    class p_state_type>
+[[always_inline]] inline void store_ksw_dp_cell(
+    p_simd_tag simd_tag, int off,
+    ksw_dp_cell<p_simd_tag>& c,
+    p_state_type& HWY_RESTRICT state,
+    hn::Vec<p_simd_tag> gap_open_vec,
+    hn::Vec<p_simd_tag> gap_open_short_vec,
+    hn::Vec<p_simd_tag> gap_open_long_vec,
+    hn::Vec<p_simd_tag> short_gap_cost_vec,
+    hn::Vec<p_simd_tag> long_gap_cost_vec,
+    hn::Vec<p_simd_tag> zero_vec) noexcept
 {
-    constexpr bool is_dual = (mode == KswAlignerMode::DUAL_AFFINE);
+    constexpr bool k_is_dual_affine =
+        p_mode == ksw_aligner_mode::dual_affine;
 
-    hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), pst,
+    hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
               state.diff_up_base + off);
-    hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), pst,
+    hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
               state.diff_left_base + off);
 
-    if constexpr (!is_dual) {
+    if constexpr (!k_is_dual_affine) {
         auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
         c.diag_chain = hn::Sub(c.diag_chain, smq);
         c.vert_chain = hn::Sub(c.vert_chain, smq);
-        hn::Store(hn::Max(c.diag_chain, zero_vec), pst,
+        hn::Store(hn::Max(c.diag_chain, zero_vec), simd_tag,
                   state.gap_e_offset_base + off);
-        hn::Store(hn::Max(c.vert_chain, zero_vec), pst,
+        hn::Store(hn::Max(c.vert_chain, zero_vec), simd_tag,
                   state.gap_f_offset_base + off);
     } else {
         auto sms = hn::Sub(c.score_max_cell, gap_open_short_vec);
@@ -577,35 +624,36 @@ template<KswAlignerMode mode, typename D, typename StateT>
         c.diag_chain2 = hn::Sub(c.diag_chain2, sml);
         c.vert_chain2 = hn::Sub(c.vert_chain2, sml);
         hn::Store(hn::Sub(hn::Max(c.diag_chain, zero_vec), short_gap_cost_vec),
-                  pst, state.gap_e_offset_base + off);
+                  simd_tag, state.gap_e_offset_base + off);
         hn::Store(hn::Sub(hn::Max(c.vert_chain, zero_vec), short_gap_cost_vec),
-                  pst, state.gap_f_offset_base + off);
+                  simd_tag, state.gap_f_offset_base + off);
         hn::Store(hn::Sub(hn::Max(c.diag_chain2, zero_vec), long_gap_cost_vec),
-                  pst, state.gap_e2_offset_base + off);
+                  simd_tag, state.gap_e2_offset_base + off);
         hn::Store(hn::Sub(hn::Max(c.vert_chain2, zero_vec), long_gap_cost_vec),
-                  pst, state.gap_f2_offset_base + off);
+                  simd_tag, state.gap_f2_offset_base + off);
     }
 }
 
 // =============================================================================
-// ksw2_core_align — unified single/dual-affine banded extension alignment
+// align_ksw2_core — unified single/dual-affine banded extension alignment
 // =============================================================================
 
 template<
-    KswAlignerMode mode,
-    bool is_reversed,
-    sequence_alphabet Alphabet,
-    size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u,
-    typename partial_score_t = int8_t,
-    typename full_score_t    = int32_t>
-[[nodiscard]] KswAlignResult ksw2_core_align(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    ksw_aligner_mode p_mode,
+    bool p_is_reversed,
+    sequence_alphabet p_alphabet,
+    size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u,
+    class p_partial_score_type = int8_t,
+    class p_full_score_type = int32_t>
+/** Execute the banded KSW2 recurrence for one sequence pair. */
+[[nodiscard]] ksw_alignment_result align_ksw2_core(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<Alphabet>& scoring_matrix,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
     int8_t gap_open,
     int8_t gap_extend,
     int8_t gap_open_long,
@@ -613,27 +661,28 @@ template<
     int band_width_param,
     int z_drop,
     int end_bonus,
-    KswFlags flags)
+    ksw_flags flags)
 {
-    constexpr bool is_dual = (mode == KswAlignerMode::DUAL_AFFINE);
+    constexpr bool k_is_dual_affine =
+        p_mode == ksw_aligner_mode::dual_affine;
 
     // --- SIMD tags ---------------------------------------------------------
-    hn::ScalableTag<partial_score_t> pst;
-    hn::ScalableTag<full_score_t>    fst;
+    hn::ScalableTag<p_partial_score_type> simd_tag;
+    hn::ScalableTag<p_full_score_type>    full_score_tag;
 
-    const size_t byte_lanes = hn::Lanes(pst);
-    const size_t score_lanes = hn::Lanes(fst);
-    constexpr size_t score_lanes_max = hn::MaxLanes(hn::ScalableTag<full_score_t>{});
+    const size_t byte_lane_count = hn::Lanes(simd_tag);
+    const size_t score_lane_count = hn::Lanes(full_score_tag);
+    constexpr size_t k_maximum_score_lanes = hn::MaxLanes(hn::ScalableTag<p_full_score_type>{});
 
     // Every internal buffer (DP state, backtrack matrix, exact-score row,
     // encoded sequences) lives in this scope. The CIGAR output lives on
-    // the result struct's own vector (heap) and is built BEFORE the scope
+    // the result struct's own vector (heap) and is built before the scope
     // unwinds, so the dangling-span hazard is contained here.
-    auto align_scope = context::current().push<context::Arena::Align>();
+    auto align_scope = context::current().push<context::arena::alignment>();
 
-    KswAlignResult result;
+    ksw_alignment_result result;
 
-    if constexpr (AlphabetDim <= 1) {
+    if constexpr (p_alphabet_dimension <= 1) {
         return result;
     }
 
@@ -649,46 +698,46 @@ template<
     const bool use_approx_max = flags.approx_max;
 
     // --- SIMD constant vectors ---------------------------------------------
-    const auto zero_vec          = hn::Zero(pst);
-    const auto match_score_vec   = hn::Set(pst, scoring_matrix.match_score());
-    const auto mismatch_score_vec = hn::Set(pst, scoring_matrix.mismatch_score());
-    const auto wildcard_rank_vec = hn::Set(pst, static_cast<partial_score_t>(AlphabetDim - 1));
+    const auto zero_vec          = hn::Zero(simd_tag);
+    const auto match_score_vec   = hn::Set(simd_tag, scoring_matrix.match_score());
+    const auto mismatch_score_vec = hn::Set(simd_tag, scoring_matrix.mismatch_score());
+    const auto wildcard_rank_vec = hn::Set(simd_tag, static_cast<p_partial_score_type>(p_alphabet_dimension - 1));
 
-    const auto double_gap_cost_vec = hn::Set(pst,
-        static_cast<partial_score_t>((gap_open + gap_extend) * 2));
-    const auto gap_open_vec = hn::Set(pst, gap_open);
-    const auto max_plausible_score_vec = hn::Set(pst,
-        static_cast<partial_score_t>(scoring_matrix.match_score() + (gap_open + gap_extend) * 2));
+    const auto double_gap_cost_vec = hn::Set(simd_tag,
+        static_cast<p_partial_score_type>((gap_open + gap_extend) * 2));
+    const auto gap_open_vec = hn::Set(simd_tag, gap_open);
+    const auto max_plausible_score_vec = hn::Set(simd_tag,
+        static_cast<p_partial_score_type>(scoring_matrix.match_score() + (gap_open + gap_extend) * 2));
 
-    const auto gap_open_short_vec = hn::Set(pst, gap_open);
-    const auto gap_open_long_vec  = hn::Set(pst, gap_open_long);
-    const auto short_gap_cost_vec = hn::Set(pst,
-        static_cast<partial_score_t>(gap_open + gap_extend));
-    const auto long_gap_cost_vec  = hn::Set(pst,
-        static_cast<partial_score_t>(gap_open_long + gap_extend_long));
+    const auto gap_open_short_vec = hn::Set(simd_tag, gap_open);
+    const auto gap_open_long_vec  = hn::Set(simd_tag, gap_open_long);
+    const auto short_gap_cost_vec = hn::Set(simd_tag,
+        static_cast<p_partial_score_type>(gap_open + gap_extend));
+    const auto long_gap_cost_vec  = hn::Set(simd_tag,
+        static_cast<p_partial_score_type>(gap_open_long + gap_extend_long));
 
     const int8_t wildcard_score = scoring_matrix.wildcard_score();
     auto wildcard_score_vec = hn::Set(
-        pst, static_cast<partial_score_t>(wildcard_score));
+        simd_tag, static_cast<p_partial_score_type>(wildcard_score));
     if (wildcard_score == 0) {
-        if constexpr (is_dual) {
+        if constexpr (k_is_dual_affine) {
             wildcard_score_vec = hn::Set(
-                pst, static_cast<partial_score_t>(-gap_extend_long));
+                simd_tag, static_cast<p_partial_score_type>(-gap_extend_long));
         } else {
             wildcard_score_vec = hn::Set(
-                pst, static_cast<partial_score_t>(-gap_extend));
+                simd_tag, static_cast<p_partial_score_type>(-gap_extend));
         }
     }
 
     // Backtrack direction constants
-    const auto bt_dir_1 = hn::Set(pst, static_cast<partial_score_t>(1));
-    const auto bt_dir_2 = hn::Set(pst, static_cast<partial_score_t>(2));
-    const auto bt_dir_3 = hn::Set(pst, static_cast<partial_score_t>(3));
-    const auto bt_dir_4 = hn::Set(pst, static_cast<partial_score_t>(4));
-    const auto bt_e_cont  = hn::Set(pst, static_cast<partial_score_t>(0x08));
-    const auto bt_f_cont  = hn::Set(pst, static_cast<partial_score_t>(0x10));
-    const auto bt_e2_cont = hn::Set(pst, static_cast<partial_score_t>(0x20));
-    const auto bt_f2_cont = hn::Set(pst, static_cast<partial_score_t>(0x40));
+    const auto bt_dir_1 = hn::Set(simd_tag, static_cast<p_partial_score_type>(1));
+    const auto bt_dir_2 = hn::Set(simd_tag, static_cast<p_partial_score_type>(2));
+    const auto bt_dir_3 = hn::Set(simd_tag, static_cast<p_partial_score_type>(3));
+    const auto bt_dir_4 = hn::Set(simd_tag, static_cast<p_partial_score_type>(4));
+    const auto bt_e_cont  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x08));
+    const auto bt_f_cont  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x10));
+    const auto bt_e2_cont = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x20));
+    const auto bt_f2_cont = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x40));
 
     // --- Band width --------------------------------------------------------
     const int band_width = band_width_param < 0
@@ -698,16 +747,16 @@ template<
 
     // --- Score range sanity check ------------------------------------------
     int matrix_min = scoring_matrix.mismatch_score();
-    for (size_t i = 1; i < scoring_matrix.entry_count; ++i) {
+    for (size_t i = 1; i < scoring_matrix.entries.size(); ++i) {
         if (scoring_matrix.entries[i] < matrix_min)
             matrix_min = scoring_matrix.entries[i];
     }
     if (-matrix_min > 2 * (gap_open + gap_extend)) return result;
 
-    // --- Long-gap threshold (d2 only) --------------------------------------
+    // --- Dual-affine long-gap threshold ------------------------------------
     [[maybe_unused]] int long_gap_threshold = 0;
     [[maybe_unused]] int long_gap_diff = 0;
-    if constexpr (is_dual) {
+    if constexpr (k_is_dual_affine) {
         if (gap_extend != gap_extend_long) {
             long_gap_threshold = (gap_open_long - gap_open)
                 / (gap_extend - gap_extend_long) - 1;
@@ -722,17 +771,17 @@ template<
     }
 
     // --- Block dimensions --------------------------------------------------
-    int band_vec_capacity = qlen < tlen ? qlen : tlen;
-    band_vec_capacity = ((band_vec_capacity < band_width + 1
-                            ? band_vec_capacity : band_width + 1)
-                         + static_cast<int>(byte_lanes) - 1)
-                        / static_cast<int>(byte_lanes) + 1;
+    int band_vector_capacity = qlen < tlen ? qlen : tlen;
+    band_vector_capacity = ((band_vector_capacity < band_width + 1
+                            ? band_vector_capacity : band_width + 1)
+                         + static_cast<int>(byte_lane_count) - 1)
+                        / static_cast<int>(byte_lane_count) + 1;
 
     // --- State arena -------------------------------------------------------
-    KswStateFor<mode> state(target_len, query_len, byte_lanes);
+    ksw_state_for<p_mode> state(target_len, query_len, byte_lane_count);
 
-    if constexpr (is_dual) {
-        state.fill_first_n_arrays(4,
+    if constexpr (k_is_dual_affine) {
+        state.fill_leading_arrays(4,
             static_cast<uint8_t>(-gap_open - gap_extend));
         state.fill_array(state.gap_e2_offset_base,
             static_cast<uint8_t>(-gap_open_long - gap_extend_long));
@@ -743,68 +792,61 @@ template<
     // --- Exact max tracking ------------------------------------------------
     // Exact-score row goes in the align arena; it's re-read every anti-
     // diagonal but never survives the call.
-    full_score_t* exact_score_row = nullptr;
+    p_full_score_type* exact_score_row = nullptr;
     if (!use_approx_max) {
-        const size_t exact_row_len = static_cast<size_t>(state.target_vec_count()) * byte_lanes;
+        const size_t exact_row_len = static_cast<size_t>(state.target_vector_count()) * byte_lane_count;
         auto exact_row_span =
-            context::current().alloc_align_array<full_score_t>(exact_row_len);
+            context::current().alloc_align_array<p_full_score_type>(exact_row_len);
         std::fill(exact_row_span.begin(), exact_row_span.end(),
-                  static_cast<full_score_t>(kKswNegInf));
+                  static_cast<p_full_score_type>(k_ksw_negative_infinity));
         exact_score_row = exact_row_span.data();
     }
 
     // --- Backtrack storage -------------------------------------------------
-    KswBacktrackMatrix backtrack;
+    ksw_backtrack_matrix backtrack;
     std::span<int32_t> anti_diag_band_start{};
     std::span<int32_t> anti_diag_band_end{};
     if (compute_cigar) {
-        backtrack.allocate(qlen + tlen - 1, band_vec_capacity, byte_lanes);
+        backtrack.allocate(qlen + tlen - 1, band_vector_capacity, byte_lane_count);
         anti_diag_band_start = backtrack.band_starts();
         anti_diag_band_end   = backtrack.band_ends();
     }
 
     // --- Prepare sequences -------------------------------------------------
-    // The DP body reads a "reversed query" (qr in minimap2's notation) and
-    // an "ordered target" (sf). The previous implementation allocated two
-    // scratch encoded buffers (`query_enc`, `target_enc`), encoded into
-    // them, and then mirror-copied into `state.query_reversed` /
-    // `state.target_bytes`. For very-long alignments that mirror copy is
-    // O(qlen + tlen) of memcpy traffic per call (see
-    // REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md
-    // §KSW2 mirror buffer). We instead use the new <is_reversed,
-    // write_reversed> overload of `to_encoded_into` to emit each
-    // orientation directly into the DP-state buffer.
+    // The DP body reads a reversed query (qr in minimap2 notation) and an
+    // ordered target (sf). The orientation-aware encoder writes both views
+    // directly into their final DP-state buffers.
     //
     // KSW2 orientation matrix (qr/sf relative to the source region):
     //   normal:        qr = reverse(query),               sf = target
     //   reverse_cigar: qr = query (already aligned),      sf = reverse(target)
     //
-    // The strand-template is_reversed flips the query letters (rc); the
+    // The strand-template p_is_reversed flips the query letters (rc); the
     // write_reversed flag flips the destination ordering. Both axes
-    // independently controlled by the new template parameter.
+    // are independently controlled by the strand and ordering parameters.
     std::span<uint8_t> query_dst(state.query_reversed, query_len);
     std::span<uint8_t> target_dst(state.target_bytes, target_len);
     if (flags.reverse_cigar) {
         // qr stays in source order — no extra mirror.
-        encode_region_via_ptr_at<is_reversed, false>(
+        encode_region_via_ptr_at<p_is_reversed, false>(
             query_seq, query_dst, query_start, query_end);
-        // Target reversed; no rc on target, so the second template arg is
+        // Target is reversed; no rc on target, so the second template arg is
         // the only orientation flip.
         encode_region_via_ptr_at<false, true>(
             target_seq, target_dst, target_start, target_end);
     } else {
-        // qr = reverse(encoded query). For the strand-reversed case the
+        // qr = reverse(encoded query). For a reversed strand the
         // existing <true, false> path produced rc(query); we want rc then
         // reverse-again, which is just complement-only. Captured as
         // <true, true> (see overload comment).
-        encode_region_via_ptr_at<is_reversed, true>(
+        encode_region_via_ptr_at<p_is_reversed, true>(
             query_seq, query_dst, query_start, query_end);
         encode_region_via_ptr_at<false, false>(
             target_seq, target_dst, target_start, target_end);
     }
 
     // --- Approximate max tracking ------------------------------------------
-    full_score_t approx_score = 0;
+    p_full_score_type approx_score = 0;
     int approx_score_target_pos = 0;
 
     // --- Determine fusion eligibility (non-generic-score path) -------------
@@ -813,7 +855,7 @@ template<
     // ====================================================================
     // Main DP loop
     // ====================================================================
-    const int bl = static_cast<int>(byte_lanes);
+    const int bl = static_cast<int>(byte_lane_count);
     int prev_band_start = -1;
     int prev_band_end   = -1;
 
@@ -830,7 +872,7 @@ template<
         if (band_end > (anti_diagonal + left_band) >> 1)
             band_end = (anti_diagonal + left_band) >> 1;
         if (band_start > band_end) {
-            result.zdropped = true;
+            result.is_z_dropped = true;
             break;
         }
         const int band_start_raw = band_start;
@@ -845,7 +887,7 @@ template<
         uint8_t* HWY_RESTRICT query_reversed_aligned = state.query_reversed
             + (qlen - 1 - anti_diagonal);
 
-        if constexpr (!is_dual) {
+        if constexpr (!k_is_dual_affine) {
             uint8_t* diff_up_u   = reinterpret_cast<uint8_t*>(state.diff_up_base);
             uint8_t* diff_left_u = reinterpret_cast<uint8_t*>(state.diff_left_base);
             uint8_t* gap_e_u     = reinterpret_cast<uint8_t*>(state.gap_e_offset_base);
@@ -916,9 +958,9 @@ template<
         }
 
         // --- Boundary vectors ----------------------------------------------
-        auto bx_vec  = set_lane_zero(pst, boundary_x_carry);
-        auto bv_vec  = set_lane_zero(pst, boundary_v_carry);
-        [[maybe_unused]] auto bx2_vec = set_lane_zero(pst, boundary_x2_carry);
+        auto bx_vec  = set_lane_zero(simd_tag, boundary_x_carry);
+        auto bv_vec  = set_lane_zero(simd_tag, boundary_v_carry);
+        [[maybe_unused]] auto bx2_vec = set_lane_zero(simd_tag, boundary_x2_carry);
         const int band_start_vec = band_start / bl;
         const int band_end_vec   = band_end / bl;
 
@@ -931,19 +973,19 @@ template<
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
                 auto c = use_fused_score
-                    ? ksw_dp_load<mode, true>(pst, off, state,
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec)
-                    : ksw_dp_load<mode, false>(pst, off, state,
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec);
-                ksw_dp_max_reduce<mode>(pst, c, max_plausible_score_vec,
+                reduce_ksw_dp_maximum<p_mode>(simd_tag, c, max_plausible_score_vec,
                     match_score_vec);
-                ksw_dp_store<mode>(pst, off, c, state,
+                store_ksw_dp_cell<p_mode>(simd_tag, off, c, state,
                     gap_open_vec, gap_open_short_vec, gap_open_long_vec,
                     short_gap_cost_vec, long_gap_cost_vec, zero_vec);
             }
@@ -954,12 +996,12 @@ template<
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
                 auto c = use_fused_score
-                    ? ksw_dp_load<mode, true>(pst, off, state,
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec)
-                    : ksw_dp_load<mode, false>(pst, off, state,
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
@@ -970,11 +1012,11 @@ template<
                     hn::Gt(c.diag_chain, c.score_max_cell), bt_dir_1);
                 c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
 
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     dir = hn::IfThenElse(
                         hn::Gt(c.vert_chain, c.score_max_cell), bt_dir_2, dir);
-                    c.score_max_cell = max_u8(pst, c.score_max_cell, c.vert_chain);
-                    c.score_max_cell = min_u8(pst, c.score_max_cell, max_plausible_score_vec);
+                    c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
+                    c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
                 } else {
                     dir = hn::IfThenElse(
                         hn::Gt(c.vert_chain, c.score_max_cell), bt_dir_2, dir);
@@ -989,23 +1031,23 @@ template<
                 }
 
                 // Store diff + gap states
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), pst,
+                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
                           state.diff_up_base + off);
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), pst,
+                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
                           state.diff_left_base + off);
 
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
                     c.diag_chain = hn::Sub(c.diag_chain, smq);
                     c.vert_chain = hn::Sub(c.vert_chain, smq);
 
                     auto dp = hn::Gt(c.diag_chain, zero_vec);
-                    hn::Store(hn::IfThenElseZero(dp, c.diag_chain), pst,
+                    hn::Store(hn::IfThenElseZero(dp, c.diag_chain), simd_tag,
                               state.gap_e_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(dp, bt_e_cont));
 
                     auto vp = hn::Gt(c.vert_chain, zero_vec);
-                    hn::Store(hn::IfThenElseZero(vp, c.vert_chain), pst,
+                    hn::Store(hn::IfThenElseZero(vp, c.vert_chain), simd_tag,
                               state.gap_f_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(vp, bt_f_cont));
                 } else {
@@ -1019,30 +1061,30 @@ template<
                     auto dp = hn::Gt(c.diag_chain, zero_vec);
                     hn::Store(hn::Sub(hn::IfThenElseZero(dp, c.diag_chain),
                                        short_gap_cost_vec),
-                              pst, state.gap_e_offset_base + off);
+                              simd_tag, state.gap_e_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(dp, bt_e_cont));
 
                     auto vp = hn::Gt(c.vert_chain, zero_vec);
                     hn::Store(hn::Sub(hn::IfThenElseZero(vp, c.vert_chain),
                                        short_gap_cost_vec),
-                              pst, state.gap_f_offset_base + off);
+                              simd_tag, state.gap_f_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(vp, bt_f_cont));
 
                     auto d2p = hn::Gt(c.diag_chain2, zero_vec);
                     hn::Store(hn::Sub(hn::IfThenElseZero(d2p, c.diag_chain2),
                                        long_gap_cost_vec),
-                              pst, state.gap_e2_offset_base + off);
+                              simd_tag, state.gap_e2_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(d2p, bt_e2_cont));
 
                     auto v2p = hn::Gt(c.vert_chain2, zero_vec);
                     hn::Store(hn::Sub(hn::IfThenElseZero(v2p, c.vert_chain2),
                                        long_gap_cost_vec),
-                              pst, state.gap_f2_offset_base + off);
+                              simd_tag, state.gap_f2_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenElseZero(v2p, bt_f2_cont));
                 }
 
-                hn::Store(dir, pst,
-                    backtrack.vec_slot_bytes(anti_diagonal, bvi - band_start_vec));
+                hn::Store(dir, simd_tag,
+                    backtrack.vector_slot_bytes(anti_diagonal, bvi - band_start_vec));
             }
         } else {
             // ---- CIGAR, gap right-alignment --------------------------------
@@ -1051,12 +1093,12 @@ template<
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
                 auto c = use_fused_score
-                    ? ksw_dp_load<mode, true>(pst, off, state,
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec)
-                    : ksw_dp_load<mode, false>(pst, off, state,
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
@@ -1067,11 +1109,11 @@ template<
                     hn::Gt(c.score_max_cell, c.diag_chain), bt_dir_1);
                 c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
 
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     dir = hn::IfThenElse(
                         hn::Gt(c.score_max_cell, c.vert_chain), dir, bt_dir_2);
-                    c.score_max_cell = max_u8(pst, c.score_max_cell, c.vert_chain);
-                    c.score_max_cell = min_u8(pst, c.score_max_cell, max_plausible_score_vec);
+                    c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
+                    c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
                 } else {
                     dir = hn::IfThenElse(
                         hn::Gt(c.score_max_cell, c.vert_chain), dir, bt_dir_2);
@@ -1085,23 +1127,23 @@ template<
                     c.score_max_cell = hn::Min(c.score_max_cell, match_score_vec);
                 }
 
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), pst,
+                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
                           state.diff_up_base + off);
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), pst,
+                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
                           state.diff_left_base + off);
 
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
                     c.diag_chain = hn::Sub(c.diag_chain, smq);
                     c.vert_chain = hn::Sub(c.vert_chain, smq);
 
                     auto dn = hn::Gt(zero_vec, c.diag_chain);
-                    hn::Store(hn::IfThenZeroElse(dn, c.diag_chain), pst,
+                    hn::Store(hn::IfThenZeroElse(dn, c.diag_chain), simd_tag,
                               state.gap_e_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(dn, bt_e_cont));
 
                     auto vn = hn::Gt(zero_vec, c.vert_chain);
-                    hn::Store(hn::IfThenZeroElse(vn, c.vert_chain), pst,
+                    hn::Store(hn::IfThenZeroElse(vn, c.vert_chain), simd_tag,
                               state.gap_f_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(vn, bt_f_cont));
                 } else {
@@ -1115,95 +1157,99 @@ template<
                     auto dn = hn::Gt(zero_vec, c.diag_chain);
                     hn::Store(hn::Sub(hn::IfThenZeroElse(dn, c.diag_chain),
                                        short_gap_cost_vec),
-                              pst, state.gap_e_offset_base + off);
+                              simd_tag, state.gap_e_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(dn, bt_e_cont));
 
                     auto vn = hn::Gt(zero_vec, c.vert_chain);
                     hn::Store(hn::Sub(hn::IfThenZeroElse(vn, c.vert_chain),
                                        short_gap_cost_vec),
-                              pst, state.gap_f_offset_base + off);
+                              simd_tag, state.gap_f_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(vn, bt_f_cont));
 
                     auto d2n = hn::Gt(zero_vec, c.diag_chain2);
                     hn::Store(hn::Sub(hn::IfThenZeroElse(d2n, c.diag_chain2),
                                        long_gap_cost_vec),
-                              pst, state.gap_e2_offset_base + off);
+                              simd_tag, state.gap_e2_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(d2n, bt_e2_cont));
 
                     auto v2n = hn::Gt(zero_vec, c.vert_chain2);
                     hn::Store(hn::Sub(hn::IfThenZeroElse(v2n, c.vert_chain2),
                                        long_gap_cost_vec),
-                              pst, state.gap_f2_offset_base + off);
+                              simd_tag, state.gap_f2_offset_base + off);
                     dir = hn::Or(dir, hn::IfThenZeroElse(v2n, bt_f2_cont));
                 }
 
-                hn::Store(dir, pst,
-                    backtrack.vec_slot_bytes(anti_diagonal, bvi - band_start_vec));
+                hn::Store(dir, simd_tag,
+                    backtrack.vector_slot_bytes(anti_diagonal, bvi - band_start_vec));
             }
         }
 
         // ================================================================
         // Max score tracking and Z-drop
         // ================================================================
-        const int8_t zdrop_gap = is_dual ? gap_extend_long : gap_extend;
+        const int8_t zdrop_gap = k_is_dual_affine
+            ? gap_extend_long
+            : gap_extend;
 
         if (!use_approx_max) {
-            full_score_t anti_diag_max_score;
+            p_full_score_type anti_diag_max_score;
             int anti_diag_max_target_pos;
             if (anti_diagonal > 0) {
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     const auto* du = reinterpret_cast<const uint8_t*>(state.diff_up_base);
                     const auto* dl = reinterpret_cast<const uint8_t*>(state.diff_left_base);
                     anti_diag_max_score = exact_score_row[band_end_raw] = band_end_raw > 0
                         ? exact_score_row[band_end_raw - 1]
-                          + static_cast<full_score_t>(du[band_end_raw]) - gap_open_plus_extend
+                          + static_cast<p_full_score_type>(du[band_end_raw]) - gap_open_plus_extend
                         : exact_score_row[band_end_raw]
-                          + static_cast<full_score_t>(dl[band_end_raw]) - gap_open_plus_extend;
+                          + static_cast<p_full_score_type>(dl[band_end_raw]) - gap_open_plus_extend;
                 } else {
                     anti_diag_max_score = exact_score_row[band_end_raw] = band_end_raw > 0
                         ? exact_score_row[band_end_raw - 1]
-                          + static_cast<full_score_t>(state.diff_up_base[band_end_raw])
+                          + static_cast<p_full_score_type>(state.diff_up_base[band_end_raw])
                         : exact_score_row[band_end_raw]
-                          + static_cast<full_score_t>(state.diff_left_base[band_end_raw]);
+                          + static_cast<p_full_score_type>(state.diff_left_base[band_end_raw]);
                 }
                 anti_diag_max_target_pos = band_end_raw;
 
-                auto max_sv = hn::Set(fst, anti_diag_max_score);
-                auto max_pv = hn::Set(fst, static_cast<full_score_t>(anti_diag_max_target_pos));
-                [[maybe_unused]] auto goe_vec = hn::Set(fst,
-                    static_cast<full_score_t>(gap_open_plus_extend));
+                auto max_sv = hn::Set(full_score_tag, anti_diag_max_score);
+                auto max_pv = hn::Set(full_score_tag, static_cast<p_full_score_type>(anti_diag_max_target_pos));
+                [[maybe_unused]] auto goe_vec = hn::Set(full_score_tag,
+                    static_cast<p_full_score_type>(gap_open_plus_extend));
 
                 const int block_end = band_start_raw
-                    + (band_end_raw - band_start_raw) / static_cast<int>(score_lanes)
-                      * static_cast<int>(score_lanes);
+                    + (band_end_raw - band_start_raw) / static_cast<int>(score_lane_count)
+                      * static_cast<int>(score_lane_count);
                 int tp = band_start_raw;
-                for (; tp < block_end; tp += static_cast<int>(score_lanes)) {
-                    auto es = hn::LoadU(fst, &exact_score_row[tp]);
-                    HWY_ALIGN full_score_t dl_buf[score_lanes_max] = {};
-                    for (size_t li = 0; li < score_lanes; ++li) {
-                        if constexpr (!is_dual)
-                            dl_buf[li] = static_cast<full_score_t>(
+                for (; tp < block_end; tp += static_cast<int>(score_lane_count)) {
+                    auto es = hn::LoadU(full_score_tag, &exact_score_row[tp]);
+                    HWY_ALIGN p_full_score_type dl_buf[k_maximum_score_lanes] = {};
+                    for (size_t li = 0; li < score_lane_count; ++li) {
+                        if constexpr (!k_is_dual_affine)
+                            dl_buf[li] = static_cast<p_full_score_type>(
                                 reinterpret_cast<const uint8_t*>(state.diff_left_base)[tp + li]);
                         else
-                            dl_buf[li] = static_cast<full_score_t>(
+                            dl_buf[li] = static_cast<p_full_score_type>(
                                 state.diff_left_base[tp + li]);
                     }
-                    auto dlv = hn::Load(fst, dl_buf);
+                    auto dlv = hn::Load(full_score_tag, dl_buf);
                     es = hn::Add(es, dlv);
-                    if constexpr (!is_dual) es = hn::Sub(es, goe_vec);
-                    hn::StoreU(es, fst, &exact_score_row[tp]);
+                    if constexpr (!k_is_dual_affine) {
+                        es = hn::Sub(es, goe_vec);
+                    }
+                    hn::StoreU(es, full_score_tag, &exact_score_row[tp]);
 
-                    auto tpv = hn::Set(fst, static_cast<full_score_t>(tp));
+                    auto tpv = hn::Set(full_score_tag, static_cast<p_full_score_type>(tp));
                     auto gm = hn::Gt(es, max_sv);
                     max_sv = hn::IfThenElse(gm, es, max_sv);
                     max_pv = hn::IfThenElse(gm, tpv, max_pv);
                 }
 
-                HWY_ALIGN full_score_t sb[score_lanes_max];
-                HWY_ALIGN full_score_t pb[score_lanes_max];
-                hn::Store(max_sv, fst, sb);
-                hn::Store(max_pv, fst, pb);
-                for (size_t li = 0; li < score_lanes; ++li) {
+                HWY_ALIGN p_full_score_type sb[k_maximum_score_lanes];
+                HWY_ALIGN p_full_score_type pb[k_maximum_score_lanes];
+                hn::Store(max_sv, full_score_tag, sb);
+                hn::Store(max_pv, full_score_tag, pb);
+                for (size_t li = 0; li < score_lane_count; ++li) {
                     if (anti_diag_max_score < sb[li]) {
                         anti_diag_max_score = sb[li];
                         anti_diag_max_target_pos = static_cast<int>(pb[li])
@@ -1211,12 +1257,12 @@ template<
                     }
                 }
                 for (; tp < band_end_raw; ++tp) {
-                    if constexpr (!is_dual) {
-                        exact_score_row[tp] += static_cast<full_score_t>(
+                    if constexpr (!k_is_dual_affine) {
+                        exact_score_row[tp] += static_cast<p_full_score_type>(
                             reinterpret_cast<const uint8_t*>(state.diff_left_base)[tp])
                             - gap_open_plus_extend;
                     } else {
-                        exact_score_row[tp] += static_cast<full_score_t>(
+                        exact_score_row[tp] += static_cast<p_full_score_type>(
                             state.diff_left_base[tp]);
                     }
                     if (exact_score_row[tp] > anti_diag_max_score) {
@@ -1225,12 +1271,12 @@ template<
                     }
                 }
             } else {
-                if constexpr (!is_dual) {
-                    exact_score_row[0] = static_cast<full_score_t>(
+                if constexpr (!k_is_dual_affine) {
+                    exact_score_row[0] = static_cast<p_full_score_type>(
                         reinterpret_cast<const uint8_t*>(state.diff_left_base)[0])
                         - gap_open_plus_extend - gap_open_plus_extend;
                 } else {
-                    exact_score_row[0] = static_cast<full_score_t>(
+                    exact_score_row[0] = static_cast<p_full_score_type>(
                         state.diff_left_base[0]) - gap_open_plus_extend;
                 }
                 anti_diag_max_score = exact_score_row[0];
@@ -1246,7 +1292,7 @@ template<
                 result.mqe = exact_score_row[band_start_raw];
                 result.mqe_t = band_start_raw;
             }
-            if (apply_zdrop_heuristic(result, true,
+            if (apply_z_drop_heuristic(result, true,
                                        anti_diag_max_score, anti_diagonal,
                                        anti_diag_max_target_pos,
                                        z_drop, zdrop_gap))
@@ -1264,12 +1310,12 @@ template<
                     && approx_score_target_pos + 1 >= band_start_raw
                     && approx_score_target_pos + 1 <= band_end_raw)
                 {
-                    full_score_t delta_left, delta_up;
-                    if constexpr (!is_dual) {
-                        delta_left = static_cast<full_score_t>(
+                    p_full_score_type delta_left, delta_up;
+                    if constexpr (!k_is_dual_affine) {
+                        delta_left = static_cast<p_full_score_type>(
                             reinterpret_cast<const uint8_t*>(state.diff_left_base)[approx_score_target_pos])
                             - gap_open_plus_extend;
-                        delta_up = static_cast<full_score_t>(
+                        delta_up = static_cast<p_full_score_type>(
                             reinterpret_cast<const uint8_t*>(state.diff_up_base)[approx_score_target_pos + 1])
                             - gap_open_plus_extend;
                     } else {
@@ -1285,28 +1331,28 @@ template<
                 } else if (approx_score_target_pos >= band_start_raw
                            && approx_score_target_pos <= band_end_raw)
                 {
-                    if constexpr (!is_dual) {
-                        approx_score += static_cast<full_score_t>(
+                    if constexpr (!k_is_dual_affine) {
+                        approx_score += static_cast<p_full_score_type>(
                             reinterpret_cast<const uint8_t*>(state.diff_left_base)[approx_score_target_pos])
                             - gap_open_plus_extend;
                     } else {
-                        approx_score += static_cast<full_score_t>(
+                        approx_score += static_cast<p_full_score_type>(
                             state.diff_left_base[approx_score_target_pos]);
                     }
                 } else {
                     ++approx_score_target_pos;
-                    if constexpr (!is_dual) {
-                        approx_score += static_cast<full_score_t>(
+                    if constexpr (!k_is_dual_affine) {
+                        approx_score += static_cast<p_full_score_type>(
                             reinterpret_cast<const uint8_t*>(state.diff_up_base)[approx_score_target_pos])
                             - gap_open_plus_extend;
                     } else {
-                        approx_score += static_cast<full_score_t>(
+                        approx_score += static_cast<p_full_score_type>(
                             state.diff_up_base[approx_score_target_pos]);
                     }
                 }
-                if constexpr (!is_dual) {
+                if constexpr (!k_is_dual_affine) {
                     if (flags.approx_zdrop
-                        && apply_zdrop_heuristic(result, true,
+                        && apply_z_drop_heuristic(result, true,
                                                   approx_score, anti_diagonal,
                                                   approx_score_target_pos,
                                                   z_drop, zdrop_gap))
@@ -1315,19 +1361,19 @@ template<
                     }
                 }
             } else {
-                if constexpr (!is_dual) {
-                    approx_score = static_cast<full_score_t>(
+                if constexpr (!k_is_dual_affine) {
+                    approx_score = static_cast<p_full_score_type>(
                         reinterpret_cast<const uint8_t*>(state.diff_left_base)[0])
                         - gap_open_plus_extend - gap_open_plus_extend;
                 } else {
-                    approx_score = static_cast<full_score_t>(
+                    approx_score = static_cast<p_full_score_type>(
                         state.diff_left_base[0]) - gap_open_plus_extend;
                 }
                 approx_score_target_pos = 0;
             }
-            if constexpr (is_dual) {
+            if constexpr (k_is_dual_affine) {
                 if (flags.approx_zdrop
-                    && apply_zdrop_heuristic(result, true,
+                    && apply_z_drop_heuristic(result, true,
                                               approx_score, anti_diagonal,
                                               approx_score_target_pos,
                                               z_drop, zdrop_gap))
@@ -1348,13 +1394,13 @@ template<
     // ====================================================================
     if (compute_cigar) {
         const bool rev = flags.reverse_cigar;
-        if (!result.zdropped && !flags.extz_only) {
+        if (!result.is_z_dropped && !flags.extz_only) {
             ksw_backtrack_cigar(backtrack, true, rev, 0,
                                 tlen - 1, qlen - 1, result.cigar);
-        } else if (!result.zdropped && flags.extz_only
+        } else if (!result.is_z_dropped && flags.extz_only
                    && result.mqe + end_bonus > result.max)
         {
-            result.reach_end = true;
+            result.has_reached_end = true;
             ksw_backtrack_cigar(backtrack, true, rev, 0,
                                 result.mqe_t, qlen - 1, result.cigar);
         } else if (result.max_t >= 0 && result.max_q >= 0) {
@@ -1367,25 +1413,27 @@ template<
 }
 
 // =============================================================================
-// HwyKsw2Aligner — public API
+// highway_ksw2_aligner — public API
 // =============================================================================
 
-class HwyKsw2Aligner {
+/** Fixed-target facade for the single- and dual-affine KSW2 callables. */
+class highway_ksw2_aligner {
 public:
     template<
-        bool is_reversed,
-        sequence_alphabet Alphabet>
-    [[nodiscard]] static KswAlignResult z2_align(
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> target,
+        bool p_is_reversed,
+        sequence_alphabet p_alphabet>
+    /** Align with the single-affine recurrence. */
+    [[nodiscard]] static ksw_alignment_result align_single_affine(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<Alphabet>& scoring_matrix,
-        const KswZ2Params& params)
+        const scoring_matrix<p_alphabet>& scoring_matrix,
+        const ksw_single_affine_parameters& params)
     {
-        return ksw2_core_align<KswAlignerMode::SINGLE_AFFINE, is_reversed>(
+        return align_ksw2_core<ksw_aligner_mode::single_affine, p_is_reversed>(
             query, target, query_start, query_end, target_start, target_end,
             scoring_matrix,
             params.gap_open, params.gap_extend,
@@ -1394,17 +1442,18 @@ public:
     }
 
     template<
-        bool is_reversed,
-        sequence_alphabet Alphabet>
-    [[nodiscard]] static KswAlignResult d2_align(
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> target,
+        bool p_is_reversed,
+        sequence_alphabet p_alphabet>
+    /** Align with the dual-affine recurrence. */
+    [[nodiscard]] static ksw_alignment_result align_dual_affine(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<Alphabet>& scoring_matrix,
-        KswD2Params params)
+        const scoring_matrix<p_alphabet>& scoring_matrix,
+        ksw_dual_affine_parameters params)
     {
         if (params.gap_open_long + params.gap_extend_long
             < params.gap_open_short + params.gap_extend_short)
@@ -1412,7 +1461,7 @@ public:
             std::swap(params.gap_open_short, params.gap_open_long);
             std::swap(params.gap_extend_short, params.gap_extend_long);
         }
-        return ksw2_core_align<KswAlignerMode::DUAL_AFFINE, is_reversed>(
+        return align_ksw2_core<ksw_aligner_mode::dual_affine, p_is_reversed>(
             query, target, query_start, query_end, target_start, target_end,
             scoring_matrix,
             params.gap_open_short, params.gap_extend_short,
@@ -1421,44 +1470,46 @@ public:
     }
 };
 
-template<sequence_alphabet Alphabet>
-[[nodiscard]] KswAlignResult ksw2_z2(
-    bool reversed,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_sequence,
+/** Dispatch the single-affine callable for the requested orientation. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] ksw_alignment_result align_ksw2_single_affine(
+    bool is_reversed,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<Alphabet>& scoring_matrix,
-    const KswZ2Params& params)
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const ksw_single_affine_parameters& params)
 {
-    return reversed
-        ? HwyKsw2Aligner::z2_align<true>(
+    return is_reversed
+        ? highway_ksw2_aligner::align_single_affine<true>(
             query, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, params)
-        : HwyKsw2Aligner::z2_align<false>(
+        : highway_ksw2_aligner::align_single_affine<false>(
             query, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, params);
 }
 
-template<sequence_alphabet Alphabet>
-[[nodiscard]] KswAlignResult ksw2_d2(
-    bool reversed,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_sequence,
+/** Dispatch the dual-affine callable for the requested orientation. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] ksw_alignment_result align_ksw2_dual_affine(
+    bool is_reversed,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<Alphabet>& scoring_matrix,
-    KswD2Params params)
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    ksw_dual_affine_parameters params)
 {
-    return reversed
-        ? HwyKsw2Aligner::d2_align<true>(
+    return is_reversed
+        ? highway_ksw2_aligner::align_dual_affine<true>(
             query, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, params)
-        : HwyKsw2Aligner::d2_align<false>(
+        : highway_ksw2_aligner::align_dual_affine<false>(
             query, target_sequence, query_start, query_end,
             target_start, target_end, scoring_matrix, params);
 }

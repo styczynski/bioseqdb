@@ -533,7 +533,7 @@ routine_identity_from_argument_declarations(
 }
 
 [[nodiscard]] inline std::vector<parsed_routine_argument>
-parse_returns_table_columns(std::string_view result_type) {
+parse_table_result_columns(std::string_view result_type) {
     result_type = signature_detail::trim(result_type);
     const std::string lowered =
         signature_detail::lower_copy(result_type);

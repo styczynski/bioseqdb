@@ -1,6 +1,6 @@
 // DOC0383 section 13.2 — byte-exact tests for the PG-free MPF5 v2 image ABI.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>

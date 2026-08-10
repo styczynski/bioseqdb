@@ -1,38 +1,34 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Bioseq custom executor node for PostgreSQL index scans.
  *
- * table/columnar_indexscan.cppm
- *
- * Bioseq IndexScan custom node. The planner_hook rewrites a vanilla
- * IndexScan plan into a CustomScan whose state is a BioseqIndexScanState
+ * The planner hook rewrites a vanilla
+ * IndexScan plan into a CustomScan whose state is a index_scan_state
  * (CustomScanState first, IndexScanState* second). The execution methods
  * delegate to PostgreSQL's IndexScan executor while reusing bioseq's
  * tuple-fetch path so projected columns can be pushed into the columnar
  * reader.
  *
- *-------------------------------------------------------------------------
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 
-export module bioseq.table:index_scan;
+export module bioseq.postgres.table:index_scan;
 
-import bioseq.common.mlogging;
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.table.types;
+import bioseq.common.logging;
+import bioseq.postgres.support;
+import bioseq.postgres.table.types;
 import bioseq.postgres.table.scan_state;
-import bioseq.pg_utils.lists;
-import bioseq.pg_utils.bitmapset;
-import :access_method;       // DOC0322 §7.4/§7.5 — bioseq_index_fetch_begin_extended (exported)
-import :utils;               // DOC0322 §7.4 — BioseqColumnAttrNeeded
-import bioseq.column.tam;    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (moved to the leaf)
+import :access_method;
+import :utils;
+import bioseq.postgres.column.table_access;
 
 /*
  * When an ordering operator is used, tuples fetched from the index that
  * need to be reordered are queued in a pairing heap as ReorderTuples.
  */
-struct ReorderTuple
+struct reorder_tuple
 {
     pairingheap_node ph_node;
     HeapTuple htup;
@@ -40,11 +36,8 @@ struct ReorderTuple
     bool* orderbynulls;
 };
 
-/*
- * DOC0322 §7.4/§7.5 — IsBioseqColumnTableAmTable / BioseqColumnAttrNeeded /
- * bioseq_index_fetch_begin_extended are reached via the imports above instead
- * of forward declarations.
- */
+/* Table identity, attribute discovery, and index-fetch construction are
+ * imported from their leaf modules to keep this executor adapter acyclic. */
 
 
 
@@ -52,7 +45,7 @@ struct ReorderTuple
  * relation_checks / check_rel_procedure mirror PostgreSQL's internal
  * RELATION_CHECKS / CHECK_REL_PROCEDURE macros. relation_checks runs the
  * three relcache sanity Asserts; check_rel_procedure raises the same
- * ereport(ERROR) (via bioseq_log<ERR, PG>, which longjmps) when an index AM
+ * ereport(ERROR) (via bioseq_log<logging_level::error, logging_target::postgres>, which longjmps) when an index AM
  * routine pointer is missing. The member-pointer template preserves the
  * macro's token-paste intent (the procedure name is a real argument).
  */
@@ -65,12 +58,12 @@ namespace {
     Assert(!ReindexIsProcessingIndex(RelationGetRelid(index_relation)));
 }
 
-template <class Member>
+template <class member>
 [[gnu::always_inline]] inline void
-check_rel_procedure(Relation index_relation, Member IndexAmRoutine::* proc, const char* pname)
+check_rel_procedure(Relation index_relation, member IndexAmRoutine::* proc, const char* pname)
 {
     if (index_relation->rd_indam->*proc == nullptr)
-        bioseq_log<ERR, PG>("function \"{}\" is not defined for index \"{}\"",
+        bioseq_log<logging_level::error, logging_target::postgres>("function \"{}\" is not defined for index \"{}\"",
                             pname, RelationGetRelationName(index_relation));
 }
 
@@ -78,21 +71,21 @@ check_rel_procedure(Relation index_relation, Member IndexAmRoutine::* proc, cons
 
 
 static IndexScanDesc
-index_beginscan_internal(Relation indexRelation,
+begin_internal_index_scan(Relation index_relation,
                          int nkeys, int norderbys, Snapshot snapshot,
                          ParallelIndexScanDesc pscan, bool temp_snap)
 {
-    relation_checks(indexRelation);
-    check_rel_procedure(indexRelation, &IndexAmRoutine::ambeginscan, "ambeginscan");
+    relation_checks(index_relation);
+    check_rel_procedure(index_relation, &IndexAmRoutine::ambeginscan, "ambeginscan");
 
-    if (!(indexRelation->rd_indam->ampredlocks))
-        PredicateLockRelation(indexRelation, snapshot);
+    if (!(index_relation->rd_indam->ampredlocks))
+        PredicateLockRelation(index_relation, snapshot);
 
     /* We hold a reference count to the relcache entry throughout the scan. */
-    RelationIncrementReferenceCount(indexRelation);
+    RelationIncrementReferenceCount(index_relation);
 
     /* Tell the AM to open a scan. */
-    IndexScanDesc scan = indexRelation->rd_indam->ambeginscan(indexRelation, nkeys, norderbys);
+    IndexScanDesc scan = index_relation->rd_indam->ambeginscan(index_relation, nkeys, norderbys);
     /* Initialize information for parallel scan. */
     scan->parallel_scan = pscan;
     scan->xs_temp_snap = temp_snap;
@@ -105,34 +98,34 @@ index_beginscan_internal(Relation indexRelation,
  * locks on the heap and the index.
  */
 static IndexScanDesc
-bioseq_index_beginscan(Relation heapRelation,
-                       Relation indexRelation,
+begin_bioseq_index_scan_descriptor(Relation heap_relation,
+                       Relation index_relation,
                        Snapshot snapshot,
                        int nkeys, int norderbys,
                        Bitmapset* attr_needed)
 {
-    IndexScanDesc scan = index_beginscan_internal(indexRelation, nkeys, norderbys, snapshot, nullptr, false);
+    IndexScanDesc scan = begin_internal_index_scan(index_relation, nkeys, norderbys, snapshot, nullptr, false);
 
     /*
      * Save additional parameters into the scandesc.  Everything else was set
      * up by RelationGetIndexScan.
      */
-    scan->heapRelation = heapRelation;
+    scan->heapRelation = heap_relation;
     scan->xs_snapshot = snapshot;
 
     /* prepare to fetch index matches from table */
-    scan->xs_heapfetch = bioseq_index_fetch_begin_extended(heapRelation, attr_needed);
+    scan->xs_heapfetch = bioseq_index_fetch_begin_extended(heap_relation, attr_needed);
 
     return scan;
 }
 
 /*
- * IndexNext retrieves the next tuple from the IndexScanState's relation
+ * fetch_next_index_tuple retrieves the next tuple from the IndexScanState's relation
  * using the bioseq-specific xs_heapfetch path so projected columns are
  * read through the columnar reader.
  */
 static TupleTableSlot*
-IndexNext(IndexScanState* node)
+fetch_next_index_tuple(IndexScanState* node)
 {
     EState* estate = node->ss.ps.state;
     ScanDirection direction = estate->es_direction;
@@ -154,10 +147,11 @@ IndexNext(IndexScanState* node)
          * We reach here if the index scan is not parallel, or if we're
          * serially executing an index scan that was planned to be parallel.
          */
-        PBitmapset attr_needed =
-            BioseqColumnAttrNeeded(&node->ss, (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
+        bioseq::postgres::support::postgres_bitmapset attr_needed = collect_needed_column_attributes(
+            &node->ss,
+            (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
 
-        scandesc = bioseq_index_beginscan(node->ss.ss_currentRelation,
+        scandesc = begin_bioseq_index_scan_descriptor(node->ss.ss_currentRelation,
                                           node->iss_RelationDesc,
                                           estate->es_snapshot,
                                           node->iss_NumScanKeys,
@@ -213,13 +207,13 @@ IndexNext(IndexScanState* node)
  * Calculate the expressions in the ORDER BY clause, based on the heap tuple.
  */
 static void
-EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
+evaluate_index_order_by(IndexScanState* node, ExprContext* econtext)
 {
-    bioseq::pg_support::MemoryContextScope ctx_guard{
+    bioseq::postgres::support::memory_context_scope ctx_guard{
         econtext->ecxt_per_tuple_memory};
 
     int orderby_index = 0;
-    for (auto orderby_state : PList<ExprState>(node->indexorderbyorig))
+    for (auto orderby_state : bioseq::postgres::support::postgres_list<ExprState>(node->indexorderbyorig))
     {
         node->iss_OrderByValues[orderby_index] = ExecEvalExpr(orderby_state,
                                                               econtext,
@@ -228,9 +222,9 @@ EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
     }
 }
 
-/* IndexRecheck -- access method routine to recheck a tuple in EvalPlanQual */
+/* recheck_index_tuple -- access method routine to recheck a tuple in EvalPlanQual */
 static bool
-IndexRecheck(IndexScanState* node, TupleTableSlot* slot)
+recheck_index_tuple(IndexScanState* node, TupleTableSlot* slot)
 {
     ExprContext* econtext = node->ss.ps.ps_ExprContext;
 
@@ -244,7 +238,7 @@ IndexRecheck(IndexScanState* node, TupleTableSlot* slot)
  * Compare ORDER BY expression values.
  */
 static int
-cmp_orderbyvals(const Datum* adist, const bool* anulls,
+compare_order_by_values(const Datum* adist, const bool* anulls,
                 const Datum* bdist, const bool* bnulls,
                 IndexScanState* node)
 {
@@ -274,17 +268,17 @@ cmp_orderbyvals(const Datum* adist, const bool* anulls,
 
 /* Helper function to push a tuple to the reorder queue. */
 static void
-reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
+push_reorder_queue(IndexScanState* node, TupleTableSlot* slot,
                   Datum* orderbyvals, bool* orderbynulls)
 {
     IndexScanDesc scandesc = node->iss_ScanDesc;
     EState* estate = node->ss.ps.state;
-    bioseq::pg_support::MemoryContextScope ctx_guard{estate->es_query_cxt};
+    bioseq::postgres::support::memory_context_scope ctx_guard{estate->es_query_cxt};
 
-    ReorderTuple* rt = make0<ReorderTuple>();
+    reorder_tuple* rt = bioseq::postgres::support::allocate_zeroed_object<reorder_tuple>();
     rt->htup = ExecCopySlotHeapTuple(slot);
-    rt->orderbyvals = make_array<Datum>(scandesc->numberOfOrderBys);
-    rt->orderbynulls = make_array<bool>(scandesc->numberOfOrderBys);
+    rt->orderbyvals = bioseq::postgres::support::allocate_zeroed_array<Datum>(scandesc->numberOfOrderBys);
+    rt->orderbynulls = bioseq::postgres::support::allocate_zeroed_array<bool>(scandesc->numberOfOrderBys);
     for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
     {
         if (!orderbynulls[orderby_index])
@@ -300,9 +294,9 @@ reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
 
 /* Helper function to pop the next tuple from the reorder queue. */
 static HeapTuple
-reorderqueue_pop(IndexScanState* node)
+pop_reorder_queue(IndexScanState* node)
 {
-    ReorderTuple* topmost = reinterpret_cast<ReorderTuple*>(pairingheap_remove_first(node->iss_ReorderQueue));
+    reorder_tuple* topmost = reinterpret_cast<reorder_tuple*>(pairingheap_remove_first(node->iss_ReorderQueue));
 
     HeapTuple result = topmost->htup;
     for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
@@ -319,13 +313,13 @@ reorderqueue_pop(IndexScanState* node)
 
 
 /*
- * IndexNextWithReorder is like IndexNext but additionally re-checks
+ * fetch_next_reordered_index_tuple is like fetch_next_index_tuple but additionally re-checks
  * ORDER BY expressions and reorders tuples through a pairing heap.
  */
 static TupleTableSlot*
-IndexNextWithReorder(IndexScanState* node)
+fetch_next_reordered_index_tuple(IndexScanState* node)
 {
-    ReorderTuple* topmost = nullptr;
+    reorder_tuple* topmost = nullptr;
     bool was_exact;
     Datum* lastfetched_vals;
     bool* lastfetched_nulls;
@@ -346,10 +340,11 @@ IndexNextWithReorder(IndexScanState* node)
 
     if (scandesc == nullptr)
     {
-        PBitmapset attr_needed =
-            BioseqColumnAttrNeeded(&node->ss, (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
+        bioseq::postgres::support::postgres_bitmapset attr_needed = collect_needed_column_attributes(
+            &node->ss,
+            (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
 
-        scandesc = bioseq_index_beginscan(node->ss.ss_currentRelation,
+        scandesc = begin_bioseq_index_scan_descriptor(node->ss.ss_currentRelation,
                                           node->iss_RelationDesc,
                                           estate->es_snapshot,
                                           node->iss_NumScanKeys,
@@ -377,16 +372,16 @@ IndexNextWithReorder(IndexScanState* node)
          */
         if (!pairingheap_is_empty(node->iss_ReorderQueue))
         {
-            topmost = reinterpret_cast<ReorderTuple*>(pairingheap_first(node->iss_ReorderQueue));
+            topmost = reinterpret_cast<reorder_tuple*>(pairingheap_first(node->iss_ReorderQueue));
 
             if (node->iss_ReachedEnd ||
-                cmp_orderbyvals(topmost->orderbyvals,
+                compare_order_by_values(topmost->orderbyvals,
                                 topmost->orderbynulls,
                                 scandesc->xs_orderbyvals,
                                 scandesc->xs_orderbynulls,
                                 node) <= 0)
             {
-                HeapTuple tuple = reorderqueue_pop(node);
+                HeapTuple tuple = pop_reorder_queue(node);
 
                 /* Pass 'true', as the tuple in the queue is a palloc'd copy */
                 ExecForceStoreHeapTuple(tuple, slot, true);
@@ -431,15 +426,15 @@ IndexNextWithReorder(IndexScanState* node)
         {
             econtext->ecxt_scantuple = slot;
             ResetExprContext(econtext);
-            EvalOrderByExpressions(node, econtext);
+            evaluate_index_order_by(node, econtext);
 
-            int cmp = cmp_orderbyvals(node->iss_OrderByValues,
+            int cmp = compare_order_by_values(node->iss_OrderByValues,
                                       node->iss_OrderByNulls,
                                       scandesc->xs_orderbyvals,
                                       scandesc->xs_orderbynulls,
                                       node);
             if (cmp < 0)
-                bioseq_log<ERR, PG>( "index returned tuples in wrong order");
+                bioseq_log<logging_level::error, logging_target::postgres>( "index returned tuples in wrong order");
             else if (cmp == 0)
                 was_exact = true;
             else
@@ -458,28 +453,28 @@ IndexNextWithReorder(IndexScanState* node)
          * Can we return this tuple immediately, or does it need to be pushed
          * to the reorder queue?
          */
-        if (!was_exact || (topmost && cmp_orderbyvals(lastfetched_vals,
+        if (!was_exact || (topmost && compare_order_by_values(lastfetched_vals,
                                                       lastfetched_nulls,
                                                       topmost->orderbyvals,
                                                       topmost->orderbynulls,
                                                       node) > 0))
         {
-            reorderqueue_push(node, slot, lastfetched_vals, lastfetched_nulls);
+            push_reorder_queue(node, slot, lastfetched_vals, lastfetched_nulls);
             continue;
         }
         return slot;
     }
 }
 
-/* ExecIndexScan(node) - executes the index scan, dispatching to the
+/* execute_index_scan(node) - executes the index scan, dispatching to the
  * reordering or non-reordering variant based on whether ORDER BY keys are
  * present.
  */
 static TupleTableSlot*
-ExecIndexScan(PlanState* pstate)
+execute_index_scan(PlanState* pstate)
 {
-    BioseqIndexScanState* bioseq_index_state = BioseqIndexScanState::from_plan_state(pstate);
-    IndexScanState* node = castNode(IndexScanState, bioseq_index_state->indexscan_state);
+    index_scan_state* bioseq_index_state = index_scan_state::from_plan_state(pstate);
+    IndexScanState* node = castNode(IndexScanState, bioseq_index_state->index_scan_executor_state);
 
     /* If we have runtime keys and they've not already been set up, do it now. */
     if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
@@ -487,32 +482,34 @@ ExecIndexScan(PlanState* pstate)
 
     if (node->iss_NumOrderByKeys > 0)
         return ExecScan(&node->ss,
-                        reinterpret_cast<ExecScanAccessMtd>(IndexNextWithReorder),
-                        reinterpret_cast<ExecScanRecheckMtd>(IndexRecheck));
+                        reinterpret_cast<ExecScanAccessMtd>(fetch_next_reordered_index_tuple),
+                        reinterpret_cast<ExecScanRecheckMtd>(recheck_index_tuple));
     return ExecScan(&node->ss,
-                    reinterpret_cast<ExecScanAccessMtd>(IndexNext),
-                    reinterpret_cast<ExecScanRecheckMtd>(IndexRecheck));
+                    reinterpret_cast<ExecScanAccessMtd>(fetch_next_index_tuple),
+                    reinterpret_cast<ExecScanRecheckMtd>(recheck_index_tuple));
 }
 
 /* ExecIndexScanInitializeDSM - set up a parallel index scan descriptor. */
 static void
-BioseqColumnIndexScan_ExecIndexScanInitializeDSM(IndexScanState* node,
+initialize_parallel_index_scan(IndexScanState* node,
                                              ParallelContext* pcxt,
                                              void* coordinate)
 {
     EState* estate = node->ss.ps.state;
     ParallelIndexScanDesc piscan = static_cast<ParallelIndexScanDesc>(coordinate);
 
-    index_parallelscan_initialize_compat(node->ss.ss_currentRelation,
-                                         node->iss_RelationDesc,
-                                         estate->es_snapshot,
-                                         piscan);
+    bioseq_initialize_uninstrumented_parallel_index_scan(
+        node->ss.ss_currentRelation,
+        node->iss_RelationDesc,
+        estate->es_snapshot,
+        piscan);
 
-    node->iss_ScanDesc = index_beginscan_parallel_compat(node->ss.ss_currentRelation,
-                                                         node->iss_RelationDesc,
-                                                         node->iss_NumScanKeys,
-                                                         node->iss_NumOrderByKeys,
-                                                         piscan);
+    node->iss_ScanDesc = bioseq_begin_uninstrumented_parallel_index_scan(
+        node->ss.ss_currentRelation,
+        node->iss_RelationDesc,
+        node->iss_NumScanKeys,
+        node->iss_NumOrderByKeys,
+        piscan);
 
     if (node->iss_NumRuntimeKeys == 0 || node->iss_RuntimeKeysReady)
         index_rescan(node->iss_ScanDesc,
@@ -522,15 +519,16 @@ BioseqColumnIndexScan_ExecIndexScanInitializeDSM(IndexScanState* node,
 
 /* ExecIndexScanInitializeWorker - copy relevant info from TOC into planstate. */
 static void
-BioseqColumnIndexScan_ExecIndexScanInitializeWorker(IndexScanState* node, void* coordinate)
+initialize_parallel_index_scan_worker(IndexScanState* node, void* coordinate)
 {
     ParallelIndexScanDesc piscan = static_cast<ParallelIndexScanDesc>(coordinate);
 
-    node->iss_ScanDesc = index_beginscan_parallel_compat(node->ss.ss_currentRelation,
-                                                         node->iss_RelationDesc,
-                                                         node->iss_NumScanKeys,
-                                                         node->iss_NumOrderByKeys,
-                                                         piscan);
+    node->iss_ScanDesc = bioseq_begin_uninstrumented_parallel_index_scan(
+        node->ss.ss_currentRelation,
+        node->iss_RelationDesc,
+        node->iss_NumScanKeys,
+        node->iss_NumOrderByKeys,
+        piscan);
 
     if (node->iss_NumRuntimeKeys == 0 || node->iss_RuntimeKeysReady)
         index_rescan(node->iss_ScanDesc,
@@ -542,32 +540,32 @@ BioseqColumnIndexScan_ExecIndexScanInitializeWorker(IndexScanState* node, void* 
 /* CustomScan factory + lifecycle hooks for the bioseq IndexScan node. */
 
 static void
-BioseqIndexScan_BeginCustomScan(CustomScanState* css, EState* estate, int eflags)
+begin_bioseq_index_scan(CustomScanState* css, EState* estate, int eflags)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(css);
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(css);
 
     /* Clean out the tuple table */
     ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
     ExecClearTuple(css->ss.ss_ScanTupleSlot);
 
-    index_state->indexscan_state = ExecInitIndexScan(index_state->inner_index_scan_plan(), estate, eflags);
+    index_state->index_scan_executor_state = ExecInitIndexScan(index_state->inner_index_scan_plan(), estate, eflags);
 
     /* Initialize result type and projection. */
-    ExecInitResultTypeTL(&index_state->css.ss.ps);
+    ExecInitResultTypeTL(&index_state->custom_scan_state.ss.ps);
 }
 
 
 static TupleTableSlot*
-BioseqIndexScan_ExecCustomScan(CustomScanState* node)
+execute_bioseq_index_scan(CustomScanState* node)
 {
-    return ExecIndexScan(reinterpret_cast<PlanState*>(node));
+    return execute_index_scan(reinterpret_cast<PlanState*>(node));
 }
 
 
 static void
-BioseqIndexScan_EndCustomScan(CustomScanState* node)
+end_bioseq_index_scan(CustomScanState* node)
 {
-    ExecEndIndexScan(BioseqIndexScanState::from_custom_scan_state(node)->indexscan_state);
+    ExecEndIndexScan(index_scan_state::from_custom_scan_state(node)->index_scan_executor_state);
 }
 
 /* Show a generic expression. */
@@ -628,9 +626,9 @@ show_instrumentation_count(const char* qlabel, int which,
 }
 
 static void
-BioseqIndexScan_ExplainCustomScan(CustomScanState* node, List* ancestors, ExplainState* es)
+explain_bioseq_index_scan(CustomScanState* node, List* ancestors, ExplainState* es)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
     IndexScan* inner_index_scan = index_state->inner_index_scan_plan();
 
     const char* indexname = get_rel_name(inner_index_scan->indexid);
@@ -638,112 +636,113 @@ BioseqIndexScan_ExplainCustomScan(CustomScanState* node, List* ancestors, Explai
     ExplainPropertyText("BioseqIndexScan using ", indexname, es);
 
     show_scan_qual(inner_index_scan->indexqualorig,
-                    "Index Cond", &index_state->css.ss.ps, ancestors, es);
+                    "Index Cond", &index_state->custom_scan_state.ss.ps, ancestors, es);
 
     if (inner_index_scan->indexqualorig)
         show_instrumentation_count("Rows Removed by Index Recheck", 2,
-                                    &index_state->css.ss.ps, es);
+                                    &index_state->custom_scan_state.ss.ps, es);
 
     show_scan_qual(inner_index_scan->indexorderbyorig,
-                    "Order By", &index_state->css.ss.ps, ancestors, es);
+                    "Order By", &index_state->custom_scan_state.ss.ps, ancestors, es);
 
-    show_scan_qual(node->ss.ps.plan->qual, "Filter", &index_state->css.ss.ps, ancestors, es);
+    show_scan_qual(node->ss.ps.plan->qual, "Filter",
+                   &index_state->custom_scan_state.ss.ps, ancestors, es);
 
     if (node->ss.ps.plan->qual)
         show_instrumentation_count("Rows Removed by Filter", 1,
-                                    &index_state->css.ss.ps, es);
+                                    &index_state->custom_scan_state.ss.ps, es);
 }
 
 /* Parallel Execution */
 
 static Size
-BioseqIndexScan_EstimateDSMCustomScan(CustomScanState* node, ParallelContext* pcxt)
+estimate_parallel_bioseq_index_scan(CustomScanState* node, ParallelContext* pcxt)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
-    ExecIndexScanEstimate(index_state->indexscan_state, pcxt);
-    return index_state->indexscan_state->iss_PscanLen;
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
+    ExecIndexScanEstimate(index_state->index_scan_executor_state, pcxt);
+    return index_state->index_scan_executor_state->iss_PscanLen;
 }
 
 
 static void
-BioseqIndexScan_InitializeDSMCustomScan(CustomScanState* node,
+initialize_parallel_bioseq_index_scan(CustomScanState* node,
                                         ParallelContext* pcxt,
                                         void* coordinate)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
-    BioseqColumnIndexScan_ExecIndexScanInitializeDSM(index_state->indexscan_state, pcxt, coordinate);
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
+    initialize_parallel_index_scan(index_state->index_scan_executor_state, pcxt, coordinate);
 }
 
 
 static void
-BioseqIndexScan_ReinitializeDSMCustomScan(CustomScanState* node,
+reinitialize_parallel_bioseq_index_scan(CustomScanState* node,
                                           ParallelContext* pcxt,
                                           void* coordinate)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
-    ExecIndexScanReInitializeDSM(index_state->indexscan_state, pcxt);
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
+    ExecIndexScanReInitializeDSM(index_state->index_scan_executor_state, pcxt);
 }
 
 
 static void
-BioseqIndexScan_InitializeWorkerCustomScan(CustomScanState* node,
+initialize_parallel_bioseq_index_scan_worker(CustomScanState* node,
                                            shm_toc* toc,
                                            void* coordinate)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
-    BioseqColumnIndexScan_ExecIndexScanInitializeWorker(index_state->indexscan_state, coordinate);
+    index_scan_state* index_state = index_scan_state::from_custom_scan_state(node);
+    initialize_parallel_index_scan_worker(index_state->index_scan_executor_state, coordinate);
 }
 
 
 [[nodiscard]] static const CustomExecMethods&
-bioseq_index_exec_methods() noexcept
+index_scan_execution_methods() noexcept
 {
     static const CustomExecMethods methods = {
         .CustomName = "BioseqIndexScan",
-        .BeginCustomScan = BioseqIndexScan_BeginCustomScan,
-        .ExecCustomScan = BioseqIndexScan_ExecCustomScan,
-        .EndCustomScan = BioseqIndexScan_EndCustomScan,
-        .EstimateDSMCustomScan = BioseqIndexScan_EstimateDSMCustomScan,
-        .InitializeDSMCustomScan = BioseqIndexScan_InitializeDSMCustomScan,
-        .ReInitializeDSMCustomScan = BioseqIndexScan_ReinitializeDSMCustomScan,
-        .InitializeWorkerCustomScan = BioseqIndexScan_InitializeWorkerCustomScan,
-        .ExplainCustomScan = BioseqIndexScan_ExplainCustomScan,
+        .BeginCustomScan = begin_bioseq_index_scan,
+        .ExecCustomScan = execute_bioseq_index_scan,
+        .EndCustomScan = end_bioseq_index_scan,
+        .EstimateDSMCustomScan = estimate_parallel_bioseq_index_scan,
+        .InitializeDSMCustomScan = initialize_parallel_bioseq_index_scan,
+        .ReInitializeDSMCustomScan = reinitialize_parallel_bioseq_index_scan,
+        .InitializeWorkerCustomScan = initialize_parallel_bioseq_index_scan_worker,
+        .ExplainCustomScan = explain_bioseq_index_scan,
     };
     return methods;
 }
 
 
 static Node*
-CreateBioseqIndexScanState(CustomScan* custom_plan)
+create_index_scan_custom_state(CustomScan* custom_plan)
 {
-    BioseqIndexScanState* index_state = BioseqIndexScanState::allocate();
-    index_state->as_custom_scan_state()->methods = &bioseq_index_exec_methods();
+    index_scan_state* index_state = index_scan_state::allocate();
+    index_state->as_custom_scan_state()->methods = &index_scan_execution_methods();
     return index_state->as_node();
 }
 
 
 [[nodiscard]] static const CustomScanMethods&
-bioseq_index_scan_methods() noexcept
+index_scan_plan_methods() noexcept
 {
     static const CustomScanMethods methods = {
         .CustomName = "BioseqIndexScan",
-        .CreateCustomScanState = CreateBioseqIndexScanState,
+        .CreateCustomScanState = create_index_scan_custom_state,
     };
     return methods;
 }
 
 
 export CustomScan*
-bioseq_create_indexscan_node(void)
+bioseq_create_index_scan_node(void)
 {
     CustomScan* cscan = reinterpret_cast<CustomScan*>(makeNode(CustomScan));
-    cscan->methods = &bioseq_index_scan_methods();
+    cscan->methods = &index_scan_plan_methods();
     return cscan;
 }
 
 
 export void
-bioseq_register_indexscan_node(void)
+bioseq_register_index_scan_node(void)
 {
-    RegisterCustomScanMethods(&bioseq_index_scan_methods());
+    RegisterCustomScanMethods(&index_scan_plan_methods());
 }

@@ -1,6 +1,6 @@
 /**
  * @file ksw2.cppm
- * @brief Target-neutral KSW2 alignment facade.
+ * @brief Exposes target-neutral KSW2 alignment contracts.
  */
 export module bioseq.alignment;
 

@@ -1,6 +1,5 @@
 module;
 
-#include "common.h"
 
 #include <string>
 #include <utility>
@@ -8,7 +7,7 @@ module;
 
 export module bioseq.io.errors;
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 
 export namespace bioseq::io {
 

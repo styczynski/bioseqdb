@@ -1,126 +1,101 @@
 /**
  * @file instrumentation/region.cppm
- * @brief RegionScope<Args> RAII type and the user-facing region() helper.
+ * @brief Scoped region timing and hardware-counter measurement.
  *
- * Hot-path entry point. The scope reads the typed profiler block from
- * `tls_profiler<Args>`. When Args::enable_profiling is false, every
- * body is empty and the type collapses.
- *
- * Two flavours of `region()` ship:
- *   - the explicitly-templated `region<Args>(desc)` used inside templated
- *     pipeline scopes (the dispatch fork's lambda body); and
- *   - the non-templated `region(desc)` that fixes Args =
- *     context_args_profiling_full. The non-templated form is the
- *     migration target for the legacy EASY_BLOCK call sites buried in
- *     non-templated chain/seed helpers — when the dispatch fork picks
- *     no-profiling, `tls_profiler<context_args_profiling_full>` stays
- *     null and the scope short-circuits with a single load + branch.
+ * The explicitly templated overload follows the caller's dispatch
+ * configuration. The non-templated overload targets the independently
+ * installed benchmark profiler state. Both paths return immediately when no
+ * matching state is installed.
  */
 module;
 
 #include <cstdint>
 
-export module bioseq.instr.region;
+export module bioseq.instrumentation.region;
 
-import bioseq.instr.config;
-import bioseq.instr.descriptor;
-import bioseq.instr.aggregate;
-import bioseq.instr.thread_state;
-import bioseq.instr.clock;
-import bioseq.instr.global_state;
-import bioseq.instr.pmu;
+import bioseq.instrumentation.configuration;
+import bioseq.instrumentation.descriptor;
+import bioseq.instrumentation.aggregation;
+import bioseq.instrumentation.profiler_state;
+import bioseq.instrumentation.clock;
+import bioseq.instrumentation.runtime;
+import bioseq.instrumentation.pmu;
 
-export namespace bioseq::instr {
+export namespace bioseq::instrumentation {
 
 /// Stack-local state captured at region begin. ~16 bytes; never allocated.
-struct Region {
-    const RegionDescriptor* desc = nullptr;
-    std::uint64_t           t_begin_ns = 0;
-    bool                    skipped = true;
+struct region_measurement {
+    const region_descriptor* descriptor = nullptr;
+    std::uint64_t start_time_ns = 0;
+    bool is_skipped = true;
 };
 
-template<is_context_args Args>
-struct [[nodiscard]] RegionScope {
-    Region r{};
-    /// PMU baseline. Sized to zero bytes when enable_counters is false
-    /// thanks to the conditional storage; the field exists in every
-    /// instantiation but consumes no space when unused, so the scope's
-    /// size is unchanged in the common no-counters paths.
-    pmu::counters_t pmu_begin{};
+template<profiling_configuration configuration_type>
+struct [[nodiscard]] region_scope {
+    region_measurement measurement{};
+    pmu::counter_sample counter_start{};
 
     [[gnu::always_inline]]
-    inline explicit RegionScope(const RegionDescriptor* d) noexcept {
-        if constexpr (Args::enable_profiling) {
-            if (!runtime_enabled() || d == nullptr || d->id == 0) return;
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            r.desc = d;
-            r.t_begin_ns = clock::now_ns();
-            if constexpr (Args::enable_counters) {
-                pmu_begin = pmu::read_thread_counters();
+    inline explicit region_scope(const region_descriptor* descriptor) noexcept {
+        if constexpr (configuration_type::enable_profiling) {
+            if (!is_runtime_enabled() || descriptor == nullptr || descriptor->id == 0) return;
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            measurement.descriptor = descriptor;
+            measurement.start_time_ns = clock::now_ns();
+            if constexpr (configuration_type::enable_counters) {
+                counter_start = pmu::read_thread_counters();
             }
-            prof->stack_depth += 1;
-            r.skipped = false;
+            profiler->stack_depth += 1;
+            measurement.is_skipped = false;
         } else {
-            (void)d;
+            (void)descriptor;
         }
     }
 
-    [[gnu::always_inline]] inline ~RegionScope() noexcept {
-        if constexpr (Args::enable_profiling) {
-            if (r.skipped) return;
+    [[gnu::always_inline]] inline ~region_scope() noexcept {
+        if constexpr (configuration_type::enable_profiling) {
+            if (measurement.is_skipped) return;
             const auto end_ns = clock::now_ns();
-            const auto delta_ns = end_ns - r.t_begin_ns;
-            // Read counters BEFORE touching the aggregate so the delta
-            // brackets only the work between the two now_ns / read calls.
-            pmu::counters_t pmu_delta{};
-            if constexpr (Args::enable_counters) {
-                const auto pmu_end = pmu::read_thread_counters();
-                pmu_delta = pmu::sub_clamped(pmu_end, pmu_begin);
+            const auto duration_ns = end_ns - measurement.start_time_ns;
+            pmu::counter_sample counter_delta{};
+            if constexpr (configuration_type::enable_counters) {
+                const auto counter_end = pmu::read_thread_counters();
+                counter_delta = pmu::subtract_clamped(counter_end, counter_start);
             }
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            if (prof->stack_depth > 0) prof->stack_depth -= 1;
-            auto* agg = prof->aggregates.get_or_create(r.desc->id);
-            if (agg != nullptr) {
-                aggregate_record(*agg, delta_ns);
-                if constexpr (Args::enable_counters) {
-                    agg->total_cycles        += pmu_delta.cycles;
-                    agg->total_instructions  += pmu_delta.instructions;
-                    agg->total_branches      += pmu_delta.branches;
-                    agg->total_branch_misses += pmu_delta.branch_misses;
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            if (profiler->stack_depth > 0) profiler->stack_depth -= 1;
+            auto* aggregate = profiler->aggregates.find_or_create(measurement.descriptor->id);
+            if (aggregate != nullptr) {
+                record_region_duration(*aggregate, duration_ns);
+                if constexpr (configuration_type::enable_counters) {
+                    aggregate->total_cycles += counter_delta.cycles;
+                    aggregate->total_instructions += counter_delta.instructions;
+                    aggregate->total_branches += counter_delta.branches;
+                    aggregate->total_branch_misses += counter_delta.branch_misses;
                 }
             }
         }
     }
 
-    RegionScope(RegionScope&&) = delete;
-    RegionScope(const RegionScope&) = delete;
-    RegionScope& operator=(RegionScope&&) = delete;
-    RegionScope& operator=(const RegionScope&) = delete;
+    region_scope(region_scope&&) = delete;
+    region_scope(const region_scope&) = delete;
+    region_scope& operator=(region_scope&&) = delete;
+    region_scope& operator=(const region_scope&) = delete;
 };
 
-template<is_context_args Args>
+template<profiling_configuration configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline RegionScope<Args> region(const RegionDescriptor* d) noexcept {
-    return RegionScope<Args>(d);
+inline region_scope<configuration_type> region(const region_descriptor* descriptor) noexcept {
+    return region_scope<configuration_type>(descriptor);
 }
 
-/// Non-templated convenience overload. Routes to the
-/// `context_args_profiling_timing_only` instantiation. This is the
-/// canonical pin for legacy EASY_BLOCK call sites in non-templated
-/// helpers (chaining, kmer extraction, KSW2). The previous default was
-/// `context_args_profiling_full`, which always read the per-thread PMU
-/// counters at scope begin/end (one sysctl on macOS, one read() syscall
-/// on Linux — ~300-400 ns per region scope). The bench's per-section
-/// region count is in the tens of thousands, so PMU reads were burning
-/// 9-27 ms per section purely on instrumentation. The timing_only
-/// variant drops PMU to leave just the clock read; PMU users can still
-/// opt back in by explicitly writing `region<context_args_profiling_full>(d)`.
+/** @brief Measure a region against the benchmark-owned profiler state. */
 [[nodiscard, gnu::always_inline]]
-inline RegionScope<context_args_profiling_timing_only>
-region(const RegionDescriptor* d) noexcept {
-    return RegionScope<context_args_profiling_timing_only>(d);
+inline region_scope<benchmark_profiling_configuration>
+region(const region_descriptor* descriptor) noexcept {
+    return region_scope<benchmark_profiling_configuration>(descriptor);
 }
 
-}  // namespace bioseq::instr
+}  // namespace bioseq::instrumentation

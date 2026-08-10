@@ -1,4 +1,5 @@
-// DOC0372 — the configured provider pack. This is the single place that names
+/// @brief Configured production provider pack.
+// This is the single place that names
 // the concrete adapters compiled into the extension; the PG bridge and the
 // live tests depend only on this alias, never on individual adapters. Adding a
 // provider is one import + one pack argument here (the compile-time uniqueness
@@ -17,9 +18,7 @@ export namespace bioseq::external::providers {
 // UniProt, EBI. Dispatch is by stable provider id, so order affects only the
 // compile-time pack layout, not runtime routing.
 using configured_external_api_provider =
-    bioseq::external::provider::external_api_provider<ncbi_provider,
-                                                      ucsc_provider,
-                                                      uniprot_provider,
-                                                      ebi_provider>;
+    bioseq::external::provider::external_api_provider<
+        ncbi_provider, ucsc_provider, uniprot_provider, ebi_provider>;
 
-}  // namespace bioseq::external::providers
+} // namespace bioseq::external::providers

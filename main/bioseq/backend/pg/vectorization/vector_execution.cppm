@@ -1,22 +1,22 @@
 /*-------------------------------------------------------------------------
  *
- * vectorization/columnar_vector_execution.cppm
+ * vectorization/vector_execution.cppm
  *
  * Walks query expression trees to build vectorised-friendly variants:
- *   - pg_is_const_var_binary_args (bioseq.pg_utils.nodes) gates OpExprs to
+ *   - is_pg_const_var_binary_args gates OpExprs to
  *     the (one Const + one Var) shape the vectorised evaluator supports.
- *   - GetVectorizedProcedureOid looks up the "v"-prefixed vectorised
+ *   - lookup_vectorized_routine_oid looks up the "v"-prefixed vectorised
  *     implementation of a scalar procedure.
- *   - CreateVectorizedExprList / ConstructVectorizedQualList convert
- *     qual/expr trees into VectorQual tree structures for the executor.
- *   - ExecuteVectorizedQual runs the compiled VectorQual tree over a
- *     VectorTupleTableSlot and returns the surviving-rows mask.
+ *   - rewrite_vectorized_expression_list / compile_vector_qualifier_list convert
+ *     qual/expr trees into vector_qualifier_node tree structures for the executor.
+ *   - evaluate_vectorized_qualifiers runs the compiled vector_qualifier_node tree over a
+ *     vector_tuple_table_slot_storage and returns the surviving-rows mask.
  *
  *-------------------------------------------------------------------------
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include "commands/extension.h"
 #include "parser/parse_func.h"
@@ -27,29 +27,34 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <string_view>
 
-export module bioseq.vector.execution;
+export module bioseq.postgres.vectorization.execution;
 
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.vector.types;
+import bioseq.postgres.support;
+import bioseq.postgres.vectorization.types;
 import bioseq.column.vector_compare;
-import bioseq.pg_utils.nodes;          // DOC0333 — pg_node_try_as_op_expr_family, pg_node_try_as, pg_is_const_var_binary_args
 #if defined(BIOSEQ_TEST_INDEXES)
-import bioseq.sql.generated.test_indexes.vector_aggregate_registry;
-import bioseq.sql.generated.test_indexes.vector_comparison_registry;
+import bioseq.postgres.sql.generated.test_indexes.vector_aggregate_registry;
+import bioseq.postgres.sql.generated.test_indexes.vector_comparison_registry;
 #else
-import bioseq.sql.generated.production.vector_aggregate_registry;
-import bioseq.sql.generated.production.vector_comparison_registry;
+import bioseq.postgres.sql.generated.production.vector_aggregate_registry;
+import bioseq.postgres.sql.generated.production.vector_comparison_registry;
 #endif
-
-using namespace bioseq::pg_utils;      // DOC0333 — node view helpers live in bioseq::pg_utils
 
 namespace {
 
-struct scalar_procedure_signature final
+using bioseq::postgres::support::allocate_zeroed_array;
+using bioseq::postgres::support::allocate_zeroed_object;
+using bioseq::postgres::support::allocate_zeroed_storage;
+using bioseq::postgres::support::is_pg_const_var_binary_args;
+using bioseq::postgres::support::pg_node_view;
+using bioseq::postgres::support::postgres_list;
+using bioseq::postgres::support::try_cast_pg_operator_expression;
+
+struct routine_signature final
 {
 	std::array<char, NAMEDATALEN> name{};
 	Oid namespace_oid = InvalidOid;
@@ -59,8 +64,33 @@ struct scalar_procedure_signature final
 	char procedure_kind = PROKIND_FUNCTION;
 };
 
-[[nodiscard]] std::optional<scalar_procedure_signature>
-read_scalar_procedure_signature(Oid procedure_oid)
+enum class vector_qualifier_node_kind : int
+{
+	boolean_expression,
+	expression,
+};
+
+struct vector_qualifier_node final
+{
+	vector_qualifier_node_kind kind;
+	union payload_type
+	{
+		struct expression_type
+		{
+			FmgrInfo* function_info;
+			FunctionCallInfo call_info;
+			vector_operand_storage* arguments;
+		} expression;
+		struct boolean_expression_type
+		{
+			BoolExprType kind;
+			List* expressions;
+		} boolean_expression;
+	} payload;
+};
+
+[[nodiscard]] std::optional<routine_signature>
+read_routine_signature(Oid procedure_oid)
 {
 	HeapTuple procedure_tuple =
 		SearchSysCache1(PROCOID, ObjectIdGetDatum(procedure_oid));
@@ -75,7 +105,7 @@ read_scalar_procedure_signature(Oid procedure_oid)
 		return std::nullopt;
 	}
 
-	scalar_procedure_signature signature{
+	routine_signature signature{
 		.namespace_oid = procedure_form->pronamespace,
 		.argument_types = {
 			procedure_form->pronargs >= 1
@@ -97,7 +127,7 @@ read_scalar_procedure_signature(Oid procedure_oid)
 }
 
 [[nodiscard]] std::optional<Oid>
-installed_extension_namespace()
+find_extension_namespace_oid()
 {
 	const Oid extension_oid = get_extension_oid("bioseq", true);
 	if (!OidIsValid(extension_oid))
@@ -110,35 +140,48 @@ installed_extension_namespace()
 }
 
 [[nodiscard]] std::optional<Oid>
-lookup_vector_owner(
+lookup_installed_routine(
 	Oid namespace_oid,
-	std::string_view vector_name,
-	const std::array<Oid, 2>& argument_types,
-	Oid expected_result_type)
+	std::string_view routine_name,
+	std::span<const Oid> argument_types)
 {
-	const char* const vector_name_data = vector_name.data();
-	const Oid left_type = argument_types[0];
-	const Oid right_type = argument_types[1];
-	const Oid vector_oid = bioseq::pg_utils::invoke_pg_as_cpp(
-		[namespace_oid, vector_name_data, left_type, right_type]
+	const Oid routine_oid = bioseq::postgres::support::invoke_pg_as_cpp(
+		[namespace_oid, routine_name, argument_types]
 		{
 			char* namespace_name = get_namespace_name(namespace_oid);
 			if (namespace_name == nullptr)
 				return InvalidOid;
 			List* qualified_name = list_make2(
 				makeString(namespace_name),
-				makeString(pstrdup(vector_name_data)));
-			Oid exact_argument_types[2]{left_type, right_type};
+				makeString(pnstrdup(
+					routine_name.data(), routine_name.size())));
+			std::array<Oid, 2> exact_argument_types{};
+			std::ranges::copy(argument_types, exact_argument_types.begin());
 			const Oid result = LookupFuncName(
 				qualified_name,
-				2,
-				exact_argument_types,
+				static_cast<int>(argument_types.size()),
+				argument_types.empty()
+					? nullptr
+					: exact_argument_types.data(),
 				true);
 			list_free_deep(qualified_name);
 			return result;
 		});
-	if (!OidIsValid(vector_oid)
-		|| get_func_rettype(vector_oid) != expected_result_type)
+	return OidIsValid(routine_oid)
+		? std::optional<Oid>{routine_oid}
+		: std::nullopt;
+}
+
+[[nodiscard]] std::optional<Oid>
+lookup_vector_comparison_owner(
+	Oid namespace_oid,
+	std::string_view vector_name,
+	const std::array<Oid, 2>& argument_types,
+	Oid expected_result_type)
+{
+	const std::optional<Oid> vector_oid = lookup_installed_routine(
+		namespace_oid, vector_name, argument_types);
+	if (!vector_oid || get_func_rettype(*vector_oid) != expected_result_type)
 		return std::nullopt;
 	return vector_oid;
 }
@@ -173,43 +216,29 @@ lookup_vector_aggregate_owner(
 	const bioseq::sql::generated::vector_aggregate_registry::
 		association& association)
 {
-	const char* const vector_name_data = association.vector_name.data();
-	const int argument_count =
-		OidIsValid(association.input_type) ? 1 : 0;
-	const Oid input_type = association.input_type;
-	const Oid vector_oid = bioseq::pg_utils::invoke_pg_as_cpp(
-		[namespace_oid, vector_name_data, argument_count, input_type]
-		{
-			char* namespace_name = get_namespace_name(namespace_oid);
-			if (namespace_name == nullptr)
-				return InvalidOid;
-			List* qualified_name = list_make2(
-				makeString(namespace_name),
-				makeString(pstrdup(vector_name_data)));
-			Oid exact_argument_types[1]{input_type};
-			const Oid result = LookupFuncName(
-				qualified_name,
-				argument_count,
-				argument_count == 0 ? nullptr : exact_argument_types,
-				true);
-			list_free_deep(qualified_name);
-			return result;
-		});
-	if (!OidIsValid(vector_oid))
+	const std::array<Oid, 1> input_types{association.input_type};
+	const std::span<const Oid> exact_input_types =
+		OidIsValid(association.input_type)
+			? std::span<const Oid>{input_types}
+			: std::span<const Oid>{};
+	const std::optional<Oid> vector_oid = lookup_installed_routine(
+		namespace_oid, association.vector_name, exact_input_types);
+	if (!vector_oid)
 		return std::nullopt;
 
-	const std::optional<scalar_procedure_signature> vector_signature =
-		read_scalar_procedure_signature(vector_oid);
+	const std::optional<routine_signature> vector_signature =
+		read_routine_signature(*vector_oid);
 	if (!vector_signature
 		|| vector_signature->procedure_kind != PROKIND_AGGREGATE
-		|| vector_signature->argument_count != argument_count
+		|| vector_signature->argument_count
+			!= static_cast<std::int16_t>(exact_input_types.size())
 		|| vector_signature->argument_types[0]
 			!= association.input_type
 		|| vector_signature->result_type != association.result_type)
 		return std::nullopt;
 
 	HeapTuple aggregate_tuple =
-		SearchSysCache1(AGGFNOID, ObjectIdGetDatum(vector_oid));
+		SearchSysCache1(AGGFNOID, ObjectIdGetDatum(*vector_oid));
 	if (!HeapTupleIsValid(aggregate_tuple))
 		return std::nullopt;
 	Form_pg_aggregate aggregate_form =
@@ -233,10 +262,10 @@ lookup_vector_aggregate_owner(
 [[nodiscard]] bool
 contains_null_constant(List* arguments) noexcept
 {
-	for (Expr* argument : PList<Expr>{arguments})
+	for (Expr* argument : postgres_list<Expr>{arguments})
 	{
-		if (Const* constant =
-				pg_node_try_as<Const>(pg_as_node(argument));
+		if (Const* constant = pg_node_view{
+				reinterpret_cast<Node*>(argument)}.try_cast<Const>();
 			constant != nullptr && constant->constisnull)
 			return true;
 	}
@@ -245,15 +274,12 @@ contains_null_constant(List* arguments) noexcept
 
 }  // namespace
 
-/*
- * Resolve a built-in scalar comparison through the generated closed
- * scalar/vector association table and the extension's installed namespace.
- */
+/** Resolve a scalar routine through the generated vector-owner registries. */
 export [[nodiscard]] std::optional<Oid>
-GetVectorizedProcedureOid(Oid procedure_oid)
+lookup_vectorized_routine_oid(Oid procedure_oid)
 {
-	const std::optional<scalar_procedure_signature> signature =
-		read_scalar_procedure_signature(procedure_oid);
+	const std::optional<routine_signature> signature =
+		read_routine_signature(procedure_oid);
 	if (!signature)
 		return std::nullopt;
 
@@ -280,10 +306,10 @@ GetVectorizedProcedureOid(Oid procedure_oid)
 		if (association != all().end())
 		{
 			const std::optional<Oid> namespace_oid =
-				installed_extension_namespace();
+				find_extension_namespace_oid();
 			if (!namespace_oid)
 				return std::nullopt;
-			return lookup_vector_owner(
+			return lookup_vector_comparison_owner(
 				*namespace_oid,
 				association->vector_name,
 				signature->argument_types,
@@ -313,21 +339,19 @@ GetVectorizedProcedureOid(Oid procedure_oid)
 	if (association == all().end())
 		return std::nullopt;
 	const std::optional<Oid> namespace_oid =
-		installed_extension_namespace();
+		find_extension_namespace_oid();
 	if (!namespace_oid)
 		return std::nullopt;
 	return lookup_vector_aggregate_owner(
 		*namespace_oid, *association);
 }
 
-/*
- * CreateVectorizedExprList rewrites an expression list by swapping each
- * OpExpr-like node for a copy whose opfuncid points at the vectorised
- * implementation. BoolExprs are rebuilt from their rewritten children; any
- * node that can't be vectorised is passed through unchanged.
+/**
+ * Copy vectorizable operator expressions and bind them to vector routines.
+ * Unsupported nodes retain their original PostgreSQL-owned pointer.
  */
 export List*
-CreateVectorizedExprList(List* expression_list)
+rewrite_vectorized_expression_list(List* expression_list)
 {
 	if (expression_list == NULL)
 		return expression_list;
@@ -336,16 +360,16 @@ CreateVectorizedExprList(List* expression_list)
 
 	List* new_qual_list = NIL;
 
-	for (auto node : PList<Node>(expression_list))
+	for (Node* node : postgres_list<Node>{expression_list})
 	{
 		if (node == NULL)
 			return NULL;
 
 		/*
 		 * OpExpr / DistinctExpr / NullIfExpr share OpExpr storage but carry
-		 * distinct tags; pg_node_try_as_op_expr_family groups all three.
+		 * distinct tags; try_cast_pg_operator_expression groups all three.
 		 */
-		if (OpExpr* op_expr_node = pg_node_try_as_op_expr_family(node))
+		if (OpExpr* op_expr_node = try_cast_pg_operator_expression(node))
 		{
 			if (list_length(op_expr_node->args) != 2)
 			{
@@ -353,7 +377,7 @@ CreateVectorizedExprList(List* expression_list)
 				continue;
 			}
 
-			if (!pg_is_const_var_binary_args(op_expr_node->args))
+			if (!is_pg_const_var_binary_args(op_expr_node->args))
 			{
 				new_qual_list = lappend(new_qual_list, op_expr_node);
 				continue;
@@ -364,34 +388,48 @@ CreateVectorizedExprList(List* expression_list)
 				continue;
 			}
 
-			HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
-			Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
-			Oid procedure_oid = operator_form->oprcode;
+			HeapTuple operator_tuple = SearchSysCache1(
+				OPEROID, ObjectIdGetDatum(op_expr_node->opno));
+			if (!HeapTupleIsValid(operator_tuple))
+			{
+				new_qual_list = lappend(new_qual_list, op_expr_node);
+				continue;
+			}
+			Form_pg_operator operator_form =
+				reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
+			const Oid procedure_oid = operator_form->oprcode;
 			ReleaseSysCache(operator_tuple);
 
 			const std::optional<Oid> vectorized_oid =
-				GetVectorizedProcedureOid(procedure_oid);
+				lookup_vectorized_routine_oid(procedure_oid);
 			if (!vectorized_oid)
 			{
 				new_qual_list = lappend(new_qual_list, op_expr_node);
 				continue;
 			}
 
-			OpExpr* vectorized_op_expr_node = reinterpret_cast<OpExpr*>(copyObject(op_expr_node));
+			OpExpr* vectorized_op_expr_node =
+				bioseq::postgres::support::copy_pg_node(op_expr_node);
 			vectorized_op_expr_node->opfuncid = *vectorized_oid;
 			new_qual_list = lappend(new_qual_list, vectorized_op_expr_node);
 
 			continue;
 		}
 
-		if (BoolExpr* bool_expr = pg_node_try_as<BoolExpr>(node))
+		if (BoolExpr* bool_expr = pg_node_view{node}.try_cast<BoolExpr>())
 		{
 			List* rewritten_bool_expr_args =
-				CreateVectorizedExprList(bool_expr->args);
+				rewrite_vectorized_expression_list(bool_expr->args);
+			List* unchanged_arguments = list_intersection(
+				rewritten_bool_expr_args, bool_expr->args);
+			const bool all_arguments_rewritten = unchanged_arguments == NIL;
+			list_free(unchanged_arguments);
 
-			if (list_length(list_intersection(rewritten_bool_expr_args, bool_expr->args)) == 0)
+			if (all_arguments_rewritten
+				&& (bool_expr->boolop == AND_EXPR
+					|| bool_expr->boolop == OR_EXPR))
 			{
-				Expr* boolean_clause = NULL;
+				Expr* boolean_clause = nullptr;
 
 				if (bool_expr->boolop == AND_EXPR)
 				{
@@ -419,89 +457,104 @@ CreateVectorizedExprList(List* expression_list)
 }
 
 
-/*
- * ConstructVectorizedQualList compiles a vectorised expression list into
- * a VectorQual tree bound to the columns of the supplied VectorTupleTableSlot.
- * Each OpExpr becomes a VectorQual with its FmgrInfo/FunctionCallInfoBaseData
- * pre-initialised so execution avoids per-row setup.
+/**
+ * Compile vector expressions against one batch slot.
+ * Function-call records are initialized once and reused for every batch.
  */
 export List*
-ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
+compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorized_qual)
 {
-	VectorTupleTableSlot* vector_slot = reinterpret_cast<VectorTupleTableSlot*>(slot);
+	vector_tuple_table_slot_storage* vector_slot =
+		reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 
 	List* vector_qual_list = NIL;
-	for (auto node : PList<Node>(vectorized_qual))
+	for (Node* node : postgres_list<Node>{vectorized_qual})
 	{
-		if (OpExpr* op_expr_node = pg_node_try_as_op_expr_family(node))
+		if (OpExpr* op_expr_node = try_cast_pg_operator_expression(node))
 		{
+			int argument_index = 0;
+			const int argument_count = list_length(op_expr_node->args);
+
+			vector_qualifier_node* new_vector_qual =
+				allocate_zeroed_object<vector_qualifier_node>();
+			new_vector_qual->kind = vector_qualifier_node_kind::expression;
+
+			new_vector_qual->payload.expression.function_info =
+				allocate_zeroed_object<FmgrInfo>();
+			new_vector_qual->payload.expression.call_info =
+				allocate_zeroed_storage<FunctionCallInfoBaseData>(
+					SizeForFunctionCallInfo(argument_count));
+			new_vector_qual->payload.expression.arguments =
+				allocate_zeroed_array<vector_operand_storage>(argument_count);
+
+			fmgr_info(
+				op_expr_node->opfuncid,
+				new_vector_qual->payload.expression.function_info);
+			fmgr_info_set_expr(
+				node, new_vector_qual->payload.expression.function_info);
+
+			InitFunctionCallInfoData(
+				*(new_vector_qual->payload.expression.call_info),
+				new_vector_qual->payload.expression.function_info,
+				argument_count,
+				op_expr_node->inputcollid,
+				nullptr,
+				nullptr);
+
+			for (Expr* argument : postgres_list<Expr>{op_expr_node->args})
 			{
-				int argument_index = 0;
-				int argument_count = list_length(op_expr_node->args);
+				vector_operand_storage* argument_storage =
+					new_vector_qual->payload.expression.arguments
+					+ argument_index;
 
-				VectorQual* new_vector_qual = make0<VectorQual>();
-				new_vector_qual->vectorQualType = VECTOR_QUAL_EXPR;
-
-				new_vector_qual->u.expr.fmgrInfo = make0<FmgrInfo>();
-				new_vector_qual->u.expr.fcInfo = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(argument_count));
-				new_vector_qual->u.expr.vectorFnArguments =
-					make_array<VectorFnArgument>(argument_count);
-
-
-				fmgr_info(op_expr_node->opfuncid, new_vector_qual->u.expr.fmgrInfo);
-				fmgr_info_set_expr(reinterpret_cast<Node*>(node), new_vector_qual->u.expr.fmgrInfo);
-
-				InitFunctionCallInfoData(*(new_vector_qual->u.expr.fcInfo),
-										 new_vector_qual->u.expr.fmgrInfo,
-										 argument_count, op_expr_node->inputcollid, NULL, NULL);
-
-				for (auto arg : PList<Expr>(op_expr_node->args))
+				if (Const* constant = pg_node_view{
+						reinterpret_cast<Node*>(argument)}.try_cast<Const>())
 				{
-					VectorFnArgument* vector_fn_argument =
-						new_vector_qual->u.expr.vectorFnArguments + argument_index;
+					argument_storage->kind =
+						vector_operand_storage_kind::constant;
+					argument_storage->datum = constant->constvalue;
 
-					if (Const* const_expr = pg_node_try_as<Const>(pg_as_node(arg)))
-					{
-						vector_fn_argument->type = VECTOR_FN_ARG_CONSTANT;
-						vector_fn_argument->arg = const_expr->constvalue;
+					new_vector_qual->payload.expression.call_info
+						->args[argument_index].value =
+						reinterpret_cast<Datum>(argument_storage);
+					new_vector_qual->payload.expression.call_info
+						->args[argument_index].isnull = constant->constisnull;
+				}
+				else
+				{
+					Var* variable = pg_node_view{
+						reinterpret_cast<Node*>(argument)}.try_cast<Var>();
+					Assert(variable != nullptr);
+					const int column_index = variable->varattno - 1;
 
-						new_vector_qual->u.expr.fcInfo->args[argument_index].value = reinterpret_cast<Datum>(vector_fn_argument);
-						new_vector_qual->u.expr.fcInfo->args[argument_index].isnull = const_expr->constisnull;
-					}
-					else if (Var* variable_expr = pg_node_try_as<Var>(pg_as_node(arg)))
-					{
-						int column_index = variable_expr->varattno - 1;
+					argument_storage->kind =
+						vector_operand_storage_kind::column;
+					argument_storage->datum = vector_slot->virtual_slot
+						.base.tts_values[column_index];
 
-						vector_fn_argument->type = VECTOR_FN_ARG_VAR;
-						vector_fn_argument->arg = vector_slot->tts.tts_values[column_index];
-
-						new_vector_qual->u.expr.fcInfo->args[argument_index].value = reinterpret_cast<Datum>(vector_fn_argument);
-						new_vector_qual->u.expr.fcInfo->args[argument_index].isnull = false;
-					}
-
-					argument_index++;
+					new_vector_qual->payload.expression.call_info
+						->args[argument_index].value =
+						reinterpret_cast<Datum>(argument_storage);
+					new_vector_qual->payload.expression.call_info
+						->args[argument_index].isnull = false;
 				}
 
-				vector_qual_list = lappend(vector_qual_list, new_vector_qual);
-				continue;
+				++argument_index;
 			}
+
+			vector_qual_list = lappend(vector_qual_list, new_vector_qual);
+			continue;
 		}
 
-		if (BoolExpr* bool_expr = pg_node_try_as<BoolExpr>(node))
+		if (BoolExpr* bool_expr = pg_node_view{node}.try_cast<BoolExpr>())
 		{
-			VectorQual* new_vector_qual = make0<VectorQual>();
-			new_vector_qual->vectorQualType = VECTOR_QUAL_BOOL_EXPR;
+			vector_qualifier_node* new_vector_qual =
+				allocate_zeroed_object<vector_qualifier_node>();
+			new_vector_qual->kind = vector_qualifier_node_kind::boolean_expression;
 
-			List* new_qual_expression_args =
-				ConstructVectorizedQualList(slot, bool_expr->args);
-
-			new_vector_qual->u.boolExpr.boolExprType = bool_expr->boolop;
-
-			for (auto qual_child : PList<VectorQual>(new_qual_expression_args))
-			{
-				new_vector_qual->u.boolExpr.vectorQualExprList =
-					lappend(new_vector_qual->u.boolExpr.vectorQualExprList, qual_child);
-			}
+			new_vector_qual->payload.boolean_expression.kind = bool_expr->boolop;
+			new_vector_qual->payload.boolean_expression.expressions =
+				compile_vector_qualifier_list(slot, bool_expr->args);
 
 			vector_qual_list = lappend(vector_qual_list, new_vector_qual);
 
@@ -512,62 +565,55 @@ ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
 	return vector_qual_list;
 }
 
-/*
- * executeVectorizedExpr invokes the compiled fmgrInfo function using the
- * per-tuple memory context. The return is a VectorColumn whose 'value'
- * array we reinterpret as a bool row mask.
- */
+/** Invoke one compiled vector expression in the per-tuple memory context. */
 static bool*
-executeVectorizedExpr(VectorQual* vector_qual, ExprContext* expression_context)
+evaluate_vectorized_expression(vector_qualifier_node* vector_qual, ExprContext* expression_context)
 {
-	VectorColumn* evaluation_result;
+	vector_column_storage* evaluation_result;
 	{
-		bioseq::pg_support::MemoryContextScope ctx_guard{
+		bioseq::postgres::support::memory_context_scope memory_scope{
 			expression_context->ecxt_per_tuple_memory};
-		evaluation_result =
-			reinterpret_cast<VectorColumn*>(vector_qual->u.expr.fmgrInfo->fn_addr(vector_qual->u.expr.fcInfo));
+		evaluation_result = reinterpret_cast<vector_column_storage*>(
+			DatumGetPointer(FunctionCallInvoke(
+				vector_qual->payload.expression.call_info)));
 	}
 
-	return reinterpret_cast<bool*>(evaluation_result->value);
+	return reinterpret_cast<bool*>(evaluation_result->data);
 }
 
-/*
- * ExecuteVectorizedQual evaluates each VectorQual in vectorizedQualList and
- * combines the resulting bool masks according to boolType. The first mask
- * is returned as-is; subsequent masks are AND/ORed into it in place.
- */
+/** Combine compiled vector predicate masks with the requested Boolean kind. */
 export bool*
-ExecuteVectorizedQual(TupleTableSlot* slot, List* vectorized_qual_list,
+evaluate_vectorized_qualifiers(TupleTableSlot* slot, List* vectorized_qual_list,
 			BoolExprType bool_type, ExprContext* expression_context)
 {
-	VectorTupleTableSlot* vector_slot = reinterpret_cast<VectorTupleTableSlot*>(slot);
+	vector_tuple_table_slot_storage* vector_slot =
+		reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 
 	bool* combined_result = NULL;
 
-	for (auto vector_qual : PList<VectorQual>(vectorized_qual_list))
+	for (vector_qualifier_node* vector_qual :
+		 postgres_list<vector_qualifier_node>{vectorized_qual_list})
 	{
 		bool* qual_result = NULL;
 
-		switch (vector_qual->vectorQualType)
+		switch (vector_qual->kind)
 		{
-			case VECTOR_QUAL_EXPR:
+			case vector_qualifier_node_kind::expression:
 			{
-				qual_result = executeVectorizedExpr(vector_qual, expression_context);
+				qual_result = evaluate_vectorized_expression(vector_qual, expression_context);
 				break;
 			}
-			case VECTOR_QUAL_BOOL_EXPR:
+			case vector_qualifier_node_kind::boolean_expression:
 			{
-				if (vector_qual->u.boolExpr.boolExprType == AND_EXPR)
+				const BoolExprType nested_kind =
+					vector_qual->payload.boolean_expression.kind;
+				if (nested_kind == AND_EXPR || nested_kind == OR_EXPR)
 				{
-					qual_result = ExecuteVectorizedQual(slot,
-										vector_qual->u.boolExpr.vectorQualExprList,
-										AND_EXPR, expression_context);
-				}
-				else if (vector_qual->u.boolExpr.boolExprType == OR_EXPR)
-				{
-					qual_result = ExecuteVectorizedQual(slot,
-										vector_qual->u.boolExpr.vectorQualExprList,
-										OR_EXPR, expression_context);
+					qual_result = evaluate_vectorized_qualifiers(
+						slot,
+						vector_qual->payload.boolean_expression.expressions,
+						nested_kind,
+						expression_context);
 				}
 				break;
 			}
@@ -579,13 +625,13 @@ ExecuteVectorizedQual(TupleTableSlot* slot, List* vectorized_qual_list,
 		}
 		else
 		{
-			const std::uint32_t n = vector_slot->dimension;
+			const std::uint32_t row_count = vector_slot->row_count;
 			if (bool_type == AND_EXPR)
 				bioseq::column::vec::mask_and(
-					combined_result, qual_result, n);
+					combined_result, qual_result, row_count);
 			else if (bool_type == OR_EXPR)
 				bioseq::column::vec::mask_or(
-					combined_result, qual_result, n);
+					combined_result, qual_result, row_count);
 		}
 	}
 

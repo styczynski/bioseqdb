@@ -1,12 +1,11 @@
 /**
  * @file parallel_gzip_decoder.cppm
  * @brief Top-level orchestrator. Owns the chunk_fetcher; walks chunks
- *        linearly; tracks `gzip_member_state`; verifies CRC + ISIZE on
+ *        linearly; tracks `gzip_member_checksum_state`; verifies CRC + ISIZE on
  *        member end.
  */
 module;
 
-#include "common.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -18,22 +17,21 @@ module;
 
 export module bioseq.io.compression.parallel_gzip_decoder;
 
-import bioseq.common.mlogging;
 import bioseq.io.sources;
-import bioseq.io.simd_kernels;
+import bioseq.io.simd;
 import bioseq.io.compression.chunk;
 import bioseq.io.compression.chunk_fetcher;
 import bioseq.io.compression.crc32;
 
 export namespace bioseq::io::compression {
 
-struct gzip_member_state {
+struct gzip_member_checksum_state {
     std::size_t   header_end_bit_offset       = 0;
     std::size_t   footer_start_bit_offset     = 0;
     std::uint32_t expected_crc32              = 0;
     std::uint32_t expected_isize_low32        = 0;
     std::uint64_t observed_decompressed_size  = 0;
-    std::uint32_t running_crc32               = kIsoHdlcInit ^ kIsoHdlcXorOut;
+    std::uint32_t running_crc32               = iso_hdlc_initial_value ^ iso_hdlc_final_xor;
     bool          seen_bfinal_block           = false;
 };
 
@@ -53,9 +51,9 @@ public:
     parallel_gzip_decoder(const parallel_gzip_decoder&) = delete;
     parallel_gzip_decoder& operator=(const parallel_gzip_decoder&) = delete;
 
-    [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
+    [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_is_at_end) {
-            return read_result{0, true, !_last_error_message.empty()};
+            return source_read_result{0, true, !_last_error_message.empty()};
         }
         std::size_t emitted = 0;
         while (emitted < cap) {
@@ -67,15 +65,15 @@ public:
                     _is_at_end = true;
                     if (has_error) {
                         _last_error_message = _fetcher.last_error_message();
-                        return read_result{emitted, true, true};
+                        return source_read_result{emitted, true, true};
                     }
-                    return read_result{emitted, true, false};
+                    return source_read_result{emitted, true, false};
                 }
-                if (chunk_ptr->state == chunk_state::DECODE_ERROR) {
+                if (chunk_ptr->state == chunk_state::decode_error) {
                     _is_at_end = true;
                     _last_error_message = std::string{
                         chunk_ptr->error_message.view()};
-                    return read_result{emitted, true, true};
+                    return source_read_result{emitted, true, true};
                 }
             }
             const auto& chunk = *_current_chunk;
@@ -124,11 +122,11 @@ public:
                     // next member. zlib auto-handles multi-member
                     // streams under our backend; we reset our own
                     // tracking.
-                    _current_member = gzip_member_state{};
+                    _current_member = gzip_member_checksum_state{};
                 }
             }
         }
-        return read_result{emitted, false, false};
+        return source_read_result{emitted, false, false};
     }
 
     [[nodiscard]] std::string last_error_message() const noexcept {
@@ -144,8 +142,8 @@ public:
 private:
     std::span<const std::uint8_t> _compressed_view;
     chunk_fetcher                 _fetcher;
-    gzip_member_state             _current_member;
-    const chunk_data*             _current_chunk = nullptr;
+    gzip_member_checksum_state             _current_member;
+    const decoded_chunk*             _current_chunk = nullptr;
     std::size_t                   _current_chunk_drain_offset = 0;
     bool                          _is_at_end = false;
     bool                          _verify_crc;

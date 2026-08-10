@@ -258,7 +258,6 @@ GUC_GENERATION_FIELDS = frozenset(
     {
         "description_authority",
         "owner_facets",
-        "parity_ledger",
         "profile",
         "profile_delta_proof",
         "registration_count",
@@ -349,7 +348,6 @@ GUC_PROPERTY_FIELDS = frozenset(
 GUC_PROFILE_PROJECTION_FIELDS = frozenset(
     {
         "profile",
-        "parity_ledger_sha256",
         "registry_module",
         "registry_content_sha256",
         "profile_delta_proof_sha256",
@@ -4343,29 +4341,6 @@ def _validate_guc_manifest_generation(
     ):
         _fail(generation_context, "registration count differs")
 
-    parity_context = f"{generation_context}.parity_ledger"
-    parity = _object(
-        _field(generation, "parity_ledger", generation_context),
-        parity_context,
-    )
-    _require_exact_fields(
-        parity,
-        frozenset({"path", "sha256"}),
-        parity_context,
-    )
-    if (
-        _string(
-            _field(parity, "path", parity_context),
-            f"{parity_context}.path",
-        )
-        != "main/bioseq/testdata/doc0388_guc_parity_ledger.json"
-    ):
-        _fail(parity_context, "parity-ledger path differs")
-    _sha256(
-        _field(parity, "sha256", parity_context),
-        f"{parity_context}.sha256",
-    )
-
     registry_sha256 = _sha256(
         _field(
             generation,
@@ -4862,11 +4837,6 @@ def _validate_guc_properties(
     delta = _field(generation, "profile_delta_proof", context)
     expected_projection_base = {
         "profile": profile,
-        "parity_ledger_sha256": _field(
-            _field(generation, "parity_ledger", context),
-            "sha256",
-            context,
-        ),
         "registry_module": _field(
             generation, "registry_module", context
         ),

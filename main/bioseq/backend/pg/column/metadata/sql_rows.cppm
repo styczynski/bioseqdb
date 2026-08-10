@@ -1,12 +1,12 @@
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <cstdint>
 #include <optional>
 #include <type_traits>
 
-export module bioseq.storage.metadata.sql_rows;
+export module bioseq.postgres.storage.metadata.sql_rows;
 
 import bioseq.codegen.sql.annotation_model;
 

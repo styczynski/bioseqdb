@@ -1,196 +1,183 @@
 /**
  * @file utils.cppm
- * @brief Shared alignment utilities: unified scoring matrix.
- *
- * Provides ScoringMatrix<Source> — a single scoring-matrix type that replaces
- * the old KswScoringMatrix (used by KSW2) and BlockSIMDMatrix (used by
- * the block aligner). The matrix dimension is deduced from the sequence
- * logical alphabet alone, independent of packed width or representation.
- * Logical alphabets and packed sequence brands canonicalize to the same type.
+ * @brief Canonical scoring-matrix storage shared by SIMD alignment kernels.
  */
 module;
 
-#include "common.h"
-
-#include <cstdint>
-#include <cstring>
 #include <array>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <type_traits>
 
 export module bioseq.alignment.utils;
 
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-// ============================================================================
-// ScoringMatrix — unified scoring matrix for KSW2 and block aligner
-// ============================================================================
-
 /**
- * @brief Canonical scoring-matrix storage templated on the logical alphabet.
+ * Canonical scalar and shuffle-table scoring storage for one logical alphabet.
  *
- * Replaces both KswScoringMatrix<AlphabetDim> (used by KSW2) and
- * BlockSIMDMatrix<AlphabetDim> (used by the block aligner) with a single
- * type.
- *
- * Core entries: AlphabetDim x AlphabetDim array of int8_t scores, used by
- * KSW2 for match/mismatch/wildcard lookups.
- *
- * SIMD-aligned rows: (AlphabetDim+1) x 16 layout with the extra row filled
- * with INT8_MIN for NULL/padding, used by the block aligner's PSHUFB
- * score lookup.
- *
- * @tparam Alphabet    A Bioseq/SeqAn logical alphabet type.
- * @tparam AlphabetDim Alphabet dimension (including wildcard), defaults to
- *                     the alphabet size plus the existing wildcard rank.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_alphabet_dimension Alphabet size including the wildcard rank.
  */
-template<sequence_alphabet Alphabet, size_t AlphabetDim>
-struct ScoringMatrixStorage {
-    using alphabet_type = Alphabet;
-    static constexpr size_t alphabet_dim = AlphabetDim;
-    static_assert(AlphabetDim > 1, "Requires alphabet dimension > 1.");
+template <sequence_alphabet p_alphabet, std::size_t p_alphabet_dimension>
+struct scoring_matrix_storage {
+    using alphabet_type = p_alphabet;
 
-    static constexpr size_t entry_count =
-        static_cast<size_t>(AlphabetDim) * AlphabetDim;
-    static constexpr int dim = static_cast<int>(AlphabetDim);
+    static constexpr std::size_t k_alphabet_dimension = p_alphabet_dimension;
+    static_assert(
+        p_alphabet_dimension > 1,
+        "Scoring matrices require at least two ranks");
 
-    // --- Core scoring entries (KSW2 layout) ---
-    std::array<int8_t, entry_count> entries{};
+    static constexpr std::size_t k_entry_count =
+        p_alphabet_dimension * p_alphabet_dimension;
+    static constexpr int k_dimension =
+        static_cast<int>(p_alphabet_dimension);
 
-    // --- SIMD-aligned rows (block-aligner layout) ---
-    static constexpr size_t SIMD_ROWS = AlphabetDim + 1;
-    // The upstream Block Aligner uses one 16-byte shuffle table for DNA and
-    // two for amino-acid alphabets.  Keep that rule generic: one table per
-    // 16 rank values, including the dedicated NULL/padding rank.  A fixed
-    // 16-byte row silently aliased row N's high-rank scores into row N+1 for
-    // aa20/aa27 and made ranks >= 16 select unrelated bytes.
-    static constexpr size_t SIMD_LUT_COUNT = (AlphabetDim + 1 + 15) / 16;
-    static constexpr size_t SIMD_COLS = SIMD_LUT_COUNT * 16;
-    static constexpr uint8_t NULL_BYTE = static_cast<uint8_t>(AlphabetDim);
+    /** Row-major scalar scoring entries. */
+    std::array<std::int8_t, k_entry_count> entries{};
 
-    static_assert(AlphabetDim < std::numeric_limits<std::uint8_t>::max(),
-                  "ScoringMatrix rank plus NULL sentinel must fit in uint8_t");
+    static constexpr std::size_t k_simd_rows = p_alphabet_dimension + 1;
+    static constexpr std::size_t k_simd_lookup_count =
+        (p_alphabet_dimension + 1 + 15) / 16;
+    static constexpr std::size_t k_simd_columns = k_simd_lookup_count * 16;
+    static constexpr std::uint8_t k_null_byte =
+        static_cast<std::uint8_t>(p_alphabet_dimension);
 
-    alignas(64) int8_t simd_scores[SIMD_ROWS * SIMD_COLS] = {};
+    static_assert(
+        p_alphabet_dimension
+            < std::numeric_limits<std::uint8_t>::max(),
+        "Scoring rank and null sentinel must fit in uint8_t");
 
-    // --- Core access (replaces KswScoringMatrix API) ---
+    /** Shuffle-table rows used by Highway score lookup. */
+    alignas(64) std::int8_t simd_scores[k_simd_rows * k_simd_columns] = {};
 
-    [[nodiscard]] constexpr int8_t at(int row, int col) const noexcept {
-        return entries[static_cast<size_t>(row) * AlphabetDim + col];
+    /** Return a scalar score by row and column. */
+    [[nodiscard]] constexpr std::int8_t at(
+        int row,
+        int column) const noexcept {
+        return entries[
+            static_cast<std::size_t>(row) * p_alphabet_dimension + column];
     }
-    [[nodiscard]] constexpr int8_t& at(int row, int col) noexcept {
-        return entries[static_cast<size_t>(row) * AlphabetDim + col];
+
+    /** Return a mutable scalar score by row and column. */
+    [[nodiscard]] constexpr std::int8_t& at(
+        int row,
+        int column) noexcept {
+        return entries[
+            static_cast<std::size_t>(row) * p_alphabet_dimension + column];
     }
-    [[nodiscard]] constexpr int8_t match_score()    const noexcept {
+
+    /** Return the canonical match score. */
+    [[nodiscard]] constexpr std::int8_t match_score() const noexcept {
         return entries[0];
     }
-    [[nodiscard]] constexpr int8_t mismatch_score()  const noexcept {
+
+    /** Return the canonical mismatch score. */
+    [[nodiscard]] constexpr std::int8_t mismatch_score() const noexcept {
         return entries[1];
     }
-    [[nodiscard]] constexpr int8_t wildcard_score()  const noexcept {
-        return entries[entry_count - 1];
+
+    /** Return the wildcard score. */
+    [[nodiscard]] constexpr std::int8_t wildcard_score() const noexcept {
+        return entries[k_entry_count - 1];
     }
 
-    // --- SIMD access (replaces BlockSIMDMatrix API) ---
-
-    [[nodiscard]] const int8_t* simd_row_ptr(size_t i) const noexcept {
-        return simd_scores + i * SIMD_COLS;
+    /** Return the first byte of a SIMD lookup row. */
+    [[nodiscard]] const std::int8_t* simd_row_pointer(
+        std::size_t row) const noexcept {
+        return simd_scores + row * k_simd_columns;
     }
 
-    /// Validate that the SIMD lookup bank is an exact projection of the
-    /// biological score matrix, including NULL/padding sentinels. Block
-    /// Aligner attestation calls this once per admitted alignment, never in
-    /// the DP loop.
-    [[nodiscard]] bool block_layout_valid() const noexcept {
-        for (size_t row = 0; row < AlphabetDim; ++row) {
-            for (size_t col = 0; col < AlphabetDim; ++col) {
-                if (simd_scores[row * SIMD_COLS + col]
-                    != entries[row * AlphabetDim + col]) {
+    /** Validate that shuffle rows exactly project the scalar matrix. */
+    [[nodiscard]] bool is_block_layout_valid() const noexcept {
+        for (std::size_t row = 0; row < p_alphabet_dimension; ++row) {
+            for (std::size_t column = 0;
+                 column < p_alphabet_dimension;
+                 ++column) {
+                if (simd_scores[row * k_simd_columns + column]
+                    != entries[row * p_alphabet_dimension + column]) {
                     return false;
                 }
             }
-            for (size_t col = AlphabetDim; col < SIMD_COLS; ++col) {
-                if (simd_scores[row * SIMD_COLS + col] != INT8_MIN) {
+            for (std::size_t column = p_alphabet_dimension;
+                 column < k_simd_columns;
+                 ++column) {
+                if (simd_scores[row * k_simd_columns + column] != INT8_MIN) {
                     return false;
                 }
             }
         }
-        for (size_t col = 0; col < SIMD_COLS; ++col) {
-            if (simd_scores[AlphabetDim * SIMD_COLS + col] != INT8_MIN) {
+        for (std::size_t column = 0; column < k_simd_columns; ++column) {
+            if (simd_scores[p_alphabet_dimension * k_simd_columns + column]
+                != INT8_MIN) {
                 return false;
             }
         }
         return true;
     }
 
-    /// Stable identity of every score consumed by the Block kernel. This
-    /// binds proof evidence to match/mismatch/ambiguity semantics instead of
-    /// merely to gap and block-size parameters.
+    /** Compute a stable identity for every score consumed by Block Aligner. */
     [[nodiscard]] std::uint64_t block_semantic_identity() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
         const auto mix = [&hash](std::uint64_t value) noexcept {
             hash ^= value;
             hash *= 1099511628211ULL;
         };
-        mix(AlphabetDim);
-        for (const int8_t score : entries) {
+        mix(p_alphabet_dimension);
+        for (const std::int8_t score : entries) {
             mix(static_cast<std::uint8_t>(score));
         }
         return hash;
     }
 
-    // --- Factory ---
-
     /**
-     * @brief Generate a scoring matrix from match/mismatch/ambiguity params.
+     * Generate scalar scores and their SIMD lookup projection.
      *
-     * Creates an AlphabetDim x AlphabetDim matrix where:
-     *   - Diagonal (i==j, i < AlphabetDim-1) = +match_score
-     *   - Off-diagonal                        = -mismatch_pen
-     *   - Last row/col (wildcard)             = -sc_ambi
-     *
-     * Also fills the SIMD-aligned rows for block-aligner use.
-     *
-     * @param match_score  Score for matching bases (positive value)
-     * @param mismatch_pen Penalty for mismatches  (positive value, negated)
-     * @param sc_ambi      Penalty for ambiguous   (positive value, negated)
+     * Positive match input remains positive; mismatch and ambiguity inputs
+     * are normalized to penalties. The last rank is the wildcard rank.
      */
-    static ScoringMatrixStorage generate(
-        int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
-    {
-        ScoringMatrixStorage matrix{};
-        constexpr int base_count = dim - 1;
+    [[nodiscard]] static scoring_matrix_storage generate(
+        std::int8_t match,
+        std::int8_t mismatch_penalty,
+        std::int8_t ambiguity_penalty) {
+        scoring_matrix_storage matrix{};
+        constexpr int k_base_count = k_dimension - 1;
 
-        const int8_t pos_match =
-            match_score > 0 ? match_score
-                            : static_cast<int8_t>(-match_score);
-        const int8_t neg_mismatch =
-            mismatch_pen > 0 ? static_cast<int8_t>(-mismatch_pen)
-                             : mismatch_pen;
-        const int8_t ambi_penalty =
-            sc_ambi > 0 ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
+        const std::int8_t positive_match = match > 0
+            ? match
+            : static_cast<std::int8_t>(-match);
+        const std::int8_t negative_mismatch = mismatch_penalty > 0
+            ? static_cast<std::int8_t>(-mismatch_penalty)
+            : mismatch_penalty;
+        const std::int8_t negative_ambiguity = ambiguity_penalty > 0
+            ? static_cast<std::int8_t>(-ambiguity_penalty)
+            : ambiguity_penalty;
 
-        // Fill core entries
-        for (int r = 0; r < base_count; ++r) {
-            for (int c = 0; c < base_count; ++c) {
-                matrix.at(r, c) = (r == c) ? pos_match : neg_mismatch;
+        for (int row = 0; row < k_base_count; ++row) {
+            for (int column = 0; column < k_base_count; ++column) {
+                matrix.at(row, column) = row == column
+                    ? positive_match
+                    : negative_mismatch;
             }
-            matrix.at(r, base_count) = ambi_penalty;
+            matrix.at(row, k_base_count) = negative_ambiguity;
         }
-        for (int c = 0; c <= base_count; ++c) {
-            matrix.at(base_count, c) = ambi_penalty;
+        for (int column = 0; column <= k_base_count; ++column) {
+            matrix.at(k_base_count, column) = negative_ambiguity;
         }
 
-        // Build SIMD-aligned rows: AlphabetDim data rows + 1 NULL row
-        for (auto& s : matrix.simd_scores) s = INT8_MIN;
-        for (int i = 0; i < dim; ++i) {
-            for (int j = 0; j < dim; ++j) {
-                matrix.simd_scores[static_cast<size_t>(i) * SIMD_COLS + j] =
-                    matrix.at(i, j);
+        for (auto& score : matrix.simd_scores) {
+            score = INT8_MIN;
+        }
+        for (int row = 0; row < k_dimension; ++row) {
+            for (int column = 0; column < k_dimension; ++column) {
+                matrix.simd_scores[
+                    static_cast<std::size_t>(row) * k_simd_columns + column]
+                    = matrix.at(row, column);
             }
         }
 
@@ -199,24 +186,23 @@ struct ScoringMatrixStorage {
 };
 
 /**
- * @brief Unified scoring matrix normalized to a source's logical alphabet.
+ * Scoring matrix normalized to a source's logical alphabet.
  *
- * `Source` may be the logical alphabet used by the canonical lazy-view APIs or
- * any established compact-sequence brand. Both spellings resolve through the
- * same `compact_sequence_range<Source>::traits` contract and therefore denote
- * the same matrix type for a given alphabet and dimension.
+ * @tparam p_source Logical alphabet or compatible compact-sequence source.
+ * @tparam p_alphabet_dimension Logical alphabet dimension.
  */
-template<supports_compact_sequence_range Source,
-         size_t AlphabetDim =
-             compact_sequence_range<Source>::traits::alphabet_size_n>
-using ScoringMatrix = ScoringMatrixStorage<
-    typename compact_sequence_range<Source>::traits::alphabet_type,
-    AlphabetDim>;
+template <
+    supports_compact_sequence_range p_source,
+    std::size_t p_alphabet_dimension =
+        compact_sequence_range<p_source>::traits::alphabet_size_n>
+using scoring_matrix = scoring_matrix_storage<
+    typename compact_sequence_range<p_source>::traits::alphabet_type,
+    p_alphabet_dimension>;
 
 static_assert(std::is_same_v<
-    ScoringMatrix<seq::dna4>,
-    ScoringMatrix<sequence_custom_alphabet<seq::dna4, std::uint64_t>>>);
-static_assert(ScoringMatrix<seq::dna4>::alphabet_dim == 5u);
-static_assert(ScoringMatrix<seq::dna5>::alphabet_dim == 6u);
+    scoring_matrix<seq::dna4>,
+    scoring_matrix<sequence_custom_alphabet<seq::dna4, std::uint64_t>>>);
+static_assert(scoring_matrix<seq::dna4>::k_alphabet_dimension == 5u);
+static_assert(scoring_matrix<seq::dna5>::k_alphabet_dimension == 6u);
 
 }  // namespace bioseq::simd

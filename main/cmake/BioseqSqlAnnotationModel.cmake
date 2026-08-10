@@ -12,7 +12,6 @@ function(bioseq_ensure_sql_annotation_model)
     "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen")
   set(_bioseq_sql_annotation_modules
     "${_bioseq_sql_annotation_root}/sql/annotation_model/entities.cppm"
-    "${_bioseq_sql_annotation_root}/sql/annotation_model/migration.cppm"
     "${_bioseq_sql_annotation_root}/sql/annotation_model/options.cppm"
     "${_bioseq_sql_annotation_root}/sql/annotation_model/validation.cppm"
     "${_bioseq_sql_annotation_root}/sql/annotation_model/index.cppm")

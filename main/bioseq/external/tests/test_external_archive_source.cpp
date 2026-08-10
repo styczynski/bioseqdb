@@ -4,7 +4,7 @@
 // caps, dataset_catalog.json member selection, decoded-member md5sum validation,
 // corruption, and the verified happy path. No network, no .so — this compiles
 // into the prebuilt bioseq_external_integration_tests_exec.
-// Tag: [external][archive].
+// Catch taxonomy: external API integration over the archive source.
 
 #include <cstddef>
 #include <cstdint>
@@ -188,7 +188,7 @@ std::uint64_t expected_fasta_letters(std::string_view body) {
 // its true digest.
 std::vector<zip_member> good_members() {
     const std::string body = fasta_body();
-    const std::string digest = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
@@ -208,7 +208,7 @@ constexpr std::string_view kRealFullPath =
 
 std::vector<zip_member> real_layout_members() {
     const std::string body = fasta_body();
-    const std::string digest = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::string catalog = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
     catalog += kRealRelPath;  // data-dir-relative, as NCBI emits it
@@ -226,16 +226,17 @@ exio::archive_read_limits default_limits() { return exio::archive_read_limits{};
 
 }  // namespace
 
-TEST_CASE("archive_source md5_hex matches a known vector", "[external][archive]") {
+TEST_CASE("archive_source compute_md5_hex matches a known vector",
+          "[component:external_api][layer:integration][feature:external_source]") {
     // RFC 1321 test vector: MD5("abc") = 900150983cd24fb0d6963f7d28e17f72.
     const std::string_view abc = "abc";
-    const std::string hex = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string hex = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(abc.data()), abc.size()));
     REQUIRE(hex == "900150983cd24fb0d6963f7d28e17f72");
 }
 
 TEST_CASE("archive_source member-name safety rejects escapes",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     REQUIRE(exio::archive_member_name_is_safe("ncbi_dataset/data/x.fna", 4096));
     REQUIRE_FALSE(exio::archive_member_name_is_safe("../escape.fna", 4096));
     REQUIRE_FALSE(exio::archive_member_name_is_safe("a/../../escape", 4096));
@@ -246,7 +247,7 @@ TEST_CASE("archive_source member-name safety rejects escapes",
 }
 
 TEST_CASE("archive_source extracts and verifies a well-formed package",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
     const auto result = exio::extract_fasta_members_from_zip(
@@ -268,7 +269,7 @@ TEST_CASE("archive_source extracts and verifies a well-formed package",
 }
 
 TEST_CASE("archive_source keys emitted chunks by the queried accession",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // Regression guard for the PG 0-rows bug: emitted chunks must be keyed by the
     // assembly accession the user queried (so the scan's `accession = '<assembly>'`
     // filter matches), NOT the member file path.
@@ -283,11 +284,11 @@ TEST_CASE("archive_source keys emitted chunks by the queried accession",
 }
 
 TEST_CASE("archive_source emits one verified asset-end MD5 event per member",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // spec §3179-3213, test #29: a fully-decoded, MD5-verified member produces
     // exactly one terminal asset-end carrying the decoded-member digest.
     const std::string body = fasta_body();
-    const std::string digest = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
@@ -302,12 +303,12 @@ TEST_CASE("archive_source emits one verified asset-end MD5 event per member",
 }
 
 TEST_CASE("archive_source streams every record of a multi-record member",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // Reviewer HIGH 2a: a multi-record member (an NCBI assembly genomic.fna) must
     // stream ALL records, not just the first — keyed by the queried assembly
     // accession, each record ending in its own end_of_record chunk.
     const std::string body = multi_record_body();
-    const std::string digest = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
@@ -336,14 +337,14 @@ TEST_CASE("archive_source streams every record of a multi-record member",
 }
 
 TEST_CASE("archive_source multi-record whole-sequence target counts every row",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // Reviewer A HIGH: for the `sequence` (whole-record) target on a multi-record
     // member, finish() must return the TRUE row count (N), not a literal 1 — the
     // earlier records were already emitted at their `>` boundaries. Two records must
     // report sequence_rows == 2 and deliver two whole-record rows. (Before the fix
     // this undercounted to 1 while 2 rows were pushed to the sink.)
     const std::string body = multi_record_body();
-    const std::string digest = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
@@ -365,7 +366,7 @@ TEST_CASE("archive_source multi-record whole-sequence target counts every row",
 }
 
 TEST_CASE("archive_source carries chunk_index across multiple selected members",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // Reviewer A MEDIUM: when more than one FASTA member is selected under one
     // accession, each member uses a fresh emitter — their chunk_index must NOT both
     // restart at 0, or PG's (accession, chunk_index) key would collide. The reader
@@ -376,9 +377,9 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
     const std::string body1 = multi_record_body();          // seg1(120) + seg2(60)
     std::string body2 = ">seg3 third segment\n";
     for (int i = 0; i < 9; ++i) body2 += "ACGTACGTAC\n";     // 90 bases, one record
-    const std::string d1 = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string d1 = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body1.data()), body1.size()));
-    const std::string d2 = exio::md5_hex(std::span<const std::uint8_t>(
+    const std::string d2 = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body2.data()), body2.size()));
     std::string md5s = md5sum_line(d1, kPath1);
     md5s += md5sum_line(d2, kPath2);
@@ -405,7 +406,7 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
 }
 
 TEST_CASE("archive_source reconciles NCBI's three path conventions",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     // catalog filePath is data-dir-relative; md5sum.txt + ZIP entry are full
     // paths. Canonicalization must make all three match → member selected+verified.
     const std::vector<std::uint8_t> zip = build_zip(real_layout_members());
@@ -421,7 +422,7 @@ TEST_CASE("archive_source reconciles NCBI's three path conventions",
 }
 
 TEST_CASE("archive_source rejects a path-traversal member",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members = good_members();
     members.push_back({.path = "../evil.fna", .content = ">x\nACGT\n"});
     const std::vector<std::uint8_t> zip = build_zip(members);
@@ -434,7 +435,7 @@ TEST_CASE("archive_source rejects a path-traversal member",
 }
 
 TEST_CASE("archive_source rejects an absolute-path member",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members = good_members();
     members.push_back({.path = "/etc/passwd", .content = "root\n"});
     const std::vector<std::uint8_t> zip = build_zip(members);
@@ -446,7 +447,8 @@ TEST_CASE("archive_source rejects an absolute-path member",
     REQUIRE(result.error().kind == prov::external_error_kind::provider_contract);
 }
 
-TEST_CASE("archive_source rejects a symlink member", "[external][archive]") {
+TEST_CASE("archive_source rejects a symlink member",
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members = good_members();
     members.push_back({.path = "ncbi_dataset/data/link.fna",
                        .filetype = AE_IFLNK,
@@ -461,7 +463,7 @@ TEST_CASE("archive_source rejects a symlink member", "[external][archive]") {
 }
 
 TEST_CASE("archive_source rejects a wrong md5sum digest (corruption)",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
                        .content = catalog_selecting_fasta()});
@@ -482,7 +484,8 @@ TEST_CASE("archive_source rejects a wrong md5sum digest (corruption)",
     REQUIRE(counter.asset_ends == 0);
 }
 
-TEST_CASE("archive_source rejects a missing md5sum.txt", "[external][archive]") {
+TEST_CASE("archive_source rejects a missing md5sum.txt",
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members;
     members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
                        .content = catalog_selecting_fasta()});
@@ -497,7 +500,7 @@ TEST_CASE("archive_source rejects a missing md5sum.txt", "[external][archive]") 
 }
 
 TEST_CASE("archive_source enforces the maximum entry count",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
     limits.maximum_entries = 2;  // the well-formed package has 3 members
     const std::vector<std::uint8_t> zip = build_zip(good_members());
@@ -510,7 +513,7 @@ TEST_CASE("archive_source enforces the maximum entry count",
 }
 
 TEST_CASE("archive_source enforces the decoded/compressed expansion ratio",
-          "[external][archive]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
     // A near-zero ratio ceiling: any decoded FASTA body exceeds it.
     limits.maximum_expansion = {.numerator = 1, .denominator = 1000000,

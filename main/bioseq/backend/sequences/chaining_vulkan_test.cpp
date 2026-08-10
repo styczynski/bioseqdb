@@ -21,7 +21,7 @@
 // the parity / shader-layout cases run on every machine.
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <array>

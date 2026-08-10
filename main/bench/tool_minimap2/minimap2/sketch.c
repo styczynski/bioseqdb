@@ -14,7 +14,7 @@
 
 #include <chrono>
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 
 unsigned char seq_nt4_table[256] = {
 	0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -100,7 +100,7 @@ static inline int tq_shift(tiny_queue_t *q)
 void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
 {
 	BENCH_INSTR_BLOCK("tool_minimap2.mm_sketch");
-	bioseq_log<DBG>("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
+	bioseq_log<logging_level::debug>("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
 
 	auto start = std::chrono::high_resolution_clock::now();
 
@@ -136,12 +136,10 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 			if (kmer[0] == kmer[1]) continue; // skip "symmetric k-mers" as we don't know it strand
 			z = kmer[0] < kmer[1]? 0 : 1; // strand
 			++l;
-			//bioseq_log<DBG>("{}(l) == {}(i+1)", l, i+1);
 			assert(l == i + 1);
 			if (l >= k && kmer_span < 256) { // hash64(kmer[z], mask)
 				info.x = hash64(kmer[z], mask) << 8 | kmer_span;
 				info.y = (uint64_t)rid<<32 | (uint32_t)i<<1 | z;
-				//bioseq_log<DBG>("OLD sketch = {}", binary_to_str( (uint64_t*)((void*)&info), 2 ));
 			}
 		} else l = 0, tq.count = tq.front = 0, kmer_span = 0;
 		buf[buf_pos] = info; // need to do this here as appropriate buf_pos and buf[buf_pos] are needed below
@@ -177,7 +175,7 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
 
 	// Print all collected
-	bioseq_log<DBG>("(BASE mm_sketch) Dump all collected: {} (runtime = {})", p->n, duration);
+	bioseq_log<logging_level::debug>("(BASE mm_sketch) Dump all collected: {} (runtime = {})", p->n, duration);
 	for(int i=0;i<p->n;++i) {
 		// p->a[i].x = kMer<<8 | kmerSpan
  		// p->a[i].y = rid<<32 | lastPos<<1 | strand
@@ -186,7 +184,7 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 		uint64_t rid = p->a[i].y >> 32;
 		uint64_t lastPos = (p->a[i].y & 4294967294) >> 1;
 		uint64_t strand = p->a[i].y & 1;
-		bioseq_log<DBG>("kmer={}, kmerSpan={}, rid={}, lastPos={}, strand={}", kmer, kmerSpan, rid, lastPos, strand);
+		bioseq_log<logging_level::debug>("kmer={}, kmerSpan={}, rid={}, lastPos={}, strand={}", kmer, kmerSpan, rid, lastPos, strand);
 	}
-	bioseq_log<DBG>("--END--");
+	bioseq_log<logging_level::debug>("--END--");
 }

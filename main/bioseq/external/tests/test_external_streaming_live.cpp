@@ -3,8 +3,8 @@
 // for sequence targets), proving bounded-memory streaming against real NCBI
 // E-utilities plus deterministic, offline security checks.
 //
-// Tags: [external][streaming] (offline security) and [external][streaming][live]
-// (real network). Run the live subset deliberately.
+// Offline locator checks exercise the API contract; streaming cases require
+// the network resource selector.
 
 #include <array>
 #include <chrono>
@@ -146,7 +146,7 @@ stream_counts stream_fasta_letters(const std::string& url,
 }  // namespace
 
 TEST_CASE("locator rejects non-allowlisted and private targets",
-          "[external][streaming]") {
+          "[component:external_api][layer:contract][feature:external_source]") {
     const prov::provider_id ncbi{"ncbi"};
     const prov::locator_policy_profile_view policy = ncbi_policy();
 
@@ -181,7 +181,7 @@ TEST_CASE("locator rejects non-allowlisted and private targets",
 }
 
 TEST_CASE("remote_byte_source streams NCBI FASTA with bounded memory",
-          "[external][streaming][live]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     const prov::provider_id ncbi{"ncbi"};
     const prov::locator_policy_profile_view policy = ncbi_policy();
 

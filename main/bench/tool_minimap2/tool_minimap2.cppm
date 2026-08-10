@@ -2,46 +2,42 @@
  * @file tool_minimap2.cppm
  * @brief Black-box C++26 wrapper around the original minimap2 C pipeline.
  *
- * Exposes a single entry point `tool_minimap2(query, target, params)` that
- * accepts our compact_sequence_range inputs and returns a
- * MatchResultCollection in the same shape as our native `minimap_port`, so
- * a benchmarker can run both on identical inputs and compare results.
+ * Exposes conversion and execution entry points that return the same PAF-like
+ * result shape as the native pipeline, allowing both implementations to run
+ * on identical decoded inputs without adding conversion work to measurements.
  *
  * The wrapper drives the minimap2 C API via its in-memory entry points
  * (mm_idx_str -> mm_map), so there is no file I/O, no argv parsing, no
  * thread pool — the original minimap2 behaviour is preserved single-
- * threaded. The minimap2 sources themselves are unchanged on purpose:
- * this module sits on top of them like any other consumer.
+ * threaded. Bundled native sources remain isolated behind this adapter's
+ * ordinary C API consumption boundary.
  */
 module;
 
 #include <hwy/highway.h>
 
-#include "common.h"
-
 extern "C" {
 #include "minimap2/minimap.h"
 }
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 export module bench.tool_minimap2;
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
-import bioseq.sequences.minimap_port;
-import bioseq.instr;
-// Force the C-shim trampolines (extern "C" registration / begin / end)
-// to be linked into this TU. Without an explicit import the build
-// system's module-graph reachability check can drop the shim on hosts
-// where the .c TUs are visited before the wrapper, leaving
-// bench_instr_region_register undefined at link time.
+import bioseq.pipeline.minimap_port;
+import bioseq.instrumentation;
+// The explicit import retains the C trampoline definitions in the module graph.
 import bench.tool_minimap2.instr_shim;
 
 export {
@@ -50,36 +46,31 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench::HWY_NAMESPACE {
 
-using bioseq::simd::CigarOp;
-using bioseq::simd::MatchResult;
-using bioseq::simd::MatchResultCollection;
-using bioseq::simd::Minimap2Params;
+using bioseq::simd::match_result;
+using bioseq::simd::match_result_collection;
+using bioseq::simd::minimap2_parameters;
 
 /**
- * @brief Convert a compact_sequence_range to an ACGT string (no NUL in the
- *        middle, `bp_size()` chars long).
+ * @brief Converts a compact sequence to an ACGT string.
  *
- * Iterates `iterable<BP>()` directly — that iterator respects padding so
- * we never emit junk past the sequence's logical end. We then reuse
- * `seqan3::alphabet::to_char` per rank for the final char mapping. This
- * is a single O(bp_size) pass with no intermediate `std::vector` (unlike
- * the `to_encoded_vector()` + loop pattern).
+ * The logical-rank iterator excludes padding, and conversion remains caller-owned
+ * so measured minimap2 execution contains no compact-sequence decoding.
  *
- * Promoted out of `detail::` so bench harnesses can call it from
- * `on_input` and pass the resulting string into `tool_minimap2`. That
- * keeps the O(bp_size) decompression out of the per-iteration timing
- * window — see main/DOCS/REPORTS/STRANGE_TIMING_COMPREHESIVE_REPORT__DOC0215.md §1b for context.
+ * @tparam p_range_type Compact-sequence configuration or backing range.
+ * @param[in] sequence Packed input sequence.
+ * @return One uppercase character per logical base.
  */
-template<supports_compact_sequence_range Range>
+template<supports_compact_sequence_range p_range_type>
 [[nodiscard]] std::string compact_sequence_to_acgt(
-    const compact_sequence_range<Range>& sequence)
+    const compact_sequence_range<p_range_type>& sequence)
 {
-    using alphabet_type = typename compact_sequence_range<Range>::traits::alphabet_type;
-    using rank_type     = seqan3::alphabet_rank_t<alphabet_type>;
+    using alphabet_type = typename compact_sequence_range<
+        p_range_type>::traits::alphabet_type;
+    using rank_type = seq::alphabet_rank_t<alphabet_type>;
     std::string acgt_chars;
     acgt_chars.reserve(sequence.bp_size());
     alphabet_type letter{};
-    for (const auto& base_pair_rank : sequence.template iterable<BP>()) {
+    for (const auto base_pair_rank : sequence.template iterable<logical_rank>()) {
         letter.assign_rank(static_cast<rank_type>(base_pair_rank));
         acgt_chars.push_back(letter.to_char());
     }
@@ -89,60 +80,101 @@ template<supports_compact_sequence_range Range>
 namespace detail {
 
 /**
- * @brief Populate an mm_mapopt_t from our Minimap2Params.
+ * @brief Projects shared alignment parameters into minimap2 option structures.
  *
- * Only the subset of fields that have direct counterparts in the minimap2
- * C API is copied. Chaining-algorithm / base-alignment-algorithm selectors
- * are bioseq-internal and have no effect on the reference minimap2 run.
+ * Only fields with direct counterparts in the minimap2 C API are copied.
+ * The native RMQ flag follows the shared chaining selector; other bioseq-only
+ * backend selectors do not alter the reference run.
+ *
+ * @param[in,out] index_options Native index options.
+ * @param[in,out] mapping_options Native mapping options.
+ * @param[in] parameters Shared benchmark parameters.
+ * @throws std::invalid_argument When native option constraints are violated.
  */
-inline void apply_params(mm_idxopt_t& idx_opt, mm_mapopt_t& map_opt,
-                         const Minimap2Params& params)
+inline void apply_parameters(
+    mm_idxopt_t& index_options,
+    mm_mapopt_t& mapping_options,
+    const minimap2_parameters& parameters)
 {
-    idx_opt.k = static_cast<short>(params.kmer_size);
-    idx_opt.w = static_cast<short>(params.window_size);
+    if (parameters.kmer_size < 1 || parameters.kmer_size > 28
+        || parameters.window_size < 1 || parameters.window_size > 255) [[unlikely]] {
+        throw std::invalid_argument(
+            "tool_minimap2 requires k-mer size in [1, 28] and window "
+            "size in [1, 255]");
+    }
 
-    map_opt.max_gap          = params.max_gap;
-    if (params.max_gap_ref >= 0) map_opt.max_gap_ref = params.max_gap_ref;
-    map_opt.bw               = params.bandwidth;
-    if (params.bandwidth_long > 0) map_opt.bw_long = params.bandwidth_long;
-    map_opt.max_chain_skip   = params.max_chain_skip;
-    map_opt.max_chain_iter   = params.max_chain_iter;
-    map_opt.min_cnt          = params.min_seed_count;
-    map_opt.min_chain_score  = params.min_chain_score;
-    map_opt.chain_gap_scale  = params.chain_gap_scale;
-    map_opt.chain_skip_scale = params.chain_skip_scale;
-    map_opt.mask_level       = params.mask_level;
-    map_opt.mask_len         = params.mask_len;
-    map_opt.pri_ratio        = params.pri_ratio;
-    map_opt.best_n           = params.best_n;
-    map_opt.a                = params.match_score;
-    map_opt.b                = params.mismatch_pen;
-    map_opt.q                = params.gap_open1;
-    map_opt.e                = params.gap_ext1;
-    map_opt.q2               = params.gap_open2;
-    map_opt.e2               = params.gap_ext2;
-    map_opt.sc_ambi          = params.sc_ambi;
-    map_opt.zdrop            = params.zdrop;
-    map_opt.end_bonus        = params.end_bonus;
-    if (params.mid_occ > 0) map_opt.mid_occ = params.mid_occ;
-    if (params.max_occ > 0) map_opt.max_occ = params.max_occ;
-    if (params.do_cigar) {
-        map_opt.flag |= MM_F_CIGAR;
+    index_options.k = static_cast<short>(parameters.kmer_size);
+    index_options.w = static_cast<short>(parameters.window_size);
+
+    mapping_options.max_gap = parameters.max_gap;
+    if (parameters.max_gap_ref >= 0) {
+        mapping_options.max_gap_ref = parameters.max_gap_ref;
+    }
+    mapping_options.bw = parameters.bandwidth;
+    if (parameters.bandwidth_long > 0) {
+        mapping_options.bw_long = parameters.bandwidth_long;
+        mapping_options.flag &= ~MM_F_NO_LJOIN;
+    } else {
+        mapping_options.bw_long = mapping_options.bw;
+        mapping_options.flag |= MM_F_NO_LJOIN;
+    }
+    mapping_options.max_chain_skip = parameters.max_chain_skip;
+    mapping_options.max_chain_iter = parameters.max_chain_iter;
+    mapping_options.min_cnt = parameters.min_seed_count;
+    mapping_options.min_chain_score = parameters.min_chain_score;
+    mapping_options.min_ksw_len = parameters.min_ksw_len;
+    mapping_options.chain_gap_scale = parameters.chain_gap_scale;
+    mapping_options.chain_skip_scale = parameters.chain_skip_scale;
+    mapping_options.mask_level = parameters.mask_level;
+    mapping_options.mask_len = parameters.mask_len;
+    mapping_options.pri_ratio = parameters.pri_ratio;
+    mapping_options.best_n = parameters.best_n;
+    mapping_options.a = parameters.match_score;
+    mapping_options.b = parameters.mismatch_pen;
+    mapping_options.q = parameters.gap_open1;
+    mapping_options.e = parameters.gap_ext1;
+    mapping_options.q2 = parameters.gap_open2;
+    mapping_options.e2 = parameters.gap_ext2;
+    mapping_options.sc_ambi = parameters.sc_ambi;
+    // The shared contract exposes forward Z-drop only; inverse Z-drop retains
+    // the native minimap2 default established by mm_set_opt.
+    mapping_options.zdrop = parameters.zdrop;
+    mapping_options.end_bonus = parameters.end_bonus;
+    const auto minimum_dp_score =
+        static_cast<std::int64_t>(parameters.min_chain_score)
+        * static_cast<std::int64_t>(parameters.match_score);
+    if (minimum_dp_score < (std::numeric_limits<int>::min)()
+        || minimum_dp_score > (std::numeric_limits<int>::max)()) [[unlikely]] {
+        throw std::invalid_argument(
+            "tool_minimap2 minimum DP score exceeds the native integer domain");
+    }
+    mapping_options.min_dp_max = static_cast<int>(minimum_dp_score);
+    if (parameters.mid_occ > 0) {
+        mapping_options.mid_occ = parameters.mid_occ;
+    }
+    if (parameters.max_occ > 0) {
+        mapping_options.max_occ = parameters.max_occ;
+    }
+    if (parameters.do_cigar || parameters.compute_edit_distance) {
+        mapping_options.flag |= MM_F_CIGAR;
+    }
+    if (parameters.chaining_algorithm
+            == bioseq::simd::chaining_algorithm::range_minimum_query) {
+        mapping_options.flag |= MM_F_RMQ;
     }
 }
 
 /**
- * @brief Copy a single mm_reg1_t (and its CIGAR) into a MatchResult.
+ * @brief Copies one native region and its CIGAR into a shared result.
  *
  * Field mapping mirrors region_to_match_result() in minimap_port.cppm so
  * results from both pipelines live in the same struct shape and an
  * evaluator can compare field-by-field.
  *
- * Fields with semantic drift between the two sources (documented so a
- * future reader does not assume 1:1 equivalence):
+ * Semantic differences relevant to cross-pipeline comparison:
  *   * chain_score = score0 ?: score — minimap2 overwrites `score` with
  *     the final DP score after merging, keeping the pre-merge value in
- *     `score0`. Our port keeps the chaining DP score under `chain_score`
+ *     `score0`. The bioseq pipeline keeps its chaining DP score under `chain_score`
  *     straight from the chain builder. For chains that never merged,
  *     score0 == 0 and the two agree.
  *   * dp_score / dp_max_score — minimap2 stores these inside
@@ -150,181 +182,230 @@ inline void apply_params(mm_idxopt_t& idx_opt, mm_mapopt_t& map_opt,
  *     CIGAR is disabled we fall back to the chaining `score` so the
  *     field is defined but not apples-to-apples.
  *   * is_primary — minimap2 encodes primary mappings as `parent == id`
- *     (see hit.c mm_set_parent). Our port sets is_primary explicitly in
+ *     (see hit.c mm_set_parent). The bioseq pipeline sets is_primary in
  *     classify_primary_secondary; both codepaths should agree but if
  *     they diverge silently the evaluator's primary-vs-secondary
  *     classification will too.
+ *
+ * @param[in] native_region Minimap2 result record.
+ * @param[in] query_length Query length in bases.
+ * @param[in] target_length Target length in bases.
+ * @param[in] parameters Shared result-projection policy.
+ * @return Shared PAF-like result record.
  */
-[[nodiscard]] MatchResult reg_to_match_result(
-    const mm_reg1_t& native_region, int32_t query_len, int32_t target_len)
+[[nodiscard]] match_result region_to_match_result(
+    const mm_reg1_t& native_region,
+    std::int32_t query_length,
+    std::int32_t target_length,
+    const minimap2_parameters& parameters)
 {
-    MatchResult mr;
-    mr.query_len              = query_len;
-    mr.query_start            = native_region.qs;
-    mr.query_end              = native_region.qe;
-    mr.is_reverse             = native_region.rev != 0;
-    mr.target_len             = target_len;
-    mr.target_start           = native_region.rs;
-    mr.target_end             = native_region.re;
-    mr.num_matches            = native_region.mlen;
-    mr.block_length           = native_region.blen;
-    mr.mapq                   = static_cast<int32_t>(native_region.mapq);
-    mr.chain_score            = native_region.score0 != 0 ? native_region.score0
-                                                           : native_region.score;
-    mr.dp_score               = native_region.p ? native_region.p->dp_score : native_region.score;
-    mr.dp_max_score           = native_region.p ? native_region.p->dp_max   : native_region.score;
-    mr.seed_count             = native_region.cnt;
-    mr.secondary_chain_score  = native_region.subsc;
-    mr.divergence             = native_region.div;
-    mr.is_primary             = (native_region.parent == native_region.id);
-    mr.has_cigar              = (native_region.p != nullptr && native_region.p->n_cigar > 0);
-    if (mr.has_cigar) {
+    match_result result;
+    result.query_len = query_length;
+    result.query_start = native_region.qs;
+    result.query_end = native_region.qe;
+    result.is_reverse = native_region.rev != 0;
+    result.target_len = target_length;
+    result.target_start = native_region.rs;
+    result.target_end = native_region.re;
+    result.num_matches = native_region.mlen;
+    result.block_length = native_region.blen;
+    result.mapq = parameters.compute_mapq
+        ? static_cast<std::int32_t>(native_region.mapq)
+        : 0;
+    result.chain_score = native_region.score0 != 0
+        ? native_region.score0
+        : native_region.score;
+    result.dp_score = native_region.p != nullptr
+        ? native_region.p->dp_score
+        : native_region.score;
+    result.dp_max_score = native_region.p != nullptr
+        ? native_region.p->dp_max0
+        : native_region.score;
+    result.seed_count = native_region.cnt;
+    result.secondary_chain_score = native_region.subsc;
+    result.divergence = parameters.compute_divergence
+        ? native_region.div
+        : -1.0f;
+    result.is_primary = native_region.parent == native_region.id;
+    result.has_cigar = native_region.p != nullptr
+        && native_region.p->n_cigar > 0;
+    if (parameters.compute_edit_distance && native_region.p != nullptr) {
+        const auto native_edit_distance =
+            static_cast<std::int64_t>(native_region.blen)
+            - static_cast<std::int64_t>(native_region.mlen)
+            + static_cast<std::int64_t>(native_region.p->n_ambi);
+        result.edit_distance = native_edit_distance > 0
+            ? static_cast<decltype(result.edit_distance)>(native_edit_distance)
+            : 0;
+    }
+    if (result.has_cigar) {
         // minimap2 packs CIGAR as (length << 4) | opcode, same wire
         // format as bioseq_cigar::append_cigar expects, so we reuse the
         // shared helper instead of re-deriving the mask here.
-        const std::vector<uint32_t> packed_cigar(
+        const std::vector<std::uint32_t> packed_cigar(
             native_region.p->cigar,
             native_region.p->cigar + native_region.p->n_cigar);
-        bioseq::simd::append_cigar(mr.cigar, packed_cigar);
+        bioseq::simd::append_cigar(result.cigar, packed_cigar);
     }
-    return mr;
+    return result;
 }
 
 /**
- * @brief RAII guard that pairs `mm_idx_t*` / `mm_tbuf_t*` handles with
- *        their correct minimap2 destructors.
+ * @brief Owns every native allocation produced by one minimap2 invocation.
  *
  * Scoping the lifetime inside a struct means any early return from the
  * wrapper still frees the native allocations. Also documents which
- * allocator owns the pointer — kalloc-arena-backed mm_idx_t is freed
- * with mm_idx_destroy; the mm_tbuf_t pairs with mm_tbuf_destroy.
+ * allocator owns each pointer: region extras and the region array use
+ * `free`, the kalloc-arena-backed index uses `mm_idx_destroy`, and the
+ * thread buffer uses `mm_tbuf_destroy`.
  */
-struct NativeMinimap2Handles {
-    mm_idx_t*  index  = nullptr;
+struct native_minimap2_handles {
+    mm_idx_t* index = nullptr;
     mm_tbuf_t* buffer = nullptr;
+    mm_reg1_t* regions = nullptr;
+    int region_count = 0;
 
-    NativeMinimap2Handles() = default;
-    NativeMinimap2Handles(const NativeMinimap2Handles&) = delete;
-    NativeMinimap2Handles& operator=(const NativeMinimap2Handles&) = delete;
+    native_minimap2_handles() = default;
+    native_minimap2_handles(const native_minimap2_handles&) = delete;
+    native_minimap2_handles& operator=(const native_minimap2_handles&) = delete;
 
-    ~NativeMinimap2Handles() {
-        if (buffer != nullptr) mm_tbuf_destroy(buffer);
-        if (index  != nullptr) mm_idx_destroy(index);
+    ~native_minimap2_handles() noexcept {
+        if (regions != nullptr) {
+            for (int region_index = 0;
+                 region_index < region_count;
+                 ++region_index) {
+                std::free(regions[region_index].p);
+            }
+        }
+        std::free(regions);
+        if (buffer != nullptr) {
+            mm_tbuf_destroy(buffer);
+        }
+        if (index != nullptr) {
+            mm_idx_destroy(index);
+        }
     }
 };
 
 }  // namespace detail
 
 /**
- * @brief Run the original minimap2 C pipeline and return a MatchResultCollection.
+ * @brief Runs the native minimap2 C pipeline on pre-decoded sequences.
  *
- * Takes pre-decoded ACGT strings (one per sequence) and calls the
- * minimap2 in-memory entry points (`mm_idx_str` -> `mm_map`). Mirrors
- * the shape of `minimap_port` for downstream evaluation, but the
- * compact-to-ACGT conversion is the *caller's* responsibility — see
- * `compact_sequence_to_acgt(...)` above. Hoisting the conversion
- * out of `on_run` keeps the per-iteration timing window honest
- * (issue 1b in main/DOCS/REPORTS/STRANGE_TIMING_COMPREHESIVE_REPORT__DOC0215.md). The
- * cross-alphabet sanity check that this function used to perform via
- * `static_assert` is preserved at the conversion site (the templated
- * `compact_sequence_to_acgt` above is the only entry that produces
- * the strings consumed here).
+ * Compact-sequence decoding is intentionally caller-owned so the measured
+ * region contains only native index construction, mapping, and result
+ * conversion. Both input strings remain alive and NUL-terminated for every
+ * native call made by this function.
  *
- * @param query_acgt   ASCII query sequence (NUL-terminated; we pass
- *                     `c_str()` straight into `mm_map`).
- * @param target_acgt  ASCII target sequence, same NUL-termination
- *                     contract.
- * @param params       Algorithm parameters (defaults match minimap2)
- * @return             PAF-like results in the shared MatchResultCollection shape
+ * @param[in] query_acgt ASCII query sequence.
+ * @param[in] target_acgt ASCII target sequence.
+ * @param[in] parameters Algorithm parameters shared with the bioseq pipeline.
+ * @return PAF-like results in the shared collection representation.
+ * @throws std::length_error When either sequence exceeds minimap2's signed
+ * 32-bit native coordinate domain.
+ * @throws std::invalid_argument When shared options cannot be represented by
+ * the native minimap2 configuration.
+ * @throws std::runtime_error When minimap2 returns an inconsistent region array.
  */
-[[nodiscard]] inline MatchResultCollection tool_minimap2(
+[[nodiscard]] inline match_result_collection tool_minimap2(
     const std::string& query_acgt,
     const std::string& target_acgt,
-    const Minimap2Params& params = Minimap2Params{})
+    const minimap2_parameters& parameters = minimap2_parameters{})
 {
-    // Top-level region for the reference-minimap2 wrapper. Inner regions
-    // come from BENCH_INSTR_BLOCK call sites inside minimap2/*.c; this
-    // outer region lets the report layer attribute the wrapper-side
-    // overhead (mm_idx_str index build, mm_tbuf_init, result copy) that
-    // minimap2's own markers don't see. The compact-to-ACGT conversion
-    // used to live here and dominated the wrapper time on XXL inputs;
-    // it's now the caller's responsibility.
-    static const auto* _tool_minimap2_run_desc =
-        bioseq::instr::register_region_static("tool_minimap2.run");
-    auto _tool_minimap2_run_scope = bioseq::instr::region(_tool_minimap2_run_desc);
-
-    const int32_t target_len = static_cast<int32_t>(target_acgt.size());
-    const int32_t query_len  = static_cast<int32_t>(query_acgt.size());
-
-    if (query_len == 0 || target_len == 0) {
-        bioseq_log<DBG>("[tool_minimap2] Empty input (qlen={}, tlen={}) — no results",
-                query_len, target_len);
-        return MatchResultCollection{};
+    constexpr auto maximum_native_length = static_cast<std::size_t>(
+        (std::numeric_limits<std::int32_t>::max)());
+    if (query_acgt.size() > maximum_native_length
+        || target_acgt.size() > maximum_native_length) [[unlikely]] {
+        throw std::length_error(
+            "tool_minimap2 input exceeds the native signed-32-bit "
+            "coordinate domain");
     }
 
-    mm_idxopt_t idx_opt{};
-    mm_mapopt_t map_opt{};
-    mm_set_opt(nullptr, &idx_opt, &map_opt);
-    detail::apply_params(idx_opt, map_opt, params);
+    // Native call-site markers cover minimap2 internals; this enclosing marker
+    // also accounts for wrapper-owned handle setup and result conversion.
+    static const auto* run_descriptor =
+        bioseq::instrumentation::register_static_region("tool_minimap2.run");
+    auto run_scope = bioseq::instrumentation::region(run_descriptor);
 
-    detail::NativeMinimap2Handles handles;
-    const char* target_ptr  = target_acgt.c_str();
+    const auto target_length = static_cast<std::int32_t>(target_acgt.size());
+    const auto query_length = static_cast<std::int32_t>(query_acgt.size());
+
+    if (query_length == 0 || target_length == 0) {
+        bioseq_log<logging_level::debug>(
+            "[tool_minimap2] Empty input (qlen={}, tlen={}) — no results",
+            query_length,
+            target_length);
+        return match_result_collection{};
+    }
+
+    mm_idxopt_t index_options{};
+    mm_mapopt_t mapping_options{};
+    mm_set_opt(nullptr, &index_options, &mapping_options);
+    detail::apply_parameters(index_options, mapping_options, parameters);
+
+    detail::native_minimap2_handles handles;
+    const char* target_sequence_address = target_acgt.c_str();
     const char* target_name = "target";
-    // Wrap mm_idx_str inside its own region so the bench's per-phase
-    // accounting can attribute the index-build cost on the minimap2 side
-    // — without this, target index construction inside mm_idx_str (which
-    // hashes every k-mer of the target and bins them into the minimizer
-    // index) was hidden inside `tool_minimap2.run` and showed up as
-    // "wrapper overhead" only. Mirrors `target_index_build` in
-    // `minimap_port.cppm` so the chart layer can pair them up cell for
-    // cell. The `mm_sketch` calls inside `mm_idx_str` register their
-    // own region (`tool_minimap2.mm_sketch`) and nest under this one.
-    static const auto* _tool_minimap2_idx_desc =
-        bioseq::instr::register_region_static("tool_minimap2.target_index_build");
+    // Keep index construction distinct from mapping while preserving nested
+    // native minimizer-sketch markers.
+    static const auto* index_descriptor =
+        bioseq::instrumentation::register_static_region("tool_minimap2.target_index_build");
     {
-        auto _idx_scope = bioseq::instr::region(_tool_minimap2_idx_desc);
+        auto index_scope = bioseq::instrumentation::region(index_descriptor);
         handles.index = mm_idx_str(
-            idx_opt.w, idx_opt.k,
-            (idx_opt.flag & MM_I_HPC) ? 1 : 0,
-            idx_opt.bucket_bits,
+            index_options.w,
+            index_options.k,
+            (index_options.flag & MM_I_HPC) != 0 ? 1 : 0,
+            index_options.bucket_bits,
             1,
-            &target_ptr,
+            &target_sequence_address,
             &target_name);
     }
     if (handles.index == nullptr) {
-        bioseq_log<DBG>("[tool_minimap2] mm_idx_str returned nullptr");
-        return MatchResultCollection{};
+        bioseq_log<logging_level::debug>("[tool_minimap2] mm_idx_str returned nullptr");
+        return match_result_collection{};
     }
-    mm_mapopt_update(&map_opt, handles.index);
+    mm_mapopt_update(&mapping_options, handles.index);
 
     handles.buffer = mm_tbuf_init();
-    int native_region_count = 0;
     // mm_map returns a malloc()'d array (`mm_gen_regs` uses `calloc`
     // for the regs block and each `mm_reg1_t::p` is malloc'd inside
     // hit.c); that's why we free each p with std::free and the array
     // itself with std::free below. kalloc-backed buffers inside the
     // pipeline are owned by `handles.buffer` and freed in its dtor.
-    mm_reg1_t* native_regions = mm_map(
+    handles.regions = mm_map(
         handles.index,
-        query_len,
+        query_length,
         query_acgt.c_str(),
-        &native_region_count,
+        &handles.region_count,
         handles.buffer,
-        &map_opt,
+        &mapping_options,
         "query");
-
-    std::vector<MatchResult> results;
-    results.reserve(static_cast<size_t>(native_region_count));
-    for (int region_index = 0; region_index < native_region_count; ++region_index) {
-        const mm_reg1_t& native_region = native_regions[region_index];
-        results.push_back(detail::reg_to_match_result(native_region, query_len, target_len));
-        std::free(native_region.p);
+    if (handles.region_count < 0
+        || (handles.region_count > 0 && handles.regions == nullptr)) {
+        throw std::runtime_error(
+            "native minimap2 returned an invalid region array");
     }
-    std::free(native_regions);
 
-    bioseq_log<DBG>("[tool_minimap2] Produced {} alignments for qlen={} tlen={}",
-            results.size(), query_len, target_len);
-    return MatchResultCollection(std::move(results));
+    std::vector<match_result> results;
+    results.reserve(static_cast<std::size_t>(handles.region_count));
+    for (int region_index = 0;
+         region_index < handles.region_count;
+         ++region_index) {
+        const mm_reg1_t& native_region = handles.regions[region_index];
+        results.push_back(detail::region_to_match_result(
+            native_region,
+            query_length,
+            target_length,
+            parameters));
+    }
+
+    bioseq_log<logging_level::debug>(
+        "[tool_minimap2] Produced {} alignments for qlen={} tlen={}",
+        results.size(),
+        query_length,
+        target_length);
+    return match_result_collection(std::move(results));
 }
 
 }  // namespace bioseq::bench::HWY_NAMESPACE

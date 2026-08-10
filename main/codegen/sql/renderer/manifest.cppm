@@ -23,8 +23,6 @@ import :model;
 import :cpp_facets;
 import :fmgr;
 import :sql;
-import bioseq.codegen.clang_structural;
-import bioseq.codegen.safety;
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
 import bioseq.codegen.support;
@@ -258,11 +256,11 @@ inline void write_json_string(
     switch (form) {
         case routine_result_form::scalar: return "scalar";
         case routine_result_form::void_: return "void";
-        case routine_result_form::setof: return "setof";
-        case routine_result_form::returns_table: return "returns_table";
-        case routine_result_form::named_out: return "named_out";
-        case routine_result_form::setof_named_out:
-            return "setof_named_out";
+        case routine_result_form::set_of: return "set_of";
+        case routine_result_form::table_rows: return "table_rows";
+        case routine_result_form::named_output: return "named_output";
+        case routine_result_form::named_output_set:
+            return "named_output_set";
     }
     return "scalar";
 }
@@ -300,15 +298,14 @@ inline void write_json_string(
 [[nodiscard]] inline std::string manifest_schema_mode(
     const collected_entity& entity) {
     if (entity.kind == entity_kind::schema) return "fixed";
-    if (entity.kind == entity_kind::alter
-        || entity.kind == entity_kind::comment
+    if (entity.kind == entity_kind::comment
         || entity.kind == entity_kind::session_setting
         || entity.kind == entity_kind::guc
         || entity.kind == entity_kind::guc_value
         || entity.kind == entity_kind::phase) {
         return "none";
     }
-    if (entity.companion && !entity.typed_install_owner) {
+    if (entity.companion) {
         return "enclosing";
     }
     if (entity.schema == "$extension") return "extension";
@@ -334,21 +331,11 @@ inline void write_json_string(
 
 [[nodiscard]] inline std::string manifest_routine_identity(
     const normalized_entity& entity) {
-    if (entity.source.typed_install_owner) {
-        const std::string identity = manifest_option_leaf(
-            entity.source, "sql_identity");
-        if (!identity.empty() && identity != "unknown") return identity;
-    }
     return fmgr_detail::relocatable_routine_identity(entity);
 }
 
 [[nodiscard]] inline std::string manifest_routine_language(
     const collected_entity& entity) {
-    if (entity.typed_install_owner) {
-        const std::string language =
-            manifest_enum_option(entity, "language");
-        if (!language.empty() && language != "none") return language;
-    }
     return entity.kind == entity_kind::sql_function ? "sql" : "c";
 }
 
@@ -357,18 +344,17 @@ inline void write_json_string(
     return manifest_option_leaf(entity, "c_symbol", entity.name);
 }
 
-[[nodiscard]] inline bool external_legacy_fmgr_symbol(
+[[nodiscard]] inline bool handwritten_fmgr_export_symbol(
     std::string_view symbol) {
-    return std::ranges::contains(
-        safety::doc0388_external_fmgr_symbols, symbol);
+    return symbol == "bioseq_external_handler";
 }
 
-[[nodiscard]] inline bool reviewed_external_legacy_fmgr_routine(
+[[nodiscard]] inline bool reviewed_handwritten_fmgr_export_routine(
     const normalized_entity& entity,
     std::string_view routine_identity,
     std::string_view symbol) {
-    if (!external_legacy_fmgr_symbol(symbol)) return false;
-    if (!fmgr_detail::reviewed_handwritten_external_routine(entity)
+    if (!handwritten_fmgr_export_symbol(symbol)) return false;
+    if (!fmgr_detail::reviewed_handwritten_fmgr_export_routine(entity)
         || routine_identity
             != "bioseq.bioseq_external_handler(internal)") {
         throw std::runtime_error(
@@ -413,8 +399,9 @@ struct routine_inventory {
 
 struct fmgr_ownership_inventory {
     std::vector<std::string> generated_wrapper_symbols;
-    std::vector<std::string> legacy_macro_symbols;
-    std::vector<std::string> external_legacy_macro_symbols;
+    std::vector<std::string> handwritten_fmgr_export_symbols;
+    std::vector<std::string>
+        handwritten_fmgr_export_external_symbols;
 };
 
 [[nodiscard]] inline routine_inventory build_routine_inventory(
@@ -445,10 +432,9 @@ struct fmgr_ownership_inventory {
                 "C-language SQL routine '" + routine_identity
                 + "' has no linked C symbol");
         }
-        if (!entity.source.typed_install_owner
-            && (symbol != entity.source.name
-                || routine_identity_leaf(routine_identity)
-                    != entity.source.name)) {
+        if (symbol != entity.source.name
+            || routine_identity_leaf(routine_identity)
+                != entity.source.name) {
             throw std::runtime_error(
                 "natural C routine '" + routine_identity
                 + "' must derive its SQL leaf and C symbol from '"
@@ -457,7 +443,7 @@ struct fmgr_ownership_inventory {
         // The external table-AM handler deliberately retains its handwritten
         // POSTGRES_FN boundary. It is a natural SQL owner, but remains outside
         // the generated main-extension wrapper/DSO closure.
-        if (reviewed_external_legacy_fmgr_routine(
+        if (reviewed_handwritten_fmgr_export_routine(
                 entity, routine_identity, symbol)) {
             continue;
         }
@@ -478,11 +464,9 @@ struct fmgr_ownership_inventory {
             entry.routine_identities.push_back(owner.routine_identity);
             entry.implementation_declarations.push_back(
                 owner.entity->source.cpp_qualified_name);
-            if (!owner.entity->source.typed_install_owner) {
-                entry.generated_wrapper = true;
-                natural_implementations.insert(
-                    owner.entity->source.cpp_qualified_name);
-            }
+            entry.generated_wrapper = true;
+            natural_implementations.insert(
+                owner.entity->source.cpp_qualified_name);
         }
         if (natural_implementations.size() > 1) {
             throw std::runtime_error(
@@ -523,13 +507,6 @@ build_fmgr_ownership_inventory(
     const std::vector<rendered_fmgr_entrypoint_module>&
         fmgr_modules,
     bool validate_reviewed_target) {
-    if (validate_reviewed_target) {
-        safety::validate_doc0388_fmgr_target(
-            routines.c_routine_identities,
-            routines.link_symbols,
-            graph.compiler_profile);
-    }
-
     const std::set<std::string, std::less<>> target_symbols{
         routines.link_symbols.begin(), routines.link_symbols.end()};
     std::set<std::string, std::less<>> expected_generated_symbols;
@@ -549,44 +526,49 @@ build_fmgr_ownership_inventory(
             "the normalized natural C routine owners");
     }
 
-    std::set<std::string, std::less<>> legacy_symbols;
-    std::set<std::string, std::less<>> external_symbols;
-    for (const legacy_fmgr_macro_owner& owner :
-         graph.legacy_fmgr_macro_owners) {
+    std::set<std::string, std::less<>>
+        handwritten_fmgr_export_symbols;
+    std::set<std::string, std::less<>>
+        handwritten_fmgr_export_external_symbols;
+    for (const handwritten_fmgr_export_owner& owner :
+         graph.handwritten_fmgr_export_owners) {
         if (target_symbols.contains(owner.symbol)) {
-            legacy_symbols.insert(owner.symbol);
+            handwritten_fmgr_export_symbols.insert(owner.symbol);
         } else {
-            external_symbols.insert(owner.symbol);
+            handwritten_fmgr_export_external_symbols.insert(owner.symbol);
         }
     }
-    const std::set<std::string, std::less<>>
-        expected_external_symbols{
-            safety::doc0388_external_fmgr_symbols.begin(),
-            safety::doc0388_external_fmgr_symbols.end()};
+    const std::set<std::string, std::less<>> expected_external_symbols{
+        "bioseq_external_handler"};
     if (validate_reviewed_target
-        && external_symbols != expected_external_symbols) {
+        && handwritten_fmgr_export_external_symbols
+            != expected_external_symbols) {
         throw std::runtime_error(
-            "production fmgr macro scan must contain exactly the reviewed "
-            "bioseq_external handler outside the main extension");
+            "production handwritten fmgr export scan must contain exactly "
+            "the reviewed bioseq_external handler outside the main "
+            "extension");
     }
 
     std::vector<std::string> overlapping_symbols;
     std::ranges::set_intersection(
         generated_symbols,
-        legacy_symbols,
+        handwritten_fmgr_export_symbols,
         std::back_inserter(overlapping_symbols));
     if (!overlapping_symbols.empty()) {
         throw std::runtime_error(
-            "generated and legacy fmgr ownership overlap at symbol '"
+            "generated and handwritten fmgr export ownership overlap at "
+            "symbol '"
             + overlapping_symbols.front() + "'");
     }
     std::set<std::string, std::less<>> owned_main_symbols =
         generated_symbols;
     owned_main_symbols.insert(
-        legacy_symbols.begin(), legacy_symbols.end());
+        handwritten_fmgr_export_symbols.begin(),
+        handwritten_fmgr_export_symbols.end());
     if (owned_main_symbols != target_symbols) {
         throw std::runtime_error(
-            "generated plus legacy fmgr ownership does not exactly cover "
+            "generated plus handwritten fmgr export ownership does not "
+            "exactly cover "
             + std::string{
                 validate_reviewed_target
                     ? "the reviewed profile-specific main-extension closure"
@@ -596,10 +578,12 @@ build_fmgr_ownership_inventory(
     return {
         .generated_wrapper_symbols = {
             generated_symbols.begin(), generated_symbols.end()},
-        .legacy_macro_symbols = {
-            legacy_symbols.begin(), legacy_symbols.end()},
-        .external_legacy_macro_symbols = {
-            external_symbols.begin(), external_symbols.end()},
+        .handwritten_fmgr_export_symbols = {
+            handwritten_fmgr_export_symbols.begin(),
+            handwritten_fmgr_export_symbols.end()},
+        .handwritten_fmgr_export_external_symbols = {
+            handwritten_fmgr_export_external_symbols.begin(),
+            handwritten_fmgr_export_external_symbols.end()},
     };
 }
 
@@ -724,35 +708,6 @@ manifest_statement_owner(
     return *owner;
 }
 
-[[nodiscard]] inline std::optional<physical_statement_binding>
-manifest_statement_binding(
-    const normalized_entity& owner,
-    const rendered_statement& statement) {
-    std::vector<physical_statement_binding> bindings =
-        effective_physical_statement_bindings(owner.source);
-    if (statement.baseline_physical_id.empty()) {
-        if (bindings.size() == 1
-            && bindings.front().baseline_physical_id.empty()
-            && bindings.front().facet == statement.facet) {
-            return bindings.front();
-        }
-        return std::nullopt;
-    }
-    const auto binding = std::ranges::find(
-        bindings,
-        statement.baseline_physical_id,
-        &physical_statement_binding::baseline_physical_id);
-    if (binding == bindings.end()) {
-        throw std::runtime_error(
-            "rendered statement '" + statement.id
-            + "' has baseline physical ID '"
-            + statement.baseline_physical_id
-            + "' that is absent from owner '"
-            + owner.stable_identity + "'");
-    }
-    return *binding;
-}
-
 }  // namespace detail
 
 [[nodiscard]] inline std::string render_graph_manifest(
@@ -761,20 +716,11 @@ manifest_statement_binding(
     const std::vector<rendered_fmgr_entrypoint_module>&
         fmgr_modules,
     bool validate_reviewed_fmgr_target = false) {
-    std::size_t migration_action_count = 0;
     std::size_t routine_entity_count = 0;
-    std::size_t install_owner_entity_count = 0;
     std::map<std::string, std::size_t, std::less<>> entity_counts_by_kind;
     for (const normalized_entity& entity : graph.entities) {
         const std::string_view kind = kind_name(entity.source.kind);
         ++entity_counts_by_kind[std::string{kind}];
-        if (entity.source.typed_install_owner) {
-            ++install_owner_entity_count;
-        }
-        if (kind == "install_action"
-            && entity.source.annotation_name == "install_action") {
-            ++migration_action_count;
-        }
         if (kind == "function" || kind == "sql_function"
             || kind == "procedure") {
             ++routine_entity_count;
@@ -817,10 +763,6 @@ manifest_statement_binding(
             }
         }
     }
-    const std::vector<std::string> retired_c_symbols =
-        graph.extension_name == "bioseq"
-        ? safety::doc0388_retired_c_symbols()
-        : std::vector<std::string>{};
     const std::vector<rendered_entity_handle_module>
         entity_handle_modules = render_entity_handle_modules(graph);
     std::size_t entity_handle_count = 0;
@@ -899,14 +841,14 @@ manifest_statement_binding(
            << "  \"compiler_profile\": ";
     detail::write_json_string(output, graph.compiler_profile);
     output << ",\n  \"clang_version\": ";
-    detail::write_json_string(output, graph.clang_version);
+    detail::write_json_string(output, graph.clang_release);
     output << ",\n  \"compilation_signature\": ";
     detail::write_json_string(
         output, graph.compilation_signature);
     if (graph.extension_name != "bioseq"
         || graph.generated_module_prefix != "bioseq.sql.generated"
         || graph.fmgr_boundary_module
-            != "bioseq.pg_utils.sql_boundary") {
+            != "bioseq.postgres.support.sql_boundary") {
         output << ",\n"
                << "  \"extension_name\": ";
         detail::write_json_string(output, graph.extension_name);
@@ -917,7 +859,7 @@ manifest_statement_binding(
     if (graph.extension_name != "bioseq"
         || graph.generated_module_prefix != "bioseq.sql.generated"
         || graph.fmgr_boundary_module
-            != "bioseq.pg_utils.sql_boundary") {
+            != "bioseq.postgres.support.sql_boundary") {
         output << ",\n  \"generated_module_prefix\": ";
         detail::write_json_string(
             output, graph.generated_module_prefix);
@@ -926,13 +868,9 @@ manifest_statement_binding(
             output, graph.fmgr_boundary_module);
     }
     output << ",\n  \"script_sha256\": ";
-    detail::write_json_string(output, sha256_hex(artifact.sql));
+    detail::write_json_string(output, bioseq::common::sha256_hex(artifact.sql));
     output << ",\n  \"statement_count\": " << artifact.statements.size()
-           << ",\n  \"physical_statement_count\": "
-           << artifact.statements.size()
-           << ",\n  \"baseline_physical_statement_count\": "
-           << graph.expected_baseline_physical_statements.size()
-           << ",\n  \"physical_statements\": [";
+           << ",\n  \"statements\": [";
     for (std::size_t index = 0;
          index < artifact.statements.size();
          ++index) {
@@ -940,94 +878,33 @@ manifest_statement_binding(
             artifact.statements[index];
         const normalized_entity& owner =
             detail::manifest_statement_owner(graph, statement);
-        const std::optional<physical_statement_binding> binding =
-            detail::manifest_statement_binding(owner, statement);
-        const std::string source_module =
-            binding ? binding->source_module
-                    : owner.source.source_module;
-        const std::filesystem::path source_path =
-            binding ? binding->source_path
-                    : owner.source.source_path;
-        const std::string source_sha256 =
-            binding ? binding->source_sha256
-                    : owner.source.source_sha256;
-        const clang_structural::source_range source_range =
-            binding ? binding->source_range
-                    : owner.source.source_range;
         output << (index == 0 ? "\n" : ",\n")
                << "    {\"statement_id\": ";
         detail::write_json_string(output, statement.id);
-        output << ", \"baseline_physical_id\": ";
-        if (statement.baseline_physical_id.empty()) {
-            output << "null";
-        } else {
-            detail::write_json_string(
-                output, statement.baseline_physical_id);
-        }
-        output << ", \"baseline_ordinal\": ";
-        if (statement.baseline_physical_id.empty()) {
-            output << "null";
-        } else {
-            output << parse_baseline_physical_ordinal(
-                statement.baseline_physical_id);
-        }
         output << ", \"kind\": ";
         detail::write_json_string(
             output, kind_name(statement.statement_kind));
-        output << ", \"facet\": ";
-        detail::write_json_string(
-            output,
-            physical_statement_facet_name(statement.facet));
         output << ", \"owner_identity\": ";
         detail::write_json_string(
             output, statement.entity_identity);
-        output << ", \"render_source\": ";
-        detail::write_json_string(
-            output,
-            physical_render_source_name(
-                statement.render_source));
         output << ", \"text_sha256\": ";
         detail::write_json_string(
-            output, sha256_hex(statement.text));
-        output << ", \"baseline_text_sha256\": ";
-        if (!binding
-            || binding->compatibility_sql_initializer.empty()) {
-            output << "null";
-        } else {
-            detail::write_json_string(
-                output,
-                sha256_hex(
-                    detail::sanitize_compatibility_sql(
-                        detail::extract_checked_sql(
-                            binding->compatibility_sql_initializer,
-                            false))));
-        }
-        output << ", \"order_identity\": ";
-        detail::write_json_string(
-            output, binding ? binding->order_identity : std::string{});
+            output, bioseq::common::sha256_hex(statement.text));
         output << ", \"source_module\": ";
-        detail::write_json_string(output, source_module);
+        detail::write_json_string(output, owner.source.source_module);
         output << ", \"source_path\": ";
         detail::write_json_string(
             output,
             detail::manifest_repository_path(
-                source_path, "physical_statements.source_path"));
+                owner.source.source_path, "statements.source_path"));
         output << ", \"source_sha256\": ";
-        detail::write_json_string(output, source_sha256);
+        detail::write_json_string(output, owner.source.source_sha256);
         output << ", \"source_line\": "
-               << source_range.begin.line << "}";
+               << owner.source.source_range.begin.line << "}";
     }
     if (!artifact.statements.empty()) output << '\n' << "  ";
     output << "]"
            << ",\n  \"entity_count\": " << graph.entities.size()
-           << ",\n  \"typed_entity_count\": "
-           << graph.entities.size() - migration_action_count
-           << ",\n  \"transitional_install_owner_entity_count\": "
-           << install_owner_entity_count
-           << ",\n  \"natural_owner_entity_count\": "
-           << graph.entities.size() - install_owner_entity_count
-           << ",\n  \"natural_authority_complete\": "
-           << (install_owner_entity_count == 0 ? "true" : "false")
            << ",\n  \"public_entity_count\": "
            << public_stable_identities.size()
            << ",\n  \"public_stable_identities\": ";
@@ -1037,8 +914,6 @@ manifest_statement_binding(
     detail::write_string_array(
         output, public_installed_identities, "    ");
     output
-           << ",\n  \"migration_install_action_count\": "
-           << migration_action_count
            << ",\n  \"routine_entity_count\": " << routine_entity_count
            << ",\n  \"c_routine_identity_count\": "
            << routine_inventory.c_routine_identities.size()
@@ -1048,18 +923,17 @@ manifest_statement_binding(
            << routine_inventory.finfo_symbols.size()
            << ",\n  \"c_wrapper_entity_count\": "
            << routine_inventory.natural_wrapper_symbol_count
-           << ",\n  \"retired_c_symbol_count\": "
-           << retired_c_symbols.size()
            << ",\n  \"generated_wrapper_symbol_count\": "
            << fmgr_ownership_inventory
                   .generated_wrapper_symbols.size()
-           << ",\n  \"legacy_macro_symbol_count\": "
-           << fmgr_ownership_inventory.legacy_macro_symbols.size()
-           << ",\n  \"external_legacy_macro_symbol_count\": "
+           << ",\n  \"handwritten_fmgr_export_symbol_count\": "
            << fmgr_ownership_inventory
-                  .external_legacy_macro_symbols.size()
-           << ",\n  \"legacy_fmgr_macro_owner_count\": "
-           << graph.legacy_fmgr_macro_owners.size()
+                  .handwritten_fmgr_export_symbols.size()
+           << ",\n  \"handwritten_fmgr_export_external_symbol_count\": "
+           << fmgr_ownership_inventory
+                  .handwritten_fmgr_export_external_symbols.size()
+           << ",\n  \"handwritten_fmgr_export_owner_count\": "
+           << graph.handwritten_fmgr_export_owners.size()
            << ",\n  \"c_symbol_sharing_group_count\": "
            << routine_inventory.sharing_group_count
            << ",\n  \"generated_cpp_profile_invariant\": true"
@@ -1119,7 +993,7 @@ manifest_statement_binding(
                << (module.profile_invariant ? "true" : "false")
                << ", \"descriptor_sha256\": ";
         detail::write_json_string(
-            output, sha256_hex(module.content));
+            output, bioseq::common::sha256_hex(module.content));
         output << ", \"row_cpp_names\": ";
         detail::write_string_array(
             output, module.row_cpp_names, "      ");
@@ -1145,7 +1019,7 @@ manifest_statement_binding(
         const std::string identity =
             detail::manifest_routine_identity(entity);
         if (generated_overload_by_identity.contains(identity)
-            || detail::reviewed_external_legacy_fmgr_routine(
+            || detail::reviewed_handwritten_fmgr_export_routine(
                 entity,
                 identity,
                 detail::manifest_c_symbol(entity.source))) {
@@ -1169,7 +1043,7 @@ manifest_statement_binding(
         const bool generated =
             overload != generated_overload_by_identity.end();
         if (!generated
-            && !detail::reviewed_external_legacy_fmgr_routine(
+            && !detail::reviewed_handwritten_fmgr_export_routine(
                 entity,
                 identity,
                 detail::manifest_c_symbol(entity.source))) {
@@ -1183,7 +1057,7 @@ manifest_statement_binding(
         output << ", \"boundary_owner\": ";
         detail::write_json_string(
             output,
-            generated ? "generated" : "external_legacy");
+            generated ? "generated" : "handwritten_fmgr_export");
         output << ", \"cpp_declaration\": ";
         detail::write_json_string(
             output, entity.source.cpp_qualified_name);
@@ -1237,10 +1111,10 @@ manifest_statement_binding(
                    << ", \"converter_key\": ";
             if (parameter.injected_call_context) {
                 detail::write_json_string(
-                    output, "injected:sql_call_context");
+                    output, "injected:function_call_context");
             } else if (!generated) {
                 detail::write_json_string(
-                    output, "external_legacy:handwritten");
+                    output, "handwritten_fmgr_export");
                 ++sql_ordinal;
             } else {
                 if (sql_ordinal
@@ -1287,7 +1161,7 @@ manifest_statement_binding(
                 output, overload->second->result_converter_key);
         } else {
             detail::write_json_string(
-                output, "external_legacy:handwritten");
+                output, "handwritten_fmgr_export");
         }
         output << ", \"row_cpp_name\": ";
         if (entity.source.result.row_cpp_name.empty()) {
@@ -1455,23 +1329,21 @@ manifest_statement_binding(
     output << ",\n  \"c_finfo_symbols\": ";
     detail::write_string_array(
         output, routine_inventory.finfo_symbols, "    ");
-    output << ",\n  \"retired_c_symbols\": ";
-    detail::write_string_array(
-        output, retired_c_symbols, "    ");
     output << ",\n  \"generated_wrapper_symbols\": ";
     detail::write_string_array(
         output,
         fmgr_ownership_inventory.generated_wrapper_symbols,
         "    ");
-    output << ",\n  \"legacy_macro_symbols\": ";
+    output << ",\n  \"handwritten_fmgr_export_symbols\": ";
     detail::write_string_array(
         output,
-        fmgr_ownership_inventory.legacy_macro_symbols,
+        fmgr_ownership_inventory.handwritten_fmgr_export_symbols,
         "    ");
-    output << ",\n  \"external_legacy_macro_symbols\": ";
+    output << ",\n  \"handwritten_fmgr_export_external_symbols\": ";
     detail::write_string_array(
         output,
-        fmgr_ownership_inventory.external_legacy_macro_symbols,
+        fmgr_ownership_inventory
+            .handwritten_fmgr_export_external_symbols,
         "    ");
     output << ",\n  \"fmgr_entrypoint_module_count\": "
            << fmgr_modules.size()
@@ -1550,12 +1422,12 @@ manifest_statement_binding(
     }
     if (!fmgr_modules.empty()) output << '\n' << "  ";
     output << "]"
-           << ",\n  \"legacy_fmgr_macro_owners\": [";
+           << ",\n  \"handwritten_fmgr_export_owners\": [";
     for (std::size_t index = 0;
-         index < graph.legacy_fmgr_macro_owners.size();
+         index < graph.handwritten_fmgr_export_owners.size();
          ++index) {
-        const legacy_fmgr_macro_owner& owner =
-            graph.legacy_fmgr_macro_owners[index];
+        const handwritten_fmgr_export_owner& owner =
+            graph.handwritten_fmgr_export_owners[index];
         output << (index == 0 ? "\n" : ",\n")
                << "    {\"symbol\": ";
         detail::write_json_string(output, owner.symbol);
@@ -1568,11 +1440,11 @@ manifest_statement_binding(
             output,
             detail::manifest_repository_path(
                 owner.source_path,
-                "legacy_fmgr_macro_owners.source_path"));
+                "handwritten_fmgr_export_owners.source_path"));
         output << ", \"source_line\": " << owner.source_line
                << "}";
     }
-    if (!graph.legacy_fmgr_macro_owners.empty()) {
+    if (!graph.handwritten_fmgr_export_owners.empty()) {
         output << '\n' << "  ";
     }
     output << "]"
@@ -1687,8 +1559,6 @@ manifest_statement_binding(
         output << ",\n      \"source_sha256\": ";
         detail::write_json_string(
             output, entity.source.source_sha256);
-        output << ",\n      \"typed_install_owner\": "
-               << (entity.source.typed_install_owner ? "true" : "false");
         output << ",\n      \"source_line\": "
                << entity.source.source_range.begin.line
                << ",\n      \"source_span\": {"
@@ -1747,13 +1617,6 @@ manifest_statement_binding(
             : entity.source.result_sql_type;
         detail::write_json_string(
             output, result_sql_type);
-        output << ",\n      \"argument_declarations\": ";
-        detail::write_json_string(
-            output,
-            entity.source.typed_install_owner
-                ? detail::manifest_option_leaf(
-                      entity.source, "argument_declarations")
-                : std::string{});
         output << ",\n      \"result\": {\"sql_type\": ";
         detail::write_json_string(
             output, result_sql_type);
@@ -1903,33 +1766,8 @@ manifest_statement_binding(
             detail::write_json_string(output, row_codec->second.second);
             output << ", \"descriptor_sha256\": ";
             detail::write_json_string(
-                output, sha256_hex(module.content));
+                output, bioseq::common::sha256_hex(module.content));
             output << ", \"profile_invariant\": true}";
-        }
-        output << ",\n      \"compatibility_sql\": ";
-        if (entity.source.compatibility_sql_initializer.empty()) {
-            output << "null";
-        } else {
-            output << "{\"descriptor_equal\": true, "
-                      "\"baseline_physical_id\": ";
-            detail::write_json_string(
-                output,
-                entity.source.compatibility_baseline_physical_id);
-            output << ", \"source_module\": ";
-            detail::write_json_string(
-                output, entity.source.compatibility_source_module);
-            output << ", \"source_path\": ";
-            detail::write_json_string(
-                output,
-                detail::manifest_repository_path(
-                    entity.source.compatibility_source_path,
-                    "entities.compatibility_sql.source_path"));
-            output << ", \"source_sha256\": ";
-            detail::write_json_string(
-                output, entity.source.compatibility_source_sha256);
-            output << ", \"source_line\": "
-                   << entity.source.compatibility_source_range.begin.line
-                   << "}";
         }
         output << ",\n      \"columns\": ";
         detail::write_string_array(output, columns, "        ");

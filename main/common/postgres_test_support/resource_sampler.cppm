@@ -33,7 +33,7 @@ import :supervision;
 export namespace bioseq::postgres_test {
 
 /// @brief Exact sample taken at a caller-defined workload phase boundary.
-struct resource_phase_boundary {
+struct resource_sample_boundary {
     std::uint64_t ordinal{};
     std::string phase;
     std::chrono::milliseconds elapsed{};
@@ -42,24 +42,24 @@ struct resource_phase_boundary {
 };
 
 /// @brief Process-tree and marker-owned filesystem sampling evidence.
-struct resource_sampling_report {
+struct resource_usage_samples {
     std::uint64_t peak_postmaster_process_tree_rss_bytes{};
     std::uint64_t peak_owned_root_bytes{};
     std::uint64_t rss_samples{};
     std::uint64_t owned_root_samples{};
     std::uint64_t rss_sampling_failures{};
     std::uint64_t owned_root_sampling_failures{};
-    std::vector<resource_phase_boundary> phase_boundaries;
+    std::vector<resource_sample_boundary> phase_boundaries;
 };
 
 /// @brief One parent-linked member of a complete postmaster tree snapshot.
-struct postmaster_process_tree_member {
+struct postgres_process_tree_member {
     std::uint64_t pid{};
     std::uint64_t parent_pid{};
 
     friend bool operator==(
-        const postmaster_process_tree_member&,
-        const postmaster_process_tree_member&) = default;
+        const postgres_process_tree_member&,
+        const postgres_process_tree_member&) = default;
 };
 
 }  // namespace bioseq::postgres_test
@@ -375,24 +375,24 @@ export namespace bioseq::postgres_test {
 
 /// @brief Samples a postmaster and all descendants as one RSS observation.
 [[nodiscard]] inline std::optional<std::uint64_t>
-sample_postmaster_process_tree_rss(std::uint64_t postmaster_pid) {
+sample_postgres_tree_rss_bytes(std::uint64_t postmaster_pid) {
     return resource_detail::process_tree_rss_bytes(postmaster_pid);
 }
 
 /// @brief Returns a complete postmaster process tree for watchdog cleanup.
 [[nodiscard]] inline std::optional<
-    std::vector<postmaster_process_tree_member>>
-sample_postmaster_process_tree(std::uint64_t postmaster_pid) {
+    std::vector<postgres_process_tree_member>>
+capture_postgres_process_tree(std::uint64_t postmaster_pid) {
     resource_detail::process_snapshot_result snapshot =
         resource_detail::process_snapshot(postmaster_pid);
     if (!snapshot.complete) {
         return std::nullopt;
     }
-    std::vector<postmaster_process_tree_member> members;
+    std::vector<postgres_process_tree_member> members;
     members.reserve(snapshot.processes.size());
     for (const resource_detail::process_entry& process :
          snapshot.processes) {
-        members.push_back(postmaster_process_tree_member{
+        members.push_back(postgres_process_tree_member{
             .pid = process.pid,
             .parent_pid = process.parent_pid});
     }
@@ -401,15 +401,15 @@ sample_postmaster_process_tree(std::uint64_t postmaster_pid) {
 
 /// @brief Returns only the PIDs from a complete postmaster tree snapshot.
 [[nodiscard]] inline std::optional<std::vector<std::uint64_t>>
-sample_postmaster_process_tree_pids(std::uint64_t postmaster_pid) {
+capture_postgres_process_tree_pids(std::uint64_t postmaster_pid) {
     const auto snapshot =
-        sample_postmaster_process_tree(postmaster_pid);
+        capture_postgres_process_tree(postmaster_pid);
     if (!snapshot) {
         return std::nullopt;
     }
     std::vector<std::uint64_t> pids;
     pids.reserve(snapshot->size());
-    for (const postmaster_process_tree_member& process : *snapshot) {
+    for (const postgres_process_tree_member& process : *snapshot) {
         pids.push_back(process.pid);
     }
     return pids;
@@ -417,7 +417,7 @@ sample_postmaster_process_tree_pids(std::uint64_t postmaster_pid) {
 
 /// @brief Samples all regular-file bytes under one marker-owned root.
 [[nodiscard]] inline std::optional<std::uint64_t>
-sample_owned_root_bytes(const std::filesystem::path& root) {
+measure_owned_root_bytes(const std::filesystem::path& root) {
     return resource_detail::strict_tree_bytes(root);
 }
 
@@ -437,10 +437,10 @@ inline void initialize_supervision_resource_journal() noexcept {
 }
 
 /// @brief Loads complete samples recorded before runner termination.
-[[nodiscard]] inline resource_sampling_report
-load_supervision_resource_report(
+[[nodiscard]] inline resource_usage_samples
+load_supervision_resource_samples(
     const std::filesystem::path& directory) {
-    resource_sampling_report report;
+    resource_usage_samples samples;
     std::ifstream input(directory / "resources.tsv");
     std::string line;
     while (std::getline(input, line)) {
@@ -489,21 +489,21 @@ load_supervision_resource_report(
         }
         if (kind == "rss") {
             if (value) {
-                ++report.rss_samples;
-                report.peak_postmaster_process_tree_rss_bytes =
+                ++samples.rss_samples;
+                samples.peak_postmaster_process_tree_rss_bytes =
                     std::max(
-                        report.peak_postmaster_process_tree_rss_bytes,
+                        samples.peak_postmaster_process_tree_rss_bytes,
                         *value);
             } else {
-                ++report.rss_sampling_failures;
+                ++samples.rss_sampling_failures;
             }
         } else if (kind == "root") {
             if (value) {
-                ++report.owned_root_samples;
-                report.peak_owned_root_bytes =
-                    std::max(report.peak_owned_root_bytes, *value);
+                ++samples.owned_root_samples;
+                samples.peak_owned_root_bytes =
+                    std::max(samples.peak_owned_root_bytes, *value);
             } else {
-                ++report.owned_root_sampling_failures;
+                ++samples.owned_root_sampling_failures;
             }
         } else if (kind == "phase") {
             const auto phase = supervision_hex_decode(phase_text);
@@ -532,21 +532,21 @@ load_supervision_resource_report(
                 }
                 boundary_owned_root_bytes = parsed;
             }
-            report.phase_boundaries.push_back(resource_phase_boundary{
-                .ordinal = report.phase_boundaries.size(),
+            samples.phase_boundaries.push_back(resource_sample_boundary{
+                .ordinal = samples.phase_boundaries.size(),
                 .phase = *phase,
                 .elapsed = std::chrono::milliseconds(elapsed),
                 .postmaster_process_tree_rss_bytes = value,
                 .owned_root_bytes = boundary_owned_root_bytes});
         }
     }
-    return report;
+    return samples;
 }
 
-/// @brief Continuously samples one fixture until finish or destruction.
-class resource_sampler {
+/// @brief Owns the worker threads that sample one live private cluster.
+class cluster_resource_sampler {
 public:
-    resource_sampler(
+    cluster_resource_sampler(
         std::filesystem::path owned_root,
         const std::filesystem::path& data_directory,
         std::chrono::milliseconds rss_interval =
@@ -577,10 +577,10 @@ public:
             });
     }
 
-    resource_sampler(const resource_sampler&) = delete;
-    resource_sampler& operator=(const resource_sampler&) = delete;
+    cluster_resource_sampler(const cluster_resource_sampler&) = delete;
+    cluster_resource_sampler& operator=(const cluster_resource_sampler&) = delete;
 
-    ~resource_sampler() noexcept {
+    ~cluster_resource_sampler() noexcept {
         try {
             static_cast<void>(finish());
         } catch (...) {
@@ -588,12 +588,12 @@ public:
     }
 
     /// @brief Forces both samples and records their phase association.
-    void observe_phase_boundary(std::string_view phase) noexcept {
+    void record_phase_boundary(std::string_view phase) noexcept {
         const std::optional<std::uint64_t> rss = sample_rss_once();
         const std::optional<std::uint64_t> root = sample_root_once();
         try {
             std::scoped_lock lock(mutex_);
-            report_.phase_boundaries.push_back(resource_phase_boundary{
+            samples_.phase_boundaries.push_back(resource_sample_boundary{
                 .ordinal = next_phase_ordinal_++,
                 .phase = std::string(phase),
                 .elapsed =
@@ -603,17 +603,17 @@ public:
                 .owned_root_bytes = root});
             resource_detail::append_journal(
                 "phase", rss, phase,
-                report_.phase_boundaries.back().elapsed, root);
+                samples_.phase_boundaries.back().elapsed, root);
         } catch (...) {
         }
     }
 
     /// @brief Stops workers and returns all evidence collected so far.
-    [[nodiscard]] resource_sampling_report finish() {
+    [[nodiscard]] resource_usage_samples finish() {
         {
             std::scoped_lock lock(mutex_);
             if (finished_) {
-                return report_;
+                return samples_;
             }
             finished_ = true;
         }
@@ -632,9 +632,9 @@ public:
     }
 
     /// @brief Returns a thread-safe, non-terminal snapshot.
-    [[nodiscard]] resource_sampling_report snapshot() const {
+    [[nodiscard]] resource_usage_samples snapshot() const {
         std::scoped_lock lock(mutex_);
-        return report_;
+        return samples_;
     }
 
 private:
@@ -661,22 +661,22 @@ private:
     sample_rss_once() noexcept {
         try {
             const std::optional<std::uint64_t> sample =
-                sample_postmaster_process_tree_rss(
+                sample_postgres_tree_rss_bytes(
                     read_postmaster_pid_file(data_directory_));
             std::scoped_lock lock(mutex_);
             if (!sample) {
-                ++report_.rss_sampling_failures;
+                ++samples_.rss_sampling_failures;
                 resource_detail::append_journal("rss");
                 return std::nullopt;
             }
-            ++report_.rss_samples;
+            ++samples_.rss_samples;
             resource_detail::update_peak(
-                report_.peak_postmaster_process_tree_rss_bytes, *sample);
+                samples_.peak_postmaster_process_tree_rss_bytes, *sample);
             resource_detail::append_journal("rss", sample);
             return sample;
         } catch (...) {
             std::scoped_lock lock(mutex_);
-            ++report_.rss_sampling_failures;
+            ++samples_.rss_sampling_failures;
             resource_detail::append_journal("rss");
             return std::nullopt;
         }
@@ -686,21 +686,21 @@ private:
     sample_root_once() noexcept {
         try {
             const std::optional<std::uint64_t> sample =
-                sample_owned_root_bytes(owned_root_);
+                measure_owned_root_bytes(owned_root_);
             std::scoped_lock lock(mutex_);
             if (!sample) {
-                ++report_.owned_root_sampling_failures;
+                ++samples_.owned_root_sampling_failures;
                 resource_detail::append_journal("root");
                 return std::nullopt;
             }
-            ++report_.owned_root_samples;
+            ++samples_.owned_root_samples;
             resource_detail::update_peak(
-                report_.peak_owned_root_bytes, *sample);
+                samples_.peak_owned_root_bytes, *sample);
             resource_detail::append_journal("root", sample);
             return sample;
         } catch (...) {
             std::scoped_lock lock(mutex_);
-            ++report_.owned_root_sampling_failures;
+            ++samples_.owned_root_sampling_failures;
             resource_detail::append_journal("root");
             return std::nullopt;
         }
@@ -713,7 +713,7 @@ private:
     std::chrono::steady_clock::time_point started_;
     mutable std::mutex mutex_;
     std::condition_variable_any wake_;
-    resource_sampling_report report_;
+    resource_usage_samples samples_;
     std::uint64_t next_phase_ordinal_{};
     std::jthread rss_thread_;
     std::jthread root_thread_;

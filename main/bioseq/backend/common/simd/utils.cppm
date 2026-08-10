@@ -1,15 +1,16 @@
+/**
+ * @file
+ * @brief Target-local Highway lane materialization utilities.
+ */
 module;
+
 #include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
-#include <hwy/print-inl.h>
 
-#include <cstddef>
-#include <cstdint>
-#include <string>
 #include <vector>
 
 export module bioseq.simd.utils;
-import bioseq.common.mlogging;
+
 import bioseq.common.templating;
 
 export {
@@ -18,124 +19,54 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/// @brief Makes the canonical compile-time index loop available to SIMD consumers.
 using ::bioseq::common::templating::for_each_index;
 
-template <typename T, typename D>
-inline constexpr std::vector<T> extract_lanes(
-    const D& d, const hn::Vec<D>& input)
-{
-    HWY_ALIGN T storage_buffer[hn::MaxLanes(d)];
-    hn::StoreU(input, d, storage_buffer);
-    return std::vector<T>(
-        storage_buffer, storage_buffer + hn::Lanes(d));
-}
-
-template <typename T, typename D>
-inline constexpr std::vector<T> extract_lanes(
-    const D& d, const hn::Mask<D>& input)
-{
-    return extract_lanes<T>(d, hn::VecFromMask(d, input));
-}
-
-template <class D, typename T, class VecT = hn::Vec<D>>
-std::vector<T> hwy_to_vector(D& d, const VecT& value) {
-    const size_t lane_count = hn::Lanes(d);
+/**
+ * @brief Materializes the active lanes of a Highway vector.
+ *
+ * @tparam p_value_type Scalar lane type.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] vector Source vector.
+ * @return Scalar values in increasing lane order.
+ */
+template <typename p_value_type, typename p_simd_tag>
+HWY_INLINE std::vector<p_value_type> extract_lanes(
+    const p_simd_tag& simd_tag,
+    const hn::Vec<p_simd_tag>& vector) {
 #if HWY_TARGET == HWY_RVV
-    auto storage = hn::AllocateAligned<T>(lane_count);
-    T* HWY_RESTRICT lanes = storage.get();
+    auto storage = hwy::AllocateAligned<p_value_type>(hn::Lanes(simd_tag));
+    p_value_type* HWY_RESTRICT storage_buffer = storage.get();
 #else
-    // This works around an SVE compile error on GCC 11 and 12. Calling
-    // AllocateAligned here would seem to require it be marked with HWY_ATTR.
-    HWY_ALIGN T lanes[hn::MaxLanes(d)];
+    HWY_ALIGN p_value_type storage_buffer[hn::MaxLanes(simd_tag)];
 #endif
-    hn::Store(value, d, lanes);
-    return std::vector<T>(lanes, lanes + lane_count);
+    hn::StoreU(vector, simd_tag, storage_buffer);
+    return std::vector<p_value_type>(
+        storage_buffer,
+        storage_buffer + hn::Lanes(simd_tag));
 }
 
-template <typename T, typename InfoT, typename I = void>
-struct hwy_vector_string_printer {
-    static inline std::string format_block(
-        const InfoT info, const void* ptr)
-    {
-        char str[100];
-        ToString(info, ptr, str);
-        return std::string(str);
-    }
-};
-
-template <class D, typename I = void, class VecT = hn::Vec<D>>
-requires requires(D& d, const VecT& value) {
-    Store(value, d, nullptr);
-}
-auto hwy_str(D& d, const VecT& value) {
-    constexpr size_t lane_u = 0;
-    constexpr size_t max_lanes = 16;
-
-    const size_t lane_count = hn::Lanes(d);
-    using T = hn::TFromD<D>;
-#if HWY_TARGET == HWY_RVV
-    auto storage = hn::AllocateAligned<T>(lane_count);
-    T* HWY_RESTRICT lanes = storage.get();
-#else
-    HWY_ALIGN T lanes[hn::MaxLanes(d)];
-#endif
-    Store(value, d, lanes);
-
-    const auto info = hwy::detail::MakeTypeInfo<T>();
-    const uint8_t* array_bytes =
-        reinterpret_cast<const uint8_t*>(lanes);
-
-    char type_name[100];
-    hwy::detail::TypeName(info, lane_count, type_name);
-
-    const intptr_t lane = intptr_t(lane_u);
-    const size_t begin = static_cast<size_t>(HWY_MAX(0, lane - 2));
-    const size_t end = HWY_MIN(begin + max_lanes, lane_count);
-
-    std::string buffer = fmt::format(
-        "hwy::{} [{}+ ->]: [ ", type_name, static_cast<int>(begin));
-    for (size_t i = begin; i < end; ++i) {
-        const void* ptr = array_bytes + i * info.sizeof_t;
-        const auto str =
-            hwy_vector_string_printer<T, decltype(info), I>::format_block(
-                info, ptr);
-        buffer += i == end - 1
-            ? fmt::format("{}", str)
-            : fmt::format("{}, ", str);
-    }
-    if (begin >= end) {
-        buffer += " (out of bounds)";
-    }
-    buffer += " ]";
-    return buffer;
+/**
+ * @brief Materializes a Highway mask as zero or all-one scalar lanes.
+ *
+ * @tparam p_value_type Scalar lane type.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] mask Source mask.
+ * @return Mask lanes in Highway's vector-mask scalar representation.
+ */
+template <typename p_value_type, typename p_simd_tag>
+HWY_INLINE std::vector<p_value_type> extract_lanes(
+    const p_simd_tag& simd_tag,
+    const hn::Mask<p_simd_tag>& mask) {
+    return extract_lanes<p_value_type>(
+        simd_tag,
+        hn::VecFromMask(simd_tag, mask));
 }
 
-template<typename D, typename T, typename VecT = hn::Vec<D>>
-class simd_from_vector {
-private:
-    hwy::AlignedFreeUniquePtr<VecT[]> storage;
-
-public:
-    explicit simd_from_vector(const D& d, std::vector<T> data) {
-        const int units_size = data.size() / hn::Lanes(d);
-        storage = hwy::AllocateAligned<T>(units_size);
-        T const* write_iter = static_cast<T const*>(data.data());
-        for (size_t i = 0; i < units_size; ++i) {
-            storage[i] = hn::Load(d, &write_iter[i * hn::Lanes(d)]);
-        }
-    }
-
-    VecT* data() const {
-        return *storage;
-    }
-};
-
-template <typename I, typename D, typename ValT>
-auto hwy_str_as(D& d, const ValT& value) {
-    return hwy_str<D, I>(d, value);
-}
-
-}  // namespace bioseq::simd::HWY_NAMESPACE
+} // namespace bioseq::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
 

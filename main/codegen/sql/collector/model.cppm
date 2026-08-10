@@ -10,12 +10,11 @@ module;
 
 export module bioseq.codegen.sql.collector:model;
 
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::sql {
 
 enum class entity_kind {
-    alter,
     comment,
     schema,
     session_setting,
@@ -45,46 +44,17 @@ enum class entity_kind {
     config_dump,
     catalog_dependencies,
     phase,
-    install_action,
-};
-
-enum class physical_statement_facet : std::uint8_t {
-    primary,
-    catalog_comment,
-    base_type_shell,
-    base_type_definition,
-};
-
-enum class physical_render_source : std::uint8_t {
-    compatibility_sql,
-    natural_projection,
-};
-
-struct physical_statement_binding {
-    entity_kind kind{entity_kind::install_action};
-    physical_statement_facet facet{
-        physical_statement_facet::primary};
-    physical_render_source render_source{
-        physical_render_source::compatibility_sql};
-    std::string baseline_physical_id;
-    std::size_t baseline_ordinal{};
-    std::string order_identity;
-    std::string compatibility_sql_initializer;
-    std::string source_module;
-    std::filesystem::path source_path;
-    std::string source_sha256;
-    clang_structural::source_range source_range;
 };
 
 struct option_value {
     std::string name;
     std::string expression;
-    clang_structural::source_range range;
+    structural_analysis::source_range range;
 };
 
 struct dependency_reference {
     std::string expression;
-    clang_structural::source_range range;
+    structural_analysis::source_range range;
 };
 
 struct routine_parameter {
@@ -95,17 +65,17 @@ struct routine_parameter {
     bool has_default{};
     bool nullable{};
     bool injected_call_context{};
-    clang_structural::source_range range;
+    structural_analysis::source_range range;
     std::string stable_identity_sql_type;
 };
 
 enum class routine_result_form {
     scalar,
     void_,
-    setof,
-    returns_table,
-    named_out,
-    setof_named_out,
+    set_of,
+    table_rows,
+    named_output,
+    named_output_set,
 };
 
 struct routine_result_contract {
@@ -120,8 +90,8 @@ struct collected_result_field {
     std::string cpp_type;
     std::string sql_type;
     bool nullable{};
-    clang_structural::documentation_record documentation;
-    clang_structural::source_range source_range;
+    structural_analysis::documentation_record documentation;
+    structural_analysis::source_range source_range;
 };
 
 struct collected_result_row {
@@ -130,7 +100,7 @@ struct collected_result_row {
     std::string source_module;
     std::filesystem::path source_path;
     std::string source_sha256;
-    clang_structural::source_range source_range;
+    structural_analysis::source_range source_range;
     std::vector<collected_result_field> fields;
 };
 
@@ -143,9 +113,9 @@ struct collected_entity {
     std::string source_module;
     std::filesystem::path source_path;
     std::string source_sha256;
-    clang_structural::declaration_kind declaration_kind{
-        clang_structural::declaration_kind::unknown};
-    clang_structural::source_range source_range;
+    structural_analysis::declaration_kind declaration_kind{
+        structural_analysis::declaration_kind::unknown};
+    structural_analysis::source_range source_range;
     std::string active_condition;
     std::string schema;
     std::string cpp_signature;
@@ -156,23 +126,14 @@ struct collected_entity {
     std::vector<routine_parameter> parameters;
     std::string result_sql_type;
     routine_result_contract result;
-    clang_structural::documentation_record documentation;
+    structural_analysis::documentation_record documentation;
     bool public_documentation{};
     bool companion{};
-    bool typed_install_owner{};
-    std::string compatibility_sql_initializer;
-    std::string compatibility_order_identity;
-    std::string compatibility_source_module;
-    std::filesystem::path compatibility_source_path;
-    std::string compatibility_source_sha256;
-    clang_structural::source_range compatibility_source_range;
-    std::string compatibility_baseline_physical_id;
-    std::vector<physical_statement_binding> physical_statements;
 };
 
 struct collected_program {
-    std::vector<clang_structural::translation_unit> translation_units;
-    clang_structural::module_graph module_graph;
+    std::vector<structural_analysis::translation_unit> translation_units;
+    structural_analysis::module_graph module_graph;
     std::string compiler_profile;
     std::string compilation_signature;
     std::vector<collected_entity> entities;
@@ -200,7 +161,6 @@ sql_parameters(const collected_entity& entity) {
 [[nodiscard]] inline constexpr const char* kind_name(
     entity_kind kind) noexcept {
     switch (kind) {
-        case entity_kind::alter: return "alter";
         case entity_kind::comment: return "comment";
         case entity_kind::schema: return "schema";
         case entity_kind::session_setting: return "session_setting";
@@ -231,32 +191,6 @@ sql_parameters(const collected_entity& entity) {
         case entity_kind::catalog_dependencies:
             return "catalog_dependencies";
         case entity_kind::phase: return "phase";
-        case entity_kind::install_action: return "install_action";
-    }
-    return "unknown";
-}
-
-[[nodiscard]] inline constexpr const char* physical_statement_facet_name(
-    physical_statement_facet facet) noexcept {
-    switch (facet) {
-        case physical_statement_facet::primary: return "primary";
-        case physical_statement_facet::catalog_comment:
-            return "catalog_comment";
-        case physical_statement_facet::base_type_shell:
-            return "base_type_shell";
-        case physical_statement_facet::base_type_definition:
-            return "base_type_definition";
-    }
-    return "unknown";
-}
-
-[[nodiscard]] inline constexpr const char* physical_render_source_name(
-    physical_render_source source) noexcept {
-    switch (source) {
-        case physical_render_source::compatibility_sql:
-            return "compatibility_sql";
-        case physical_render_source::natural_projection:
-            return "natural_projection";
     }
     return "unknown";
 }

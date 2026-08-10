@@ -4,26 +4,12 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
 #include <filesystem>
-#include <limits>
-#include <span>
 #include <string>
-#include <string_view>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:stable_reads;
 export import :types;
@@ -35,21 +21,21 @@ import :sync;
 import :positional_io;
 import :stable_read_at;
 
-export namespace bioseq::durable_file_io {
+export namespace bioseq::common::durable_file_io {
 /**
  * Read a regular file without following its final symlink and prove its
  * identity and size did not change between the before/after fstat snapshots.
  */
-[[nodiscard]] inline std::expected<stable_regular_file, file_io_error>
+[[nodiscard]] inline std::expected<stable_regular_file, file_error>
 read_stable_regular_file(
     const std::filesystem::path& path,
     const stable_read_options& options = {},
-    const file_io_hooks& hooks = {},
-    const positional_io_operations& operations = {}) {
+    const fault_injection_hooks& hooks = {},
+    const positional_io_callbacks& callbacks = {}) {
     if (path.empty()) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::open_file,
+            file_error_code::invalid_argument,
+            file_operation::open_regular_file,
             EINVAL));
     }
     const std::filesystem::path parent =
@@ -61,19 +47,19 @@ read_stable_regular_file(
     }
     file_descriptor directory = std::move(*directory_opened);
     return detail::read_stable_regular_file_at(
-        directory.get(), name, options, hooks, operations);
+        directory.get(), name, options, hooks, callbacks);
 }
 
 /** Check a path against a captured identity without following a symlink. */
-[[nodiscard]] inline std::expected<bool, file_io_error>
-same_regular_file_identity(
+[[nodiscard]] inline std::expected<bool, file_error>
+matches_regular_file_identity(
     const std::filesystem::path& path,
     const regular_file_identity& expected,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     if (path.empty()) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::open_file,
+            file_error_code::invalid_argument,
+            file_operation::open_regular_file,
             EINVAL));
     }
     const std::filesystem::path parent =
@@ -88,14 +74,14 @@ same_regular_file_identity(
         directory.get(),
         name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto current = detail::capture_identity(
-        descriptor.get(), file_io_operation::stat_before, hooks);
+    auto current = detail::capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
@@ -106,14 +92,14 @@ same_regular_file_identity(
 }
 
 /** Fsync one directory path without following its final symlink. */
-[[nodiscard]] inline std::expected<void, file_io_error> fsync_directory(
+[[nodiscard]] inline std::expected<void, file_error> fsync_directory(
     const std::filesystem::path& directory,
-    const file_io_hooks& hooks = {},
+    const fault_injection_hooks& hooks = {},
     publication_state publication = publication_state::unchanged) {
     if (directory.empty()) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::open_directory,
+            file_error_code::invalid_argument,
+            file_operation::open_directory,
             EINVAL,
             0,
             publication));
@@ -124,9 +110,9 @@ same_regular_file_identity(
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    if (auto synced = detail::sync_descriptor(
+    if (auto synced = detail::fsync_descriptor(
             descriptor.get(),
-            file_io_operation::sync_directory,
+            file_operation::fsync_directory,
             hooks,
             publication);
         !synced.has_value()) {
@@ -136,4 +122,4 @@ same_regular_file_identity(
         descriptor, hooks, publication);
 }
 
-}  // namespace bioseq::durable_file_io
+}  // namespace bioseq::common::durable_file_io

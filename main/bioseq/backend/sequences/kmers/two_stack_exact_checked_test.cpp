@@ -1,9 +1,9 @@
-// Checked neutral-ABI coverage for the generated ExactSimd two-stack kernel.
+// Checked neutral-ABI coverage for the generated two_stack_nthash two-stack kernel.
 // Biological comparisons in this file retain raw chronological order,
-// strand, and duplicate multiplicity. Only the historic report-76 contract
+// strand, and duplicate multiplicity. Only the historic resident-vector-stream contract
 // explicitly normalizes its target-geometry-dependent overlap output.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>
@@ -28,30 +28,30 @@ import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
-import bioseq.sequences.kmers.mm_sketch_baseline;
-import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.kmers.minimap2_sketch_baseline;
+import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner;
 
 namespace {
 
-using bioseq::minimizers::MinimapSketchData;
-using bioseq::minimizers::MinimizerKernelAlgorithm;
-using bioseq::minimizers::MinimizerKernelInvocation;
-using bioseq::minimizers::MinimizerKernelResult;
-using bioseq::minimizers::MinimizerKernelStatus;
-using bioseq::minimizers::MinimizerOutputLayout;
-using bioseq::minimizers::MinimizerRepr;
-using bioseq::minimizers::MinimizerSink;
-using bioseq::minimizers::MinimizerSinkBatchView;
-using bioseq::minimizers::PackedSequenceFragmentSource;
-using bioseq::minimizers::PackedSequenceKernelFragment;
-using bioseq::minimizers::PackedSequenceKernelView;
-using bioseq::minimizers::TwoStackContinuationStatus;
-using bioseq::minimizers::TwoStackExecutionProof;
-using bioseq::minimizers::TwoStackRoute;
-using bioseq::minimizers::two_stack_exact_max_kmer;
-using bioseq::minimizers::two_stack_max_window;
+using bioseq::minimizers::minimap_sketch_data;
+using bioseq::minimizers::minimizer_kernel_algorithm;
+using bioseq::minimizers::minimizer_kernel_invocation;
+using bioseq::minimizers::minimizer_kernel_result;
+using bioseq::minimizers::minimizer_kernel_status;
+using bioseq::minimizers::minimizer_output_layout;
+using bioseq::minimizers::minimizer_representation;
+using bioseq::minimizers::minimizer_sink;
+using bioseq::minimizers::minimizer_sink_batch_view;
+using bioseq::minimizers::packed_sequence_fragment_source;
+using bioseq::minimizers::packed_sequence_kernel_fragment;
+using bioseq::minimizers::packed_sequence_kernel_view;
+using bioseq::minimizers::two_stack_continuation_status;
+using bioseq::minimizers::two_stack_execution_stats;
+using bioseq::minimizers::two_stack_route;
+using bioseq::minimizers::k_max_exact_two_stack_kmer;
+using bioseq::minimizers::k_max_two_stack_window;
 
 struct exact_record final {
     std::uint64_t hash = 0u;
@@ -62,12 +62,12 @@ struct exact_record final {
         const exact_record&) const noexcept = default;
 };
 
-template<class MinimizerT>
+template<class p_minimizer_type>
 class exact_sink final {
 public:
-    static constexpr std::size_t batch_capacity = 256u;
+    static constexpr std::size_t k_batch_capacity = 256u;
 
-    [[nodiscard]] MinimizerSink contract() noexcept {
+    [[nodiscard]] minimizer_sink contract() noexcept {
         return {
             .state = this,
             .acquire = &acquire,
@@ -88,14 +88,14 @@ public:
         return result;
     }
 
-    std::vector<MinimizerT> records;
+    std::vector<p_minimizer_type> records;
     bool protocol_ok = true;
     bool reject_acquire = false;
     bool acquire_rejected = false;
     std::size_t raw_batches = 0u;
 
 private:
-    [[nodiscard]] static MinimizerSinkBatchView acquire(
+    [[nodiscard]] static minimizer_sink_batch_view acquire(
         void* opaque, const std::size_t minimum)
     {
         auto& self = *static_cast<exact_sink*>(opaque);
@@ -103,28 +103,28 @@ private:
             self.acquire_rejected = true;
             return {};
         }
-        if (self.pending_ || minimum > batch_capacity) {
+        if (self.pending_ || minimum > k_batch_capacity) {
             self.protocol_ok = false;
             return {};
         }
         self.pending_ = true;
         return {
             .data = self.storage_.data(),
-            .capacity = batch_capacity,
-            .layout = bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
-            .record_size = sizeof(MinimizerT),
-            .record_alignment = alignof(MinimizerT),
+            .capacity = k_batch_capacity,
+            .layout = bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>,
+            .record_size = sizeof(p_minimizer_type),
+            .record_alignment = alignof(p_minimizer_type),
         };
     }
 
     static void commit(void* opaque, const std::size_t initialized) noexcept {
         auto& self = *static_cast<exact_sink*>(opaque);
-        if (!self.pending_ || initialized > batch_capacity) {
+        if (!self.pending_ || initialized > k_batch_capacity) {
             self.protocol_ok = false;
             return;
         }
         auto* const first = std::launder(
-            reinterpret_cast<MinimizerT*>(self.storage_.data()));
+            reinterpret_cast<p_minimizer_type*>(self.storage_.data()));
         try {
             self.records.insert(self.records.end(), first, first + initialized);
         } catch (...) {
@@ -136,7 +136,7 @@ private:
 
     [[nodiscard]] static bool append_raw_u64(
         void* opaque,
-        const MinimizerOutputLayout layout,
+        const minimizer_output_layout layout,
         const std::uint64_t* raw,
         const std::size_t count) noexcept
     {
@@ -147,20 +147,20 @@ private:
         }
         if (self.pending_
             || layout
-                != bioseq::minimizers::minimizer_output_layout_v<MinimizerT>
+                != bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>
             || (count != 0u && raw == nullptr)) {
             self.protocol_ok = false;
             return false;
         }
-        if constexpr (requires { typename MinimizerT::storage_t; }) {
-            if constexpr (std::same_as<typename MinimizerT::storage_t,
+        if constexpr (requires { typename p_minimizer_type::storage_type; }) {
+            if constexpr (std::same_as<typename p_minimizer_type::storage_type,
                                        std::uint64_t>) {
                 try {
                     const auto decoded =
                         std::span<const std::uint64_t>{raw, count}
                         | std::views::transform(
                             [](const std::uint64_t value) {
-                                return MinimizerT::from_raw_storage(value);
+                                return p_minimizer_type::from_raw_storage(value);
                             });
                     self.records.insert(
                         self.records.end(), decoded.begin(), decoded.end());
@@ -176,8 +176,8 @@ private:
         return false;
     }
 
-    alignas(MinimizerT) std::array<
-        std::byte, batch_capacity * sizeof(MinimizerT)> storage_;
+    alignas(p_minimizer_type) std::array<
+        std::byte, k_batch_capacity * sizeof(p_minimizer_type)> storage_;
     bool pending_ = false;
 };
 
@@ -185,10 +185,10 @@ private:
     return bioseq::simd_dispatch::highway_test_kernel_table();
 }
 
-template<sequence_alphabet Alphabet>
+template<sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint8_t alphabet_code() {
     const auto* identity = fixed_table().template resolve_alphabet_identity<
-        Alphabet>();
+        p_alphabet>();
     if (identity == nullptr) {
         throw std::logic_error{"fixed target lacks requested alphabet"};
     }
@@ -196,7 +196,7 @@ template<sequence_alphabet Alphabet>
 }
 
 template<class Range>
-[[nodiscard]] PackedSequenceKernelView packed_view(const Range& range) {
+[[nodiscard]] packed_sequence_kernel_view packed_view(const Range& range) {
     using traits = typename Range::traits;
     return {
         .storage = range.size() == 0u ? nullptr
@@ -213,7 +213,7 @@ template<class Range>
     };
 }
 
-[[nodiscard]] PackedSequenceKernelView descriptor_view(
+[[nodiscard]] packed_sequence_kernel_view descriptor_view(
     const bioseq::storage::basic_lazy_sequence_view<seq::dna5>::
         resident_packed_region& descriptor)
 {
@@ -230,42 +230,42 @@ template<class Range>
     };
 }
 
-template<class MinimizerT>
+template<class p_minimizer_type>
 struct run_result final {
     std::vector<exact_record> records;
-    MinimizerKernelResult kernel{};
+    minimizer_kernel_result kernel{};
     bool sink_ok = false;
     bool acquire_rejected = false;
     std::size_t raw_batches = 0u;
     std::size_t releases = 0u;
 };
 
-template<class MinimizerT>
-[[nodiscard]] run_result<MinimizerT> invoke(
-    PackedSequenceKernelView sequence,
-    const PackedSequenceFragmentSource fragments,
+template<class p_minimizer_type>
+[[nodiscard]] run_result<p_minimizer_type> invoke(
+    packed_sequence_kernel_view sequence,
+    const packed_sequence_fragment_source fragments,
     const std::size_t window,
     const std::size_t kmer,
     const std::size_t position_base = 0u,
-    const TwoStackRoute route = TwoStackRoute::chronological_continuation,
+    const two_stack_route route = two_stack_route::chronological_continuation,
     const bool reject_sink = false,
-    const MinimizerOutputLayout output_layout =
-        bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
-    const std::uint64_t hash_mask = static_cast<std::uint64_t>(
-        MinimizerT::hash_field_mask),
+    const minimizer_output_layout output_layout =
+        bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>,
+    const std::uint64_t k_hash_mask = static_cast<std::uint64_t>(
+        p_minimizer_type::k_hash_field_mask),
     const std::uint64_t position_mask = static_cast<std::uint64_t>(
-        MinimizerT::pos_field_mask))
+        p_minimizer_type::k_position_field_mask))
 {
-    exact_sink<MinimizerT> sink;
+    exact_sink<p_minimizer_type> sink;
     sink.reject_acquire = reject_sink;
-    MinimizerKernelInvocation invocation{
+    minimizer_kernel_invocation invocation{
         .sequence = sequence,
         .fragments = fragments,
         .window = window,
         .kmer = kmer,
         .emitted_position_base = position_base,
         .output_layout = output_layout,
-        .output_hash_mask = hash_mask,
+        .output_hash_mask = k_hash_mask,
         .output_position_mask = position_mask,
         .two_stack_route = route,
         .sink = sink.contract(),
@@ -282,24 +282,24 @@ template<class MinimizerT>
     };
 }
 
-template<sequence_alphabet Alphabet, class StorageUnit,
-         class MinimizerT = MinimapSketchData>
-[[nodiscard]] run_result<MinimizerT> run_resident(
-    const std::vector<Alphabet>& data,
+template<sequence_alphabet p_alphabet, class p_storage_unit,
+         class p_minimizer_type = minimap_sketch_data>
+[[nodiscard]] run_result<p_minimizer_type> run_resident(
+    const std::vector<p_alphabet>& data,
     const std::size_t window,
     const std::size_t kmer,
     const std::size_t position_base = 0u,
-    const TwoStackRoute route = TwoStackRoute::chronological_continuation,
+    const two_stack_route route = two_stack_route::chronological_continuation,
     const bool reject_sink = false)
 {
-    using config = sequence_custom_alphabet<Alphabet, StorageUnit>;
-    compact_sequence_range<config> packed{std::vector<Alphabet>(data)};
-    return invoke<MinimizerT>(
+    using config = sequence_custom_alphabet<p_alphabet, p_storage_unit>;
+    compact_sequence_range<config> packed{std::vector<p_alphabet>(data)};
+    return invoke<p_minimizer_type>(
         packed_view(packed), {}, window, kmer, position_base, route,
         reject_sink);
 }
 
-template<class MinimizerT = MinimapSketchData>
+template<class p_minimizer_type = minimap_sketch_data>
 [[nodiscard]] std::vector<exact_record> dna4_oracle(
     const std::vector<seq::dna4>& data,
     const std::size_t window,
@@ -309,9 +309,9 @@ template<class MinimizerT = MinimapSketchData>
     if (data.empty()) return {};
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     compact_sequence_range<config> packed{std::vector<seq::dna4>(data)};
-    bioseq::minimizers::sketch_collector_t<MinimizerT> collector;
+    bioseq::minimizers::basic_sketch_collector<p_minimizer_type> collector;
     bioseq::simd::collect_minimizers_view<
-        bioseq::simd::minimap_int_hasher, MinimizerT>(
+        bioseq::simd::minimap_int_hasher, p_minimizer_type>(
             collector, packed, packed.begin(), packed.end(), window, kmer);
     std::vector<exact_record> result;
     for (const auto& record : collector.extract_sketches_data()) {
@@ -329,7 +329,8 @@ template<class MinimizerT = MinimapSketchData>
     std::string bases;
     bases.reserve(data.size());
     for (const auto symbol : data) bases.push_back(symbol.to_char());
-    const auto entries = bioseq::mm_sketch_baseline_ns::mm_sketch(
+    const auto entries =
+        bioseq::minimap2_sketch_baseline_detail::collect_minimap2_sketch(
         bases.data(),
         static_cast<int>(bases.size()),
         static_cast<int>(window),
@@ -369,49 +370,49 @@ template<class MinimizerT = MinimapSketchData>
     return result;
 }
 
-template<class MinimizerT>
+template<class p_minimizer_type>
 void require_success(
-    const run_result<MinimizerT>& result,
+    const run_result<p_minimizer_type>& result,
     const std::vector<exact_record>& expected,
     const bool require_vector_work = true)
 {
-    REQUIRE(result.kernel.status == MinimizerKernelStatus::ok);
+    REQUIRE(result.kernel.status == minimizer_kernel_status::ok);
     REQUIRE(result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::ok));
-    REQUIRE(result.kernel.proof.algorithm
-        == MinimizerKernelAlgorithm::two_stack_nthash);
-    REQUIRE(result.kernel.proof.target
+        two_stack_continuation_status::ok));
+    REQUIRE(result.kernel.stats.algorithm
+        == minimizer_kernel_algorithm::two_stack_nthash);
+    REQUIRE(result.kernel.stats.target
         == bioseq::simd_dispatch::highway_test_target_binding().target);
     REQUIRE(result.sink_ok);
     REQUIRE(result.kernel.emitted == result.records.size());
     REQUIRE(result.records == expected);
-    const auto& proof = result.kernel.proof.two_stack;
-    REQUIRE(proof.scalar_backend_branches == 0u);
-    REQUIRE(proof.scalar_tail_symbols == 0u);
-    REQUIRE(proof.scalar_hash_symbols == 0u);
-    REQUIRE(proof.scalar_window_transitions == 0u);
-    REQUIRE(proof.scalar_event_records == 0u);
-    REQUIRE(proof.scalar_sort_records == 0u);
-    REQUIRE(proof.scalar_dedup_records == 0u);
-    REQUIRE(proof.fail_closed_rejections == 0u);
-    REQUIRE(proof.accepted(require_vector_work));
+    const auto& stats = result.kernel.stats.two_stack;
+    REQUIRE(stats.scalar_backend_branches == 0u);
+    REQUIRE(stats.scalar_tail_symbols == 0u);
+    REQUIRE(stats.scalar_hash_symbols == 0u);
+    REQUIRE(stats.scalar_window_transitions == 0u);
+    REQUIRE(stats.scalar_event_records == 0u);
+    REQUIRE(stats.scalar_sort_records == 0u);
+    REQUIRE(stats.scalar_dedup_records == 0u);
+    REQUIRE(stats.fail_closed_rejections == 0u);
+    REQUIRE(stats.is_internally_consistent(require_vector_work));
 }
 
-template<sequence_alphabet Alphabet, class StorageUnit>
+template<sequence_alphabet p_alphabet, class p_storage_unit>
 struct owned_fragment final {
-    std::vector<StorageUnit> units;
+    std::vector<p_storage_unit> units;
     std::size_t bp_size = 0u;
     std::size_t fragment_begin = 0u;
     std::size_t consume_begin = 0u;
     std::size_t consume_end = 0u;
 };
 
-template<sequence_alphabet Alphabet, class StorageUnit>
+template<sequence_alphabet p_alphabet, class p_storage_unit>
 struct fragment_source final {
-    std::vector<owned_fragment<Alphabet, StorageUnit>> fragments;
+    std::vector<owned_fragment<p_alphabet, p_storage_unit>> fragments;
     std::size_t releases = 0u;
 
-    [[nodiscard]] static PackedSequenceKernelFragment read(
+    [[nodiscard]] static packed_sequence_kernel_fragment read(
         void* opaque, const std::size_t index)
     {
         const auto& fragment =
@@ -432,9 +433,9 @@ struct fragment_source final {
     }
 };
 
-template<sequence_alphabet Alphabet, class StorageUnit>
-[[nodiscard]] owned_fragment<Alphabet, StorageUnit> make_fragment(
-    const std::vector<Alphabet>& data,
+template<sequence_alphabet p_alphabet, class p_storage_unit>
+[[nodiscard]] owned_fragment<p_alphabet, p_storage_unit> make_fragment(
+    const std::vector<p_alphabet>& data,
     const std::size_t storage_begin,
     const std::size_t storage_end,
     const std::size_t fragment_begin,
@@ -443,12 +444,12 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 {
     REQUIRE(storage_begin <= storage_end);
     REQUIRE(storage_end <= data.size());
-    std::vector<Alphabet> slice(
+    std::vector<p_alphabet> slice(
         data.begin() + static_cast<std::ptrdiff_t>(storage_begin),
         data.begin() + static_cast<std::ptrdiff_t>(storage_end));
-    using config = sequence_custom_alphabet<Alphabet, StorageUnit>;
+    using config = sequence_custom_alphabet<p_alphabet, p_storage_unit>;
     compact_sequence_range<config> packed(slice);
-    owned_fragment<Alphabet, StorageUnit> result{
+    owned_fragment<p_alphabet, p_storage_unit> result{
         .bp_size = slice.size(),
         .fragment_begin = fragment_begin,
         .consume_begin = consume_begin,
@@ -461,50 +462,50 @@ template<sequence_alphabet Alphabet, class StorageUnit>
     return result;
 }
 
-template<sequence_alphabet Alphabet, class StorageUnit,
-         class MinimizerT = MinimapSketchData>
-[[nodiscard]] run_result<MinimizerT> run_fragmented(
-    const std::vector<Alphabet>& data,
+template<sequence_alphabet p_alphabet, class p_storage_unit,
+         class p_minimizer_type = minimap_sketch_data>
+[[nodiscard]] run_result<p_minimizer_type> run_fragmented(
+    const std::vector<p_alphabet>& data,
     const std::vector<std::pair<std::size_t, std::size_t>>& ranges,
     const std::size_t window,
     const std::size_t kmer,
     const std::size_t position_base = 0u)
 {
-    using config = sequence_custom_alphabet<Alphabet, StorageUnit>;
+    using config = sequence_custom_alphabet<p_alphabet, p_storage_unit>;
     using traits = compact_sequence_range<config>::traits;
-    fragment_source<Alphabet, StorageUnit> source;
+    fragment_source<p_alphabet, p_storage_unit> source;
     source.fragments.reserve(ranges.size());
     for (const auto [begin, end] : ranges) {
-        source.fragments.push_back(make_fragment<Alphabet, StorageUnit>(
+        source.fragments.push_back(make_fragment<p_alphabet, p_storage_unit>(
             data, begin, end, begin, begin, end));
     }
-    PackedSequenceKernelView topology{
+    packed_sequence_kernel_view topology{
         .storage = nullptr,
         .storage_units = (data.size() + traits::letters_per_unit - 1u)
             / traits::letters_per_unit,
         .begin_symbol = 0u,
         .end_symbol = data.size(),
-        .alphabet_code = alphabet_code<Alphabet>(),
+        .alphabet_code = alphabet_code<p_alphabet>(),
         .bits_per_symbol = static_cast<std::uint8_t>(traits::bits_per_char),
-        .storage_unit_bytes = static_cast<std::uint8_t>(sizeof(StorageUnit)),
+        .storage_unit_bytes = static_cast<std::uint8_t>(sizeof(p_storage_unit)),
         .final_segment = true,
     };
-    const PackedSequenceFragmentSource fragments{
+    const packed_sequence_fragment_source fragments{
         .state = &source,
         .first_fragment = 0u,
         .fragment_end = source.fragments.size(),
-        .read = &fragment_source<Alphabet, StorageUnit>::read,
-        .release = &fragment_source<Alphabet, StorageUnit>::release,
+        .read = &fragment_source<p_alphabet, p_storage_unit>::read,
+        .release = &fragment_source<p_alphabet, p_storage_unit>::release,
     };
-    auto result = invoke<MinimizerT>(
+    auto result = invoke<p_minimizer_type>(
         topology, fragments, window, kmer, position_base);
     result.releases = source.releases;
     return result;
 }
 
-template<class StorageUnit>
+template<class p_storage_unit>
 void require_storage_width(const std::vector<seq::dna4>& source) {
-    using config = sequence_custom_alphabet<seq::dna4, StorageUnit>;
+    using config = sequence_custom_alphabet<seq::dna4, p_storage_unit>;
     using range_type = compact_sequence_range<config>;
     constexpr std::size_t letters_per_unit =
         range_type::traits::letters_per_unit;
@@ -514,16 +515,16 @@ void require_storage_width(const std::vector<seq::dna4>& source) {
         source.begin() + static_cast<std::ptrdiff_t>(letters_per_unit),
         source.begin() + static_cast<std::ptrdiff_t>(bounded_end));
     for (const auto& data : {bounded, source}) {
-        CAPTURE(sizeof(StorageUnit), data.size());
-        const auto result = run_resident<seq::dna4, StorageUnit>(data, 5u, 7u);
+        CAPTURE(sizeof(p_storage_unit), data.size());
+        const auto result = run_resident<seq::dna4, p_storage_unit>(data, 5u, 7u);
         require_success(result, dna4_oracle(data, 5u, 7u));
-        REQUIRE(result.kernel.proof.two_stack.bp_consumed == data.size());
-        REQUIRE(result.kernel.proof.two_stack.packed_decode_lanes
+        REQUIRE(result.kernel.stats.two_stack.bp_consumed == data.size());
+        REQUIRE(result.kernel.stats.two_stack.packed_decode_lanes
             == data.size());
     }
 }
 
-TEST_CASE("ExactSimd checked table — DNA4 packed widths preserve raw order",
+TEST_CASE("two_stack_nthash checked table — DNA4 packed widths preserve raw order",
           "[two_stack][exact][checked][packed_widths]") {
     const auto data = fixture(391u);
     require_storage_width<std::uint8_t>(data);
@@ -532,9 +533,9 @@ TEST_CASE("ExactSimd checked table — DNA4 packed widths preserve raw order",
     require_storage_width<std::uint64_t>(data);
 }
 
-TEST_CASE("ExactSimd checked table — K15/W10 every partial B8 tail",
+TEST_CASE("two_stack_nthash checked table — K15/W10 every partial B8 tail",
           "[two_stack][exact][checked][tail][k15_w10_b8]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     constexpr std::size_t initial_codes = 14u;
     constexpr std::size_t full_block = 8u;
     bool saw_masked_tail = false;
@@ -544,17 +545,17 @@ TEST_CASE("ExactSimd checked table — K15/W10 every partial B8 tail",
         const auto result = run_resident<
             seq::dna4, std::uint32_t, representation>(data, 10u, 15u);
         require_success(result, dna4_oracle<representation>(data, 10u, 15u));
-        REQUIRE(result.kernel.proof.two_stack.vector_lanes_visited
+        REQUIRE(result.kernel.stats.two_stack.vector_lanes_visited
             == full_block + tail);
         saw_masked_tail = saw_masked_tail
-            || result.kernel.proof.two_stack.masked_tail_lanes > 0u;
+            || result.kernel.stats.two_stack.masked_tail_lanes > 0u;
     }
     REQUIRE(saw_masked_tail);
 }
 
-TEST_CASE("ExactSimd checked table — packed22 adversarial cuts preserve chronology",
+TEST_CASE("two_stack_nthash checked table — packed22 adversarial cuts preserve chronology",
           "[two_stack][exact][checked][fragmented][packed22]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     const auto data = fixture(257u);
     const auto expected = dna4_oracle<representation>(data, 10u, 15u);
     const std::array cut_sets{
@@ -589,14 +590,14 @@ TEST_CASE("ExactSimd checked table — packed22 adversarial cuts preserve chrono
     require_success(result, expected);
 }
 
-TEST_CASE("ExactSimd checked table — resident report-76 fingerprint is locked",
-          "[two_stack][exact][checked][resident][report76]") {
+TEST_CASE("two_stack_nthash checked table — resident resident-vector-stream fingerprint is locked",
+          "[two_stack][exact][checked][resident][resident_vector_stream]") {
     const auto data = fixture(4096u);
     auto result = run_resident<seq::dna4, std::uint32_t>(
-        data, 10u, 15u, 0u, TwoStackRoute::resident_report76);
-    REQUIRE(result.kernel.status == MinimizerKernelStatus::ok);
-    REQUIRE(result.kernel.proof.algorithm
-        == MinimizerKernelAlgorithm::two_stack_nthash);
+        data, 10u, 15u, 0u, two_stack_route::resident_vector_stream);
+    REQUIRE(result.kernel.status == minimizer_kernel_status::ok);
+    REQUIRE(result.kernel.stats.algorithm
+        == minimizer_kernel_algorithm::two_stack_nthash);
     REQUIRE(result.sink_ok);
     REQUIRE(result.kernel.emitted == result.records.size());
     const auto raw_size = result.records.size();
@@ -605,42 +606,42 @@ TEST_CASE("ExactSimd checked table — resident report-76 fingerprint is locked"
         std::ranges::unique(result.records).begin(), result.records.end());
     std::uint64_t fingerprint = 1469598103934665603ULL;
     for (const auto& record : result.records) {
-        const auto raw = MinimapSketchData{
+        const auto raw = minimap_sketch_data{
             record.hash, record.position, record.strand}.raw_value();
         fingerprint = (fingerprint ^ raw) * 1099511628211ULL;
     }
     REQUIRE(result.records.size() == 754u);
     REQUIRE(fingerprint == 0x0f4a56dc592b279dULL);
-    const auto& proof = result.kernel.proof.two_stack;
-    REQUIRE(proof.accepted(true));
-    REQUIRE(proof.resident_vector_stream_kernel_calls == 1u);
-    REQUIRE(proof.resident_vector_stream_dual_calls == 1u);
-    REQUIRE(proof.resident_vector_stream_input_bp == data.size());
-    REQUIRE(proof.resident_vector_stream_minimizers_emitted == raw_size);
-    REQUIRE(proof.generic_u64_kernel_calls == 0u);
-    REQUIRE(proof.k15_w10_b8_u32_hash_kernel_calls == 0u);
-    REQUIRE(proof.scalar_backend_branches == 0u);
+    const auto& stats = result.kernel.stats.two_stack;
+    REQUIRE(stats.is_internally_consistent(true));
+    REQUIRE(stats.resident_vector_stream_kernel_calls == 1u);
+    REQUIRE(stats.resident_vector_stream_dual_calls == 1u);
+    REQUIRE(stats.resident_vector_stream_input_bp == data.size());
+    REQUIRE(stats.resident_vector_stream_minimizers_emitted == raw_size);
+    REQUIRE(stats.generic_u64_kernel_calls == 0u);
+    REQUIRE(stats.kmer_15_window_10_byte_8_uint32_hash_kernel_calls == 0u);
+    REQUIRE(stats.scalar_backend_branches == 0u);
 }
 
-TEST_CASE("ExactSimd checked table — K15/W10 tie chronology is exact",
+TEST_CASE("two_stack_nthash checked table — K15/W10 tie chronology is exact",
           "[two_stack][exact][checked][ties]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     std::vector<seq::dna4> data(160u);
     for (auto& symbol : data) symbol.assign_rank(0u);
     const auto result = run_resident<
         seq::dna4, std::uint32_t, representation>(data, 10u, 15u);
     require_success(result, dna4_oracle<representation>(data, 10u, 15u));
-    const auto& proof = result.kernel.proof.two_stack;
-    REQUIRE(proof.tie_matrix_event_batches > 0u);
-    REQUIRE((proof.first_window_tie_events > 0u
-        || proof.expiry_tie_events > 0u));
-    REQUIRE(proof.tie_hash_prefilter_batches > 0u);
-    REQUIRE(proof.tie_raw_verification_batches > 0u);
+    const auto& stats = result.kernel.stats.two_stack;
+    REQUIRE(stats.tie_matrix_event_batches > 0u);
+    REQUIRE((stats.first_window_tie_events > 0u
+        || stats.expiry_tie_events > 0u));
+    REQUIRE(stats.tie_hash_prefilter_batches > 0u);
+    REQUIRE(stats.tie_raw_verification_batches > 0u);
 }
 
-TEST_CASE("ExactSimd checked table — reachable K15 hash sentinel is not emitted",
+TEST_CASE("two_stack_nthash checked table — reachable K15 hash sentinel is not emitted",
           "[two_stack][exact][checked][sentinel]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
     std::uint32_t forward = 0u;
     std::uint32_t reverse = 0u;
@@ -674,9 +675,9 @@ TEST_CASE("ExactSimd checked table — reachable K15 hash sentinel is not emitte
     }));
 }
 
-TEST_CASE("ExactSimd checked table — 33-bit emitted positions remain exact",
+TEST_CASE("two_stack_nthash checked table — 33-bit emitted positions remain exact",
           "[two_stack][exact][checked][position]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     constexpr std::size_t output_base = static_cast<std::size_t>(
         (std::numeric_limits<std::uint32_t>::max)()) + 8192u;
     const auto data = fixture(257u);
@@ -692,9 +693,9 @@ TEST_CASE("ExactSimd checked table — 33-bit emitted positions remain exact",
     }));
 }
 
-TEST_CASE("ExactSimd checked table — unaligned u32 ownership is exact",
+TEST_CASE("two_stack_nthash checked table — unaligned u32 ownership is exact",
           "[two_stack][exact][checked][unaligned]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     constexpr std::size_t begin = 13u;
     constexpr std::size_t end = 181u;
     const auto data = fixture(224u);
@@ -706,7 +707,7 @@ TEST_CASE("ExactSimd checked table — unaligned u32 ownership is exact",
         data, 0u, data.size(), 0u, begin, end));
     using traits = compact_sequence_range<
         sequence_custom_alphabet<seq::dna4, std::uint32_t>>::traits;
-    const PackedSequenceKernelView topology{
+    const packed_sequence_kernel_view topology{
         .storage = nullptr,
         .storage_units = (data.size() + traits::letters_per_unit - 1u)
             / traits::letters_per_unit,
@@ -717,7 +718,7 @@ TEST_CASE("ExactSimd checked table — unaligned u32 ownership is exact",
         .storage_unit_bytes = sizeof(std::uint32_t),
         .final_segment = true,
     };
-    const PackedSequenceFragmentSource fragments{
+    const packed_sequence_fragment_source fragments{
         .state = &source,
         .first_fragment = 0u,
         .fragment_end = 1u,
@@ -727,10 +728,10 @@ TEST_CASE("ExactSimd checked table — unaligned u32 ownership is exact",
     const auto result = invoke<representation>(
         topology, fragments, 10u, 15u);
     require_success(result, dna4_oracle<representation>(slice, 10u, 15u));
-    REQUIRE(result.kernel.proof.two_stack.packed_word_boundary_merges > 0u);
+    REQUIRE(result.kernel.stats.two_stack.packed_word_boundary_merges > 0u);
 }
 
-TEST_CASE("ExactSimd checked table — DNA5 T normalization and N resets",
+TEST_CASE("two_stack_nthash checked table — DNA5 T normalization and N resets",
           "[two_stack][exact][checked][dna5][reset][scanner]") {
     constexpr std::size_t window = 10u;
     constexpr std::size_t kmer = 15u;
@@ -749,9 +750,9 @@ TEST_CASE("ExactSimd checked table — DNA5 T normalization and N resets",
     const auto resident = run_resident<seq::dna5, std::uint8_t>(
         data, window, kmer);
     require_success(resident, expected);
-    REQUIRE(resident.kernel.proof.two_stack.ambiguous_symbols
+    REQUIRE(resident.kernel.stats.two_stack.ambiguous_symbols
         == n_positions.size());
-    REQUIRE(resident.kernel.proof.two_stack.ambiguous_reset_batches > 0u);
+    REQUIRE(resident.kernel.stats.two_stack.ambiguous_reset_batches > 0u);
 
     const auto fragmented = run_fragmented<seq::dna5, std::uint64_t>(
         data,
@@ -760,7 +761,7 @@ TEST_CASE("ExactSimd checked table — DNA5 T normalization and N resets",
         window,
         kmer);
     require_success(fragmented, expected);
-    REQUIRE(fragmented.kernel.proof.two_stack.ambiguous_symbols
+    REQUIRE(fragmented.kernel.stats.two_stack.ambiguous_symbols
         == n_positions.size());
     REQUIRE(fragmented.records == resident.records);
 
@@ -775,18 +776,18 @@ TEST_CASE("ExactSimd checked table — DNA5 T normalization and N resets",
     const std::uint64_t admitted_bytes =
         bioseq::storage::packed_region_admission_bytes<seq::dna5>(
             scanner_view.bp_size(), 4u);
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(admitted_bytes);
     REQUIRE(permit.has_value());
     auto canonical = bioseq::storage::materialize_packed_region(
         scanner_view, 0u, scanner_view.bp_size(), 4u, std::move(*permit));
-    const auto scanner_result = invoke<MinimapSketchData>(
+    const auto scanner_result = invoke<minimap_sketch_data>(
         descriptor_view(canonical.descriptor()), {}, window, kmer);
     require_success(scanner_result, expected);
     REQUIRE(scanner_result.records == resident.records);
 }
 
-TEST_CASE("ExactSimd checked table — scanner bounded materialization preserves tails",
+TEST_CASE("two_stack_nthash checked table — scanner bounded materialization preserves tails",
           "[two_stack][exact][checked][scanner][bounded][tail]") {
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -803,14 +804,14 @@ TEST_CASE("ExactSimd checked table — scanner bounded materialization preserves
     const std::uint64_t admitted_bytes =
         bioseq::storage::packed_region_admission_bytes<seq::dna4>(
             end - begin, 4u);
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+    auto permit = bioseq::parallelism::memory_admission_controller::instance()
         .try_reserve(admitted_bytes);
     REQUIRE(permit.has_value());
     auto canonical = bioseq::storage::materialize_packed_region(
         view, begin, end, 4u, std::move(*permit));
     const auto& descriptor = canonical.descriptor();
     REQUIRE(descriptor.leading_symbol_offset == 0u);
-    const PackedSequenceKernelView kernel_view{
+    const packed_sequence_kernel_view kernel_view{
         .storage = reinterpret_cast<const std::byte*>(descriptor.units),
         .storage_units = descriptor.unit_count,
         .begin_symbol = 0u,
@@ -822,14 +823,14 @@ TEST_CASE("ExactSimd checked table — scanner bounded materialization preserves
     };
     std::vector<seq::dna4> slice(
         data.begin() + static_cast<std::ptrdiff_t>(begin), data.end());
-    const auto result = invoke<MinimapSketchData>(
+    const auto result = invoke<minimap_sketch_data>(
         kernel_view, {}, 5u, 7u);
     require_success(result, dna4_oracle(slice, 5u, 7u));
-    REQUIRE(result.kernel.proof.two_stack.bp_consumed == slice.size());
-    REQUIRE(result.kernel.proof.two_stack.masked_tail_lanes > 0u);
+    REQUIRE(result.kernel.stats.two_stack.bp_consumed == slice.size());
+    REQUIRE(result.kernel.stats.two_stack.masked_tail_lanes > 0u);
 }
 
-TEST_CASE("ExactSimd checked table — invalid shapes fail before core work",
+TEST_CASE("two_stack_nthash checked table — invalid shapes fail before core work",
           "[two_stack][exact][checked][rejection]") {
     const auto data = fixture(96u);
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -839,82 +840,82 @@ TEST_CASE("ExactSimd checked table — invalid shapes fail before core work",
     for (const auto [window, kmer] :
          std::array<std::pair<std::size_t, std::size_t>, 4u>{
              std::pair{0u, 7u},
-             std::pair{two_stack_max_window + 1u, 7u},
+             std::pair{k_max_two_stack_window + 1u, 7u},
              std::pair{5u, 0u},
-             std::pair{5u, two_stack_exact_max_kmer + 1u}}) {
+             std::pair{5u, k_max_exact_two_stack_kmer + 1u}}) {
         CAPTURE(window, kmer);
-        const auto result = invoke<MinimapSketchData>(
+        const auto result = invoke<minimap_sketch_data>(
             view, {}, window, kmer);
         REQUIRE(result.kernel.status
-            == MinimizerKernelStatus::invalid_configuration);
+            == minimizer_kernel_status::invalid_configuration);
         REQUIRE(result.kernel.emitted == 0u);
         REQUIRE(result.records.empty());
-        REQUIRE(result.kernel.proof.two_stack.vector_batches == 0u);
-        REQUIRE(result.kernel.proof.two_stack.scalar_backend_branches == 0u);
+        REQUIRE(result.kernel.stats.two_stack.vector_batches == 0u);
+        REQUIRE(result.kernel.stats.two_stack.scalar_backend_branches == 0u);
     }
 
-    const auto bad_layout = invoke<MinimapSketchData>(
-        view, {}, 5u, 7u, 0u, TwoStackRoute::chronological_continuation,
-        false, MinimizerOutputLayout::unsupported);
+    const auto bad_layout = invoke<minimap_sketch_data>(
+        view, {}, 5u, 7u, 0u, two_stack_route::chronological_continuation,
+        false, minimizer_output_layout::unsupported);
     REQUIRE(bad_layout.kernel.status
-        == MinimizerKernelStatus::invalid_configuration);
+        == minimizer_kernel_status::invalid_configuration);
     REQUIRE(bad_layout.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::unsupported_representation));
+        two_stack_continuation_status::unsupported_representation));
     REQUIRE(bad_layout.records.empty());
 
-    const auto bad_mask = invoke<MinimapSketchData>(
-        view, {}, 5u, 7u, 0u, TwoStackRoute::chronological_continuation,
+    const auto bad_mask = invoke<minimap_sketch_data>(
+        view, {}, 5u, 7u, 0u, two_stack_route::chronological_continuation,
         false,
-        bioseq::minimizers::minimizer_output_layout_v<MinimapSketchData>,
-        MinimapSketchData::hash_field_mask ^ 1u,
-        MinimapSketchData::pos_field_mask);
+        bioseq::minimizers::k_minimizer_output_layout<minimap_sketch_data>,
+        minimap_sketch_data::k_hash_field_mask ^ 1u,
+        minimap_sketch_data::k_position_field_mask);
     REQUIRE(bad_mask.kernel.status
-        == MinimizerKernelStatus::invalid_configuration);
+        == minimizer_kernel_status::invalid_configuration);
     REQUIRE(bad_mask.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::unsupported_representation));
-    REQUIRE(bad_mask.kernel.proof.two_stack.fail_closed_rejections == 1u);
+        two_stack_continuation_status::unsupported_representation));
+    REQUIRE(bad_mask.kernel.stats.two_stack.fail_closed_rejections == 1u);
 
-    using two_word_representation = MinimizerRepr<63u, 15u>;
+    using two_word_representation = minimizer_representation<63u, 15u>;
     const auto two_word = invoke<two_word_representation>(
         view, {}, 10u, 15u);
     REQUIRE(two_word.kernel.status
-        == MinimizerKernelStatus::invalid_configuration);
+        == minimizer_kernel_status::invalid_configuration);
     REQUIRE(two_word.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::unsupported_representation));
+        two_stack_continuation_status::unsupported_representation));
     REQUIRE(two_word.kernel.emitted == 0u);
     REQUIRE(two_word.records.empty());
-    REQUIRE(two_word.kernel.proof.two_stack.vector_batches == 0u);
-    REQUIRE(two_word.kernel.proof.two_stack.scalar_backend_branches == 0u);
+    REQUIRE(two_word.kernel.stats.two_stack.vector_batches == 0u);
+    REQUIRE(two_word.kernel.stats.two_stack.scalar_backend_branches == 0u);
 
     auto unknown_alphabet = view;
     unknown_alphabet.alphabet_code = 0xffu;
-    const auto bad_alphabet = invoke<MinimapSketchData>(
+    const auto bad_alphabet = invoke<minimap_sketch_data>(
         unknown_alphabet, {}, 5u, 7u);
     REQUIRE(bad_alphabet.kernel.status
-        == MinimizerKernelStatus::invalid_configuration);
+        == minimizer_kernel_status::invalid_configuration);
     REQUIRE(bad_alphabet.records.empty());
 }
 
-TEST_CASE("ExactSimd checked table — representation position overflow is rejected",
+TEST_CASE("two_stack_nthash checked table — representation position overflow is rejected",
           "[two_stack][exact][checked][overflow][representation]") {
     constexpr std::size_t sequence_size = 32u;
-    constexpr std::uint64_t position_mask = MinimapSketchData::pos_field_mask;
+    constexpr std::uint64_t position_mask = minimap_sketch_data::k_position_field_mask;
     constexpr std::size_t position_base = static_cast<std::size_t>(
         position_mask - (sequence_size - 2u));
     const auto data = fixture(sequence_size);
     const auto result = run_resident<seq::dna4, std::uint32_t>(
         data, 10u, 15u, position_base);
     REQUIRE(result.kernel.status
-        == MinimizerKernelStatus::invalid_configuration);
+        == minimizer_kernel_status::invalid_configuration);
     REQUIRE(result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::unsupported_representation));
+        two_stack_continuation_status::unsupported_representation));
     REQUIRE(result.kernel.emitted == 0u);
     REQUIRE(result.records.empty());
-    REQUIRE(result.kernel.proof.two_stack.vector_batches == 0u);
-    REQUIRE(result.kernel.proof.two_stack.scalar_backend_branches == 0u);
+    REQUIRE(result.kernel.stats.two_stack.vector_batches == 0u);
+    REQUIRE(result.kernel.stats.two_stack.scalar_backend_branches == 0u);
 }
 
-TEST_CASE("ExactSimd checked table — invalid fragment topology fails closed",
+TEST_CASE("two_stack_nthash checked table — invalid fragment topology fails closed",
           "[two_stack][exact][checked][fragmented][invalid]") {
     const auto data = fixture(32u);
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -922,7 +923,7 @@ TEST_CASE("ExactSimd checked table — invalid fragment topology fails closed",
     fragment_source<seq::dna4, std::uint64_t> source;
     source.fragments.push_back(make_fragment<seq::dna4, std::uint64_t>(
         data, 0u, data.size(), 0u, 9u, 8u));
-    const PackedSequenceKernelView topology{
+    const packed_sequence_kernel_view topology{
         .storage = nullptr,
         .storage_units = (data.size() + traits::letters_per_unit - 1u)
             / traits::letters_per_unit,
@@ -933,19 +934,19 @@ TEST_CASE("ExactSimd checked table — invalid fragment topology fails closed",
         .storage_unit_bytes = sizeof(std::uint64_t),
         .final_segment = true,
     };
-    const PackedSequenceFragmentSource reversed{
+    const packed_sequence_fragment_source reversed{
         .state = &source,
         .first_fragment = 0u,
         .fragment_end = 1u,
         .read = &fragment_source<seq::dna4, std::uint64_t>::read,
         .release = &fragment_source<seq::dna4, std::uint64_t>::release,
     };
-    const auto reversed_result = invoke<MinimapSketchData>(
+    const auto reversed_result = invoke<minimap_sketch_data>(
         topology, reversed, 5u, 7u);
     REQUIRE(reversed_result.kernel.status
-        == MinimizerKernelStatus::invalid_sequence_view);
+        == minimizer_kernel_status::invalid_sequence_view);
     REQUIRE(reversed_result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::invalid_range));
+        two_stack_continuation_status::invalid_range));
     REQUIRE(reversed_result.records.empty());
     REQUIRE(source.releases == 1u);
 
@@ -953,19 +954,19 @@ TEST_CASE("ExactSimd checked table — invalid fragment topology fails closed",
     beyond_source.fragments.push_back(
         make_fragment<seq::dna4, std::uint64_t>(
             data, 0u, data.size(), 0u, 0u, data.size() + 1u));
-    const PackedSequenceFragmentSource beyond{
+    const packed_sequence_fragment_source beyond{
         .state = &beyond_source,
         .first_fragment = 0u,
         .fragment_end = 1u,
         .read = &fragment_source<seq::dna4, std::uint64_t>::read,
         .release = &fragment_source<seq::dna4, std::uint64_t>::release,
     };
-    const auto beyond_result = invoke<MinimapSketchData>(
+    const auto beyond_result = invoke<minimap_sketch_data>(
         topology, beyond, 5u, 7u);
     REQUIRE(beyond_result.kernel.status
-        == MinimizerKernelStatus::invalid_sequence_view);
+        == minimizer_kernel_status::invalid_sequence_view);
     REQUIRE(beyond_result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::invalid_range));
+        two_stack_continuation_status::invalid_range));
     REQUIRE(beyond_result.records.empty());
     REQUIRE(beyond_source.releases == 1u);
 
@@ -976,49 +977,49 @@ TEST_CASE("ExactSimd checked table — invalid fragment topology fails closed",
     gapped_source.fragments.push_back(
         make_fragment<seq::dna4, std::uint64_t>(
             data, 4u, 5u, 4u, 4u, 5u));
-    const PackedSequenceFragmentSource gapped{
+    const packed_sequence_fragment_source gapped{
         .state = &gapped_source,
         .first_fragment = 0u,
         .fragment_end = 2u,
         .read = &fragment_source<seq::dna4, std::uint64_t>::read,
         .release = &fragment_source<seq::dna4, std::uint64_t>::release,
     };
-    const auto gapped_result = invoke<MinimapSketchData>(
+    const auto gapped_result = invoke<minimap_sketch_data>(
         topology, gapped, 5u, 7u);
     REQUIRE(gapped_result.kernel.status
-        == MinimizerKernelStatus::invalid_sequence_view);
+        == minimizer_kernel_status::invalid_sequence_view);
     REQUIRE(gapped_result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::non_contiguous_range));
+        two_stack_continuation_status::non_contiguous_range));
     REQUIRE(gapped_result.records.empty());
     REQUIRE(gapped_source.releases == 2u);
 
-    const PackedSequenceFragmentSource missing_callbacks{
+    const packed_sequence_fragment_source missing_callbacks{
         .state = &source,
         .first_fragment = 0u,
         .fragment_end = 1u,
         .read = &fragment_source<seq::dna4, std::uint64_t>::read,
         .release = nullptr,
     };
-    const auto missing = invoke<MinimapSketchData>(
+    const auto missing = invoke<minimap_sketch_data>(
         topology, missing_callbacks, 5u, 7u);
     REQUIRE(missing.kernel.status
-        == MinimizerKernelStatus::invalid_continuation);
+        == minimizer_kernel_status::invalid_continuation);
     REQUIRE(missing.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::invalid_state));
+        two_stack_continuation_status::invalid_state));
     REQUIRE(missing.records.empty());
 }
 
-TEST_CASE("ExactSimd checked table — sink rejection and calls are isolated",
+TEST_CASE("two_stack_nthash checked table — sink rejection and calls are isolated",
           "[two_stack][exact][checked][sink][lifecycle]") {
     const auto data = fixture(197u);
     const auto rejected = run_resident<seq::dna4, std::uint64_t>(
-        data, 5u, 7u, 0u, TwoStackRoute::chronological_continuation, true);
-    REQUIRE(rejected.kernel.status == MinimizerKernelStatus::sink_rejected);
+        data, 5u, 7u, 0u, two_stack_route::chronological_continuation, true);
+    REQUIRE(rejected.kernel.status == minimizer_kernel_status::sink_rejected);
     REQUIRE(rejected.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::collector_overflow));
+        two_stack_continuation_status::collector_overflow));
     REQUIRE(rejected.acquire_rejected);
     REQUIRE(rejected.records.empty());
-    REQUIRE(rejected.kernel.proof.two_stack.scalar_event_records == 0u);
+    REQUIRE(rejected.kernel.stats.two_stack.scalar_event_records == 0u);
 
     const auto first = run_resident<seq::dna4, std::uint64_t>(data, 5u, 7u);
     const auto second = run_resident<seq::dna4, std::uint64_t>(data, 5u, 7u);
@@ -1026,7 +1027,7 @@ TEST_CASE("ExactSimd checked table — sink rejection and calls are isolated",
     require_success(first, expected);
     require_success(second, expected);
     REQUIRE(first.records == second.records);
-    REQUIRE(first.kernel.proof.two_stack == second.kernel.proof.two_stack);
+    REQUIRE(first.kernel.stats.two_stack == second.kernel.stats.two_stack);
 }
 
 }  // namespace

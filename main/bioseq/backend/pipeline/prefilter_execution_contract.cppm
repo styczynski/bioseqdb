@@ -1,6 +1,6 @@
 /**
  * @file prefilter_execution_contract.cppm
- * @brief Target-neutral rank-prefilter execution evidence.
+ * @brief Target-neutral rank-prefilter execution statistics.
  */
 module;
 
@@ -15,36 +15,36 @@ export import bioseq.pipeline.runtime_contract;
 
 export {
 
-// Rank-prefilter proof is target-independent statement evidence. Keeping it
+// Rank-prefilter stats is a target-independent statement observation. Keeping it
 // outside the Highway namespace gives every compiled SIMD target one shared
-// type, so PostgreSQL can aggregate operation proofs without translating or
+// type, so PostgreSQL can aggregate operation statistics without translating or
 // mirroring their counters.
-namespace bioseq::prefilter_stats {
+namespace bioseq::prefilter {
 
 /// Algorithm resolved for one completed prefilter batch.
-enum class ResolvedPrefilterAlgorithm : std::uint8_t {
+enum class resolved_prefilter_algorithm : std::uint8_t {
     sneaky_snake = 0u,
     gatekeeper = 1u,
 };
 
 [[nodiscard]] constexpr const char* prefilter_algorithm_name(
-    ResolvedPrefilterAlgorithm algorithm) noexcept
+    resolved_prefilter_algorithm algorithm) noexcept
 {
     switch (algorithm) {
-        case ResolvedPrefilterAlgorithm::sneaky_snake: return "sneaky_snake";
-        case ResolvedPrefilterAlgorithm::gatekeeper: return "gatekeeper";
+        case resolved_prefilter_algorithm::sneaky_snake: return "sneaky_snake";
+        case resolved_prefilter_algorithm::gatekeeper: return "gatekeeper";
     }
     return "unknown";
 }
 
-/// Operation-originated evidence for the rank-prefilter stage.
+/// Operation-originated statistics for the rank-prefilter stage.
 ///
 /// A selector never populates this value.  The stage records one dispatch only
 /// after the selected backend has returned a complete result batch and the
-/// per-region survivor decision has been applied.  This makes the proof useful
+/// per-region survivor decision has been applied.  This makes the stats useful
 /// to benchmark and SQL callers that must distinguish requested policy from
 /// real maze execution.
-struct PrefilterExecutionProof {
+struct prefilter_execution_stats {
     std::uint64_t dispatches = 0;
     std::uint64_t sneaky_snake_dispatches = 0;
     std::uint64_t gatekeeper_dispatches = 0;
@@ -64,7 +64,7 @@ struct PrefilterExecutionProof {
     std::uint64_t exact_guard_activations = 0;
     std::uint64_t guard_confirmed_rejections = 0;
     std::uint64_t hamming_exact_rejections = 0;
-    bool saturated = false;
+    bool is_saturated = false;
 
     static constexpr void add(
             std::uint64_t& destination,
@@ -80,8 +80,8 @@ struct PrefilterExecutionProof {
     }
 
     constexpr void record_batch(
-            const ResolvedPrefilterAlgorithm algorithm,
-            const PrefilterBackendType backend,
+            const resolved_prefilter_algorithm algorithm,
+            const prefilter_backend backend,
             const std::uint64_t job_count,
             const std::uint64_t evaluated_count,
             const std::uint64_t length_difference_count,
@@ -94,20 +94,20 @@ struct PrefilterExecutionProof {
             const std::uint64_t guard_confirmed_rejection_count = 0u,
             const std::uint64_t hamming_exact_rejection_count = 0u,
             const std::uint64_t length_64_count = 0u) noexcept {
-        add(dispatches, 1u, saturated);
-        if (length_64_count > evaluated_count) saturated = true;
+        add(dispatches, 1u, is_saturated);
+        if (length_64_count > evaluated_count) is_saturated = true;
         switch (algorithm) {
-            case ResolvedPrefilterAlgorithm::sneaky_snake:
-                add(sneaky_snake_dispatches, 1u, saturated);
+            case resolved_prefilter_algorithm::sneaky_snake:
+                add(sneaky_snake_dispatches, 1u, is_saturated);
                 if (mask_rejection_candidate_count != 0u
                     || exact_guard_activation_count != 0u
                     || guard_confirmed_rejection_count != 0u
                     || hamming_exact_rejection_count != 0u) {
-                    saturated = true;
+                    is_saturated = true;
                 }
                 break;
-            case ResolvedPrefilterAlgorithm::gatekeeper:
-                add(gatekeeper_dispatches, 1u, saturated);
+            case resolved_prefilter_algorithm::gatekeeper:
+                add(gatekeeper_dispatches, 1u, is_saturated);
                 if (guard_confirmed_rejection_count
                         > exact_guard_activation_count
                     || exact_guard_activation_count
@@ -117,50 +117,50 @@ struct PrefilterExecutionProof {
                     || hamming_exact_rejection_count
                         != rejected_job_count
                             - guard_confirmed_rejection_count) {
-                    saturated = true;
+                    is_saturated = true;
                 }
                 break;
         }
         switch (backend) {
-            case PrefilterBackendType::SCALAR:
-                add(scalar_dispatches, 1u, saturated);
+            case prefilter_backend::scalar:
+                add(scalar_dispatches, 1u, is_saturated);
                 break;
-            case PrefilterBackendType::SIMD:
-                add(simd_dispatches, 1u, saturated);
+            case prefilter_backend::simd:
+                add(simd_dispatches, 1u, is_saturated);
                 break;
-            case PrefilterBackendType::VULKAN:
-                add(vulkan_dispatches, 1u, saturated);
+            case prefilter_backend::vulkan:
+                add(vulkan_dispatches, 1u, is_saturated);
                 break;
-            case PrefilterBackendType::AUTO:
+            case prefilter_backend::automatic:
                 // AUTO must be resolved before an operation can be attested.
-                saturated = true;
+                is_saturated = true;
                 break;
         }
-        add(jobs, job_count, saturated);
-        add(evaluated_jobs, evaluated_count, saturated);
-        add(length_64_jobs, length_64_count, saturated);
-        add(length_difference_jobs, length_difference_count, saturated);
-        add(unsupported_jobs, unsupported_count, saturated);
-        add(rejected_jobs, rejected_job_count, saturated);
-        add(rejected_regions, rejected_region_count, saturated);
-        add(surviving_regions, surviving_region_count, saturated);
+        add(jobs, job_count, is_saturated);
+        add(evaluated_jobs, evaluated_count, is_saturated);
+        add(length_64_jobs, length_64_count, is_saturated);
+        add(length_difference_jobs, length_difference_count, is_saturated);
+        add(unsupported_jobs, unsupported_count, is_saturated);
+        add(rejected_jobs, rejected_job_count, is_saturated);
+        add(rejected_regions, rejected_region_count, is_saturated);
+        add(surviving_regions, surviving_region_count, is_saturated);
         add(mask_rejection_candidates,
-            mask_rejection_candidate_count, saturated);
+            mask_rejection_candidate_count, is_saturated);
         add(exact_guard_activations,
-            exact_guard_activation_count, saturated);
+            exact_guard_activation_count, is_saturated);
         add(guard_confirmed_rejections,
-            guard_confirmed_rejection_count, saturated);
+            guard_confirmed_rejection_count, is_saturated);
         add(hamming_exact_rejections,
-            hamming_exact_rejection_count, saturated);
+            hamming_exact_rejection_count, is_saturated);
     }
 
-    constexpr void combine(
-            const PrefilterExecutionProof& other) noexcept {
-        // A caller that marks a proof present is attesting a complete batch
-        // or statement aggregate.  Malformed evidence must remain sticky:
+    constexpr void merge(
+            const prefilter_execution_stats& other) noexcept {
+        // A caller that marks a stats present is attesting a complete batch
+        // or statement aggregate.  Malformed input must remain sticky:
         // adding its numeric zeroes to a valid aggregate must never make the
-        // final proof appear valid.
-        bool overflow = saturated || !other.valid();
+        // final stats appear valid.
+        bool overflow = is_saturated || !other.is_internally_consistent();
         add(dispatches, other.dispatches, overflow);
         add(sneaky_snake_dispatches,
             other.sneaky_snake_dispatches, overflow);
@@ -183,16 +183,16 @@ struct PrefilterExecutionProof {
             other.guard_confirmed_rejections, overflow);
         add(hamming_exact_rejections,
             other.hamming_exact_rejections, overflow);
-        saturated = overflow;
+        is_saturated = overflow;
     }
 
     /// Validate algorithm/backend accounting without requiring one backend.
     /// A statement aggregate may legitimately contain more than one resolved
     /// algorithm or backend across completed batches.
-    [[nodiscard]] constexpr bool valid(
+    [[nodiscard]] constexpr bool is_internally_consistent(
             const bool require_evaluated_jobs = false,
             const bool forbid_unsupported_jobs = false) const noexcept {
-        return !(saturated || dispatches == 0u || jobs == 0u
+        return !(is_saturated || dispatches == 0u || jobs == 0u
             || sneaky_snake_dispatches > dispatches
             || gatekeeper_dispatches
                 != dispatches - sneaky_snake_dispatches
@@ -224,25 +224,25 @@ struct PrefilterExecutionProof {
             || (forbid_unsupported_jobs && unsupported_jobs != 0u));
     }
 
-    [[nodiscard]] constexpr bool accepted(
-            const PrefilterBackendType expected_backend,
+    [[nodiscard]] constexpr bool is_backend_consistent(
+            const prefilter_backend expected_backend,
             const bool require_evaluated_jobs = false,
             const bool forbid_unsupported_jobs = false) const noexcept {
-        if (!valid(require_evaluated_jobs, forbid_unsupported_jobs)) return false;
+        if (!is_internally_consistent(require_evaluated_jobs, forbid_unsupported_jobs)) return false;
         switch (expected_backend) {
-            case PrefilterBackendType::SCALAR:
+            case prefilter_backend::scalar:
                 return scalar_dispatches == dispatches
                     && simd_dispatches == 0u
                     && vulkan_dispatches == 0u;
-            case PrefilterBackendType::SIMD:
+            case prefilter_backend::simd:
                 return scalar_dispatches == 0u
                     && simd_dispatches == dispatches
                     && vulkan_dispatches == 0u;
-            case PrefilterBackendType::VULKAN:
+            case prefilter_backend::vulkan:
                 return scalar_dispatches == 0u
                     && simd_dispatches == 0u
                     && vulkan_dispatches == dispatches;
-            case PrefilterBackendType::AUTO:
+            case prefilter_backend::automatic:
                 return false;
         }
         return false;
@@ -250,7 +250,7 @@ struct PrefilterExecutionProof {
 
     /// Return the operation-proven algorithm identity of this aggregate.
     [[nodiscard]] constexpr const char* resolved_algorithm_name() const noexcept {
-        if (!valid()) return "invalid";
+        if (!is_internally_consistent()) return "invalid";
         if (gatekeeper_dispatches == dispatches) return "gatekeeper";
         if (sneaky_snake_dispatches == dispatches) return "sneaky_snake";
         return "mixed";
@@ -258,7 +258,7 @@ struct PrefilterExecutionProof {
 
     /// Return the operation-proven backend identity of this aggregate.
     [[nodiscard]] constexpr const char* resolved_backend_name() const noexcept {
-        if (!valid()) return "invalid";
+        if (!is_internally_consistent()) return "invalid";
         if (scalar_dispatches == dispatches) return "scalar";
         if (simd_dispatches == dispatches) return "highway_simd";
         if (vulkan_dispatches == dispatches) return "vulkan";
@@ -266,66 +266,66 @@ struct PrefilterExecutionProof {
     }
 
     constexpr bool operator==(
-        const PrefilterExecutionProof&) const noexcept = default;
+        const prefilter_execution_stats&) const noexcept = default;
 };
 
-static_assert(std::is_trivially_copyable_v<PrefilterExecutionProof>);
-static_assert(std::is_standard_layout_v<PrefilterExecutionProof>);
+static_assert(std::is_trivially_copyable_v<prefilter_execution_stats>);
+static_assert(std::is_standard_layout_v<prefilter_execution_stats>);
 
 static_assert([] {
-    PrefilterExecutionProof proof{};
-    proof.record_batch(
-        ResolvedPrefilterAlgorithm::sneaky_snake,
-        PrefilterBackendType::SIMD, 4u, 2u, 1u, 1u, 1u, 1u, 2u);
-    PrefilterExecutionProof tail{};
+    prefilter_execution_stats stats{};
+    stats.record_batch(
+        resolved_prefilter_algorithm::sneaky_snake,
+        prefilter_backend::simd, 4u, 2u, 1u, 1u, 1u, 1u, 2u);
+    prefilter_execution_stats tail{};
     tail.record_batch(
-        ResolvedPrefilterAlgorithm::sneaky_snake,
-        PrefilterBackendType::SIMD, 2u, 2u, 0u, 0u, 0u, 0u, 1u);
-    proof.combine(tail);
-    return proof.dispatches == 2u
-        && proof.jobs == 6u
-        && proof.evaluated_jobs == 4u
-        && proof.accepted(PrefilterBackendType::SIMD);
+        resolved_prefilter_algorithm::sneaky_snake,
+        prefilter_backend::simd, 2u, 2u, 0u, 0u, 0u, 0u, 1u);
+    stats.merge(tail);
+    return stats.dispatches == 2u
+        && stats.jobs == 6u
+        && stats.evaluated_jobs == 4u
+        && stats.is_backend_consistent(prefilter_backend::simd);
 }());
 static_assert([] {
-    PrefilterExecutionProof proof{};
-    proof.record_batch(
-        ResolvedPrefilterAlgorithm::gatekeeper,
-        PrefilterBackendType::VULKAN,
+    prefilter_execution_stats stats{};
+    stats.record_batch(
+        resolved_prefilter_algorithm::gatekeeper,
+        prefilter_backend::vulkan,
         3u, 3u, 0u, 0u, 1u, 1u, 2u,
         1u, 1u, 1u, 0u, 3u);
-    return proof.valid(/*require_evaluated_jobs=*/true,
+    return stats.is_internally_consistent(/*require_evaluated_jobs=*/true,
                        /*forbid_unsupported_jobs=*/true)
-        && proof.length_64_jobs == 3u
-        && std::string_view{proof.resolved_algorithm_name()} == "gatekeeper"
-        && std::string_view{proof.resolved_backend_name()} == "vulkan";
+        && stats.length_64_jobs == 3u
+        && std::string_view{stats.resolved_algorithm_name()} == "gatekeeper"
+        && std::string_view{stats.resolved_backend_name()} == "vulkan";
 }());
 static_assert([] {
-    PrefilterExecutionProof proof{};
-    proof.record_batch(
-        ResolvedPrefilterAlgorithm::sneaky_snake,
-        PrefilterBackendType::SCALAR,
+    prefilter_execution_stats stats{};
+    stats.record_batch(
+        resolved_prefilter_algorithm::sneaky_snake,
+        prefilter_backend::scalar,
         (std::numeric_limits<std::uint64_t>::max)(),
         (std::numeric_limits<std::uint64_t>::max)(),
         0u, 0u, 0u, 0u, 1u);
-    proof.record_batch(
-        ResolvedPrefilterAlgorithm::sneaky_snake,
-        PrefilterBackendType::SCALAR, 1u, 1u, 0u, 0u, 0u, 0u, 1u);
-    return proof.saturated
-        && proof.jobs == (std::numeric_limits<std::uint64_t>::max)()
-        && !proof.accepted(PrefilterBackendType::SCALAR);
+    stats.record_batch(
+        resolved_prefilter_algorithm::sneaky_snake,
+        prefilter_backend::scalar, 1u, 1u, 0u, 0u, 0u, 0u, 1u);
+    return stats.is_saturated
+        && stats.jobs == (std::numeric_limits<std::uint64_t>::max)()
+        && !stats.is_backend_consistent(prefilter_backend::scalar);
 }());
 static_assert([] {
-    PrefilterExecutionProof proof{};
-    proof.record_batch(
-        ResolvedPrefilterAlgorithm::gatekeeper,
-        PrefilterBackendType::VULKAN,
+    prefilter_execution_stats stats{};
+    stats.record_batch(
+        resolved_prefilter_algorithm::gatekeeper,
+        prefilter_backend::vulkan,
         1u, 1u, 0u, 0u, 0u, 0u, 1u,
         0u, 0u, 0u, 0u, 1u);
-    proof.combine(PrefilterExecutionProof{});
-    return proof.saturated && !proof.valid();
+    stats.merge(prefilter_execution_stats{});
+    return stats.is_saturated && !stats.is_internally_consistent();
 }());
 
-} // namespace bioseq::prefilter_stats
+} // namespace bioseq::prefilter
 
 }

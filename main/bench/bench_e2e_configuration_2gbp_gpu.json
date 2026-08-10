@@ -4,23 +4,23 @@
       "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; load(no index)+recompute align, all via SQL, timed end-to-end"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the recompute minimizer index for async persistence (off = pure from-scratch no-index measure)"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL recompute path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     },
     "bioseq_block_simd_dp_two_stack_nthash_just_index": {
       "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; index prebuilt (untimed); assemble align via SQL, timed (cold read after a PostgreSQL restart)"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
     },
     "bioseq_block_gpu_dp_gpu_seed_just_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C GPU frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
     },
     "bioseq_block_gpu_dp_gpu_seed_no_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C GPU frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the recompute minimizer index for async persistence (off = pure from-scratch no-index measure)"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL recompute path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     },
     "minimap2_no_index": {
       "_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"},
@@ -40,7 +40,7 @@
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
-      "description": "dna4 2 Gbp reference, one 5 Mbp HiFi-error query (DOC0283 seed)" },
+      "description": "dna4 2 Gbp reference, one 5 Mbp HiFi-error query (fixed seed)" },
 
     "E2E_2GBP_DNA5": { "concurrency": 1, "data": {
         "alphabet": "dna5", "size_label": "2gbp_dna5", "reference_length": 2000000000,
@@ -54,7 +54,7 @@
 
   "bench_e2e": {
     "tags": ["e2e", "gpu", "2gbp"],
-    "description": "GPU benchmark 2 Gbp pass: Vulkan GPU seeding+chaining (DOC0344 production, no XPC fallback) vs minimap2 baseline at 2 Gbp dna4/dna5. Split from 4 Gbp pass due to 16 GiB local RAM constraint.",
+    "description": "GPU benchmark 2 Gbp pass: Vulkan GPU seeding+chaining (production, no XPC fallback) vs minimap2 baseline at 2 Gbp dna4/dna5. Split from 4 Gbp pass due to 16 GiB local RAM constraint.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {

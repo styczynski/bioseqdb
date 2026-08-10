@@ -9,9 +9,9 @@
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
-import bioseq.sequences.kmers.highway_contract;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import :minimizer_two_stack;
 
 namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {

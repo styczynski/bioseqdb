@@ -1,4 +1,4 @@
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <cstddef>
 #include <stdexcept>

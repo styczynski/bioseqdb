@@ -12,7 +12,7 @@
 //      is wired. The insertion fixture exercises the stub path by writing
 //      locator stubs into the parent relation.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

@@ -26,25 +26,25 @@ module;
 #  include <x86intrin.h>
 #endif
 
-export module bioseq.instr.clock;
+export module bioseq.instrumentation.clock;
 
-export namespace bioseq::instr::clock {
+export namespace bioseq::instrumentation::clock {
 
 /// Monotonic nanosecond timestamp. Cheap on every supported platform.
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_ns() noexcept {
 #if defined(__APPLE__)
-    static const auto tb = []() {
-        mach_timebase_info_data_t v{};
-        mach_timebase_info(&v);
-        return v;
+    static const auto timebase = []() {
+        mach_timebase_info_data_t result{};
+        mach_timebase_info(&result);
+        return result;
     }();
-    return mach_absolute_time() * tb.numer / tb.denom;
+    return mach_absolute_time() * timebase.numer / timebase.denom;
 #elif defined(__linux__)
-    struct timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    return static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000'000ull
-         + static_cast<std::uint64_t>(ts.tv_nsec);
+    struct timespec timestamp{};
+    clock_gettime(CLOCK_MONOTONIC_RAW, &timestamp);
+    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1'000'000'000ull
+         + static_cast<std::uint64_t>(timestamp.tv_nsec);
 #else
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -55,15 +55,15 @@ inline std::uint64_t now_ns() noexcept {
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_cycles() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
-    unsigned aux;
-    return __rdtscp(&aux);
+    unsigned processor_id;
+    return __rdtscp(&processor_id);
 #elif defined(__aarch64__)
-    std::uint64_t v;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
-    return v;
+    std::uint64_t cycle_count;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cycle_count));
+    return cycle_count;
 #else
     return 0;
 #endif
 }
 
-}  // namespace bioseq::instr::clock
+}  // namespace bioseq::instrumentation::clock

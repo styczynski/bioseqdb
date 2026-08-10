@@ -1,5 +1,5 @@
 /* Opaque source-domain ABI and callback-scoped read-session shell.  Concrete
- * PostgreSQL scanners/domains live in sequence_scanner_pg and import this
+ * PostgreSQL scanners/domains live in postgres_sequence_scanner and import this
  * partition; this partition never imports them. */
 module;
 
@@ -10,12 +10,12 @@ module;
 #include <thread>
 #include <type_traits>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.types.pg_compact_sequence:source_abi;
+export module bioseq.postgres.types.compact_sequence:source_abi;
 
 import :flat_abi;
-import bioseq.storage.bucket_math;
+import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 
 export struct pg_sequence_backend_thread_token {
@@ -54,7 +54,7 @@ export struct pg_sequence_source_backend_ops {
     pg_sequence_source_read_status (*read_ranks)(
         void const*,
         pg_sequence_read_session&,
-        bioseq::storage::seq_locator const&,
+        bioseq::storage::sequence_locator const&,
         compact_sequence_stdc_type_params,
         bioseq::storage::sequence_transform,
         std::uint64_t,
@@ -97,7 +97,7 @@ export inline void release_pg_sequence_source(
 
 export struct pg_sequence_read_entry_key {
     pg_sequence_source_identity source;
-    bioseq::storage::seq_locator locator;
+    bioseq::storage::sequence_locator locator;
     compact_sequence_stdc_type_params stored_type_params;
 };
 
@@ -137,8 +137,8 @@ export using create_pg_sequence_read_entry_fn = void* (*)(
 namespace {
 
 [[nodiscard]] inline bool same_read_entry_locator(
-    bioseq::storage::seq_locator const& left,
-    bioseq::storage::seq_locator const& right) noexcept
+    bioseq::storage::sequence_locator const& left,
+    bioseq::storage::sequence_locator const& right) noexcept
 {
     return std::memcmp(&left, &right, sizeof(left)) == 0;
 }

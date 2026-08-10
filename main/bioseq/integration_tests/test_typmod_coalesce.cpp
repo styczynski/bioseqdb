@@ -19,8 +19,8 @@
 // assertions: the EXPLAIN line "(coalesce to seq('dna4', 32))"
 // is the user-visible signal but the row set is the load-bearing part.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 
 #include <array>
 #include <set>

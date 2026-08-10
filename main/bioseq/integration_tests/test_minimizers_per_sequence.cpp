@@ -1,6 +1,6 @@
 // DOC0279 §16.2 — the per-sequence merged (external-sort) index + set_active_read_index
 // routing + the multi-run k-way merge (forced via the tiny index_run_buffer_bytes GUC).
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <set>
 #include <tuple>
 import bioseq.integration_tests.common;

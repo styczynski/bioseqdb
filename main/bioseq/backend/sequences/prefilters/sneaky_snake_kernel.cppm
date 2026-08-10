@@ -20,19 +20,19 @@ module;
 export module bioseq.highway.sources.sneaky_snake;
 
 import std;
-import bioseq.sequences.prefilters.sneaky_snake;
+import bioseq.prefilter.sneaky_snake;
 import bioseq.highway.sources.simd_utils;
 
-export namespace bioseq::sequences::prefilters {
+export namespace bioseq::prefilter {
 namespace [[bioseq::simd]] target {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
 namespace sneaky_snake_target_detail {
 
-template <class D>
-struct HighwayTraversal final {
-    D d;
+template <class descriptor_type>
+struct highway_traversal final {
+    descriptor_type d;
 
     [[nodiscard]] std::uint32_t diagonal_run(
         std::span<const std::uint8_t> query,
@@ -41,7 +41,7 @@ struct HighwayTraversal final {
         std::uint32_t submaze_end,
         std::uint32_t query_index) const noexcept
     {
-        const hn::Repartition<std::uint8_t, D> byte_d;
+        const hn::Repartition<std::uint8_t, descriptor_type> byte_d;
         const std::uint32_t target_remaining = submaze_end - position;
         const std::uint32_t query_remaining = static_cast<std::uint32_t>(
             query.size() - static_cast<std::size_t>(query_index));
@@ -95,7 +95,7 @@ struct HighwayTraversal final {
         return run;
     }
 
-    template <class Consumer>
+    template <class consumer_type>
     [[nodiscard]] bool visit_candidate_starts(
         std::span<const std::uint8_t> query,
         std::uint32_t filter_offset,
@@ -103,11 +103,11 @@ struct HighwayTraversal final {
         std::uint32_t position,
         std::uint32_t lower,
         std::uint32_t upper,
-        Consumer&& consume) const noexcept
+        consumer_type&& consume) const noexcept
     {
-        using ByteD = hn::Repartition<std::uint8_t, D>;
-        const ByteD byte_d;
-        static_assert(hn::MaxLanes(ByteD{}) <= 64u);
+        using byte_descriptor = hn::Repartition<std::uint8_t, descriptor_type>;
+        const byte_descriptor byte_d;
+        static_assert(hn::MaxLanes(byte_descriptor{}) <= 64u);
         const std::uint32_t lanes = static_cast<std::uint32_t>(
             hn::Lanes(byte_d));
         const auto wanted = hn::Set(byte_d, filter_rank);
@@ -148,42 +148,37 @@ struct HighwayTraversal final {
 } // namespace sneaky_snake_target_detail
 
 /// Fixed-target batch implementation used by target-local parity tests.
-template <class D>
-[[nodiscard]] inline std::vector<PrefilterResult>
+template <class descriptor_type>
+[[nodiscard]] inline std::vector<prefilter_result>
 sneaky_snake_simd_batch_for(
-    D d,
-    const PrefilterBatchInput& input,
-    SneakySnakeOptions options = {})
+    descriptor_type d,
+    const prefilter_batch_input& input,
+    sneaky_snake_options options = {})
 {
-    sneaky_snake_target_detail::HighwayTraversal<D> traversal{.d = d};
-    std::vector<PrefilterResult> results(input.jobs.size());
-    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const PrefilterJob& job = input.jobs[index];
-        if (!prefilter_job_in_bounds(input, job)) {
-            results[index] = sneaky_snake_detail::make_result(
-                0u, PrefilterStatus::unsupported_conservative, true);
-            continue;
-        }
-        results[index] = sneaky_snake_detail::bounded_with(
-            traversal,
-            input.query_ranks.subspan(
-                job.query_offset, job.query_length),
-            input.target_ranks.subspan(
-                job.target_offset, job.target_length),
-            job.max_edits,
-            options);
-    }
-    return results;
+    sneaky_snake_target_detail::highway_traversal<descriptor_type> traversal{.d = d};
+    return sneaky_snake_detail::evaluate_batch_with(
+        input,
+        [&traversal, options](
+            std::span<const std::uint8_t> query,
+            std::span<const std::uint8_t> target_ranks,
+            const prefilter_job& job) noexcept {
+            return sneaky_snake_detail::bounded_with(
+                traversal,
+                query,
+                target_ranks,
+                job.max_edits,
+                options);
+        });
 }
 
-/// Exact callable inserted into CommonKernels by each generated target binder.
-[[nodiscard]] inline std::vector<PrefilterResult> sneaky_snake_simd_batch(
-    const PrefilterBatchInput& input,
-    SneakySnakeOptions options = {})
+/// Exact callable inserted into highway_common_kernels by each generated target binder.
+[[nodiscard]] inline std::vector<prefilter_result> sneaky_snake_simd_batch(
+    const prefilter_batch_input& input,
+    sneaky_snake_options options = {})
 {
     const hn::ScalableTag<std::uint8_t> d;
     return sneaky_snake_simd_batch_for(d, input, options);
 }
 
 } // namespace target
-} // namespace bioseq::sequences::prefilters
+} // namespace bioseq::prefilter

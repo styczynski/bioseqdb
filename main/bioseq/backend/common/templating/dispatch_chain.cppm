@@ -1,33 +1,19 @@
 /**
  * @file dispatch_chain.cppm
- * @brief N-step generic dispatch chain (lifted from pipe.cppm).
+ * @brief Composable runtime-to-template dispatch steps.
  *
- * Each step has:
- *   - `target_t`         — the NTTP type the step pins
- *   - `default_value`    — pinned when active_v<Pinned...> is false
- *   - `active_v<...>`    — compile-time predicate
- *   - `dispatch<R, Params, Pinned..., K>(params, k, args...)` —
- *     runtime dispatch that invokes the continuation with the pinned
- *     value.
- *
- * The chain's only continuation type is
- * `dispatch_chain<R, Leaf, Params, Head, Tail...>::continuation<Pinned...>`
- * — a stateless POD with one templated member function. No `[&]`
- * lambdas anywhere; the chain and the steps are all pure compile-time
- * machinery.
- *
- * `Params` is a template parameter so the chain is reusable from any
- * pipeline. `pipe.cppm` keeps the per-pipeline aliases that pin
- * `Params = Minimap2Params`.
+ * A chain pins one compile-time value per step before invoking a leaf. Each
+ * step supplies a target type, a default value, an activation predicate, and a
+ * dispatch function that invokes the continuation with its selected value.
  */
 module;
 
+#include <cstddef>
 #include <type_traits>
 #include <utility>
 
 export module bioseq.common.templating.dispatch_chain;
 
-import bioseq.common.templating.value_sequence;
 import bioseq.common.templating.runtime_dispatch;
 
 #ifndef BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE
@@ -44,198 +30,354 @@ export namespace bioseq::common::templating {
 
 namespace detail_dispatch_chain {
 
-template <class... Args>
-concept chain_args_are_references = (std::is_reference_v<Args> && ...);
+/** Reports whether every forwarded chain argument is a reference type. */
+template <class... argument_types>
+concept chain_arguments_are_references =
+    (std::is_reference_v<argument_types> && ...);
+
+/**
+ * @brief Adapts an integral-constant dispatch callback to a chain continuation.
+ */
+template <class result_type,
+          class parameter_type,
+          class continuation_type,
+          class target_type>
+struct continuation_adapter {
+    /// Next stage in the dispatch chain.
+    continuation_type continuation;
+
+    /** Forwards one selected compile-time value into the continuation. */
+    template <target_type value, class... argument_types>
+    BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
+    result_type operator()(
+        std::integral_constant<target_type, value>,
+        const parameter_type& parameters,
+        argument_types&&... arguments) const
+    {
+        return continuation.template run<value>(
+            parameters,
+            std::forward<argument_types>(arguments)...);
+    }
+};
 
 } // namespace detail_dispatch_chain
 
-template <class R, template <auto...> class Leaf, class Params, class... Steps>
+/**
+ * @brief Pins step values in order and invokes a templated leaf.
+ * @tparam result_type Leaf result type.
+ * @tparam leaf_type Leaf template exposing `call`.
+ * @tparam parameter_type Shared runtime-parameter type.
+ * @tparam step_types Ordered dispatch-step types.
+ */
+template <class result_type,
+          template <auto...> class leaf_type,
+          class parameter_type,
+          class... step_types>
 struct dispatch_chain;
 
-template <class R, template <auto...> class Leaf, class Params>
-struct dispatch_chain<R, Leaf, Params> {
-    template <auto... Pinned, class... Args>
-        requires detail_dispatch_chain::chain_args_are_references<Args...>
+/// Terminal `dispatch_chain` specialization that invokes the leaf.
+template <class result_type,
+          template <auto...> class leaf_type,
+          class parameter_type>
+struct dispatch_chain<result_type, leaf_type, parameter_type> {
+    /**
+     * @brief Invokes the leaf with all previously selected values.
+     * @tparam pinned_values Values selected by preceding steps.
+     * @param parameters Shared runtime parameters.
+     * @param arguments Reference arguments forwarded to the leaf.
+     */
+    template <auto... pinned_values, class... argument_types>
+        requires detail_dispatch_chain::chain_arguments_are_references<
+            argument_types...>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R run(const Params& params, Args&&... args) {
-        return Leaf<Pinned...>::call(params, std::forward<Args>(args)...);
+    static result_type run(
+        const parameter_type& parameters,
+        argument_types&&... arguments)
+    {
+        return leaf_type<pinned_values...>::call(
+            parameters,
+            std::forward<argument_types>(arguments)...);
     }
 };
 
-template <class R, template <auto...> class Leaf, class Params,
-          class Head, class... Tail>
-struct dispatch_chain<R, Leaf, Params, Head, Tail...> {
-    template <auto... Pinned>
+/// Recursive `dispatch_chain` specialization that selects the next value.
+template <class result_type,
+          template <auto...> class leaf_type,
+          class parameter_type,
+          class head_step,
+          class... remaining_steps>
+struct dispatch_chain<
+    result_type,
+    leaf_type,
+    parameter_type,
+    head_step,
+    remaining_steps...> {
+    /** Carries previously selected values into the remainder of the chain. */
+    template <auto... pinned_values>
     struct continuation {
-        template <auto V, class... Args>
+        /** Selects one value and resumes the remaining steps. */
+        template <auto value, class... argument_types>
         BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-        R run(const Params& params, Args&&... args) const {
-            return dispatch_chain<R, Leaf, Params, Tail...>
-                ::template run<Pinned..., V>(params, std::forward<Args>(args)...);
+        result_type run(
+            const parameter_type& parameters,
+            argument_types&&... arguments) const
+        {
+            return dispatch_chain<
+                result_type,
+                leaf_type,
+                parameter_type,
+                remaining_steps...>::template run<pinned_values..., value>(
+                    parameters,
+                    std::forward<argument_types>(arguments)...);
         }
     };
 
-    template <auto... Pinned, class... Args>
-        requires detail_dispatch_chain::chain_args_are_references<Args...>
+    /**
+     * @brief Selects the head-step value and resumes the chain.
+     * @tparam pinned_values Values selected by preceding steps.
+     * @param parameters Shared runtime parameters.
+     * @param arguments Reference arguments forwarded through every step.
+     */
+    template <auto... pinned_values, class... argument_types>
+        requires detail_dispatch_chain::chain_arguments_are_references<
+            argument_types...>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R run(const Params& params, Args&&... args) {
-        if constexpr (Head::template active_v<Pinned...>) {
-            return Head::template dispatch<R, Params, Pinned...>(
-                params, continuation<Pinned...>{}, std::forward<Args>(args)...);
+    static result_type run(
+        const parameter_type& parameters,
+        argument_types&&... arguments)
+    {
+        if constexpr (head_step::template active_v<pinned_values...>) {
+            return head_step::template dispatch<
+                result_type,
+                parameter_type,
+                pinned_values...>(
+                    parameters,
+                    continuation<pinned_values...>{},
+                    std::forward<argument_types>(arguments)...);
         } else {
-            return dispatch_chain<R, Leaf, Params, Tail...>::template run<
-                Pinned..., Head::default_value>(
-                    params, std::forward<Args>(args)...);
+            return dispatch_chain<
+                result_type,
+                leaf_type,
+                parameter_type,
+                remaining_steps...>::template run<
+                    pinned_values...,
+                    head_step::default_value>(
+                        parameters,
+                        std::forward<argument_types>(arguments)...);
         }
     }
 };
 
-template <class Registry>
+/**
+ * @brief Dispatch step selecting an exact enumeration value or its default.
+ * @tparam registry_type Registry exposing `target_t`, `value_list`,
+ *         `default_value`, and `read_field`.
+ */
+template <class registry_type>
 struct enum_step {
-    using target_t = typename Registry::target_t;
-    static constexpr target_t default_value = Registry::default_value;
+    /// Type selected by this step.
+    using target_t = typename registry_type::target_t;
 
-    template <auto... /*Pinned*/>
+    /// Value selected when the runtime input is not registered.
+    static constexpr target_t default_value = registry_type::default_value;
+
+    /// Enumeration dispatch is active for every preceding selection.
+    template <auto...>
     static constexpr bool active_v = true;
 
-    template <class R, class Params, class Continuation>
-    struct adapter {
-        Continuation continuation;
-        template <target_t V, class... A>
-        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-        R operator()(
-            std::integral_constant<target_t, V>,
-            const Params& params, A&&... forwarded_args) const
-        {
-            return continuation.template run<V>(
-                params, std::forward<A>(forwarded_args)...);
-        }
-    };
-
-    template <class R, class Params, auto... Pinned,
-              class Continuation, class... Args>
+    /**
+     * @brief Dispatches the runtime field and resumes the chain.
+     * @param parameters Shared runtime parameters.
+     * @param continuation Next chain stage.
+     * @param arguments Reference arguments forwarded through the chain.
+     */
+    template <class result_type,
+              class parameter_type,
+              auto... pinned_values,
+              class continuation_type,
+              class... argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R dispatch(
-        const Params& params, Continuation continuation, Args&&... args)
+    static result_type dispatch(
+        const parameter_type& parameters,
+        continuation_type continuation,
+        argument_types&&... arguments)
     {
-        adapter<R, Params, Continuation> step_adapter{continuation};
-        if constexpr (std::is_same_v<R, void>) {
-            enum_dispatch_pack_void<target_t, default_value>(
-                typename Registry::value_list{},
-                Registry::read_field(params, args...),
-                step_adapter, params, std::forward<Args>(args)...);
+        using adapter_type = detail_dispatch_chain::continuation_adapter<
+            result_type,
+            parameter_type,
+            continuation_type,
+            target_t>;
+        adapter_type adapter{continuation};
+        if constexpr (std::is_same_v<result_type, void>) {
+            dispatch_exact_value_or_default_void<target_t, default_value>(
+                typename registry_type::value_list{},
+                registry_type::read_field(parameters, arguments...),
+                adapter,
+                parameters,
+                std::forward<argument_types>(arguments)...);
             return;
         } else {
-            return enum_dispatch_pack<R, target_t, default_value>(
-                typename Registry::value_list{},
-                Registry::read_field(params, args...),
-                step_adapter, params, std::forward<Args>(args)...);
+            return dispatch_exact_value_or_default<
+                result_type,
+                target_t,
+                default_value>(
+                    typename registry_type::value_list{},
+                    registry_type::read_field(parameters, arguments...),
+                    adapter,
+                    parameters,
+                    std::forward<argument_types>(arguments)...);
         }
     }
 };
 
-template <class Registry>
+/**
+ * @brief Dispatch step selecting the first registered bucket not below a field.
+ * @tparam registry_type Registry exposing `value_list`, `default_value`, and
+ *         `read_field`.
+ */
+template <class registry_type>
 struct bucket_step {
+    /// Type selected by this step.
     using target_t = std::size_t;
-    static constexpr std::size_t default_value = Registry::default_value;
 
-    template <auto... /*Pinned*/>
+    /// Value selected when the step is inactive in a guarded chain.
+    static constexpr target_t default_value = registry_type::default_value;
+
+    /// Bucket dispatch is active for every preceding selection.
+    template <auto...>
     static constexpr bool active_v = true;
 
-    template <class R, class Params, class Continuation>
-    struct adapter {
-        Continuation continuation;
-        template <std::size_t V, class... A>
-        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-        R operator()(
-            std::integral_constant<std::size_t, V>,
-            const Params& params, A&&... forwarded_args) const
-        {
-            return continuation.template run<V>(
-                params, std::forward<A>(forwarded_args)...);
-        }
-    };
-
-    template <class R, class Params, auto... Pinned,
-              class Continuation, class... Args>
+    /**
+     * @brief Dispatches the runtime field and resumes the chain.
+     * @param parameters Shared runtime parameters.
+     * @param continuation Next chain stage.
+     * @param arguments Reference arguments forwarded through the chain.
+     */
+    template <class result_type,
+              class parameter_type,
+              auto... pinned_values,
+              class continuation_type,
+              class... argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R dispatch(
-        const Params& params, Continuation continuation, Args&&... args)
+    static result_type dispatch(
+        const parameter_type& parameters,
+        continuation_type continuation,
+        argument_types&&... arguments)
     {
-        adapter<R, Params, Continuation> step_adapter{continuation};
-        return value_dispatch_smallest_ge<R, std::size_t>(
-            typename Registry::value_list{},
-            Registry::read_field(params, args...),
-            step_adapter, params, std::forward<Args>(args)...);
+        using adapter_type = detail_dispatch_chain::continuation_adapter<
+            result_type,
+            parameter_type,
+            continuation_type,
+            target_t>;
+        adapter_type adapter{continuation};
+        return dispatch_smallest_not_less<result_type, target_t>(
+            typename registry_type::value_list{},
+            registry_type::read_field(parameters, arguments...),
+            adapter,
+            parameters,
+            std::forward<argument_types>(arguments)...);
     }
 };
 
-/// Pinned-aware bucket step (DOC0271 §5.1).
-///
-/// Unlike `bucket_step`, the value list iterated by this step depends on the
-/// previously-pinned chain values via `Registry::template value_list_for<Pinned...>`.
-/// The intended use is per-K seq_len_log2 bucketing: place this step *after*
-/// the K (kmer_size) step so `Pinned...` starts with the pinned K, and have
-/// `value_list_for<K, …>` resolve to the K-specific breakpoint sequence (e.g.
-/// `compute_breakpoints_for<K>()` materialised as a `value_sequence`).
-///
-/// The runtime-side `read_field` is also Pinned-aware
-/// (`Registry::template read_field_for<Pinned...>(params, args...)`) so a
-/// per-K bucket-selection function can clamp to the same K the step is
-/// iterating against.
-template <class Registry>
-struct bucket_step_pinned {
+/**
+ * @brief Bucket step whose candidates and field depend on prior selections.
+ * @tparam registry_type Registry exposing `value_list_for`, `read_field_for`,
+ *         and `default_value`.
+ *
+ * Place this step after the values on which its bucket set depends. The
+ * selected values are forwarded to both registry templates.
+ */
+template <class registry_type>
+struct dependent_bucket_step {
+    /// Type selected by this step.
     using target_t = std::size_t;
-    static constexpr std::size_t default_value = Registry::default_value;
 
-    template <auto... /*Pinned*/>
+    /// Value selected when the step is inactive in a guarded chain.
+    static constexpr target_t default_value = registry_type::default_value;
+
+    /// Dependent bucket dispatch is active for every preceding selection.
+    template <auto...>
     static constexpr bool active_v = true;
 
-    template <class R, class Params, class Continuation>
-    struct adapter {
-        Continuation continuation;
-        template <std::size_t V, class... A>
-        BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-        R operator()(
-            std::integral_constant<std::size_t, V>,
-            const Params& params, A&&... forwarded_args) const
-        {
-            return continuation.template run<V>(
-                params, std::forward<A>(forwarded_args)...);
-        }
-    };
-
-    template <class R, class Params, auto... Pinned,
-              class Continuation, class... Args>
+    /**
+     * @brief Dispatches against the bucket set for prior selected values.
+     * @param parameters Shared runtime parameters.
+     * @param continuation Next chain stage.
+     * @param arguments Reference arguments forwarded through the chain.
+     */
+    template <class result_type,
+              class parameter_type,
+              auto... pinned_values,
+              class continuation_type,
+              class... argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R dispatch(
-        const Params& params, Continuation continuation, Args&&... args)
+    static result_type dispatch(
+        const parameter_type& parameters,
+        continuation_type continuation,
+        argument_types&&... arguments)
     {
-        adapter<R, Params, Continuation> step_adapter{continuation};
-        return value_dispatch_smallest_ge<R, std::size_t>(
-            typename Registry::template value_list_for<Pinned...>{},
-            Registry::template read_field_for<Pinned...>(params, args...),
-            step_adapter, params, std::forward<Args>(args)...);
+        using adapter_type = detail_dispatch_chain::continuation_adapter<
+            result_type,
+            parameter_type,
+            continuation_type,
+            target_t>;
+        adapter_type adapter{continuation};
+        return dispatch_smallest_not_less<result_type, target_t>(
+            typename registry_type::template value_list_for<
+                pinned_values...>{},
+            registry_type::template read_field_for<pinned_values...>(
+                parameters,
+                arguments...),
+            adapter,
+            parameters,
+            std::forward<argument_types>(arguments)...);
     }
 };
 
-template <class Inner, bool ActiveCondition>
+/**
+ * @brief Applies a compile-time activation condition to another step.
+ * @tparam inner_step Step used when active.
+ * @tparam active_condition Whether the inner step participates in the chain.
+ */
+template <class inner_step, bool active_condition>
 struct guarded_step {
-    using target_t = typename Inner::target_t;
-    static constexpr target_t default_value = Inner::default_value;
+    /// Type selected by the guarded step.
+    using target_t = typename inner_step::target_t;
 
-    template <auto... /*Pinned*/>
-    static constexpr bool active_v = ActiveCondition;
+    /// Value pinned when the guarded step is inactive.
+    static constexpr target_t default_value = inner_step::default_value;
 
-    template <class R, class Params, auto... Pinned,
-              class Continuation, class... Args>
+    /// Compile-time activation predicate consumed by `dispatch_chain`.
+    template <auto...>
+    static constexpr bool active_v = active_condition;
+
+    /**
+     * @brief Delegates active dispatch to the wrapped step.
+     * @param parameters Shared runtime parameters.
+     * @param continuation Next chain stage.
+     * @param arguments Reference arguments forwarded through the chain.
+     */
+    template <class result_type,
+              class parameter_type,
+              auto... pinned_values,
+              class continuation_type,
+              class... argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
-    static R dispatch(
-        const Params& params, Continuation continuation, Args&&... args)
+    static result_type dispatch(
+        const parameter_type& parameters,
+        continuation_type continuation,
+        argument_types&&... arguments)
     {
-        return Inner::template dispatch<R, Params, Pinned...>(
-            params, continuation, std::forward<Args>(args)...);
+        return inner_step::template dispatch<
+            result_type,
+            parameter_type,
+            pinned_values...>(
+                parameters,
+                continuation,
+                std::forward<argument_types>(arguments)...);
     }
 };
 
-} // namespace
+} // namespace bioseq::common::templating
+
+#undef BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR

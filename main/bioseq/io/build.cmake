@@ -1,6 +1,4 @@
-# io/build.cmake — IO module setup. Brings in kseq++ and includes the
-# V10 IO bench wiring (`io_bench_v10.cmake`) for the `bioseq_io_bench`
-# target.
+# IO module setup and benchmark target wiring.
 
 include(FetchContent)
 set(_bioseq_io_build_testing_was_defined FALSE)
@@ -33,5 +31,5 @@ set_target_properties(kseq++ PROPERTIES
   INTERFACE_LINK_LIBRARIES
     "$<BUILD_INTERFACE:ZLIB::ZLIB>")
 
-# === bioseq_io_bench (V10) — built on top of bench_framework ===
-include("${CMAKE_CURRENT_LIST_DIR}/io_bench_v10.cmake")
+# The benchmark owns its launcher and named logic module under benchmark/.
+include("${CMAKE_CURRENT_LIST_DIR}/benchmark/build.cmake")

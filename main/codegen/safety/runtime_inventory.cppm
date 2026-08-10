@@ -20,6 +20,7 @@ import :analyzer_model;
 import :json;
 import :model;
 import :serialization;
+import :validation;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::safety {
@@ -34,17 +35,6 @@ namespace fs = std::filesystem;
     throw std::runtime_error(
         "runtime inventory " + std::string{context}
         + ": " + std::string{message});
-}
-
-[[nodiscard]] inline bool lowercase_sha256(
-    std::string_view value) noexcept {
-    return value.size() == 64
-        && std::ranges::all_of(
-            value,
-            [](const char digit) {
-                return (digit >= '0' && digit <= '9')
-                    || (digit >= 'a' && digit <= 'f');
-            });
 }
 
 [[nodiscard]] inline bool same_position(
@@ -77,12 +67,12 @@ inline void add_source_authority(
     std::string source,
     std::string sha256,
     std::string_view context) {
-    if (source.empty() || !lowercase_sha256(sha256)) {
+    if (source.empty() || !detail::lowercase_sha256(sha256)) {
         inventory_failure(
             context,
             "source authority has an empty path or invalid hash");
     }
-    const auto found = result.find(source);
+    const source_authority::iterator found = result.find(source);
     if (found != result.end()) {
         if (found->second.sha256 != sha256) {
             inventory_failure(
@@ -114,6 +104,13 @@ inline void validate_string_array(
                 context, "contains an empty string");
         }
     }
+}
+
+[[nodiscard]] inline std::string compile_graph_string(
+    const json_value::object& root,
+    std::string_view field) {
+    return serialization_detail::string_field(
+        root, field, "runtime inventory compile graph");
 }
 
 [[nodiscard]] inline source_authority
@@ -149,25 +146,23 @@ parse_source_authority(
             "translation_units",
         },
         "runtime inventory compile graph");
-    const auto required = [&](std::string_view field) {
-        return serialization_detail::string_field(
-            root, field, "runtime inventory compile graph");
-    };
-    if (required("schema")
+    if (compile_graph_string(root, "schema")
             != "bioseq_safety_compile_graph/v1"
-        || required("profile") != profile_name(facts.profile)
-        || required("clang_version") != facts.clang_version
-        || required("source_list_sha256")
+        || compile_graph_string(root, "profile")
+            != profile_name(facts.profile)
+        || compile_graph_string(root, "clang_version")
+            != facts.clang_version
+        || compile_graph_string(root, "source_list_sha256")
             != facts.source_list_sha256
-        || required("compile_database_sha256")
+        || compile_graph_string(root, "compile_database_sha256")
             != facts.compile_database_sha256
-        || required("pcm_manifest_sha256")
+        || compile_graph_string(root, "pcm_manifest_sha256")
             != facts.pcm_manifest_sha256
-        || required("compilation_signature").empty()
-        || required("compile_database").empty()
-        || required("pcm_manifest").empty()
-        || required("pcm_root").empty()
-        || required("source_list").empty()) {
+        || compile_graph_string(root, "compilation_signature").empty()
+        || compile_graph_string(root, "compile_database").empty()
+        || compile_graph_string(root, "pcm_manifest").empty()
+        || compile_graph_string(root, "pcm_root").empty()
+        || compile_graph_string(root, "source_list").empty()) {
         inventory_failure(
             "compile graph",
             "profile, compiler, or sealed input hashes differ "
@@ -216,7 +211,7 @@ parse_source_authority(
         validate_string_array(
             json_field(unit, "arguments", context),
             context + ".arguments");
-        if (!lowercase_sha256(
+        if (!detail::lowercase_sha256(
                 serialization_detail::string_field(
                     unit,
                     "arguments_sha256",
@@ -296,7 +291,8 @@ parse_source_authority(
     const located_source_range& location,
     source_authority& authority,
     std::string_view context) {
-    const auto found = authority.find(location.source_file);
+    const source_authority::iterator found =
+        authority.find(location.source_file);
     if (found == authority.end()) {
         inventory_failure(
             context,
@@ -311,8 +307,8 @@ parse_source_authority(
                 "sealed source file is unavailable");
         }
         std::string bytes =
-            bioseq::codegen::read_file(location.source_file);
-        if (bioseq::codegen::sha256_hex(bytes)
+            bioseq::codegen::read_artifact_bytes(location.source_file);
+        if (bioseq::common::sha256_hex(bytes)
             != record.sha256) {
             inventory_failure(
                 context,
@@ -334,7 +330,7 @@ parse_source_authority(
             "expanded source span is not a nonempty half-open "
             "range inside the sealed source");
     }
-    return bioseq::codegen::sha256_hex(
+    return bioseq::common::sha256_hex(
         std::string_view{*record.verified_bytes}.substr(
             span.begin.byte_offset,
             span.end.byte_offset
@@ -345,6 +341,9 @@ struct owned_call {
     const function_flow* owner{};
     const flow_call_site* call{};
 };
+
+using owned_call_index =
+    std::map<std::string, owned_call, std::less<>>;
 
 [[nodiscard]] inline bool exact_direct_target(
     const flow_call_site& call,
@@ -423,42 +422,9 @@ struct owned_call {
             == site_call.owner->stable_usr;
 }
 
-[[nodiscard]] inline runtime_probe_contract contract_for(
-    runtime_relation relation) {
-    switch (relation) {
-        case runtime_relation::natural_at_site:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 0,
-                .ordering =
-                    runtime_probe_ordering::visit_only,
-            };
-        case runtime_relation::injected_routes_to_site:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 1,
-                .ordering =
-                    runtime_probe_ordering::
-                        trigger_before_visit,
-            };
-        case runtime_relation::injected_after_site_success:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 1,
-                .ordering =
-                    runtime_probe_ordering::
-                        visit_before_trigger,
-            };
-    }
-    inventory_failure(
-        "probe contract", "relation is unknown");
-}
-
 }  // namespace runtime_inventory_detail
 
+/// Returns the deterministic ABI-v2 identity for a SQL/fault probe pair.
 [[nodiscard]] inline std::string runtime_probe_site_id(
     std::string_view sql_identity,
     std::string_view fault_key) {
@@ -468,12 +434,13 @@ struct owned_call {
             "SQL identity and fault key must be nonempty");
     }
     return "probe:v2:"
-        + bioseq::codegen::sha256_hex(
+        + bioseq::common::sha256_hex(
             "bioseq.safety_runtime_probe.site.v2\n"
             + std::string{sql_identity} + "\n"
             + std::string{fault_key} + "\n");
 }
 
+/// Validates canonical runtime-probe identities and inventory shape.
 inline void validate_runtime_probe_inventory(
     const runtime_probe_inventory& inventory) {
     serialization_detail::
@@ -491,6 +458,7 @@ inline void validate_runtime_probe_inventory(
     }
 }
 
+/// Joins compiler probe facts to exact recoverable ERROR ledger sites.
 [[nodiscard]] inline runtime_probe_inventory
 build_runtime_probe_inventory(
     const safety_ledger& ledger,
@@ -525,15 +493,15 @@ build_runtime_probe_inventory(
             "ledger or compiler-fact bytes are not canonical");
     }
     const std::string ledger_sha256 =
-        bioseq::codegen::sha256_hex(ledger_json);
+        bioseq::common::sha256_hex(ledger_json);
     const std::string compiler_facts_sha256 =
-        bioseq::codegen::sha256_hex(compiler_facts_json);
+        bioseq::common::sha256_hex(compiler_facts_json);
     const std::string compile_graph_sha256 =
-        bioseq::codegen::sha256_hex(compile_graph_json);
+        bioseq::common::sha256_hex(compile_graph_json);
     const std::string sql_manifest_sha256 =
-        bioseq::codegen::sha256_hex(sql_manifest_json);
+        bioseq::common::sha256_hex(sql_manifest_json);
     const std::string inventory_producer_sha256 =
-        bioseq::codegen::sha256_hex(
+        bioseq::common::sha256_hex(
             inventory_producer_executable_bytes);
     if (ledger.compiler_facts_sha256
             != compiler_facts_sha256
@@ -565,7 +533,7 @@ build_runtime_probe_inventory(
     source_authority authority =
         parse_source_authority(compile_graph_json, facts);
 
-    std::map<std::string, owned_call, std::less<>> calls;
+    owned_call_index calls;
     for (const function_flow& function : facts.functions) {
         for (const flow_call_site& call : function.calls) {
             if (!calls.emplace(
@@ -602,16 +570,16 @@ build_runtime_probe_inventory(
             inventory_producer_sha256,
     };
     static constexpr std::string_view visit_name =
-        "bioseq::pg_utils::safety_runtime_probe::"
+        "bioseq::postgres::support::safety_runtime_probe::"
         "record_site_visit";
     static constexpr std::string_view trigger_name =
-        "bioseq::pg_utils::safety_runtime_probe::"
+        "bioseq::postgres::support::safety_runtime_probe::"
         "consume_fault";
     for (const runtime_probe_fact& probe :
          facts.runtime_probes) {
-        const auto site_found =
+        const owned_call_index::const_iterator site_found =
             calls.find(probe.site_call_stable_id);
-        const auto visit_found =
+        const owned_call_index::const_iterator visit_found =
             calls.find(probe.visit_call_stable_id);
         if (site_found == calls.end()
             || visit_found == calls.end()) {
@@ -624,7 +592,7 @@ build_runtime_probe_inventory(
         const owned_call& visit_call = visit_found->second;
         std::optional<owned_call> trigger_call;
         if (probe.trigger_call_stable_id) {
-            const auto trigger_found =
+            const owned_call_index::const_iterator trigger_found =
                 calls.find(*probe.trigger_call_stable_id);
             if (trigger_found == calls.end()) {
                 inventory_failure(
@@ -722,7 +690,7 @@ build_runtime_probe_inventory(
                     probe.fault_key),
                 .relation = probe.relation,
                 .ledger_site_sha256 =
-                    bioseq::codegen::sha256_hex(
+                    bioseq::common::sha256_hex(
                         canonical_site),
                 .site_anchor = site_anchor,
                 .visit_anchor = visit_anchor,
@@ -730,7 +698,7 @@ build_runtime_probe_inventory(
                 .transitive_call_path =
                     match->transitive_call_path,
                 .probe_contract =
-                    contract_for(probe.relation),
+                    runtime_probe_contract_for(probe.relation),
             });
         }
         if (match_count == 0) {

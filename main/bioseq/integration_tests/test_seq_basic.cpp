@@ -18,8 +18,8 @@
 // SPEC_HOW_TO_CONNECT_ALIGNER_3 §13.1). Round-trip / metadata tests live on a
 // heap table to keep the assertions tight on the type itself.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

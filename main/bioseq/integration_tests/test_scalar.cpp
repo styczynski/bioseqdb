@@ -7,7 +7,7 @@
 //   * `bioseq.len` / `bioseq.unit_len` on the empty sequence return 0 and
 //     do not error out under any width.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

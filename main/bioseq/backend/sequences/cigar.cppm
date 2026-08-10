@@ -7,8 +7,6 @@
  */
 module;
 
-#include "common.h"
-
 #include <cstdint>
 #include <vector>
 #include <array>
@@ -16,84 +14,113 @@ module;
 #include <algorithm>
 #include <span>
 #include <stdexcept>
+#include <cstddef>
 
 export module bioseq.sequences.cigar;
 
-import bioseq.common.mlogging;
 import bioseq.sequences;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 
 export namespace bioseq::simd {
 
-// ============================================================================
-// CIGAR operation codes — matches minimap2 (minimap.h) and KSW2
-// ============================================================================
+/** @brief Generic aligned-pair opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_match_opcode = 0;
+/** @brief Query-insertion opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_insertion_opcode = 1;
+/** @brief Query-deletion opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_deletion_opcode = 2;
+/** @brief Reference-skip opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_reference_skip_opcode = 3;
+/** @brief Exact-match opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_equal_opcode = 7;
+/** @brief Mismatch opcode used by minimap2 and KSW2. */
+constexpr std::uint32_t cigar_mismatch_opcode = 8;
 
-constexpr uint32_t CIGAR_MATCH  = 0;
-constexpr uint32_t CIGAR_INS    = 1;
-constexpr uint32_t CIGAR_DEL    = 2;
-constexpr uint32_t CIGAR_N_SKIP = 3;
-constexpr uint32_t CIGAR_EQ     = 7;
-constexpr uint32_t CIGAR_X      = 8;
-
-/// Character representation of CIGAR ops (MM_CIGAR_STR "MIDNSHP=XB").
-constexpr std::array<char, 10> CIGAR_OP_CHAR = {
+/** @brief Character lookup for the minimap2 opcode order `MIDNSHP=XB`. */
+constexpr std::array<char, 10> cigar_opcode_characters = {
     'M', 'I', 'D', 'N', 'S', 'H', 'P', '=', 'X', 'B'
 };
 
-// ============================================================================
-// CigarOp — single CIGAR operation (length + opcode)
-// ============================================================================
-
-struct CigarOp {
-    uint32_t length;
-    uint32_t opcode;
+/** @brief One run-length encoded CIGAR operation. */
+struct cigar_operation {
+    /** @brief Number of symbols covered by the operation. */
+    std::uint32_t length;
+    /** @brief Minimap2-compatible operation code. */
+    std::uint32_t opcode;
 };
 
-// ============================================================================
-// Packed CIGAR helpers (KSW2 format: length<<4 | opcode)
-// ============================================================================
-
-/// Push a CIGAR operation in packed format, merging with the last op if same
-/// opcode.
+/**
+ * @brief Append one operation in KSW2 packed form.
+ *
+ * Adjacent operations with the same opcode are merged to keep the result in
+ * canonical run-length form.
+ *
+ * @param cigar Destination vector containing `(length << 4) | opcode` words.
+ * @param opcode Minimap2-compatible opcode stored in the low four bits.
+ * @param length Number of symbols represented by the operation.
+ */
 inline void push_packed_cigar(
-    std::vector<uint32_t>& cigar, uint32_t op, uint32_t len)
+    std::vector<std::uint32_t>& cigar,
+    std::uint32_t opcode,
+    std::uint32_t length)
 {
-    if (!cigar.empty() && (cigar.back() & 0xfU) == op)
-        cigar.back() += len << 4;
+    if (!cigar.empty() && (cigar.back() & 0xfU) == opcode)
+        cigar.back() += length << 4;
     else
-        cigar.push_back((len << 4) | op);
+        cigar.push_back((length << 4) | opcode);
 }
 
-/// Append packed CIGAR ops (length<<4 | opcode) to a CigarOp vector,
-/// merging adjacent same-opcode entries.
+/**
+ * @brief Decode and append packed CIGAR words to an operation vector.
+ * @param destination Run-length destination; equal adjacent opcodes merge.
+ * @param source KSW2 words encoded as `(length << 4) | opcode`.
+ */
 inline void append_cigar(
-    std::vector<CigarOp>& destination, const std::vector<uint32_t>& source)
+    std::vector<cigar_operation>& destination,
+    const std::vector<std::uint32_t>& source)
 {
-    for (uint32_t entry : source) {
-        const uint32_t opcode    = entry & 0xfU;
-        const uint32_t op_length = entry >> 4;
+    for (std::uint32_t entry : source) {
+        const std::uint32_t opcode = entry & 0xfU;
+        const std::uint32_t operation_length = entry >> 4;
         if (!destination.empty() && destination.back().opcode == opcode) {
-            destination.back().length += op_length;
+            destination.back().length += operation_length;
         } else {
-            destination.push_back({op_length, opcode});
+            destination.push_back({operation_length, opcode});
         }
     }
 }
 
 /**
- * Compute the exact unit-cost edit distance represented by one packed CIGAR
- * and its already-clipped sequence windows. Generic M operations must be
+ * @brief Compute the exact unit-cost distance represented by a packed CIGAR.
+ *
+ * The distance is evaluated against the already-clipped sequence windows.
+ * Generic M operations must be
  * compared against the underlying alphabet ranks because the block aligner
- * deliberately projects both Eq and X to M at its public CIGAR boundary.
+ * deliberately projects exact matches and mismatches to the generic match
+ * opcode at its public CIGAR boundary.
+ *
+ * @tparam strand_reversed Whether query ranks are decoded in reverse-complement
+ * order.
+ * @tparam alphabet Logical alphabet shared by both sequence views.
+ * @param query_seq Lazy query view; it is decoded only for the selected window.
+ * @param target_seq Lazy target view; it is decoded only for the selected window.
+ * @param query_start Inclusive query offset.
+ * @param query_end Exclusive query offset.
+ * @param target_start Inclusive target offset.
+ * @param target_end Exclusive target offset.
+ * @param cigar Packed CIGAR words covering both selected windows exactly.
+ * @return Unit-cost edit distance represented by the CIGAR and sequence ranks.
+ * @throws std::invalid_argument If either window is inverted.
+ * @throws std::runtime_error If the CIGAR is unsupported or does not cover the
+ * selected windows exactly.
  */
 template <bool strand_reversed,
-          sequence_alphabet Alphabet>
+          sequence_alphabet alphabet>
 [[nodiscard]] bioseq::storage::sequence_size_t
 exact_edit_distance_from_packed_cigar(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -107,9 +134,9 @@ exact_edit_distance_from_packed_cigar(
     const std::size_t target_length = target_end - target_start;
     std::vector<std::uint8_t> query_ranks(query_length);
     std::vector<std::uint8_t> target_ranks(target_length);
-    query_seq.template to_encoded_into<strand_reversed, false>(
+    query_seq.template copy_ranks<strand_reversed, false>(
         std::span<std::uint8_t>(query_ranks), query_start, query_end);
-    target_seq.template to_encoded_into<false, false>(
+    target_seq.template copy_ranks<false, false>(
         std::span<std::uint8_t>(target_ranks), target_start, target_end);
 
     std::size_t query_position = 0;
@@ -118,12 +145,13 @@ exact_edit_distance_from_packed_cigar(
     for (const std::uint32_t packed : cigar) {
         const std::uint32_t opcode = packed & 0xfU;
         const std::size_t length = static_cast<std::size_t>(packed >> 4);
-        const bool consumes_query = opcode == CIGAR_MATCH
-            || opcode == CIGAR_EQ || opcode == CIGAR_X
-            || opcode == CIGAR_INS;
-        const bool consumes_target = opcode == CIGAR_MATCH
-            || opcode == CIGAR_EQ || opcode == CIGAR_X
-            || opcode == CIGAR_DEL || opcode == CIGAR_N_SKIP;
+        const bool consumes_query = opcode == cigar_match_opcode
+            || opcode == cigar_equal_opcode || opcode == cigar_mismatch_opcode
+            || opcode == cigar_insertion_opcode;
+        const bool consumes_target = opcode == cigar_match_opcode
+            || opcode == cigar_equal_opcode || opcode == cigar_mismatch_opcode
+            || opcode == cigar_deletion_opcode
+            || opcode == cigar_reference_skip_opcode;
         if ((consumes_query
                 && (query_position > query_length
                     || length > query_length - query_position))
@@ -135,18 +163,18 @@ exact_edit_distance_from_packed_cigar(
         }
 
         switch (opcode) {
-            case CIGAR_MATCH:
+            case cigar_match_opcode:
                 for (std::size_t offset = 0; offset < length; ++offset) {
                     edits += query_ranks[query_position + offset]
                         != target_ranks[target_position + offset];
                 }
                 break;
-            case CIGAR_EQ:
+            case cigar_equal_opcode:
                 break;
-            case CIGAR_X:
-            case CIGAR_INS:
-            case CIGAR_DEL:
-            case CIGAR_N_SKIP:
+            case cigar_mismatch_opcode:
+            case cigar_insertion_opcode:
+            case cigar_deletion_opcode:
+            case cigar_reference_skip_opcode:
                 edits += static_cast<bioseq::storage::sequence_size_t>(length);
                 break;
             default:
@@ -164,13 +192,19 @@ exact_edit_distance_from_packed_cigar(
 }
 
 /**
- * Append the implicit seed span shared by alignment backends. The common
+ * @brief Append the implicit seed span shared by alignment backends.
+ *
+ * The common
  * prefix is represented as a match, followed by the query-only insertion or
  * target-only deletion tail. Adjacent equal opcodes retain the canonical
  * run-length merge used by append_cigar().
+ *
+ * @param cigar Destination operation vector.
+ * @param query_length Number of query symbols in the seed span.
+ * @param target_length Number of target symbols in the seed span.
  */
 inline void append_implicit_seed_cigar(
-    std::vector<CigarOp>& cigar,
+    std::vector<cigar_operation>& cigar,
     std::size_t query_length,
     std::size_t target_length)
 {
@@ -179,7 +213,7 @@ inline void append_implicit_seed_cigar(
         if (!cigar.empty() && cigar.back().opcode == opcode) {
             cigar.back().length += static_cast<std::uint32_t>(length);
         } else {
-            cigar.push_back(CigarOp{
+            cigar.push_back(cigar_operation{
                 .length = static_cast<std::uint32_t>(length),
                 .opcode = opcode,
             });
@@ -187,29 +221,42 @@ inline void append_implicit_seed_cigar(
     };
 
     const std::size_t common_length = std::min(query_length, target_length);
-    append_op(CIGAR_MATCH, common_length);
+    append_op(cigar_match_opcode, common_length);
     if (query_length > common_length) {
-        append_op(CIGAR_INS, query_length - common_length);
+        append_op(cigar_insertion_opcode, query_length - common_length);
     } else if (target_length > common_length) {
-        append_op(CIGAR_DEL, target_length - common_length);
+        append_op(cigar_deletion_opcode, target_length - common_length);
     }
 }
 
 /**
- * Count the implicit seed alignment of a single-seed region.
+ * @brief Count exact edits in the implicit seed of a single-seed region.
  *
  * Multi-seed regions include the first seed in their first mandatory gap
  * fill. A single-seed region has no such fill, so the seed lies between the
- * independently aligned left and right extensions. A minimizer hash is not
- * a proof that the underlying ranks are equal; exact edit-distance callers
- * must compare this span explicitly.
+ * independently aligned left and right extensions. Equal minimizer hashes do
+ * not establish equal underlying ranks, so exact-distance callers compare the
+ * seed span explicitly.
+ *
+ * @tparam strand_reversed Whether query ranks are decoded in reverse-complement
+ * order.
+ * @tparam alphabet Logical alphabet shared by both sequence views.
+ * @param query_seq Lazy query view.
+ * @param target_seq Lazy target view.
+ * @param query_start Inclusive query offset.
+ * @param query_end Exclusive query offset.
+ * @param target_start Inclusive target offset.
+ * @param target_end Exclusive target offset.
+ * @return Unit-cost edit distance across the implicit seed span.
+ * @throws std::invalid_argument If either window is inverted.
+ * @throws std::out_of_range If either window exceeds its sequence.
  */
 template <bool strand_reversed,
-          sequence_alphabet Alphabet>
+          sequence_alphabet alphabet>
 [[nodiscard]] bioseq::storage::sequence_size_t
 exact_edit_distance_for_implicit_seed(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    bioseq::storage::lazy_sequence_view<alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -229,11 +276,11 @@ exact_edit_distance_for_implicit_seed(
     const std::size_t common_length = std::min(query_length, target_length);
     std::vector<std::uint8_t> query_ranks(common_length);
     std::vector<std::uint8_t> target_ranks(common_length);
-    query_seq.template to_encoded_into<strand_reversed, false>(
+    query_seq.template copy_ranks<strand_reversed, false>(
         std::span<std::uint8_t>(query_ranks),
         query_start,
         query_start + common_length);
-    target_seq.template to_encoded_into<false, false>(
+    target_seq.template copy_ranks<false, false>(
         std::span<std::uint8_t>(target_ranks),
         target_start,
         target_start + common_length);
@@ -249,15 +296,20 @@ exact_edit_distance_for_implicit_seed(
     return edits;
 }
 
-/// Format a CigarOp vector as a human-readable string (e.g. "58M1I33M").
-[[nodiscard]] inline std::string format_cigar(const std::vector<CigarOp>& cigar)
+/**
+ * @brief Format operations as a human-readable CIGAR string.
+ * @param cigar Run-length operations to render.
+ * @return Text such as `58M1I33M`; unknown opcodes render as `?`.
+ */
+[[nodiscard]] inline std::string format_cigar(
+    const std::vector<cigar_operation>& cigar)
 {
     std::string cigar_string;
     cigar_string.reserve(cigar.size() * 5);
     for (const auto& cigar_op : cigar) {
         cigar_string += std::to_string(cigar_op.length);
-        if (cigar_op.opcode < CIGAR_OP_CHAR.size()) {
-            cigar_string += CIGAR_OP_CHAR[cigar_op.opcode];
+        if (cigar_op.opcode < cigar_opcode_characters.size()) {
+            cigar_string += cigar_opcode_characters[cigar_op.opcode];
         } else {
             cigar_string += '?';
         }
@@ -265,101 +317,117 @@ exact_edit_distance_for_implicit_seed(
     return cigar_string;
 }
 
-// ============================================================================
-// Block CIGAR — run-length-encoded CIGAR for block aligner traceback
-// ============================================================================
-
-enum class BlockCigarOp : uint8_t {
-    Sentinel = 0, M = 1, Eq = 2, X = 3, I = 4, D = 5
+/** @brief Traceback operation retained by the block aligner. */
+enum class block_cigar_operation : std::uint8_t {
+    sentinel = 0,
+    match = 1,
+    equal = 2,
+    mismatch = 3,
+    insertion = 4,
+    deletion = 5,
 };
 
-struct BlockCigarEntry {
-    BlockCigarOp op = BlockCigarOp::Sentinel;
-    size_t len = 0;
+/** @brief One run in a block-aligner traceback. */
+struct block_cigar_entry {
+    /** @brief Traceback operation for this run. */
+    block_cigar_operation operation = block_cigar_operation::sentinel;
+    /** @brief Number of traceback steps in this run. */
+    std::size_t length = 0;
 };
 
-/// Run-length-encoded CIGAR. Operations are added in reverse during
-/// traceback, then reversed at the end.
-class BlockCigar {
+/**
+ * @brief Compact run-length traceback buffer for the block aligner.
+ *
+ * Operations are appended in traceback order and reversed once traceback
+ * completes. Storage grows only with emitted runs, preserving the bounded
+ * working set expected by short block alignments.
+ */
+class block_cigar {
 public:
-    BlockCigar() = default;
+    /** @brief Construct an empty buffer without reserving traceback storage. */
+    block_cigar() = default;
 
-    explicit BlockCigar(size_t max_len) {
-        // Reserve without value-init: the previous implementation
-        // value-initialised every entry up to `max_len + 5`, which for a
-        // 200x200 alignment is ~16 KB of zero-fill per call. The actual
-        // working set is `idx_..len()` which is bounded by the number of
-        // backtrack steps the aligner emits — usually <100. resize() is
-        // still needed because indexed writes happen inside `add(...)`,
-        // but we keep the working set tight by sentinelling only the
-        // first slot the algorithm reads on the very first add(...) call.
-        ops_.reserve(max_len + 5);
+    /**
+     * @brief Construct an empty buffer with a traceback capacity hint.
+     * @param maximum_length Upper-bound hint for traceback steps.
+     */
+    explicit block_cigar(std::size_t maximum_length) {
+        // Reserve capacity without initializing every potential traceback
+        // entry. Only the sentinel is materialized until runs are appended.
+        ops_.reserve(maximum_length + 5);
         ops_.resize(1);
-        ops_[0] = BlockCigarEntry{BlockCigarOp::Sentinel, 0};
-        idx_   = 1;
+        ops_[0] = block_cigar_entry{};
+        size_ = 1;
     }
 
+    /** @brief Reset the buffer while retaining allocated capacity. */
     void clear() {
-        // Reset to a single sentinel; downstream `add(...)` calls
-        // resize ops_ implicitly via push-style growth.
         ops_.resize(1);
-        ops_[0] = BlockCigarEntry{BlockCigarOp::Sentinel, 0};
-        idx_ = 1;
+        ops_[0] = block_cigar_entry{};
+        size_ = 1;
     }
 
-    void add(BlockCigarOp op) {
-        // Grow the working set as the backtrack writes new entries; the
-        // initial slot is the sentinel set by the constructor / clear()
-        // path. Without this, ops_[idx_] is past-end and writing it is UB.
-        if (op != ops_[idx_ - 1].op) {
-            if (idx_ >= ops_.size()) {
-                ops_.resize(idx_ + 1, BlockCigarEntry{BlockCigarOp::Sentinel, 0});
+    /**
+     * @brief Append one traceback step, coalescing an equal preceding run.
+     * @param operation Operation emitted by the current traceback step.
+     */
+    void add(block_cigar_operation operation) {
+        if (operation != ops_[size_ - 1].operation) {
+            if (size_ >= ops_.size()) {
+                ops_.resize(size_ + 1, block_cigar_entry{});
             }
-            ++idx_;
-            ops_[idx_ - 1].op = op;
-            ops_[idx_ - 1].len = 1;
+            ++size_;
+            ops_[size_ - 1].operation = operation;
+            ops_[size_ - 1].length = 1;
         } else {
-            ops_[idx_ - 1].len += 1;
+            ops_[size_ - 1].length += 1;
         }
     }
 
+    /** @brief Reverse accumulated runs from traceback order to forward order. */
     void reverse() {
         std::reverse(ops_.begin() + 1,
-                     ops_.begin() + static_cast<ptrdiff_t>(idx_));
+                     ops_.begin() + static_cast<std::ptrdiff_t>(size_));
     }
 
-    [[nodiscard]] size_t len() const { return idx_ - 1; }
+    /** @return Number of operation runs, excluding the sentinel. */
+    [[nodiscard]] std::size_t size() const noexcept { return size_ - 1; }
 
-    /// Convert to packed CIGAR format: vector of (length << 4 | opcode).
-    [[nodiscard]] std::vector<uint32_t> to_packed_cigar() const {
-        std::vector<uint32_t> result;
-        result.reserve(len());
-        for (size_t k = 1; k < idx_; ++k) {
+    /**
+     * @brief Convert traceback runs to canonical KSW2 packed CIGAR words.
+     * @return Vector of `(length << 4) | opcode` words.
+     */
+    [[nodiscard]] std::vector<std::uint32_t> to_packed_cigar() const {
+        std::vector<std::uint32_t> result;
+        result.reserve(size());
+        for (std::size_t k = 1; k < size_; ++k) {
             const auto& entry = ops_[k];
-            uint32_t opcode = 0;
-            switch (entry.op) {
-                case BlockCigarOp::M:
-                case BlockCigarOp::Eq:
-                case BlockCigarOp::X:  opcode = CIGAR_MATCH; break;
-                case BlockCigarOp::I:  opcode = CIGAR_INS; break;
-                case BlockCigarOp::D:  opcode = CIGAR_DEL; break;
+            std::uint32_t opcode = 0;
+            switch (entry.operation) {
+                case block_cigar_operation::match:
+                case block_cigar_operation::equal:
+                case block_cigar_operation::mismatch:
+                    opcode = cigar_match_opcode;
+                    break;
+                case block_cigar_operation::insertion:
+                    opcode = cigar_insertion_opcode;
+                    break;
+                case block_cigar_operation::deletion:
+                    opcode = cigar_deletion_opcode;
+                    break;
                 default: continue;
             }
-            // Traceback keeps Eq/X distinct so callers can inspect exact
-            // edit semantics, while the pipeline ABI deliberately projects
-            // both to minimap/KSW's generic M opcode.  Coalesce after that
-            // projection: otherwise an Eq/X boundary becomes adjacent M
-            // records (for example 32M1M), unlike the upstream `cigar()`
-            // result and unlike canonical packed CIGAR.
+            // Traceback keeps equality and mismatch distinct, while the
+            // packed boundary projects both to the generic match opcode.
             push_packed_cigar(
-                result, opcode, static_cast<uint32_t>(entry.len));
+                result, opcode, static_cast<std::uint32_t>(entry.length));
         }
         return result;
     }
 
 private:
-    std::vector<BlockCigarEntry> ops_;
-    size_t idx_ = 1;
+    std::vector<block_cigar_entry> ops_;
+    std::size_t size_ = 1;
 };
 
 }  // namespace bioseq::simd

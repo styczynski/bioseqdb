@@ -50,18 +50,12 @@ def _public_projection(
         if not isinstance(raw_entity, dict):
             raise RuntimeError(f"{source}: entities[{index}] must be an object")
         public = raw_entity.get("public_documentation")
-        transitional = raw_entity.get("typed_install_owner")
-        if not isinstance(public, bool) or not isinstance(transitional, bool):
+        if not isinstance(public, bool):
             raise RuntimeError(
-                f"{source}: entities[{index}] visibility/owner fields must be booleans"
+                f"{source}: entities[{index}].public_documentation must be boolean"
             )
         if not public:
             continue
-        if transitional:
-            raise RuntimeError(
-                f"{source}: transitional install owner at entities[{index}] "
-                "cannot be website-public"
-            )
         stable_identity = raw_entity.get(
             "stable_identity", raw_entity.get("identity")
         )
@@ -135,14 +129,8 @@ def _verify_c_symbol_naming(manifest: dict[str, Any], source: Path) -> None:
 def verify(args: argparse.Namespace) -> str:
     install_sql = args.install_sql.resolve(strict=True)
     manifest_path = args.manifest.resolve(strict=True)
-    source_golden = args.source_golden.resolve(strict=True)
     identity_golden_path = args.public_identities.resolve(strict=True)
 
-    if install_sql == source_golden:
-        raise RuntimeError(
-            "packaged install SQL resolves to the checked source golden; "
-            "the generated build artifact must be package authority"
-        )
     if install_sql.name != "bioseq--1.0.sql":
         raise RuntimeError(
             f"generated install artifact has unexpected name: {install_sql.name}"
@@ -230,11 +218,6 @@ def verify(args: argparse.Namespace) -> str:
             f"{manifest_path}: script_sha256 does not match {install_sql}"
         )
     _verify_c_symbol_naming(manifest, manifest_path)
-    if source_golden.read_bytes() != sql_bytes:
-        raise RuntimeError(
-            "generated install SQL differs from the checked stale-golden oracle"
-        )
-
     derived_stable, derived_installed = _public_projection(
         manifest, manifest_path
     )
@@ -302,7 +285,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--install-sql", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--source-golden", type=Path, required=True)
     parser.add_argument("--public-identities", type=Path, required=True)
     parser.add_argument("--stamp", type=Path, required=True)
     return parser.parse_args()

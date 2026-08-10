@@ -3,7 +3,7 @@
  * @brief Focused semantic tests for the clean-room scalar GateKeeper oracle.
  */
 #include "common.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>
@@ -15,7 +15,7 @@
 #include <span>
 #include <vector>
 
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;
 import bioseq.sequences.edit_distance_threshold;

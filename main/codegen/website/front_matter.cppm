@@ -26,7 +26,7 @@ import bioseq.codegen.support;
 // are fatal so authoring errors surface before any cluster starts.
 namespace bioseq::codegen::website {
 
-struct front_matter_split {
+struct front_matter_sections {
     std::string yaml;
     std::string body;
     std::size_t body_first_line{};
@@ -145,7 +145,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
 }  // namespace
 
 /// @brief Splits a leading `---` fenced YAML block from the Markdown body.
-[[nodiscard]] front_matter_split split_front_matter(std::string_view source) {
+[[nodiscard]] front_matter_sections separate_front_matter(std::string_view source) {
     if (!source.starts_with("---")) {
         throw std::runtime_error("tutorial is missing its --- frontmatter block");
     }
@@ -158,7 +158,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
         throw std::runtime_error("tutorial frontmatter block is not terminated by ---");
     }
     const std::size_t body_begin = source.find('\n', closing + 1);
-    front_matter_split split;
+    front_matter_sections split;
     split.yaml = std::string(source.substr(first_newline + 1, closing - first_newline - 1));
     if (body_begin != std::string_view::npos) {
         split.body = std::string(source.substr(body_begin + 1));
@@ -180,7 +180,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
 /// @param path Source path for diagnostics.
 /// @param default_slug Snake-case filename stem used when slug is omitted.
 /// @return The validated metadata; throws on any unknown or missing key.
-[[nodiscard]] tutorial_metadata parse_front_matter(
+[[nodiscard]] tutorial_metadata parse_tutorial_metadata(
     std::string_view yaml,
     std::string_view path,
     std::string_view default_slug) {
@@ -242,7 +242,7 @@ void validate_yaml_strict(const std::string& yaml, std::string_view path) {
         throw std::runtime_error("tutorial frontmatter requires title, description, "
                                  "order, and keywords: " + std::string(path));
     }
-    if (trim(metadata.description).empty()) {
+    if (trim_ascii_whitespace(metadata.description).empty()) {
         throw std::runtime_error("tutorial description must not be empty: "
                                  + std::string(path));
     }
@@ -334,7 +334,7 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
 /// @param yaml Raw site.yaml text.
 /// @param path Source path for diagnostics.
 /// @return The validated, closed-schema configuration.
-[[nodiscard]] site_configuration parse_site_config(
+[[nodiscard]] site_configuration parse_site_configuration(
     std::string_view yaml, std::string_view path) {
     const std::string yaml_text(yaml);
     validate_yaml_strict(yaml_text, path);

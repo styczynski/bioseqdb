@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -20,9 +20,9 @@ import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
-namespace alignment_exec = bioseq::pg::alignment_execution;
+namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
-void destroy_alignment_frame(AlignmentExecutorFrame* frame) noexcept
+void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
 		return;
@@ -40,11 +40,11 @@ namespace {
 
 void alignment_frame_context_cleanup(void* argument)
 {
-	auto* token = static_cast<AlignmentFrameCleanupToken*>(argument);
+	auto* token = static_cast<alignment_frame_cleanup_token*>(argument);
 	if (token == nullptr || token->frame == nullptr) {
 		return;
 	}
-	AlignmentExecutorFrame* frame = token->frame;
+	alignment_executor_frame* frame = token->frame;
 	token->frame = nullptr;
 	frame->cleanup_token = nullptr;
 	retire_escaped_nested_bindings(frame);
@@ -55,16 +55,16 @@ void alignment_frame_context_cleanup(void* argument)
 } // namespace
 
 void ensure_alignment_frame_cleanup(
-		AlignmentExecutorFrame* frame,
+		alignment_executor_frame* frame,
 		EState* estate)
 {
 	if (frame == nullptr || estate == nullptr || estate->es_query_cxt == nullptr
 		|| frame->cleanup_token != nullptr) {
 		return;
 	}
-	auto* token = static_cast<AlignmentFrameCleanupToken*>(
+	auto* token = static_cast<alignment_frame_cleanup_token*>(
 		MemoryContextAllocZero(
-			estate->es_query_cxt, sizeof(AlignmentFrameCleanupToken)));
+			estate->es_query_cxt, sizeof(alignment_frame_cleanup_token)));
 	token->frame = frame;
 	token->callback.func = alignment_frame_context_cleanup;
 	token->callback.arg = token;
@@ -73,7 +73,7 @@ void ensure_alignment_frame_cleanup(
 	frame->cleanup_token = token;
 }
 
-[[nodiscard]] alignment_exec::AlignmentNodeRegistrationHandle
+[[nodiscard]] alignment_exec::alignment_node_registration_handle
 bind_alignment_node_to_starting_frame(
 		EState* estate,
 		std::uint32_t scan_node_id)
@@ -83,7 +83,7 @@ bind_alignment_node_to_starting_frame(
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("bioseq alignment node began outside ExecutorStart")));
 	}
-	AlignmentExecutorFrame* frame = nullptr;
+	alignment_executor_frame* frame = nullptr;
 	if (!alignment_start_in_progress.empty()) {
 		frame = alignment_start_in_progress.back();
 		if (frame == nullptr || frame->query_desc == nullptr
@@ -105,21 +105,21 @@ bind_alignment_node_to_starting_frame(
 		if (frame == nullptr || frame->finished
 			|| alignment_current_run.empty()
 			|| alignment_current_run.back() != frame
-			|| frame->collector_binding.retired
-			|| frame->collector_binding.root == nullptr) {
+			|| frame->collector_binding.is_retired
+			|| frame->collector_binding.root_collector == nullptr) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("bioseq alignment node began outside ExecutorStart")));
 		}
 	}
 	ensure_alignment_frame_cleanup(frame, frame->estate);
-	return alignment_exec::AlignmentNodeRegistrationHandle{
+	return alignment_exec::alignment_node_registration_handle{
 		.binding = &frame->collector_binding,
 		.scan_node_id = scan_node_id,
 	};
 }
 
-void retire_alignment_frame(AlignmentExecutorFrame* frame) noexcept
+void retire_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
 		return;

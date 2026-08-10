@@ -1,4 +1,4 @@
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <atomic>
@@ -514,7 +514,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
             2u * units_per_buffer * sizeof(DestructionProbe);
         const std::uint64_t preallocation_peak =
             logical_sum
-            * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+            * bioseq::parallelism::k_vector_preallocation_headroom_factor;
         auto permit = admission.try_reserve(preallocation_peak);
         REQUIRE(permit.has_value());
         REQUIRE(admission.reserved_bytes() == baseline + preallocation_peak);
@@ -565,7 +565,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
     const auto admit = [&](OwnedU64Vector& owned, std::size_t units) {
         const std::uint64_t logical = units * sizeof(std::uint64_t);
         const std::uint64_t peak = logical
-            * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+            * bioseq::parallelism::k_vector_preallocation_headroom_factor;
         auto permit = admission.try_reserve(peak);
         REQUIRE(permit.has_value());
         owned.permit = std::move(*permit);

@@ -63,7 +63,6 @@ struct guc_profile_projection_row {
 
 struct guc_profile_projection {
     guc_profile profile{guc_profile::production};
-    std::string ledger_sha256;
     std::string registry_content_sha256;
     std::map<std::string, std::string, std::less<>>
         owner_content_sha256;
@@ -169,7 +168,7 @@ inline void render_generated_live_authority(
            << ", \"hooks\": {";
     for (std::size_t index = 0; index < hook_names.size(); ++index) {
         const bool present = live.hook_presence[index];
-        if (present != guc.authority.hooks[index].has_value()) {
+        if (present != guc.hooks[index].has_value()) {
             throw std::runtime_error(
                 "generated live hook presence differs from GUC "
                 "authority for '" + guc.name + "'");
@@ -178,7 +177,7 @@ inline void render_generated_live_authority(
         output << json_string(hook_names[index])
                << ": {\"symbol\": ";
         render_json_optional_string(
-            output, guc.authority.hooks[index]);
+            output, guc.hooks[index]);
         output << ", \"present\": "
                << (present ? "true" : "false")
                << ", \"behavior\": "
@@ -309,15 +308,15 @@ inline void render_generated_live_authority(
         const collected_guc& guc) {
     return guc.reset_plan_cache
         ? plan_cache_assign_hook_name(guc)
-        : hook_argument(guc.authority.hooks[1]);
+        : hook_argument(guc.hooks[1]);
 }
 
 inline void render_hook_arguments(
     std::ostringstream& output,
     const collected_guc& guc) {
-    output << hook_argument(guc.authority.hooks[0]) << ", "
+    output << hook_argument(guc.hooks[0]) << ", "
            << assign_hook_argument(guc) << ", "
-           << hook_argument(guc.authority.hooks[2]);
+           << hook_argument(guc.hooks[2]);
 }
 
 [[nodiscard]] inline std::string registration_function_name(
@@ -410,7 +409,7 @@ inline void render_plan_cache_assign_hook(
             break;
         case guc_kind::enumeration:
             output << "static_cast<int>(" << cell
-                   << ".value()) != new_value;\n";
+                   << ".get_value()) != new_value;\n";
             break;
         case guc_kind::string:
             output
@@ -436,7 +435,7 @@ inline void render_plan_cache_assign_hook(
 inline void render_planner_assertions(
     std::ostringstream& output,
     const collected_guc& guc) {
-    if (guc.name != "bioseq.planner_debug_level") return;
+    if (guc.name != "bioseq.planner.diagnostics.log_level") return;
     static constexpr std::pair<std::string_view, std::string_view>
         levels[] = {
             {"debug5", "DEBUG5"},
@@ -535,7 +534,8 @@ inline void render_primitive_registration(
     output << "    };\n"
            << "    static_assert(std::is_trivially_destructible_v<\n"
            << "        decltype(define_variable)>);\n"
-           << "    ::bioseq::pg_utils::invoke_pg_as_cpp(define_variable);\n"
+           << "    ::bioseq::postgres::support::"
+              "invoke_pg_as_cpp(define_variable);\n"
            << "    complete = true;\n"
            << "}\n\n";
 }
@@ -549,7 +549,8 @@ inline void render_enum_registration(
            << "    using enum_type = "
            << global_cpp_name(guc.enum_cpp_name) << ";\n"
            << "    static const "
-           << "::bioseq::pg_utils::postgres_enum_registration<enum_type>\n"
+           << "::bioseq::postgres::support::"
+              "postgres_enum_registration<enum_type>\n"
            << "        registration{\n"
            << "            .name = " << cpp_string(guc.name) << ",\n"
            << "            .short_description = "
@@ -562,13 +563,14 @@ inline void render_enum_registration(
            << "            .context = " << pg_context(guc.context) << ",\n"
            << "            .flags = " << pg_flags(guc) << ",\n"
            << "            .check_hook = "
-           << hook_argument(guc.authority.hooks[0]) << ",\n"
+           << hook_argument(guc.hooks[0]) << ",\n"
            << "            .assign_hook = "
            << assign_hook_argument(guc) << ",\n"
            << "            .show_hook = "
-           << hook_argument(guc.authority.hooks[2]) << ",\n"
+           << hook_argument(guc.hooks[2]) << ",\n"
            << "        };\n"
-           << "    ::bioseq::pg_utils::guc_registration_access::init(\n"
+           << "    ::bioseq::postgres::support::"
+              "postgres_enum_registration_access::initialize(\n"
            << "        " << global_cpp_name(guc.cpp_qualified_name)
            << ", registration);\n"
            << "}\n\n";
@@ -713,8 +715,10 @@ inline void render_enum_registration(
            << guc.enum_cpp_name << '\0';
     output << guc.reset_plan_cache << '\0'
            << guc.authored_assign_hook.value_or("") << '\0';
-    for (const std::optional<std::string>& hook :
-         guc.authority.hooks) {
+    output << guc.storage_kind << '\0'
+           << guc.feature_predicate << '\0'
+           << guc.enum_default_name << '\0';
+    for (const std::optional<std::string>& hook : guc.hooks) {
         output << hook.value_or("") << '\0';
     }
     for (const std::string& flag : guc.flags) {
@@ -769,7 +773,7 @@ render_primitive_guc_registration_contract_probe(
     std::string_view generated_module_prefix =
         "bioseq.sql.generated",
     std::string_view boundary_module =
-        "bioseq.pg_utils.sql_boundary") {
+        "bioseq.postgres.support.sql_boundary") {
     static constexpr std::string_view owner_order[] = {
         "bioseq",
         "scheduler",
@@ -827,15 +831,14 @@ make_guc_profile_projection(
     }
     guc_profile_projection projection{
         .profile = inventory.profile,
-        .ledger_sha256 = inventory.ledger_sha256,
         .registry_content_sha256 =
-            sha256_hex(package.registry.content),
+            bioseq::common::sha256_hex(package.registry.content),
     };
     for (const rendered_guc_owner_module& owner :
          package.owners) {
         if (!projection.owner_content_sha256.emplace(
                 owner.owner_key,
-                sha256_hex(owner.content)).second) {
+                bioseq::common::sha256_hex(owner.content)).second) {
             throw std::runtime_error(
                 "GUC profile projection duplicates owner '"
                 + owner.owner_key + "'");
@@ -855,7 +858,7 @@ make_guc_profile_projection(
             .owner_key = guc.owner_key,
             .source_module = guc.source_module,
             .source_sha256 = guc.source_sha256,
-            .descriptor_sha256 = sha256_hex(
+            .descriptor_sha256 = bioseq::common::sha256_hex(
                 guc_render_detail::descriptor_signature(guc)),
         });
     }
@@ -864,8 +867,7 @@ make_guc_profile_projection(
 
 [[nodiscard]] inline std::string guc_profile_projection_row_signature(
     const guc_profile_projection_row& row) {
-    std::string result =
-        std::to_string(row.registration_ordinal);
+    std::string result;
     const auto append =
         [&result](std::string_view value) {
             result.push_back('\0');
@@ -887,13 +889,6 @@ make_guc_profile_projection(
         throw std::runtime_error(
             "GUC profile projection delta requires production then "
             "test_indexes");
-    }
-    if (production.ledger_sha256.size() != 64
-        || production.ledger_sha256
-            != test_indexes.ledger_sha256) {
-        throw std::runtime_error(
-            "GUC profile projection delta compared different parity "
-            "ledgers");
     }
     std::map<
         std::string,
@@ -983,8 +978,8 @@ make_guc_profile_projection(
             std::string{owner}, invariant);
     }
     if (proof.added_in_test_indexes
-            != std::vector<std::string>{
-                "bioseq.test_force_paper_index_failure"}
+        != std::vector<std::string>{
+                "bioseq.testing.persisted_index.failure_mode"}
         || !proof.removed_from_test_indexes.empty()
         || !proof.changed_in_test_indexes.empty()
         || proof.owner_descriptor_profile_invariant.at("bioseq")
@@ -1048,10 +1043,6 @@ make_guc_profile_delta_evidence(
         throw std::runtime_error(
             "GUC profile delta proof requires production then test_indexes");
     }
-    if (production.ledger_sha256 != test_indexes.ledger_sha256) {
-        throw std::runtime_error(
-            "GUC profile delta proof compared different parity ledgers");
-    }
     std::map<std::string, const collected_guc*, std::less<>>
         production_by_name;
     std::map<std::string, const collected_guc*, std::less<>>
@@ -1112,8 +1103,8 @@ make_guc_profile_delta_evidence(
             std::string{owner}, invariant);
     }
     if (proof.added_in_test_indexes
-            != std::vector<std::string>{
-                "bioseq.test_force_paper_index_failure"}
+        != std::vector<std::string>{
+                "bioseq.testing.persisted_index.failure_mode"}
         || !proof.removed_from_test_indexes.empty()
         || !proof.changed_in_test_indexes.empty()
         || proof.owner_descriptor_profile_invariant.at("bioseq")
@@ -1155,15 +1146,6 @@ make_guc_profile_delta_evidence(
                 inventory.profile)) << ",\n"
            << "    \"description_authority\": "
            << "\"cleaned_doxygen_only\",\n"
-           << "    \"parity_ledger\": {\n"
-           << "      \"path\": "
-           << guc_render_detail::json_string(
-                detail::manifest_repository_path(
-                    inventory.ledger_path,
-                    "guc_generation.parity_ledger.path")) << ",\n"
-           << "      \"sha256\": "
-           << guc_render_detail::json_string(inventory.ledger_sha256)
-           << "\n    },\n"
            << "    \"registration_count\": "
            << inventory.gucs.size() << ",\n"
            << "    \"registry_module\": "
@@ -1171,7 +1153,7 @@ make_guc_profile_delta_evidence(
            << ",\n"
            << "    \"registry_content_sha256\": "
            << guc_render_detail::json_string(
-                sha256_hex(package.registry.content)) << ",\n"
+                bioseq::common::sha256_hex(package.registry.content)) << ",\n"
            << "    \"owner_facets\": [\n";
     for (std::size_t index = 0; index < package.owners.size(); ++index) {
         const rendered_guc_owner_module& owner = package.owners[index];
@@ -1183,7 +1165,7 @@ make_guc_profile_delta_evidence(
                << guc_render_detail::json_string(owner.module_name)
                << ", \"content_sha256\": "
                << guc_render_detail::json_string(
-                    sha256_hex(owner.content))
+                    bioseq::common::sha256_hex(owner.content))
                << ", \"registration_count\": "
                << owner.guc_names.size() << "}"
                << (index + 1 == package.owners.size() ? "\n" : ",\n");
@@ -1278,114 +1260,96 @@ make_guc_profile_delta_evidence(
            << "    \"registrations\": [\n";
     for (std::size_t index = 0; index < inventory.gucs.size(); ++index) {
         const collected_guc& guc = inventory.gucs[index];
-        const collected_guc_authority& authority = guc.authority;
-        output << "      {\"authority\": {"
-               << "\"registration_ordinal\": "
+        output << "      {\"registration_ordinal\": "
                << guc.registration_ordinal
-               << ", \"source_owner\": "
-               << guc_render_detail::json_string(
-                    authority.source_owner)
                << ", \"name\": "
                << guc_render_detail::json_string(guc.name)
-               << ", \"group\": "
-               << guc_render_detail::json_string(authority.group)
+               << ", \"owner\": "
+               << guc_render_detail::json_string(guc.owner_key)
                << ", \"member\": "
                << guc_render_detail::json_string(guc.member)
                << ", \"kind\": "
                << guc_render_detail::json_string(
                     guc_kind_name(guc.kind))
+               << ", \"cpp_storage\": "
+               << guc_render_detail::json_string(
+                    guc.cpp_qualified_name)
                << ", \"storage_kind\": "
                << guc_render_detail::json_string(
-                    authority.storage_kind)
-               << ", \"storage\": "
+                    guc.storage_kind)
+               << ", \"source_module\": "
                << guc_render_detail::json_string(
-                    authority.legacy_storage)
+                    guc.source_module)
+               << ", \"source_path\": "
+               << guc_render_detail::json_string(
+                    detail::manifest_repository_path(
+                        guc.source_path,
+                        "guc_generation.registrations.source_path"))
+               << ", \"source_sha256\": "
+               << guc_render_detail::json_string(
+                    guc.source_sha256)
                << ", \"default_expression\": "
                << guc_render_detail::json_string(
-                    authority.default_expression)
+                    guc.default_expression)
                << ", \"minimum_expression\": ";
         guc_render_detail::render_json_optional_string(
-            output, authority.minimum_expression);
+            output, guc.minimum_expression);
         output << ", \"maximum_expression\": ";
         guc_render_detail::render_json_optional_string(
-            output, authority.maximum_expression);
+            output, guc.maximum_expression);
         output << ", \"context\": "
-               << guc_render_detail::json_string(authority.context)
+               << guc_render_detail::json_string(guc.context)
                << ", \"flags\": ";
         guc_render_detail::render_json_string_array(
-            output, authority.flags);
+            output, guc.flags);
         output << ", \"unit\": ";
         guc_render_detail::render_json_optional_string(
-            output, authority.unit);
+            output, guc.unit);
         output << ", \"hooks\": [";
         for (std::size_t hook_index = 0;
-             hook_index < authority.hooks.size();
+             hook_index < guc.hooks.size();
              ++hook_index) {
             if (hook_index != 0) output << ", ";
             guc_render_detail::render_json_optional_string(
-                output, authority.hooks[hook_index]);
+                output, guc.hooks[hook_index]);
         }
         output << "], \"feature_predicate\": "
                << guc_render_detail::json_string(
-                    authority.feature_predicate)
-               << ", \"profiles\": ";
-        guc_render_detail::render_json_string_array(
-            output, authority.profiles);
-        output << ", \"default_semantic\": ";
-        guc_render_detail::render_json_optional_string(
-            output, authority.default_semantic);
+                    guc.feature_predicate)
+               << ", \"enum_default\": ";
+        if (guc.enum_default_name.empty()) {
+            output << "null";
+        } else {
+            output << guc_render_detail::json_string(
+                guc.enum_default_name);
+        }
         output << ", "
-               << "\"enum_rows_name_wire_hidden_feature_alias_of\": [";
+               << "\"enum_rows_name_wire_condition_alias_hidden_compiled\": [";
         for (std::size_t value_index = 0;
-             value_index < authority.enum_values.size();
+             value_index < guc.enum_values.size();
              ++value_index) {
-            const collected_guc_authority_enum_value& value =
-                authority.enum_values[value_index];
+            const collected_guc_enum_value& value =
+                guc.enum_values[value_index];
             if (value_index != 0) output << ", ";
             output << "["
                    << guc_render_detail::json_string(value.name)
                    << ", "
                    << guc_render_detail::json_string(
                         value.wire_expression)
-                   << ", " << (value.hidden ? "1" : "0")
                    << ", "
                    << guc_render_detail::json_string(
-                        value.feature_predicate)
+                        value.active_condition)
                    << ", ";
             guc_render_detail::render_json_optional_string(
                 output, value.alias_of);
-            output << "]";
-        }
-        output << "], \"enum_omissions_name_wire\": [";
-        for (std::size_t omission_index = 0;
-             omission_index < authority.omissions.size();
-             ++omission_index) {
-            const collected_guc_authority_omission& omission =
-                authority.omissions[omission_index];
-            if (omission_index != 0) output << ", ";
-            output << "["
-                   << guc_render_detail::json_string(omission.name)
-                   << ", "
-                   << guc_render_detail::json_string(
-                        omission.wire_expression)
+            output << ", " << (value.hidden ? "true" : "false")
+                   << ", " << (value.compiled ? "true" : "false")
                    << "]";
         }
-        output << "]}, \"generated_live_authority\": ";
+        output << "], \"generated_live_authority\": ";
         guc_render_detail::render_generated_live_authority(
             output, guc);
-        output << ", \"candidate\": {\"owner\": "
-               << guc_render_detail::json_string(authority.group)
-               << ", \"cpp_storage\": "
-               << guc_render_detail::json_string(
-                    guc.cpp_qualified_name)
-               << ", \"storage_kind\": "
-               << guc_render_detail::json_string(
-                    authority.storage_kind)
-               << ", \"source_module\": "
-               << guc_render_detail::json_string(guc.source_module)
-               << ", \"source_sha256\": "
-               << guc_render_detail::json_string(guc.source_sha256)
-               << "}}"
+        output << "}"
                << (index + 1 == inventory.gucs.size() ? "\n" : ",\n");
     }
     output << "    ]\n"

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_compression.cppm
+ * compression.cppm
  *
  * Compression / decompression dispatch over the configured compression
  * algorithms (none, pglz, optional lz4, optional zstd). The pglz path
@@ -12,7 +12,17 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 #if HAVE_CITUS_LIBLZ4
 #include <lz4.h>
@@ -22,141 +32,335 @@ module;
 #include <zstd.h>
 #endif
 
-export module bioseq.storage.compression;
+export module bioseq.postgres.storage.compression;
 
-import bioseq.common.mlogging;
-import bioseq.config;       // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
-import bioseq.pg_utils;
+import bioseq.common.checked_arithmetic;
+import bioseq.common.logging;
+import bioseq.postgres.configuration.core;
+import bioseq.postgres.support;
 
 /*
  * Header prepended to a pglz-compressed buffer; combines the standard
- * varlena length header with a separate rawsize field so decompression
+ * varlena length header with a separate raw-size field so decompression
  * can allocate the right output buffer without external metadata.
  */
-struct BioseqColumnCompressHeader
+struct compressed_column_header
 {
 	int32_t vl_len_;              /* varlena header (do not touch directly!) */
-	int32_t rawsize;
+	int32_t raw_size;
 };
 
-/* Inline helpers replacing the original token-pasting macros. They accept
- * the raw varlena byte pointer (typically StringInfo->data) and reinterpret
- * its prefix as BioseqColumnCompressHeader. */
+static_assert(std::is_standard_layout_v<compressed_column_header>);
+static_assert(sizeof(compressed_column_header) == 8);
+static_assert(offsetof(compressed_column_header, vl_len_) == 0);
+static_assert(offsetof(compressed_column_header, raw_size) == 4);
+static_assert(sizeof(decltype(compressed_column_header::vl_len_)) == 4);
+static_assert(sizeof(decltype(compressed_column_header::raw_size)) == 4);
+inline constexpr uint64_t pglz_maximum_output_overhead = 4;
+static_assert(
+	static_cast<uint64_t>(PGLZ_MAX_OUTPUT(0))
+	== pglz_maximum_output_overhead);
 
-[[gnu::always_inline]] inline int32_t bioseq_column_compress_hdrsz()
+[[noreturn]] static void
+raise_compression_size_error(const char* operation, uint64_t byte_count)
 {
-	return static_cast<int32_t>(sizeof(BioseqColumnCompressHeader));
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+		{
+			.message = fmt::format(
+				"cannot {} a column buffer of {} bytes",
+				operation,
+				byte_count),
+			.detail = fmt::format(
+				"PostgreSQL StringInfo allocations are limited to {} bytes.",
+				static_cast<uint64_t>(MaxAllocSize - 1)),
+		});
 }
 
-[[gnu::always_inline]] [[nodiscard]] inline int32_t bioseq_column_compress_rawsize(const char* compressed_buffer)
+[[noreturn]] static void
+raise_corrupt_compressed_buffer(std::string detail)
 {
-	return reinterpret_cast<const BioseqColumnCompressHeader *>(compressed_buffer)->rawsize;
+	bioseq::postgres::support::raise_sql_error(
+		ERRCODE_DATA_CORRUPTED,
+		{
+			.message = "cannot decompress the column buffer",
+			.detail = std::move(detail),
+		});
 }
 
-[[gnu::always_inline]] [[nodiscard]] inline char* bioseq_column_compress_rawdata(char* compressed_buffer)
+static void
+validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
 {
-	return compressed_buffer + bioseq_column_compress_hdrsz();
+	if (input_buffer == nullptr || input_buffer->data == nullptr
+		|| input_buffer->len < 0)
+	{
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INVALID_PARAMETER_VALUE,
+			{
+				.message = "cannot compress an invalid column input buffer",
+			});
+	}
+	if (output_buffer == nullptr || output_buffer->data == nullptr
+		|| output_buffer->maxlen <= 0)
+	{
+		bioseq::postgres::support::raise_sql_error(
+			ERRCODE_INVALID_PARAMETER_VALUE,
+			{
+				.message = "cannot write to an invalid column compression buffer",
+			});
+	}
 }
 
-[[gnu::always_inline]] inline void bioseq_column_compress_set_rawsize(char* compressed_buffer, int32_t raw_size)
+[[nodiscard]] static int
+validate_string_info_size(uint64_t byte_count, const char* operation)
 {
-	reinterpret_cast<BioseqColumnCompressHeader *>(compressed_buffer)->rawsize = raw_size;
+	const uint64_t maximum_string_info_size = std::min<uint64_t>(
+		static_cast<uint64_t>((std::numeric_limits<int>::max)()),
+		static_cast<uint64_t>(MaxAllocSize - 1));
+	if (byte_count > maximum_string_info_size)
+	{
+		raise_compression_size_error(operation, byte_count);
+	}
+	return static_cast<int>(byte_count);
+}
+
+/**
+ * Parse the SQL spelling of a supported compression algorithm.
+ *
+ * @param[in] value Null-terminated PostgreSQL name buffer.
+ * @return Parsed algorithm, or `invalid` for an unsupported spelling.
+ */
+export [[nodiscard]] bioseq::compression_algorithm
+parse_compression_algorithm(const char* value) noexcept
+{
+	Assert(value != nullptr);
+	if (std::strncmp(value, "none", NAMEDATALEN) == 0)
+		return bioseq::compression_algorithm::none;
+	if (std::strncmp(value, "pglz", NAMEDATALEN) == 0)
+		return bioseq::compression_algorithm::pglz;
+#if HAVE_CITUS_LIBLZ4
+	if (std::strncmp(value, "lz4", NAMEDATALEN) == 0)
+		return bioseq::compression_algorithm::lz4;
+#endif
+#if HAVE_LIBZSTD
+	if (std::strncmp(value, "zstd", NAMEDATALEN) == 0)
+		return bioseq::compression_algorithm::zstd;
+#endif
+	return bioseq::compression_algorithm::invalid;
+}
+
+/**
+ * Return the SQL spelling of a supported compression algorithm.
+ *
+ * @return Static spelling, or null for a sentinel value.
+ */
+export [[nodiscard]] const char*
+compression_algorithm_name(bioseq::compression_algorithm value) noexcept
+{
+	switch (value)
+	{
+		case bioseq::compression_algorithm::none:
+			return "none";
+		case bioseq::compression_algorithm::pglz:
+			return "pglz";
+#if HAVE_CITUS_LIBLZ4
+		case bioseq::compression_algorithm::lz4:
+			return "lz4";
+#endif
+#if HAVE_LIBZSTD
+		case bioseq::compression_algorithm::zstd:
+			return "zstd";
+#endif
+		case bioseq::compression_algorithm::invalid:
+		case bioseq::compression_algorithm::count:
+			return nullptr;
+	}
+	return nullptr;
+}
+
+// These hot-path helpers interpret the prefix of a StringInfo byte buffer.
+[[gnu::always_inline]] [[nodiscard]] inline constexpr int32_t
+compressed_column_header_size() noexcept
+{
+	return static_cast<int32_t>(sizeof(compressed_column_header));
+}
+
+[[gnu::always_inline]] [[nodiscard]] inline int32_t
+compressed_column_raw_size(const char* compressed_buffer) noexcept
+{
+	return reinterpret_cast<const compressed_column_header*>(compressed_buffer)->raw_size;
+}
+
+[[gnu::always_inline]] [[nodiscard]] inline char*
+compressed_column_payload(char* compressed_buffer) noexcept
+{
+	return compressed_buffer + compressed_column_header_size();
+}
+
+[[gnu::always_inline]] inline void
+set_compressed_column_raw_size(char* compressed_buffer, int32_t raw_size) noexcept
+{
+	reinterpret_cast<compressed_column_header*>(compressed_buffer)->raw_size = raw_size;
 }
 
 
-/*
- * CompressBuffer compresses the given buffer with the given compression type
- * outputBuffer enlarged to contain compressed data. The function returns true
- * if compression is done, returns false if compression is not done.
- * outputBuffer is valid only if the function returns true.
+/** @brief Compresses a serialized column buffer when the algorithm is effective.
+ * @param input_buffer Source bytes.
+ * @param output_buffer Destination scratch buffer, valid on success.
+ * @param compression_algorithm Configured compression algorithm.
+ * @param compression_level Algorithm-specific level.
+ * @return True when compressed bytes were produced.
  */
 export bool
-CompressBuffer(StringInfo inputBuffer,
-			   StringInfo outputBuffer,
-			   CompressionType compressionType,
-			   int compressionLevel)
+compress_column_buffer(StringInfo input_buffer,
+			   StringInfo output_buffer,
+			   bioseq::compression_algorithm compression_algorithm,
+			   int compression_level)
 {
-	switch (compressionType)
+	validate_compression_buffers(input_buffer, output_buffer);
+
+	switch (compression_algorithm)
 	{
 #if HAVE_CITUS_LIBLZ4
-		case COMPRESSION_LZ4:
+		case bioseq::compression_algorithm::lz4:
 		{
-			int maximumLength = LZ4_compressBound(inputBuffer->len);
+			const int maximum_length = LZ4_compressBound(input_buffer->len);
+			if (maximum_length <= 0)
+			{
+				raise_compression_size_error(
+					"compress", static_cast<uint64_t>(input_buffer->len));
+			}
+			const int output_capacity = validate_string_info_size(
+				static_cast<uint64_t>(maximum_length), "compress");
 
-			resetStringInfo(outputBuffer);
-			enlargeStringInfo(outputBuffer, maximumLength);
+			resetStringInfo(output_buffer);
+			enlargeStringInfo(output_buffer, output_capacity);
 
-			int compressedSize = LZ4_compress_default(inputBuffer->data,
-													  outputBuffer->data,
-													  inputBuffer->len, maximumLength);
-			if (compressedSize <= 0)
+			const int compressed_size = LZ4_compress_default(
+				input_buffer->data,
+				output_buffer->data,
+				input_buffer->len,
+				output_capacity);
+			if (compressed_size <= 0)
 			{
 				bioseq_log_pg(DEBUG1,
 					 "failure in LZ4_compress_default, input size={}, output size={}",
-					 inputBuffer->len, maximumLength);
+					 input_buffer->len, maximum_length);
 				return false;
 			}
 
-			bioseq_log_pg(DEBUG1, "compressed {} bytes to {} bytes", inputBuffer->len,
-				 compressedSize);
+			bioseq_log_pg(DEBUG1, "compressed {} bytes to {} bytes", input_buffer->len,
+				 compressed_size);
 
-			outputBuffer->len = compressedSize;
+			output_buffer->len = compressed_size;
+			output_buffer->data[output_buffer->len] = '\0';
 			return true;
 		}
 #endif
 
 #if HAVE_LIBZSTD
-		case COMPRESSION_ZSTD:
+		case bioseq::compression_algorithm::zstd:
 		{
-			int maximumLength = ZSTD_compressBound(inputBuffer->len);
-
-			resetStringInfo(outputBuffer);
-			enlargeStringInfo(outputBuffer, maximumLength);
-
-			size_t compressedSize = ZSTD_compress(outputBuffer->data,
-												  outputBuffer->maxlen,
-												  inputBuffer->data,
-												  inputBuffer->len,
-												  compressionLevel);
-
-			if (ZSTD_isError(compressedSize))
+			const size_t maximum_length = ZSTD_compressBound(input_buffer->len);
+			if (ZSTD_isError(maximum_length))
 			{
-				bioseq_report<WRN, PG>().msg("zstd compression failed").detail("{}", ZSTD_getErrorName(compressedSize));
+				bioseq_report<logging_level::warning, logging_target::postgres>()
+					.with_message("zstd compression bound failed")
+					.with_detail("{}", ZSTD_getErrorName(maximum_length));
 				return false;
 			}
+			const int output_capacity = validate_string_info_size(
+				static_cast<uint64_t>(maximum_length), "compress");
 
-			outputBuffer->len = compressedSize;
+			resetStringInfo(output_buffer);
+			enlargeStringInfo(output_buffer, output_capacity);
+
+			const size_t compressed_size = ZSTD_compress(output_buffer->data,
+											  static_cast<size_t>(output_capacity),
+											  input_buffer->data,
+												  input_buffer->len,
+												  compression_level);
+
+			if (ZSTD_isError(compressed_size))
+			{
+				bioseq_report<logging_level::warning, logging_target::postgres>().with_message("zstd compression failed").with_detail("{}", ZSTD_getErrorName(compressed_size));
+				return false;
+			}
+			if (compressed_size > static_cast<size_t>(output_capacity))
+			{
+				raise_compression_size_error(
+					"store compressed", static_cast<uint64_t>(compressed_size));
+			}
+
+			output_buffer->len = static_cast<int>(compressed_size);
+			output_buffer->data[output_buffer->len] = '\0';
 			return true;
 		}
 #endif
 
-		case COMPRESSION_PG_LZ:
+		case bioseq::compression_algorithm::pglz:
 		{
-			uint64_t maximumLength = PGLZ_MAX_OUTPUT(inputBuffer->len) +
-								   bioseq_column_compress_hdrsz();
-			bool compressionResult = false;
+			const std::optional<uint64_t> maximum_payload_length =
+				bioseq::common::checked_add(
+					static_cast<uint64_t>(input_buffer->len),
+					pglz_maximum_output_overhead);
+			if (!maximum_payload_length.has_value()
+				|| *maximum_payload_length
+					> static_cast<uint64_t>((std::numeric_limits<int>::max)()))
+			{
+				raise_compression_size_error(
+					"compress", static_cast<uint64_t>(input_buffer->len));
+			}
+			const int pglz_payload_capacity =
+				static_cast<int>(*maximum_payload_length);
+			const std::optional<uint64_t> maximum_length =
+				bioseq::common::checked_add(
+					static_cast<uint64_t>(pglz_payload_capacity),
+					static_cast<uint64_t>(compressed_column_header_size()));
+			if (!maximum_length.has_value())
+			{
+				raise_compression_size_error(
+					"compress", static_cast<uint64_t>(input_buffer->len));
+			}
+			const int output_capacity =
+				validate_string_info_size(*maximum_length, "compress");
+			bool compression_result = false;
 
-			resetStringInfo(outputBuffer);
-			enlargeStringInfo(outputBuffer, maximumLength);
+			resetStringInfo(output_buffer);
+			enlargeStringInfo(output_buffer, output_capacity);
 
-			int32_t compressedByteCount = pglz_compress(inputBuffer->data,
-													  inputBuffer->len,
-													  bioseq_column_compress_rawdata(outputBuffer->data),
+			const int32_t compressed_byte_count = pglz_compress(input_buffer->data,
+													  input_buffer->len,
+											  compressed_column_payload(output_buffer->data),
 													  PGLZ_strategy_always);
-			if (compressedByteCount >= 0)
+			if (compressed_byte_count >= 0)
 			{
-				bioseq_column_compress_set_rawsize(outputBuffer->data, inputBuffer->len);
-				SET_VARSIZE_COMPRESSED(outputBuffer->data,
-									   compressedByteCount + bioseq_column_compress_hdrsz());
-				compressionResult = true;
+				const std::optional<uint64_t> total_compressed_size =
+					bioseq::common::checked_add(
+						static_cast<uint64_t>(compressed_byte_count),
+						static_cast<uint64_t>(compressed_column_header_size()));
+				if (!total_compressed_size.has_value()
+					|| *total_compressed_size
+						> static_cast<uint64_t>(output_capacity))
+				{
+					raise_compression_size_error(
+						"compress", static_cast<uint64_t>(input_buffer->len));
+				}
+				set_compressed_column_raw_size(
+					output_buffer->data,
+					static_cast<int32_t>(input_buffer->len));
+				SET_VARSIZE_COMPRESSED(output_buffer->data,
+					static_cast<int32_t>(*total_compressed_size));
+				compression_result = true;
 			}
 
-			if (compressionResult)
+			if (compression_result)
 			{
-				outputBuffer->len = VARSIZE(outputBuffer->data);
+				output_buffer->len = VARSIZE(output_buffer->data);
+				output_buffer->data[output_buffer->len] = '\0';
 			}
 
-			return compressionResult;
+			return compression_result;
 		}
 
 		default:
@@ -167,103 +371,188 @@ CompressBuffer(StringInfo inputBuffer,
 }
 
 
-/*
- * DecompressBuffer decompresses the given buffer with the given compression
- * type. This function returns the buffer as-is when no compression is applied.
+/** @brief Decompresses serialized column bytes.
+ * @return The input buffer for `none`, otherwise a newly allocated buffer.
  */
 export StringInfo
-DecompressBuffer(StringInfo buffer,
-				 CompressionType compressionType,
-				 uint64_t decompressedSize)
+decompress_column_buffer(StringInfo buffer,
+					 bioseq::compression_algorithm compression_algorithm,
+					 uint64_t decompressed_size)
 {
-	switch (compressionType)
+	if (compression_algorithm != bioseq::compression_algorithm::none
+		&& (buffer == nullptr || buffer->data == nullptr || buffer->len < 0))
 	{
-		case COMPRESSION_NONE:
+		raise_corrupt_compressed_buffer(
+			"The compressed input does not contain a valid byte buffer.");
+	}
+
+	switch (compression_algorithm)
+	{
+		case bioseq::compression_algorithm::none:
 		{
 			return buffer;
 		}
 
 #if HAVE_CITUS_LIBLZ4
-		case COMPRESSION_LZ4:
+		case bioseq::compression_algorithm::lz4:
 		{
-			StringInfo decompressedBuffer = makeStringInfo();
-			enlargeStringInfo(decompressedBuffer, decompressedSize);
+			const int expected_size =
+				validate_string_info_size(decompressed_size, "decompress");
+			StringInfo decompressed_buffer = makeStringInfo();
+			enlargeStringInfo(decompressed_buffer, expected_size);
 
-			int lz4DecompressSize = LZ4_decompress_safe(buffer->data,
-														decompressedBuffer->data,
-														buffer->len,
-														decompressedSize);
+			const int lz4_decompressed_size = LZ4_decompress_safe(
+				buffer->data,
+				decompressed_buffer->data,
+				buffer->len,
+				expected_size);
 
-			if (lz4DecompressSize != decompressedSize)
+			if (lz4_decompressed_size != expected_size)
 			{
-				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", decompressedSize, lz4DecompressSize);
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"Expected {} bytes, but received {} bytes",
+						expected_size,
+						lz4_decompressed_size));
 			}
 
-			decompressedBuffer->len = decompressedSize;
+			decompressed_buffer->len = expected_size;
+			decompressed_buffer->data[decompressed_buffer->len] = '\0';
 
-			return decompressedBuffer;
+			return decompressed_buffer;
 		}
 #endif
 
 #if HAVE_LIBZSTD
-		case COMPRESSION_ZSTD:
+		case bioseq::compression_algorithm::zstd:
 		{
-			StringInfo decompressedBuffer = makeStringInfo();
-			enlargeStringInfo(decompressedBuffer, decompressedSize);
+			const int expected_size =
+				validate_string_info_size(decompressed_size, "decompress");
+			StringInfo decompressed_buffer = makeStringInfo();
+			enlargeStringInfo(decompressed_buffer, expected_size);
 
-			size_t zstdDecompressSize = ZSTD_decompress(decompressedBuffer->data,
-														decompressedSize,
-														buffer->data,
-														buffer->len);
-			if (ZSTD_isError(zstdDecompressSize))
+			const size_t zstd_decompress_size = ZSTD_decompress(
+				decompressed_buffer->data,
+				static_cast<size_t>(expected_size),
+				buffer->data,
+				static_cast<size_t>(buffer->len));
+			if (ZSTD_isError(zstd_decompress_size))
 			{
-				bioseq_report<ERR, PG>().msg("zstd decompression failed").detail("{}", ZSTD_getErrorName(zstdDecompressSize));
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"zstd decompression failed: {}",
+						ZSTD_getErrorName(zstd_decompress_size)));
 			}
 
-			if (zstdDecompressSize != decompressedSize)
+			if (zstd_decompress_size != static_cast<size_t>(expected_size))
 			{
-				bioseq_report<ERR, PG>().msg("unexpected decompressed size").detail("Expected {}, received {}", decompressedSize, zstdDecompressSize);
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"Expected {} bytes, but received {} bytes",
+						expected_size,
+						zstd_decompress_size));
 			}
 
-			decompressedBuffer->len = decompressedSize;
+			decompressed_buffer->len = expected_size;
+			decompressed_buffer->data[decompressed_buffer->len] = '\0';
 
-			return decompressedBuffer;
+			return decompressed_buffer;
 		}
 #endif
 
-		case COMPRESSION_PG_LZ:
+		case bioseq::compression_algorithm::pglz:
 		{
-			uint32_t compressedDataSize = VARSIZE(buffer->data) - bioseq_column_compress_hdrsz();
-			uint32_t decompressedDataSize = bioseq_column_compress_rawsize(buffer->data);
-
-			if (compressedDataSize + bioseq_column_compress_hdrsz() != buffer->len)
+			if (buffer == nullptr || buffer->data == nullptr
+				|| buffer->len < compressed_column_header_size())
 			{
-				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", compressedDataSize, buffer->len);
+					raise_corrupt_compressed_buffer(
+					"The PGLZ payload is shorter than its 8-byte header.");
+			}
+			if (!VARATT_IS_4B_C(buffer->data))
+			{
+				raise_corrupt_compressed_buffer(
+					"The PGLZ payload does not have a compressed 4-byte "
+					"varlena header.");
 			}
 
-			char *decompressedData = make1<char>(decompressedDataSize);
-
-			int32_t decompressedByteCount = pglz_decompress(bioseq_column_compress_rawdata(buffer->data),
-														  compressedDataSize,
-														  decompressedData,
-														  decompressedDataSize, true);
-
-			if (decompressedByteCount < 0)
+			const uint32_t encoded_size = VARSIZE(buffer->data);
+			if (encoded_size
+				< static_cast<uint32_t>(compressed_column_header_size())
+				|| encoded_size != static_cast<uint32_t>(buffer->len))
 			{
-				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("compressed data is corrupted");
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"The PGLZ header declares {} bytes, but the input "
+						"contains {} bytes.",
+						encoded_size,
+						buffer->len));
 			}
 
-			StringInfo decompressedBuffer = make0<StringInfoData>();
-			decompressedBuffer->data = decompressedData;
-			decompressedBuffer->len = decompressedDataSize;
-			decompressedBuffer->maxlen = decompressedDataSize;
+			const int32_t stored_raw_size =
+				compressed_column_raw_size(buffer->data);
+			if (stored_raw_size < 0
+				|| static_cast<uint64_t>(stored_raw_size) != decompressed_size)
+			{
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"The PGLZ header declares a raw size of {}, but {} "
+						"bytes were requested.",
+						stored_raw_size,
+						decompressed_size));
+			}
+			const int decompressed_data_size =
+				validate_string_info_size(decompressed_size, "decompress");
+			const uint32_t compressed_data_size =
+				encoded_size
+				- static_cast<uint32_t>(compressed_column_header_size());
+			if (compressed_data_size
+				> static_cast<uint32_t>((std::numeric_limits<int32_t>::max)()))
+			{
+				raise_corrupt_compressed_buffer(
+					"The PGLZ payload exceeds the decoder's signed size range.");
+			}
 
-			return decompressedBuffer;
+			const size_t allocation_size =
+				static_cast<size_t>(decompressed_data_size) + 1;
+			char *decompressed_data =
+				bioseq::postgres::support::allocate_zeroed_storage<char>(
+					allocation_size);
+
+			const int32_t decompressed_byte_count = pglz_decompress(
+				compressed_column_payload(buffer->data),
+				static_cast<int32_t>(compressed_data_size),
+				decompressed_data,
+				static_cast<int32_t>(decompressed_data_size),
+				true);
+
+			if (decompressed_byte_count != decompressed_data_size)
+			{
+				raise_corrupt_compressed_buffer(
+					fmt::format(
+						"Expected {} bytes, but the PGLZ decoder produced {} bytes.",
+						decompressed_data_size,
+						decompressed_byte_count));
+			}
+
+			StringInfo decompressed_buffer =
+				bioseq::postgres::support::allocate_zeroed_object<StringInfoData>();
+			decompressed_buffer->data = decompressed_data;
+			decompressed_buffer->len = decompressed_data_size;
+			decompressed_buffer->maxlen = decompressed_data_size + 1;
+			decompressed_buffer->data[decompressed_buffer->len] = '\0';
+
+			return decompressed_buffer;
 		}
 
 		default:
 		{
-			bioseq_log<ERR, PG>( "unexpected compression type: {}", compressionType);
+			bioseq::postgres::support::raise_sql_error(
+				ERRCODE_INVALID_PARAMETER_VALUE,
+				{
+					.message = fmt::format(
+						"cannot decompress an unsupported compression type {}",
+						static_cast<int>(compression_algorithm)),
+				});
 		}
 	}
 }

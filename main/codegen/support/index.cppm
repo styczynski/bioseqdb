@@ -1,6 +1,6 @@
 export module bioseq.codegen.support;
 
 export import :diagnostics;
-export import :text;
-export import :artifact_store;
-export import :sha256;
+export import :source_text;
+export import :artifact_io;
+export import bioseq.common.hashing;

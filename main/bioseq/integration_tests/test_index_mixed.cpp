@@ -1,7 +1,7 @@
 // DOC0279 §16.2 — one batch with BOTH indexed and unindexed rows (the query_key/rowno
 // silent-failure class, §15). Indexed rows go through the assemble path, unindexed rows
 // fall back to recompute, in the same scan.
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <algorithm>
 #include <set>
 #include <string>

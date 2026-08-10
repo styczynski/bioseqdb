@@ -39,16 +39,20 @@ import :call_context;
 import :error_boundary;
 import :owning_values;
 
-export namespace bioseq::pg_utils {
+export namespace bioseq::postgres::support {
 
-class sql_boundary_conversion_error final : public std::runtime_error {
+/** Invalid conversion between a PostgreSQL Datum and an owning C++ value. */
+class scalar_conversion_error final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-namespace detail {
+}  // namespace bioseq::postgres::support
 
-inline constexpr std::size_t maximum_text_payload =
+export namespace bioseq::postgres::support::detail {
+
+/** Largest payload representable by a PostgreSQL varlena allocation. */
+inline constexpr std::size_t maximum_varlena_payload_size =
     static_cast<std::size_t>(MaxAllocSize - VARHDRSZ)
         < static_cast<std::size_t>(
               std::numeric_limits<int>::max() - VARHDRSZ)
@@ -56,27 +60,28 @@ inline constexpr std::size_t maximum_text_payload =
     : static_cast<std::size_t>(
           std::numeric_limits<int>::max() - VARHDRSZ);
 
-inline void require_sql_argument(
+/** Validate that an fmgr call contains one zero-based argument position. */
+inline void require_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
+        int argument_index) {
     if (call == nullptr) {
-        throw sql_boundary_conversion_error{
+        throw scalar_conversion_error{
             "generated SQL boundary received a null call frame"};
     }
-    if (zero_based_index < 0
-        || zero_based_index >= static_cast<int>(call->nargs)) {
-        throw sql_boundary_conversion_error{
+    if (argument_index < 0
+        || argument_index >= static_cast<int>(call->nargs)) {
+        throw scalar_conversion_error{
             "generated SQL boundary argument index is out of range"};
     }
 }
 
-template<class T>
-struct sql_scalar_conversion;
+/** Datum codec specialized for each supported scalar C++ type. */
+template<class scalar_type>
+struct scalar_codec;
 
+/** Codec for PostgreSQL boolean Datums. */
 template<>
-struct sql_scalar_conversion<bool> final {
-    static constexpr const char* key = "bool/by_value";
-
+struct scalar_codec<bool> final {
     [[nodiscard]] static bool read(Datum value) noexcept {
         return DatumGetBool(value);
     }
@@ -86,10 +91,9 @@ struct sql_scalar_conversion<bool> final {
     }
 };
 
+/** Codec for PostgreSQL int2 Datums. */
 template<>
-struct sql_scalar_conversion<std::int16_t> final {
-    static constexpr const char* key = "int16/by_value";
-
+struct scalar_codec<std::int16_t> final {
     [[nodiscard]] static std::int16_t read(Datum value) noexcept {
         return DatumGetInt16(value);
     }
@@ -99,10 +103,9 @@ struct sql_scalar_conversion<std::int16_t> final {
     }
 };
 
+/** Codec for PostgreSQL int4 Datums. */
 template<>
-struct sql_scalar_conversion<std::int32_t> final {
-    static constexpr const char* key = "int32/by_value";
-
+struct scalar_codec<std::int32_t> final {
     [[nodiscard]] static std::int32_t read(Datum value) noexcept {
         return DatumGetInt32(value);
     }
@@ -112,10 +115,9 @@ struct sql_scalar_conversion<std::int32_t> final {
     }
 };
 
+/** Codec for PostgreSQL int8 Datums. */
 template<>
-struct sql_scalar_conversion<std::int64_t> final {
-    static constexpr const char* key = "int64/by_value";
-
+struct scalar_codec<std::int64_t> final {
     [[nodiscard]] static std::int64_t read(Datum value) noexcept {
         return DatumGetInt64(value);
     }
@@ -125,10 +127,9 @@ struct sql_scalar_conversion<std::int64_t> final {
     }
 };
 
+/** Codec for PostgreSQL float4 Datums. */
 template<>
-struct sql_scalar_conversion<float> final {
-    static constexpr const char* key = "float32/by_value";
-
+struct scalar_codec<float> final {
     [[nodiscard]] static float read(Datum value) noexcept {
         return DatumGetFloat4(value);
     }
@@ -138,10 +139,9 @@ struct sql_scalar_conversion<float> final {
     }
 };
 
+/** Codec for PostgreSQL float8 Datums. */
 template<>
-struct sql_scalar_conversion<double> final {
-    static constexpr const char* key = "float64/by_value";
-
+struct scalar_codec<double> final {
     [[nodiscard]] static double read(Datum value) noexcept {
         return DatumGetFloat8(value);
     }
@@ -151,10 +151,9 @@ struct sql_scalar_conversion<double> final {
     }
 };
 
+/** Codec for PostgreSQL object-identifier Datums. */
 template<>
-struct sql_scalar_conversion<Oid> final {
-    static constexpr const char* key = "oid/by_value";
-
+struct scalar_codec<Oid> final {
     [[nodiscard]] static Oid read(Datum value) noexcept {
         return DatumGetObjectId(value);
     }
@@ -164,62 +163,60 @@ struct sql_scalar_conversion<Oid> final {
     }
 };
 
+/** Codec preserving finite and infinite PostgreSQL timestamptz values. */
 template<>
-struct sql_scalar_conversion<sql_timestamptz> final {
-    static constexpr const char* key = "timestamptz/owning";
-
-    [[nodiscard]] static sql_timestamptz read(
+struct scalar_codec<timestamp_with_time_zone> final {
+    [[nodiscard]] static timestamp_with_time_zone read(
             Datum value) noexcept {
         const TimestampTz timestamp = DatumGetTimestampTz(value);
         if (TIMESTAMP_IS_NOBEGIN(timestamp)) {
             return {
-                .kind = sql_timestamp_kind::negative_infinity,
+                .kind = timestamp_kind::negative_infinity,
             };
         }
         if (TIMESTAMP_IS_NOEND(timestamp)) {
             return {
-                .kind = sql_timestamp_kind::positive_infinity,
+                .kind = timestamp_kind::positive_infinity,
             };
         }
         return {
-            .kind = sql_timestamp_kind::finite,
-            .postgres_microseconds =
+            .kind = timestamp_kind::finite,
+            .postgres_epoch_microseconds =
                 static_cast<std::int64_t>(timestamp),
         };
     }
 
     [[nodiscard]] static Datum write(
-            const sql_timestamptz& value) {
+            const timestamp_with_time_zone& value) {
         TimestampTz timestamp{};
         switch (value.kind) {
-        case sql_timestamp_kind::finite:
+        case timestamp_kind::finite:
             timestamp =
                 static_cast<TimestampTz>(
-                    value.postgres_microseconds);
+                    value.postgres_epoch_microseconds);
             if (TIMESTAMP_NOT_FINITE(timestamp)) {
-                throw sql_boundary_conversion_error{
+                throw scalar_conversion_error{
                     "finite timestamptz value equals a PostgreSQL "
                     "infinity sentinel"};
             }
             break;
-        case sql_timestamp_kind::negative_infinity:
+        case timestamp_kind::negative_infinity:
             timestamp = DT_NOBEGIN;
             break;
-        case sql_timestamp_kind::positive_infinity:
+        case timestamp_kind::positive_infinity:
             timestamp = DT_NOEND;
             break;
         default:
-            throw sql_boundary_conversion_error{
+            throw scalar_conversion_error{
                 "timestamptz value has an unknown timestamp kind"};
         }
         return TimestampTzGetDatum(timestamp);
     }
 };
 
+/** Identity codec for already encoded Datums. */
 template<>
-struct sql_scalar_conversion<Datum> final {
-    static constexpr const char* key = "datum/opaque";
-
+struct scalar_codec<Datum> final {
     [[nodiscard]] static Datum read(Datum value) noexcept {
         return value;
     }
@@ -229,10 +226,9 @@ struct sql_scalar_conversion<Datum> final {
     }
 };
 
+/** Borrowed C-string Datum codec. */
 template<>
-struct sql_scalar_conversion<const char*> final {
-    static constexpr const char* key = "cstring/borrowed";
-
+struct scalar_codec<const char*> final {
     [[nodiscard]] static const char* read(Datum value) noexcept {
         return DatumGetCString(value);
     }
@@ -242,10 +238,9 @@ struct sql_scalar_conversion<const char*> final {
     }
 };
 
+/** Mutable borrowed C-string Datum codec. */
 template<>
-struct sql_scalar_conversion<char*> final {
-    static constexpr const char* key = "cstring/owned";
-
+struct scalar_codec<char*> final {
     [[nodiscard]] static char* read(Datum value) noexcept {
         return DatumGetCString(value);
     }
@@ -255,10 +250,9 @@ struct sql_scalar_conversion<char*> final {
     }
 };
 
+/** Borrowed PostgreSQL StringInfo Datum codec. */
 template<>
-struct sql_scalar_conversion<StringInfo> final {
-    static constexpr const char* key = "string_info/borrowed";
-
+struct scalar_codec<StringInfo> final {
     [[nodiscard]] static StringInfo read(Datum value) noexcept {
         return reinterpret_cast<StringInfo>(DatumGetPointer(value));
     }
@@ -268,14 +262,13 @@ struct sql_scalar_conversion<StringInfo> final {
     }
 };
 
-/*
+/**
  * text, varchar, and bytea share PostgreSQL's varlena C representation.
- * Their SQL identity remains distinct in the generated converter registry.
+ * Generated call sites retain their distinct SQL identities when selecting
+ * an owning or borrowed conversion.
  */
 template<>
-struct sql_scalar_conversion<text*> final {
-    static constexpr const char* key = "varlena/borrowed_or_owned";
-
+struct scalar_codec<text*> final {
     [[nodiscard]] static text* read(Datum value) noexcept {
         return reinterpret_cast<text*>(DatumGetPointer(value));
     }
@@ -285,10 +278,9 @@ struct sql_scalar_conversion<text*> final {
     }
 };
 
+/** Borrowed pointer Datum codec for PostgreSQL INTERNAL values. */
 template<>
-struct sql_scalar_conversion<void*> final {
-    static constexpr const char* key = "internal/opaque";
-
+struct scalar_codec<void*> final {
     [[nodiscard]] static void* read(Datum value) noexcept {
         return DatumGetPointer(value);
     }
@@ -298,44 +290,41 @@ struct sql_scalar_conversion<void*> final {
     }
 };
 
+/** Codec for the table access-method handler pseudo-argument marker. */
 template<>
-struct sql_scalar_conversion<table_am_handler_context> final {
-    static constexpr const char* key = "table_am_handler/context";
-
-    [[nodiscard]] static table_am_handler_context read(
+struct scalar_codec<table_access_method_handler> final {
+    [[nodiscard]] static table_access_method_handler read(
             Datum value) noexcept {
         static_cast<void>(value);
         return {};
     }
 
     [[nodiscard]] static Datum write(
-            table_am_handler_context value) noexcept {
+            table_access_method_handler value) noexcept {
         static_cast<void>(value);
         return static_cast<Datum>(0);
     }
 };
 
+/** Codec for the subscripting handler pseudo-argument marker. */
 template<>
-struct sql_scalar_conversion<subscript_handler_context> final {
-    static constexpr const char* key = "subscript_handler/context";
-
-    [[nodiscard]] static subscript_handler_context read(
+struct scalar_codec<subscript_handler> final {
+    [[nodiscard]] static subscript_handler read(
             Datum value) noexcept {
         static_cast<void>(value);
         return {};
     }
 
     [[nodiscard]] static Datum write(
-            subscript_handler_context value) noexcept {
+            subscript_handler value) noexcept {
         static_cast<void>(value);
         return static_cast<Datum>(0);
     }
 };
 
+/** Borrowed table access-method routine pointer codec. */
 template<>
-struct sql_scalar_conversion<const TableAmRoutine*> final {
-    static constexpr const char* key = "table_am_handler/pointer";
-
+struct scalar_codec<const TableAmRoutine*> final {
     [[nodiscard]] static const TableAmRoutine* read(
             Datum value) noexcept {
         return reinterpret_cast<const TableAmRoutine*>(
@@ -348,10 +337,9 @@ struct sql_scalar_conversion<const TableAmRoutine*> final {
     }
 };
 
+/** Codec for PostgreSQL's fixed-width NameData value. */
 template<>
-struct sql_scalar_conversion<NameData> final {
-    static constexpr const char* key = "name/owning";
-
+struct scalar_codec<NameData> final {
     [[nodiscard]] static NameData read(Datum value) noexcept {
         return *DatumGetName(value);
     }
@@ -365,51 +353,58 @@ struct sql_scalar_conversion<NameData> final {
     }
 };
 
-template<class T>
-concept registered_sql_scalar =
-    requires(Datum datum, T value) {
-        { sql_scalar_conversion<T>::key } -> std::convertible_to<const char*>;
-        { sql_scalar_conversion<T>::read(datum) } -> std::same_as<T>;
-        { sql_scalar_conversion<T>::write(value) } -> std::same_as<Datum>;
+/** C++ type with a complete scalar Datum codec. */
+template<class scalar_type>
+concept supported_scalar =
+    requires(Datum datum, scalar_type value) {
+        { scalar_codec<scalar_type>::read(datum) }
+            -> std::same_as<scalar_type>;
+        { scalar_codec<scalar_type>::write(value) }
+            -> std::same_as<Datum>;
     };
 
-template<class T>
+template<class candidate_type>
 struct is_optional : std::false_type {};
 
-template<class T>
-struct is_optional<std::optional<T>> : std::true_type {
-    using value_type = T;
+template<class element_type>
+struct is_optional<std::optional<element_type>> : std::true_type {
+    using value_type = element_type;
 };
 
-template<class T>
-concept registered_optional_sql_scalar =
-    is_optional<T>::value
-    && registered_sql_scalar<typename is_optional<T>::value_type>;
+/** std::optional specialization whose element has a scalar Datum codec. */
+template<class candidate_type>
+concept supported_optional_scalar =
+    is_optional<candidate_type>::value
+    && supported_scalar<
+        typename is_optional<candidate_type>::value_type>;
 
-class packed_text_guard final {
+/** Own a detoasted PostgreSQL text copy when one was allocated. */
+class packed_text_owner final {
 public:
-    packed_text_guard(
+    /** Retain a packed value and whether this owner must free it. */
+    packed_text_owner(
             text* packed,
             bool owns_packed_copy) noexcept
         : packed_{packed},
           owns_packed_copy_{owns_packed_copy} {}
 
-    packed_text_guard(const packed_text_guard&) = delete;
-    packed_text_guard& operator=(const packed_text_guard&) = delete;
+    packed_text_owner(const packed_text_owner&) = delete;
+    packed_text_owner& operator=(const packed_text_owner&) = delete;
 
-    packed_text_guard(packed_text_guard&& other) noexcept
+    packed_text_owner(packed_text_owner&& other) noexcept
         : packed_{std::exchange(other.packed_, nullptr)},
           owns_packed_copy_{
               std::exchange(other.owns_packed_copy_, false)} {}
 
-    packed_text_guard& operator=(packed_text_guard&&) = delete;
+    packed_text_owner& operator=(packed_text_owner&&) = delete;
 
-    ~packed_text_guard() noexcept {
+    ~packed_text_owner() noexcept {
         if (owns_packed_copy_ && packed_ != nullptr) {
             pfree(packed_);
         }
     }
 
+    /** Return the packed PostgreSQL text pointer. */
     [[nodiscard]] text* get() const noexcept {
         return packed_;
     }
@@ -426,10 +421,10 @@ private:
  * PostgreSQL allocation behind invoke_pg_as_cpp ensures that an ERROR is
  * translated before control returns to a scope that owns C++ row values.
  */
-[[nodiscard]] inline Datum encode_sql_text(
+[[nodiscard]] inline Datum encode_text(
         const std::string& value) {
-    if (value.size() > maximum_text_payload) {
-        throw sql_boundary_conversion_error{
+    if (value.size() > maximum_varlena_payload_size) {
+        throw scalar_conversion_error{
             "generated text result exceeds PostgreSQL's allocatable "
             "varlena payload"};
     }
@@ -442,18 +437,20 @@ private:
     return PointerGetDatum(encoded);
 }
 
-}  // namespace detail
+}  // namespace bioseq::postgres::support::detail
+
+export namespace bioseq::postgres::support {
 
 /**
  * Copy one PostgreSQL text Datum into an owning C++ string.
  *
  * DatumGetTextPP is invoked behind the PostgreSQL ERROR bridge with a
  * trivially destructible capture.  If PostgreSQL materializes a packed
- * detoast copy, packed_text_guard frees that copy exactly once after the C++
+ * detoast copy, packed_text_owner frees that copy exactly once after the C++
  * string owns the bytes (including when string construction throws).  An
  * inline source Datum remains borrowed and is never freed here.
  */
-[[nodiscard]] inline std::string copy_text_datum_to_string(
+[[nodiscard]] inline std::string decode_text(
         Datum source) {
     const auto detoast = [source] {
         return DatumGetTextPP(source);
@@ -462,7 +459,7 @@ private:
     text* const packed = invoke_pg_as_cpp(detoast);
     const bool owns_packed_copy =
         static_cast<const void*>(packed) != DatumGetPointer(source);
-    const detail::packed_text_guard packed_owner{
+    const detail::packed_text_owner packed_owner{
         packed, owns_packed_copy};
     return std::string{
         VARDATA_ANY(packed_owner.get()),
@@ -476,11 +473,13 @@ private:
  * PostgreSQL may return either the original array or a detoasted working
  * copy. The guard releases only the latter after the typed owner returns.
  */
-class sql_array_argument_guard final {
+class array_argument final {
 public:
-    sql_array_argument_guard() noexcept = default;
+    /** Construct an empty nullable-array view. */
+    array_argument() noexcept = default;
 
-    sql_array_argument_guard(
+    /** Retain a decoded array and record whether detoasting allocated it. */
+    array_argument(
             Datum source,
             ArrayType* value) noexcept
         : value_{value},
@@ -488,29 +487,31 @@ public:
               static_cast<const void*>(value)
               != DatumGetPointer(source)} {}
 
-    sql_array_argument_guard(
-        const sql_array_argument_guard&) = delete;
-    sql_array_argument_guard& operator=(
-        const sql_array_argument_guard&) = delete;
+    array_argument(
+        const array_argument&) = delete;
+    array_argument& operator=(
+        const array_argument&) = delete;
 
-    sql_array_argument_guard(
-            sql_array_argument_guard&& other) noexcept
+    array_argument(
+            array_argument&& other) noexcept
         : value_{std::exchange(other.value_, nullptr)},
           owns_value_{std::exchange(other.owns_value_, false)} {}
 
-    sql_array_argument_guard& operator=(
-        sql_array_argument_guard&&) = delete;
+    array_argument& operator=(
+        array_argument&&) = delete;
 
-    ~sql_array_argument_guard() noexcept {
+    ~array_argument() noexcept {
         if (owns_value_ && value_ != nullptr) {
             pfree(value_);
         }
     }
 
+    /** Return the decoded non-null array pointer. */
     [[nodiscard]] ArrayType* get() const noexcept {
         return value_;
     }
 
+    /** Return the decoded array or std::nullopt for SQL NULL. */
     [[nodiscard]] std::optional<ArrayType*> optional() const noexcept {
         if (value_ == nullptr) {
             return std::nullopt;
@@ -527,50 +528,54 @@ private:
  * Decode one non-null SQL array and retain its detoast copy for the duration
  * of the generated owner call.
  */
-[[nodiscard]] inline sql_array_argument_guard sql_array_argument(
+[[nodiscard]] inline array_argument read_array_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
             "SQL NULL reached a non-nullable generated array argument"};
     }
-    const Datum source = call->args[zero_based_index].value;
+    const Datum source = call->args[argument_index].value;
     ArrayType* const value = invoke_pg_as_cpp([source] {
         return DatumGetArrayTypeP(source);
     });
-    return sql_array_argument_guard{source, value};
+    return array_argument{source, value};
 }
 
 /**
  * Decode a nullable SQL array while retaining any detoast copy for the
  * duration of the generated owner call.
  */
-[[nodiscard]] inline sql_array_argument_guard sql_nullable_array_argument(
+[[nodiscard]] inline array_argument read_nullable_array_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
         return {};
     }
-    const Datum source = call->args[zero_based_index].value;
+    const Datum source = call->args[argument_index].value;
     ArrayType* const value = invoke_pg_as_cpp([source] {
         return DatumGetArrayTypeP(source);
     });
-    return sql_array_argument_guard{source, value};
+    return array_argument{source, value};
 }
 
-namespace detail {
+}  // namespace bioseq::postgres::support
 
-class palloc_guard final {
+export namespace bioseq::postgres::support::detail {
+
+/** Release one PostgreSQL allocation when this scope exits normally. */
+class palloc_owner final {
 public:
-    explicit palloc_guard(void* value) noexcept
+    /** Take ownership of one palloc allocation. */
+    explicit palloc_owner(void* value) noexcept
         : value_{value} {}
 
-    palloc_guard(const palloc_guard&) = delete;
-    palloc_guard& operator=(const palloc_guard&) = delete;
+    palloc_owner(const palloc_owner&) = delete;
+    palloc_owner& operator=(const palloc_owner&) = delete;
 
-    ~palloc_guard() noexcept {
+    ~palloc_owner() noexcept {
         if (value_ != nullptr) {
             pfree(value_);
         }
@@ -580,17 +585,19 @@ private:
     void* value_;
 };
 
-[[nodiscard]] inline sql_jsonb decode_sql_jsonb(Datum source) {
+/** Copy a PostgreSQL JSONB Datum into canonical owning text. */
+[[nodiscard]] inline jsonb_value decode_jsonb(Datum source) {
     char* const encoded = invoke_pg_as_cpp([source] {
         return DatumGetCString(
             DirectFunctionCall1(jsonb_out, source));
     });
-    const palloc_guard owner{encoded};
-    return sql_jsonb{std::string{encoded}};
+    const palloc_owner owner{encoded};
+    return jsonb_value{std::string{encoded}};
 }
 
-[[nodiscard]] inline Datum encode_sql_jsonb(
-        const sql_jsonb& value) {
+/** Parse canonical owning JSONB text into a PostgreSQL Datum. */
+[[nodiscard]] inline Datum encode_jsonb(
+        const jsonb_value& value) {
     const char* const encoded = value.encoded().c_str();
     return invoke_pg_as_cpp([encoded] {
         return DirectFunctionCall1(
@@ -598,10 +605,11 @@ private:
     });
 }
 
-[[nodiscard]] inline Datum encode_sql_bytea(
-        const sql_bytea& value) {
-    if (value.bytes().size() > maximum_text_payload) {
-        throw sql_boundary_conversion_error{
+/** Copy an owning byte payload into a PostgreSQL BYTEA Datum. */
+[[nodiscard]] inline Datum encode_bytea(
+        const bytea_value& value) {
+    if (value.bytes().size() > maximum_varlena_payload_size) {
+        throw scalar_conversion_error{
             "generated bytea result exceeds PostgreSQL's allocatable "
             "varlena payload"};
     }
@@ -625,28 +633,30 @@ private:
     return PointerGetDatum(encoded);
 }
 
-[[nodiscard]] inline sql_bytea decode_sql_bytea(Datum source) {
+/** Copy a PostgreSQL BYTEA Datum into an owning byte payload. */
+[[nodiscard]] inline bytea_value decode_bytea(Datum source) {
     bytea* const packed = invoke_pg_as_cpp([source] {
         return DatumGetByteaPP(source);
     });
     const bool owns_packed =
         static_cast<const void*>(packed) != DatumGetPointer(source);
-    const palloc_guard owner{
+    const palloc_owner owner{
         owns_packed ? static_cast<void*>(packed) : nullptr};
     const auto* const begin = reinterpret_cast<const std::byte*>(
         VARDATA_ANY(packed));
-    return sql_bytea{
+    return bytea_value{
         std::vector<std::byte>{
             begin,
             begin + VARSIZE_ANY_EXHDR(packed)}};
 }
 
-[[nodiscard]] inline Datum encode_sql_int64_array(
-        const sql_int64_array& value) {
+/** Encode an owning int64 sequence as a one-dimensional bigint array. */
+[[nodiscard]] inline Datum encode_bigint_array(
+        const bigint_array& value) {
     if (value.values().size()
         > static_cast<std::size_t>(
               std::numeric_limits<int>::max())) {
-        throw sql_boundary_conversion_error{
+        throw scalar_conversion_error{
             "generated bigint[] result has too many elements"};
     }
 
@@ -673,363 +683,303 @@ private:
     return PointerGetDatum(encoded);
 }
 
-[[nodiscard]] inline Datum encode_sql_interval(
-        const sql_interval& value) {
+/** Encode PostgreSQL's three-part interval representation. */
+[[nodiscard]] inline Datum encode_interval(
+        const interval_value& value) {
     Interval* const encoded = invoke_pg_as_cpp([value] {
         auto* const result = static_cast<Interval*>(
             palloc(sizeof(Interval)));
-        result->time = value.time;
-        result->day = value.day;
-        result->month = value.month;
+        result->time = value.microseconds;
+        result->day = value.days;
+        result->month = value.months;
         return result;
     });
     return PointerGetDatum(encoded);
 }
 
-}  // namespace detail
+}  // namespace bioseq::postgres::support::detail
 
-template<class T>
-    requires std::same_as<T, sql_jsonb>
-[[nodiscard]] inline T sql_argument(
+export namespace bioseq::postgres::support {
+
+/** Decode one required JSONB argument into an owning value. */
+template<class requested_type>
+    requires std::same_as<requested_type, jsonb_value>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable JSONB argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required JSONB argument"};
     }
-    return detail::decode_sql_jsonb(
-        call->args[zero_based_index].value);
+    return detail::decode_jsonb(call->args[argument_index].value);
 }
 
-template<class T>
-    requires std::same_as<T, std::optional<sql_jsonb>>
-[[nodiscard]] inline T sql_argument(
+/** Decode one nullable JSONB argument. */
+template<class requested_type>
+    requires std::same_as<
+        requested_type,
+        std::optional<jsonb_value>>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        return std::nullopt;
-    }
-    return sql_argument<sql_jsonb>(call, zero_based_index);
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) return std::nullopt;
+    return read_argument<jsonb_value>(call, argument_index);
 }
 
-template<class T>
-    requires std::same_as<T, sql_bytea>
-[[nodiscard]] inline T sql_argument(
+/** Decode one required BYTEA argument into an owning value. */
+template<class requested_type>
+    requires std::same_as<requested_type, bytea_value>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable BYTEA argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required BYTEA argument"};
     }
-    return detail::decode_sql_bytea(
-        call->args[zero_based_index].value);
+    return detail::decode_bytea(call->args[argument_index].value);
 }
 
-template<class T>
-    requires std::same_as<T, std::optional<sql_bytea>>
-[[nodiscard]] inline T sql_argument(
+/** Decode one nullable BYTEA argument. */
+template<class requested_type>
+    requires std::same_as<
+        requested_type,
+        std::optional<bytea_value>>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        return std::nullopt;
-    }
-    return sql_argument<sql_bytea>(call, zero_based_index);
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) return std::nullopt;
+    return read_argument<bytea_value>(call, argument_index);
 }
 
-template<class T>
-    requires std::same_as<T, sql_interval>
-[[nodiscard]] inline T sql_argument(
+/** Decode one required PostgreSQL INTERVAL argument. */
+template<class requested_type>
+    requires std::same_as<requested_type, interval_value>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable INTERVAL argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required INTERVAL argument"};
     }
     const Interval* const interval = DatumGetIntervalP(
-        call->args[zero_based_index].value);
+        call->args[argument_index].value);
     return {
-        .time = interval->time,
-        .day = interval->day,
-        .month = interval->month,
+        .microseconds = interval->time,
+        .days = interval->day,
+        .months = interval->month,
     };
 }
 
-template<class T>
-    requires std::same_as<T, std::optional<sql_interval>>
-[[nodiscard]] inline T sql_argument(
+/** Decode one nullable PostgreSQL INTERVAL argument. */
+template<class requested_type>
+    requires std::same_as<
+        requested_type,
+        std::optional<interval_value>>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        return std::nullopt;
-    }
-    return sql_argument<sql_interval>(call, zero_based_index);
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) return std::nullopt;
+    return read_argument<interval_value>(call, argument_index);
 }
 
-template<class T>
-    requires std::same_as<T, sql_tid>
-[[nodiscard]] inline T sql_argument(
+/** Decode one required PostgreSQL tuple identifier. */
+template<class requested_type>
+    requires std::same_as<requested_type, tuple_identifier>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable TID argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required TID argument"};
     }
     ItemPointer const item = DatumGetItemPointer(
-        call->args[zero_based_index].value);
+        call->args[argument_index].value);
     if (item == nullptr || !ItemPointerIsValid(item)) {
-        throw sql_boundary_conversion_error{
-            "generated TID argument is invalid"};
+        throw scalar_conversion_error{"PostgreSQL TID argument is invalid"};
     }
-    return sql_tid{
+    return {
         .block_number = ItemPointerGetBlockNumber(item),
         .offset_number = ItemPointerGetOffsetNumber(item),
     };
 }
 
-/**
- * Decode one non-null, registered by-value argument from an fmgr call.
- */
-template<class T>
-    requires detail::registered_sql_scalar<T>
-[[nodiscard]] inline T sql_argument(
+/** Decode one required scalar from an fmgr call. */
+template<class scalar_type>
+    requires detail::supported_scalar<scalar_type>
+[[nodiscard]] inline scalar_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable generated argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required scalar argument"};
     }
-    return detail::sql_scalar_conversion<T>::read(
-        call->args[zero_based_index].value);
+    return detail::scalar_codec<scalar_type>::read(
+        call->args[argument_index].value);
 }
 
-/**
- * Decode one nullable argument without inventing a sentinel value.
- */
-template<class T>
-    requires detail::registered_sql_scalar<T>
-[[nodiscard]] inline std::optional<T> sql_argument(
+/** Decode one nullable scalar without inventing a sentinel value. */
+template<class scalar_type>
+    requires detail::supported_scalar<scalar_type>
+[[nodiscard]] inline std::optional<scalar_type> read_argument(
         FunctionCallInfo call,
-        int zero_based_index,
-        std::type_identity<std::optional<T>>) {
+        int argument_index,
+        std::type_identity<std::optional<scalar_type>>) {
     if constexpr (
-            std::same_as<T, table_am_handler_context>
-            || std::same_as<T, subscript_handler_context>) {
-        /*
-         * PostgreSQL declares table-AM and subscripting handlers with one
-         * INTERNAL pseudo-argument but invokes them through OidFunctionCall0.
-         * Preserve those catalog signatures while representing the absent
-         * call-frame value as the handler-specific optional context marker.
-         */
-        if (call != nullptr
-            && zero_based_index == 0
-            && call->nargs == 0) {
+            std::same_as<
+                scalar_type,
+                table_access_method_handler>
+            || std::same_as<scalar_type, subscript_handler>) {
+        // PostgreSQL declares these handlers with one INTERNAL pseudo-argument
+        // but invokes them through OidFunctionCall0.
+        if (call != nullptr && argument_index == 0 && call->nargs == 0) {
             return std::nullopt;
         }
     }
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        return std::nullopt;
-    }
-    return detail::sql_scalar_conversion<T>::read(
-        call->args[zero_based_index].value);
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) return std::nullopt;
+    return detail::scalar_codec<scalar_type>::read(
+        call->args[argument_index].value);
 }
 
-template<class T>
-    requires detail::registered_optional_sql_scalar<T>
-[[nodiscard]] inline T sql_argument(
+/** Decode one supported optional scalar. */
+template<class requested_type>
+    requires detail::supported_optional_scalar<requested_type>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    return sql_argument(
+        int argument_index) {
+    return read_argument(
         call,
-        zero_based_index,
-        std::type_identity<T>{});
+        argument_index,
+        std::type_identity<requested_type>{});
 }
 
-template<class T>
-    requires std::same_as<T, std::string>
-[[nodiscard]] inline T sql_argument(
+/** Decode one required text argument into an owning string. */
+template<class requested_type>
+    requires std::same_as<requested_type, std::string>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        throw sql_boundary_conversion_error{
-            "SQL NULL reached a non-nullable generated text argument"};
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) {
+        throw scalar_conversion_error{
+            "SQL NULL reached a required text argument"};
     }
-    return copy_text_datum_to_string(
-        call->args[zero_based_index].value);
+    return decode_text(call->args[argument_index].value);
 }
 
-template<class T>
-    requires std::same_as<T, std::optional<std::string>>
-[[nodiscard]] inline T sql_argument(
+/** Decode one nullable text argument into an owning string. */
+template<class requested_type>
+    requires std::same_as<
+        requested_type,
+        std::optional<std::string>>
+[[nodiscard]] inline requested_type read_argument(
         FunctionCallInfo call,
-        int zero_based_index) {
-    detail::require_sql_argument(call, zero_based_index);
-    if (call->args[zero_based_index].isnull) {
-        return std::nullopt;
-    }
-    return sql_argument<std::string>(call, zero_based_index);
+        int argument_index) {
+    detail::require_argument(call, argument_index);
+    if (call->args[argument_index].isnull) return std::nullopt;
+    return read_argument<std::string>(call, argument_index);
 }
 
-/**
- * Construct the one injected, non-SQL call-context parameter.
- */
-[[nodiscard]] inline sql_call_context sql_context_argument(
+/** Construct the injected, non-SQL call-context parameter. */
+[[nodiscard]] inline function_call_context read_call_context(
         FunctionCallInfo call) noexcept {
-    return sql_boundary_access::make_context(call);
+    return function_call_context::from_call(call);
 }
 
-/**
- * Encode a registered scalar result into the current fmgr result slot.
- */
-template<class T>
-    requires detail::registered_sql_scalar<std::remove_cvref_t<T>>
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one supported scalar result into the fmgr result slot. */
+template<class scalar_type>
+    requires detail::supported_scalar<
+        std::remove_cvref_t<scalar_type>>
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        T&& value) noexcept(noexcept(
-            detail::sql_scalar_conversion<
-                std::remove_cvref_t<T>>::write(
-                    std::forward<T>(value)))) {
+        scalar_type&& value) noexcept(noexcept(
+            detail::scalar_codec<
+                std::remove_cvref_t<scalar_type>>::write(
+                    std::forward<scalar_type>(value)))) {
     call->isnull = false;
-    return detail::sql_scalar_conversion<
-        std::remove_cvref_t<T>>::write(std::forward<T>(value));
+    return detail::scalar_codec<
+        std::remove_cvref_t<scalar_type>>::write(
+            std::forward<scalar_type>(value));
 }
 
-/**
- * Encode an owning text result. PostgreSQL allocation is bridged so an ERROR
- * cannot skip destruction of the caller's std::string.
- */
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one owning text result through PostgreSQL's error bridge. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         const std::string& value) {
-    const Datum encoded = detail::encode_sql_text(value);
+    const Datum encoded = detail::encode_text(value);
     call->isnull = false;
     return encoded;
 }
 
-/**
- * Return an array allocated by a typed owner.
- */
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Return an ArrayType allocated by a typed owner. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
         ArrayType* value) noexcept {
     call->isnull = false;
     return PointerGetDatum(value);
 }
 
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one owning JSONB result. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        const sql_jsonb& value) {
-    const Datum encoded = detail::encode_sql_jsonb(value);
+        const jsonb_value& value) {
+    const Datum encoded = detail::encode_jsonb(value);
     call->isnull = false;
     return encoded;
 }
 
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one owning BYTEA result. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        const sql_bytea& value) {
-    const Datum encoded = detail::encode_sql_bytea(value);
+        const bytea_value& value) {
+    const Datum encoded = detail::encode_bytea(value);
     call->isnull = false;
     return encoded;
 }
 
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one owning bigint-array result. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        const sql_int64_array& value) {
-    const Datum encoded = detail::encode_sql_int64_array(value);
+        const bigint_array& value) {
+    const Datum encoded = detail::encode_bigint_array(value);
     call->isnull = false;
     return encoded;
 }
 
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode one owning INTERVAL result. */
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        const sql_interval& value) {
-    const Datum encoded = detail::encode_sql_interval(value);
+        const interval_value& value) {
+    const Datum encoded = detail::encode_interval(value);
     call->isnull = false;
     return encoded;
 }
 
-template<class T>
-[[nodiscard]] inline Datum sql_result_to_datum(
+/** Encode a nullable result, setting the fmgr null flag when empty. */
+template<class value_type>
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        const std::optional<T>& value) {
+        const std::optional<value_type>& value) {
     if (!value.has_value()) {
         call->isnull = true;
         return static_cast<Datum>(0);
     }
-    return sql_result_to_datum(call, *value);
+    return encode_result(call, *value);
 }
 
-/**
- * Mark a generated procedure result as SQL void.
- */
-[[nodiscard]] inline Datum sql_void_result(FunctionCallInfo call) noexcept {
+/** Mark a procedure result as SQL void. */
+[[nodiscard]] inline Datum encode_void_result(
+        FunctionCallInfo call) noexcept {
     call->isnull = false;
     return static_cast<Datum>(0);
 }
 
-namespace detail {
-
-static_assert(registered_sql_scalar<bool>);
-static_assert(registered_sql_scalar<std::int16_t>);
-static_assert(registered_sql_scalar<std::int32_t>);
-static_assert(registered_sql_scalar<std::int64_t>);
-static_assert(registered_sql_scalar<float>);
-static_assert(registered_sql_scalar<double>);
-static_assert(registered_sql_scalar<Oid>);
-static_assert(registered_sql_scalar<sql_timestamptz>);
-static_assert(registered_sql_scalar<Datum>);
-static_assert(registered_sql_scalar<const char*>);
-static_assert(registered_sql_scalar<char*>);
-static_assert(registered_sql_scalar<StringInfo>);
-static_assert(registered_sql_scalar<text*>);
-static_assert(registered_sql_scalar<void*>);
-static_assert(registered_sql_scalar<table_am_handler_context>);
-static_assert(registered_sql_scalar<subscript_handler_context>);
-static_assert(registered_sql_scalar<const TableAmRoutine*>);
-static_assert(registered_sql_scalar<NameData>);
-static_assert(is_optional<std::optional<bool>>::value);
-static_assert(!is_optional<bool>::value);
-static_assert(
-    registered_optional_sql_scalar<std::optional<bool>>);
-static_assert(
-    registered_optional_sql_scalar<
-        std::optional<sql_timestamptz>>);
-static_assert(
-    !registered_optional_sql_scalar<std::optional<std::string>>);
-static_assert(
-    maximum_text_payload
-    <= static_cast<std::size_t>(
-        std::numeric_limits<int>::max() - VARHDRSZ));
-static_assert(
-    maximum_text_payload
-    <= static_cast<std::size_t>(MaxAllocSize - VARHDRSZ));
-static_assert(requires(FunctionCallInfo call) {
-    {
-        sql_argument<std::optional<std::string>>(call, 0)
-    } -> std::same_as<std::optional<std::string>>;
-    {
-        sql_argument<std::optional<sql_timestamptz>>(call, 0)
-    } -> std::same_as<std::optional<sql_timestamptz>>;
-    {
-        sql_argument<std::optional<sql_interval>>(call, 0)
-    } -> std::same_as<std::optional<sql_interval>>;
-    {
-        sql_argument<std::optional<sql_bytea>>(call, 0)
-    } -> std::same_as<std::optional<sql_bytea>>;
-    {
-        sql_nullable_array_argument(call, 0).optional()
-    } -> std::same_as<std::optional<ArrayType*>>;
-});
-
-}  // namespace detail
-
-}  // namespace bioseq::pg_utils
+}  // namespace bioseq::postgres::support

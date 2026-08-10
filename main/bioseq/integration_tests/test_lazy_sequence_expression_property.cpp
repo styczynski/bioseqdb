@@ -1,6 +1,6 @@
 // DOC0377 §17.3: deterministic randomized expression-tree properties.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <algorithm>
 #include <array>

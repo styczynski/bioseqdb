@@ -12,56 +12,66 @@ module;
 
 export module bioseq.codegen.namespace_materialization:model;
 
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::namespace_materialization {
 
-inline constexpr std::uint32_t topology_schema_version = 1;
-inline constexpr std::uint32_t artifact_schema_version = 3;
-inline constexpr std::uint32_t publication_schema_version = 1;
-inline constexpr std::string_view generator_version =
+/// Revisions of the stable JSON formats emitted by this generator.
+inline constexpr std::uint32_t topology_format_revision = 1;
+inline constexpr std::uint32_t artifact_format_revision = 3;
+inline constexpr std::uint32_t publication_format_revision = 1;
+
+/// Stable identity written into generated source and metadata.
+inline constexpr std::string_view materialization_generator_identity =
     "bioseq-namespace-materialization-v1";
 
+/// Role played by one independent materialization axis.
 enum class axis_role : std::uint8_t {
     identity,
     shard,
     external,
 };
 
+/// One closed replacement spelling accepted for an axis.
 struct replacement_case {
     std::string label;
     std::string spelling;
     std::uint32_t ordinal{};
 };
 
+/// Compiler-derived declaration bound to a materialization axis.
 struct binding_record {
-    clang_structural::declaration_record declaration;
+    structural_analysis::declaration_record declaration;
     axis_role role{axis_role::identity};
     std::string group;
     std::vector<replacement_case> cases;
 };
 
+/// Cases that select a controlled declaration for one axis group.
 struct selection_clause {
     std::string group;
     std::vector<std::string> accepted_case_labels;
 };
 
+/// Declaration owned by the generated module topology.
 struct owned_declaration {
-    clang_structural::declaration_record declaration;
+    structural_analysis::declaration_record declaration;
     std::string entry_role;
     std::vector<selection_clause> clauses;
     bool generated_api_entry{};
 };
 
+/// Authored namespace boundary and declarations controlled by generation.
 struct materialization_region {
-    clang_structural::module_record source_module;
+    structural_analysis::module_record source_module;
     std::string configured_output_module_name;
-    clang_structural::namespace_record boundary;
-    std::optional<clang_structural::namespace_record> support_island;
+    structural_analysis::namespace_record boundary;
+    std::optional<structural_analysis::namespace_record> support_island;
     std::vector<binding_record> bindings;
     std::vector<owned_declaration> controlled_declarations;
 };
 
+/// Zipped bindings that form one logical materialization axis.
 struct axis_group {
     std::string name;
     axis_role role{axis_role::identity};
@@ -69,6 +79,7 @@ struct axis_group {
     std::vector<std::size_t> binding_indices;
 };
 
+/// Selected case for one axis at one logical coordinate.
 struct axis_case_assignment {
     std::string group;
     axis_role role{axis_role::identity};
@@ -76,6 +87,7 @@ struct axis_case_assignment {
     std::uint32_t case_ordinal{};
 };
 
+/// Stable identity and output location for one materialized specialization.
 struct materialization_coordinate {
     std::uint32_t ordinal{};
     std::vector<axis_case_assignment> assignments;
@@ -85,17 +97,18 @@ struct materialization_coordinate {
     std::string topology_digest;
 };
 
+/// Exact byte replacement against an authenticated source slice.
 struct source_edit {
     std::size_t begin_byte{};
     std::size_t end_byte{};
     std::string replacement;
-    std::string provenance_id;
+    std::string source_identity;
     std::string purpose;
 };
 
 /// A coordinate belongs either to the explicit identity/shard product or to
 /// one policy-supplied external axis. The explicit grammar intentionally does
-/// not expose the external role; Highway is its sole DOC0398 adapter.
+/// not expose the external role; Highway is its sole policy adapter.
 void validate_coordinate_axis_domain(
     const materialization_coordinate& coordinate);
 
@@ -106,11 +119,13 @@ void validate_coordinate_axis_domain(
     std::vector<source_edit> edits,
     std::size_t source_origin = 0u);
 
+/// Whether validation may compile a generated artifact body.
 enum class validation_class : std::uint8_t {
     body_free,
     body_bearing,
 };
 
+/// One generated module or metadata artifact.
 struct materialization_artifact {
     enum class kind : std::uint8_t {
         declaration_probe,
@@ -129,11 +144,11 @@ struct materialization_artifact {
     std::string content_sha256;
 };
 
-/// Actions directly observed by the namespace-materialization generate
-/// command. This ledger must never include later CMake module scans or
-/// compiler invocations, nor infer actions performed by the earlier prepare
-/// command merely because its authenticated outputs were validated.
-struct frontend_action_ledger {
+/// Frontend actions directly observed by the generate command.
+///
+/// Counts exclude later CMake scans and compiler invocations and do not infer
+/// work performed by the earlier prepare command.
+struct frontend_action_counts {
     std::uint32_t dependency_preparation_validations{};
     std::uint32_t canonical_token_slice_scans{};
     std::uint32_t signature_donor_token_slice_scans{};
@@ -150,6 +165,7 @@ struct cmake_compilation_obligations {
     std::uint32_t body_bearing_implementation_units{};
 };
 
+/// Closed logical topology derived from the authored source.
 struct topology_plan {
     materialization_region region;
     std::vector<axis_group> groups;
@@ -159,6 +175,7 @@ struct topology_plan {
     std::string topology_digest;
 };
 
+/// Complete authenticated input to rendering and publication.
 struct generation_plan {
     topology_plan topology;
     std::filesystem::path repository_root;
@@ -169,15 +186,16 @@ struct generation_plan {
     std::string name;
     std::string profile;
     std::vector<std::uint32_t> enabled_ordinals;
-    std::string clang_version;
+    std::string clang_release;
     std::string compilation_signature;
     std::string compiler_module_inventory_sha256;
     std::string previous_manifest_identity;
-    std::vector<clang_structural::translation_unit> declaration_probes;
-    frontend_action_ledger frontend_actions;
+    std::vector<structural_analysis::translation_unit> declaration_probes;
+    frontend_action_counts frontend_actions;
     cmake_compilation_obligations compilation_obligations;
 };
 
+/// Generated artifacts and their sealed metadata.
 struct generation_result {
     std::vector<materialization_artifact> artifacts;
     std::string topology_manifest_json;
@@ -185,6 +203,7 @@ struct generation_result {
     std::string manifest_identity;
 };
 
+/// Closed ownership class used by policy-neutral publication.
 enum class publication_artifact_class : std::uint8_t {
     production_cppm,
     metadata_json,
@@ -214,6 +233,7 @@ struct publication_manifest_request {
     std::vector<publication_artifact> artifacts;
 };
 
+/// Atomic publication request for artifacts and their ownership envelope.
 struct publication_request {
     std::filesystem::path output_root;
     std::filesystem::path artifact_manifest;
@@ -222,6 +242,7 @@ struct publication_request {
     std::vector<publication_artifact> artifacts;
 };
 
+/// Parsed arguments for dependency preparation.
 struct prepare_command_line {
     std::filesystem::path source;
     std::filesystem::path signature_source;
@@ -242,28 +263,34 @@ struct prepare_command_line {
     std::filesystem::path stamp;
 };
 
+/// Test-observable checkpoints in the atomic prepare publication sequence.
 enum class prepare_publication_checkpoint : std::uint8_t {
     after_environment_built,
     after_db_manifest_publish,
     before_completion_stamp,
 };
 
+/// Observer invoked at a prepare-publication checkpoint.
 using prepare_publication_checkpoint_callback =
     std::function<void(prepare_publication_checkpoint)>;
 
+/// Optional observer installed only by the in-module contract partition.
 inline thread_local prepare_publication_checkpoint_callback
     prepare_publication_test_checkpoint_callback;
 
+/// Installs a contract observer for prepare-publication checkpoints.
 inline void set_prepare_publication_test_checkpoint(
     prepare_publication_checkpoint_callback callback) {
     prepare_publication_test_checkpoint_callback =
         std::move(callback);
 }
 
+/// Removes the current contract observer.
 inline void clear_prepare_publication_test_checkpoint() {
     prepare_publication_test_checkpoint_callback = {};
 }
 
+/// Notifies the contract observer when one is installed.
 inline void invoke_prepare_publication_test_checkpoint(
     prepare_publication_checkpoint checkpoint) {
     if (prepare_publication_test_checkpoint_callback) {
@@ -276,6 +303,7 @@ inline void invoke_prepare_publication_test_checkpoint(
 [[nodiscard]] int execute_prepare_contract(
     prepare_command_line command);
 
+/// Parsed arguments for namespace materialization generation.
 struct command_line {
     std::string name;
     std::filesystem::path source;

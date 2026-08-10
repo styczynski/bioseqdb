@@ -3140,8 +3140,6 @@ def _run_pipeline(
             configured("artifacts/support/support-manifest.json"),
             "--stamp",
             configured("artifacts/support/support.stamp"),
-            "--guc-parity-ledger",
-            str(args.guc_parity_ledger),
             "--guc-output-root",
             _configured_variant_path(guc_output_root, variant_root),
             "--guc-active-profile",
@@ -3198,8 +3196,6 @@ def _run_pipeline(
             ),
             "--stamp",
             configured("artifacts/test-support/support.stamp"),
-            "--guc-parity-ledger",
-            str(args.guc_parity_ledger),
             "--guc-output-root",
             _configured_variant_path(guc_output_root, variant_root),
             "--guc-active-profile",
@@ -3314,8 +3310,6 @@ def _run_pipeline(
             configured("artifacts/core/core-descriptor.sha256"),
             "--core-manifest",
             configured("artifacts/core/core-manifest.json"),
-            "--guc-parity-ledger",
-            str(args.guc_parity_ledger),
             "--guc-output-root",
             _configured_variant_path(guc_output_root, variant_root),
             "--guc-active-profile",
@@ -3365,9 +3359,6 @@ def _resolve_run_arguments(args: argparse.Namespace) -> None:
     )
     args.physical_ledger = _require_regular_file(
         args.physical_ledger, "checked physical ledger"
-    )
-    args.guc_parity_ledger = _require_regular_file(
-        args.guc_parity_ledger, "GUC parity ledger"
     )
     args.clang_binary = _require_regular_file(
         args.clang_binary, "configured Clang", True
@@ -5190,7 +5181,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         ),
     )
     run_parser.add_argument("--physical-ledger", type=Path, required=True)
-    run_parser.add_argument("--guc-parity-ledger", type=Path, required=True)
     run_parser.add_argument("--clang-binary", type=Path, required=True)
     run_parser.add_argument("--clang-scan-deps", type=Path, required=True)
     run_parser.add_argument("--llvm-config", type=Path, required=True)

@@ -1,6 +1,6 @@
 /**
  * @file block_aligner.cppm
- * @brief Target-neutral Block Aligner facade.
+ * @brief Exposes target-neutral adaptive-block alignment contracts.
  */
 export module bioseq.alignment.block_aligner;
 

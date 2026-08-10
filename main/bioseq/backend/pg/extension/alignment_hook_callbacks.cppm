@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -22,7 +22,7 @@ import bioseq.postgres.table.alignment_execution;
 namespace bioseq::pg::detail {
 
 namespace {
-namespace alignment_exec = bioseq::pg::alignment_execution;
+namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
 ExecutorStart_hook_type PreviousExecutorStartHook = nullptr;
 ExecutorFinish_hook_type PreviousExecutorFinishHook = nullptr;
@@ -47,20 +47,20 @@ void call_previous_or_standard_executor_finish(QueryDesc* query_desc)
 
 void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 {
-	auto* frame = new AlignmentExecutorFrame{};
+	auto* frame = new alignment_executor_frame{};
 	frame->query_desc = query_desc;
 	if (!alignment_current_run.empty()) {
-		AlignmentExecutorFrame* active = alignment_current_run.back();
+		alignment_executor_frame* active = alignment_current_run.back();
 		frame->nested = true;
-		frame->collector.root = active != nullptr
-			? active->collector.root
+		frame->collector.root_collector = active != nullptr
+			? active->collector.root_collector
 			: nullptr;
 	} else {
-		frame->collector.root = &frame->collector;
+		frame->collector.root_collector = &frame->collector;
 	}
-	frame->collector_binding.root = frame->collector.root;
-	frame->collector_binding.nested_alignment_invoked = frame->nested
-		? &frame->nested_alignment_invoked
+	frame->collector_binding.root_collector = frame->collector.root_collector;
+	frame->collector_binding.nested_executor_invoked = frame->nested
+		? &frame->nested_executor_invoked
 		: nullptr;
 	alignment_start_in_progress.push_back(frame);
 	MemoryContext saved_context = CurrentMemoryContext;
@@ -89,7 +89,7 @@ void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 
 void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 {
-	AlignmentExecutorFrame* frame = find_alignment_frame(query_desc);
+	alignment_executor_frame* frame = find_alignment_frame(query_desc);
 	MemoryContext saved_context = CurrentMemoryContext;
 	PG_TRY();
 	{
@@ -121,7 +121,7 @@ void install_alignment_execution_hooks()
 	ExecutorStart_hook = bioseq_alignment_executor_start;
 	ExecutorRun_hook = bioseq_alignment_executor_run;
 	ExecutorFinish_hook = bioseq_alignment_executor_finish;
-	alignment_exec::install_alignment_node_bind_callback(
+	alignment_exec::install_alignment_node_binder(
 		bind_alignment_node_to_starting_frame);
 }
 

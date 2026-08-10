@@ -15,55 +15,73 @@ module;
 
 export module bioseq.pg_sql_boundary:shape;
 
-export namespace bioseq::pg_utils {
+export namespace bioseq::postgres::support {
 
-enum class sql_result_kind {
-    setof,
-    returns_table,
-    setof_named_out,
+/** PostgreSQL result shape owned by a generated callback. */
+enum class result_shape {
+    set_of,            ///< A SETOF scalar result.
+    table,             ///< A RETURNS TABLE row set.
+    named_output_set,  ///< A SETOF result with named output columns.
 };
 
-template<class T, sql_result_kind Kind>
-class owning_sql_rows final {
+/**
+ * Move-only owning rows for one PostgreSQL result shape.
+ *
+ * @tparam element_type C++ value stored for each PostgreSQL row.
+ * @tparam shape PostgreSQL result convention represented by the container.
+ */
+template<class element_type, result_shape shape>
+class result_rows final {
 public:
-    using value_type = T;
-    using container_type = std::vector<T>;
+    /** Value stored for each result row. */
+    using value_type = element_type;
+    /** Owning storage for the result rows. */
+    using container_type = std::vector<element_type>;
+    /** Mutable row iterator. */
     using iterator = typename container_type::iterator;
+    /** Read-only row iterator. */
     using const_iterator = typename container_type::const_iterator;
 
-    explicit owning_sql_rows(container_type rows)
+    /** Take ownership of all rows. */
+    explicit result_rows(container_type rows)
         noexcept(std::is_nothrow_move_constructible_v<container_type>)
         : rows_{std::move(rows)} {}
 
-    owning_sql_rows(owning_sql_rows&&)
+    result_rows(result_rows&&)
         noexcept(std::is_nothrow_move_constructible_v<container_type>) =
             default;
-    owning_sql_rows& operator=(owning_sql_rows&&)
+    result_rows& operator=(result_rows&&)
         noexcept(std::is_nothrow_move_assignable_v<container_type>) =
             default;
-    owning_sql_rows(const owning_sql_rows&) = delete;
-    owning_sql_rows& operator=(const owning_sql_rows&) = delete;
+    result_rows(const result_rows&) = delete;
+    result_rows& operator=(const result_rows&) = delete;
 
+    /** Return an iterator to the first row. */
     [[nodiscard]] iterator begin() noexcept {
         return rows_.begin();
     }
 
+    /** Return an iterator past the last row. */
     [[nodiscard]] iterator end() noexcept {
         return rows_.end();
     }
 
+    /** Return a read-only iterator to the first row. */
     [[nodiscard]] const_iterator begin() const noexcept {
         return rows_.begin();
     }
 
+    /** Return a read-only iterator past the last row. */
     [[nodiscard]] const_iterator end() const noexcept {
         return rows_.end();
     }
 
+    /** Return the number of rows. */
     [[nodiscard]] std::size_t size() const noexcept {
         return rows_.size();
     }
 
+    /** Return whether no rows are stored. */
     [[nodiscard]] bool empty() const noexcept {
         return rows_.empty();
     }
@@ -72,90 +90,51 @@ private:
     container_type rows_;
 };
 
-template<class T>
-using setof = owning_sql_rows<T, sql_result_kind::setof>;
+/** Rows returned by a SETOF scalar routine. */
+template<class element_type>
+using set_of = result_rows<element_type, result_shape::set_of>;
 
-template<class Row>
-using returns_table =
-    owning_sql_rows<Row, sql_result_kind::returns_table>;
+/** Rows returned by a RETURNS TABLE routine. */
+template<class row_type>
+using table_rows = result_rows<row_type, result_shape::table>;
 
-template<class Row>
-using setof_named_out =
-    owning_sql_rows<Row, sql_result_kind::setof_named_out>;
+/** Rows returned by SETOF with named output columns. */
+template<class row_type>
+using named_output_set =
+    result_rows<row_type, result_shape::named_output_set>;
 
-template<class Row>
-class named_out final {
+/**
+ * One composite value returned through named output parameters.
+ *
+ * @tparam row_type C++ value containing the named output fields.
+ */
+template<class row_type>
+class named_output final {
 public:
-    explicit named_out(Row row)
-        noexcept(std::is_nothrow_move_constructible_v<Row>)
+    /** Take ownership of the composite row value. */
+    explicit named_output(row_type row)
+        noexcept(std::is_nothrow_move_constructible_v<row_type>)
         : row_{std::move(row)} {}
 
-    named_out(named_out&&)
-        noexcept(std::is_nothrow_move_constructible_v<Row>) = default;
-    named_out& operator=(named_out&&)
-        noexcept(std::is_nothrow_move_assignable_v<Row>) = default;
-    named_out(const named_out&) = delete;
-    named_out& operator=(const named_out&) = delete;
+    named_output(named_output&&)
+        noexcept(std::is_nothrow_move_constructible_v<row_type>) = default;
+    named_output& operator=(named_output&&)
+        noexcept(std::is_nothrow_move_assignable_v<row_type>) = default;
+    named_output(const named_output&) = delete;
+    named_output& operator=(const named_output&) = delete;
 
-    [[nodiscard]] Row& value() noexcept {
+    /** Return the mutable composite row. */
+    [[nodiscard]] row_type& value() noexcept {
         return row_;
     }
 
-    [[nodiscard]] const Row& value() const noexcept {
+    /** Return the read-only composite row. */
+    [[nodiscard]] const row_type& value() const noexcept {
         return row_;
     }
 
 private:
-    Row row_;
+    row_type row_;
 };
 
-}  // namespace bioseq::pg_utils
-
-namespace bioseq::pg_utils::detail {
-
-struct sql_result_probe_row {
-    int value;
-};
-
-using setof_probe = setof<int>;
-using table_probe = returns_table<sql_result_probe_row>;
-using named_set_probe = setof_named_out<sql_result_probe_row>;
-using named_probe = named_out<sql_result_probe_row>;
-
-static_assert(std::is_same_v<
-              typename setof_probe::value_type,
-              int>);
-static_assert(std::is_same_v<
-              setof_probe,
-              owning_sql_rows<int, sql_result_kind::setof>>);
-static_assert(std::is_same_v<
-              table_probe,
-              owning_sql_rows<
-                  sql_result_probe_row,
-                  sql_result_kind::returns_table>>);
-static_assert(std::is_same_v<
-              named_set_probe,
-              owning_sql_rows<
-                  sql_result_probe_row,
-                  sql_result_kind::setof_named_out>>);
-static_assert(!std::is_default_constructible_v<setof_probe>);
-static_assert(!std::is_copy_constructible_v<setof_probe>);
-static_assert(!std::is_copy_assignable_v<setof_probe>);
-static_assert(std::is_move_constructible_v<setof_probe>);
-static_assert(std::is_move_assignable_v<setof_probe>);
-static_assert(!std::is_copy_constructible_v<named_probe>);
-static_assert(!std::is_copy_assignable_v<named_probe>);
-static_assert(std::is_move_constructible_v<named_probe>);
-static_assert(std::is_move_assignable_v<named_probe>);
-static_assert(noexcept(std::declval<setof_probe&>().begin()));
-static_assert(noexcept(std::declval<const setof_probe&>().begin()));
-static_assert(noexcept(std::declval<const setof_probe&>().size()));
-static_assert(noexcept(std::declval<const setof_probe&>().empty()));
-static_assert(std::is_same_v<
-              decltype(std::declval<named_probe&>().value()),
-              sql_result_probe_row&>);
-static_assert(std::is_same_v<
-              decltype(std::declval<const named_probe&>().value()),
-              const sql_result_probe_row&>);
-
-}  // namespace bioseq::pg_utils::detail
+}  // namespace bioseq::postgres::support

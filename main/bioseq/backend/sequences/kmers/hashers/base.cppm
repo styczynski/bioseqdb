@@ -1,4 +1,7 @@
-/** Target-neutral scalar foundations for minimizer hashers. */
+/**
+ * @file base.cppm
+ * @brief Target-neutral scalar foundations for minimizer hashers.
+ */
 module;
 
 #include <array>
@@ -10,97 +13,102 @@ module;
 
 export module bioseq.sequences.kmers.hashers.base;
 
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-template<
-    typename Derived,
-    sequence_alphabet Alphabet,
-    typename Input>
+/** Shared alphabet and strand-selection policy for scalar hashers. */
+template<sequence_alphabet p_alphabet, typename p_input_type>
 struct hasher_base {
+    /** Compile-time sequence traits and the canonical scalar return type. */
     struct traits
-        : public compact_sequence_range<Alphabet>::
+        : public compact_sequence_range<p_alphabet>::
               compact_sequence_range_base::traits {
-        using input_t = Input;
-        using hasher_return_t = std::pair<input_t, sequence_strand_mode>;
+        using input_type = p_input_type;
+        using hasher_return_type = std::pair<input_type, sequence_strand_mode>;
 
-        static constexpr std::size_t max_kmer_length =
-            sizeof(Input) * 8u
-            / compact_sequence_range<Alphabet>::
+        static constexpr std::size_t k_max_kmer_length =
+            sizeof(p_input_type) * 8u
+            / compact_sequence_range<p_alphabet>::
                   compact_sequence_range_base::traits::bits_per_char;
 
-        template <typename InputLike>
-        [[gnu::always_inline]] static constexpr hasher_return_t
+        /** Select the canonical hash and strand, preserving palindrome identity. */
+        template<typename p_input_like>
+        [[gnu::always_inline]] static constexpr hasher_return_type
         select_min_hash_strand(
-            InputLike&& forward,
-            InputLike&& reverse_complement) noexcept
+            p_input_like&& forward,
+            p_input_like&& reverse_complement) noexcept
         {
             if (forward == reverse_complement) [[unlikely]] {
                 return std::make_pair(
-                    static_cast<input_t>(forward), SEQUENCE_STRAND_EQUAL);
+                    static_cast<input_type>(forward),
+                    sequence_strand_mode::equal);
             }
             if (forward < reverse_complement) {
                 return std::make_pair(
-                    static_cast<input_t>(forward), SEQUENCE_STRAND_FORWARD);
+                    static_cast<input_type>(forward),
+                    sequence_strand_mode::forward);
             }
             return std::make_pair(
-                static_cast<input_t>(reverse_complement),
-                SEQUENCE_STRAND_REVERSE_COMPLEMENT);
+                static_cast<input_type>(reverse_complement),
+                sequence_strand_mode::reverse_complement);
         }
     };
 };
 
+/** True when a hasher template supplies the scalar rolling-hash contract. */
 template<
-    template<typename> typename Hasher,
-    typename Alphabet,
-    typename Input = std::uint64_t,
-    typename ScalarHasher =
-        Hasher<Alphabet>::template scalar_hash<Input>>
-concept supports_scalar_hash = sequence_alphabet<Alphabet>
-    && requires (ScalarHasher& hasher, Input&& incoming) {
+    template<typename> typename p_hasher_template,
+    typename p_alphabet,
+    typename p_input_type = std::uint64_t,
+    typename p_scalar_hasher_type =
+        p_hasher_template<p_alphabet>::template scalar_hash<p_input_type>>
+concept supports_scalar_hash = sequence_alphabet<p_alphabet>
+    && requires (p_scalar_hasher_type& hasher, p_input_type&& incoming) {
         { hasher.next(
             std::move(incoming), std::move(incoming)) }
-            -> std::same_as<typename ScalarHasher::traits::hasher_return_t>;
+            -> std::same_as<typename p_scalar_hasher_type::traits::hasher_return_type>;
     };
 
-// DOC0286 §10.2 — minimap2-compatible nt4 normalization. SeqAn nucleotide
-// ranks are alphabet-specific (dna5: A=0,C=1,G=2,N=3,T=4), whereas minimap2
-// maps A/C/G/T to 0..3 and ambiguity to sentinel 4.
-inline constexpr std::uint8_t kNt4Sentinel = 4u;
+/** Sentinel returned for symbols outside minimap2's A/C/G/T code space. */
+inline constexpr std::uint8_t k_nt4_sentinel = 4u;
 
+/** Convert one character to minimap2's nt4 code space. */
 [[nodiscard]] constexpr std::uint8_t char_to_nt4(char base) noexcept {
     switch (base) {
         case 'A': case 'a': return 0u;
         case 'C': case 'c': return 1u;
         case 'G': case 'g': return 2u;
         case 'T': case 't': return 3u;
-        default: return kNt4Sentinel;
+        default: return k_nt4_sentinel;
     }
 }
 
-template <sequence_alphabet Alphabet>
+/** Build an alphabet-rank to minimap2-nt4 lookup table. */
+template<sequence_alphabet p_alphabet>
 [[nodiscard]] constexpr auto make_nt4_lut() noexcept {
-    std::array<std::uint8_t, seqan3::alphabet_size<Alphabet>> lut{};
+    std::array<std::uint8_t, seqan3::alphabet_size<p_alphabet>> lut{};
     for (std::size_t rank = 0u;
-         rank < seqan3::alphabet_size<Alphabet>;
+         rank < seqan3::alphabet_size<p_alphabet>;
          ++rank) {
-        Alphabet letter{};
+        p_alphabet letter{};
         letter.assign_rank(
-            static_cast<seqan3::alphabet_rank_t<Alphabet>>(rank));
+            static_cast<seqan3::alphabet_rank_t<p_alphabet>>(rank));
         lut[rank] = char_to_nt4(letter.to_char());
     }
     return lut;
 }
 
-template <sequence_alphabet Alphabet>
-inline constexpr auto nt4_lut_v = make_nt4_lut<Alphabet>();
+/** Alphabet-specific minimap2-nt4 lookup table. */
+template<sequence_alphabet p_alphabet>
+inline constexpr auto k_nt4_lut = make_nt4_lut<p_alphabet>();
 
-template <sequence_alphabet Alphabet>
+/** Normalize one alphabet rank to minimap2's nt4 code space. */
+template<sequence_alphabet p_alphabet>
 [[nodiscard, gnu::always_inline]] constexpr std::uint8_t
 nt4_normalize(std::uint8_t rank) noexcept {
-    return nt4_lut_v<Alphabet>[rank];
+    return k_nt4_lut<p_alphabet>[rank];
 }
 
 } // namespace bioseq::simd

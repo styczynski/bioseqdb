@@ -8,7 +8,7 @@
  * distinct cache keys / hashes. Pure-host tests cover both layouts; resident
  * upload tests skip when no device exists.
  */
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>

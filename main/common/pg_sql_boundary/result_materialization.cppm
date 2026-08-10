@@ -36,119 +36,139 @@ import :owning_values;
 import :scalar_conversion;
 import :shape;
 
-export namespace bioseq::pg_utils {
+export namespace bioseq::postgres::support {
 
-class sql_result_materialization_error final
+/** Invalid PostgreSQL tuple or set-result materialization contract. */
+class result_materialization_error final
     : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-struct encoded_sql_result_field final {
-    Datum value;
-    bool is_null;
+/** One encoded field and its PostgreSQL null flag. */
+struct encoded_result_field final {
+    Datum value{};  ///< Encoded PostgreSQL field value.
+    bool is_null{};  ///< Whether PostgreSQL must ignore `value` as NULL.
 };
 
-namespace detail {
+}  // namespace bioseq::postgres::support
 
-template<class T>
-concept typed_sql_result_scalar =
-    registered_sql_scalar<std::remove_cvref_t<T>>
-    && !std::same_as<std::remove_cvref_t<T>, Datum>;
+namespace bioseq::postgres::support::detail {
 
-template<class T>
-concept direct_sql_result_field =
-    typed_sql_result_scalar<T>
-    || std::same_as<std::remove_cvref_t<T>, std::string>
-    || std::same_as<std::remove_cvref_t<T>, sql_jsonb>
-    || std::same_as<std::remove_cvref_t<T>, sql_bytea>
-    || std::same_as<std::remove_cvref_t<T>, sql_int64_array>
-    || std::same_as<std::remove_cvref_t<T>, sql_interval>;
+/** Scalar field type encoded directly through scalar_codec. */
+template<class value_type>
+concept typed_result_scalar =
+    supported_scalar<std::remove_cvref_t<value_type>>
+    && !std::same_as<std::remove_cvref_t<value_type>, Datum>;
 
-template<class T>
-struct optional_sql_result_field : std::false_type {};
+/** Owning or by-value type accepted as one non-null result field. */
+template<class value_type>
+concept direct_result_field =
+    typed_result_scalar<value_type>
+    || std::same_as<
+        std::remove_cvref_t<value_type>,
+        std::string>
+    || std::same_as<
+        std::remove_cvref_t<value_type>,
+        jsonb_value>
+    || std::same_as<
+        std::remove_cvref_t<value_type>,
+        bytea_value>
+    || std::same_as<
+        std::remove_cvref_t<value_type>,
+        bigint_array>
+    || std::same_as<
+        std::remove_cvref_t<value_type>,
+        interval_value>;
 
-template<class T>
-struct optional_sql_result_field<std::optional<T>>
-    : std::bool_constant<direct_sql_result_field<T>> {
-    using value_type = T;
+/** Trait identifying an optional value accepted as a result field. */
+template<class candidate_type>
+struct optional_result_field : std::false_type {};
+
+template<class element_type>
+struct optional_result_field<std::optional<element_type>>
+    : std::bool_constant<direct_result_field<element_type>> {
+    using value_type = element_type;
 };
 
-template<class T>
-concept encodable_sql_result_field =
-    direct_sql_result_field<T>
-    || optional_sql_result_field<
-           std::remove_cvref_t<T>>::value;
+/** Any direct or optional field type accepted by row materialization. */
+template<class value_type>
+concept encodable_result_field =
+    direct_result_field<value_type>
+    || optional_result_field<
+           std::remove_cvref_t<value_type>>::value;
 
 template<class>
 inline constexpr bool unsupported_result_field_type = false;
 
-struct sql_result_field_type_contract final {
-    Oid primary;
-    Oid alternative;
+/** Primary and permitted alternative PostgreSQL OIDs for one C++ field. */
+struct result_field_type_contract final {
+    Oid primary{};
+    Oid alternative{};
 };
 
-template<class T>
-    requires encodable_sql_result_field<T>
-[[nodiscard]] consteval sql_result_field_type_contract
-sql_result_field_types() {
-    using Value = std::remove_cvref_t<T>;
-    if constexpr (optional_sql_result_field<Value>::value) {
-        return sql_result_field_types<
-            typename optional_sql_result_field<Value>::value_type>();
-    } else if constexpr (std::same_as<Value, bool>) {
+/** Return the PostgreSQL OID contract for one supported field type. */
+template<class field_type>
+    requires encodable_result_field<field_type>
+[[nodiscard]] consteval result_field_type_contract
+result_field_types() {
+    using value_type = std::remove_cvref_t<field_type>;
+    if constexpr (optional_result_field<value_type>::value) {
+        return result_field_types<
+            typename optional_result_field<value_type>::value_type>();
+    } else if constexpr (std::same_as<value_type, bool>) {
         return {BOOLOID, InvalidOid};
-    } else if constexpr (std::same_as<Value, std::int16_t>) {
+    } else if constexpr (std::same_as<value_type, std::int16_t>) {
         return {INT2OID, InvalidOid};
-    } else if constexpr (std::same_as<Value, std::int32_t>) {
+    } else if constexpr (std::same_as<value_type, std::int32_t>) {
         return {INT4OID, InvalidOid};
-    } else if constexpr (std::same_as<Value, std::int64_t>) {
+    } else if constexpr (std::same_as<value_type, std::int64_t>) {
         return {INT8OID, InvalidOid};
-    } else if constexpr (std::same_as<Value, float>) {
+    } else if constexpr (std::same_as<value_type, float>) {
         return {FLOAT4OID, InvalidOid};
-    } else if constexpr (std::same_as<Value, double>) {
+    } else if constexpr (std::same_as<value_type, double>) {
         return {FLOAT8OID, InvalidOid};
-    } else if constexpr (std::same_as<Value, Oid>) {
+    } else if constexpr (std::same_as<value_type, Oid>) {
         return {OIDOID, REGCLASSOID};
     } else if constexpr (
-            std::same_as<Value, sql_timestamptz>) {
+            std::same_as<value_type, timestamp_with_time_zone>) {
         return {TIMESTAMPTZOID, InvalidOid};
-    } else if constexpr (std::same_as<Value, std::string>) {
+    } else if constexpr (std::same_as<value_type, std::string>) {
         return {TEXTOID, InvalidOid};
-    } else if constexpr (std::same_as<Value, sql_jsonb>) {
+    } else if constexpr (std::same_as<value_type, jsonb_value>) {
         return {JSONBOID, InvalidOid};
-    } else if constexpr (std::same_as<Value, sql_bytea>) {
+    } else if constexpr (std::same_as<value_type, bytea_value>) {
         return {BYTEAOID, InvalidOid};
     } else if constexpr (
-            std::same_as<Value, sql_int64_array>) {
+            std::same_as<value_type, bigint_array>) {
         return {INT8ARRAYOID, InvalidOid};
-    } else if constexpr (std::same_as<Value, sql_interval>) {
+    } else if constexpr (std::same_as<value_type, interval_value>) {
         return {INTERVALOID, InvalidOid};
     } else {
         static_assert(
-            unsupported_result_field_type<Value>,
-            "registered SQL result field is missing a PostgreSQL type OID");
+            unsupported_result_field_type<value_type>,
+            "supported result field is missing a PostgreSQL type OID");
         return {InvalidOid, InvalidOid};
     }
 }
 
-}  // namespace detail
+}  // namespace bioseq::postgres::support::detail
 
-/**
- * Encode one registered, by-value scalar as a result-row field.
- */
-template<class T>
-    requires detail::typed_sql_result_scalar<T>
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        T&& value) noexcept(noexcept(
-            detail::sql_scalar_conversion<
-                std::remove_cvref_t<T>>::write(
-                    std::forward<T>(value)))) {
-    using Value = std::remove_cvref_t<T>;
+export namespace bioseq::postgres::support {
+
+/** Encode one supported by-value scalar as a result-row field. */
+template<class scalar_type>
+    requires detail::typed_result_scalar<scalar_type>
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        scalar_type&& value) noexcept(noexcept(
+            detail::scalar_codec<
+                std::remove_cvref_t<scalar_type>>::write(
+                    std::forward<scalar_type>(value)))) {
+    using value_type = std::remove_cvref_t<scalar_type>;
     return {
         .value =
-            detail::sql_scalar_conversion<Value>::write(
-                std::forward<T>(value)),
+            detail::scalar_codec<value_type>::write(
+                std::forward<scalar_type>(value)),
         .is_null = false,
     };
 }
@@ -156,10 +176,10 @@ template<class T>
 /**
  * Encode one owning text value as a result-row field.
  */
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
+[[nodiscard]] inline encoded_result_field encode_result_field(
         const std::string& value) {
     return {
-        .value = detail::encode_sql_text(value),
+        .value = detail::encode_text(value),
         .is_null = false,
     };
 }
@@ -167,28 +187,28 @@ template<class T>
 /**
  * Encode one owning JSONB value as a result-row field.
  */
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        const sql_jsonb& value) {
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        const jsonb_value& value) {
     return {
-        .value = detail::encode_sql_jsonb(value),
+        .value = detail::encode_jsonb(value),
         .is_null = false,
     };
 }
 
 /** Encode one owning BYTEA value as a result-row field. */
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        const sql_bytea& value) {
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        const bytea_value& value) {
     return {
-        .value = detail::encode_sql_bytea(value),
+        .value = detail::encode_bytea(value),
         .is_null = false,
     };
 }
 
 /** Encode one owning bigint[] value as a result-row field. */
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        const sql_int64_array& value) {
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        const bigint_array& value) {
     return {
-        .value = detail::encode_sql_int64_array(value),
+        .value = detail::encode_bigint_array(value),
         .is_null = false,
     };
 }
@@ -196,10 +216,10 @@ template<class T>
 /**
  * Encode one INTERVAL value as a result-row field.
  */
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        const sql_interval& value) {
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        const interval_value& value) {
     return {
-        .value = detail::encode_sql_interval(value),
+        .value = detail::encode_interval(value),
         .is_null = false,
     };
 }
@@ -207,73 +227,82 @@ template<class T>
 /**
  * Encode one nullable scalar or text value without a sentinel.
  */
-template<class T>
-    requires detail::direct_sql_result_field<T>
-[[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        const std::optional<T>& value) {
+template<class value_type>
+    requires detail::direct_result_field<value_type>
+[[nodiscard]] inline encoded_result_field encode_result_field(
+        const std::optional<value_type>& value) {
     if (!value.has_value()) {
         return {
             .value = static_cast<Datum>(0),
             .is_null = true,
         };
     }
-    return sql_result_field(*value);
+    return encode_result_field(*value);
 }
 
 /**
- * Encoded values, null flags, and a compile-time PostgreSQL type contract for
- * one generated result row.
+ * Encoded values, null flags, and PostgreSQL type contracts for one row.
+ *
+ * @tparam field_types Ordered C++ field types in the result descriptor.
  */
-template<class... FieldTypes>
+template<class... field_types>
     requires (
-        sizeof...(FieldTypes) > 0
-        && (detail::encodable_sql_result_field<FieldTypes> && ...))
-class encoded_sql_result_row final {
+        sizeof...(field_types) > 0
+        && (detail::encodable_result_field<field_types> && ...))
+class encoded_result_row final {
 public:
-    static constexpr std::size_t fields_count =
-        sizeof...(FieldTypes);
+    /** Number of fields in this row contract. */
+    static constexpr std::size_t field_count =
+        sizeof...(field_types);
 
-    explicit encoded_sql_result_row(
+    /** Split encoded fields into PostgreSQL value and null arrays. */
+    explicit encoded_result_row(
             std::array<
-                encoded_sql_result_field,
-                fields_count> fields) noexcept {
+                encoded_result_field,
+                field_count> fields) noexcept {
         for (std::size_t index = 0;
-             index < fields_count;
+             index < field_count;
              ++index) {
             values_[index] = fields[index].value;
             nulls_[index] = fields[index].is_null;
         }
     }
 
+    /** Return mutable encoded values for PostgreSQL tuple formation. */
     [[nodiscard]] Datum* values_data() noexcept {
         return values_.data();
     }
 
+    /** Return read-only encoded values. */
     [[nodiscard]] const Datum* values_data() const noexcept {
         return values_.data();
     }
 
+    /** Return mutable PostgreSQL null flags. */
     [[nodiscard]] bool* nulls_data() noexcept {
         return nulls_.data();
     }
 
+    /** Return read-only PostgreSQL null flags. */
     [[nodiscard]] const bool* nulls_data() const noexcept {
         return nulls_.data();
     }
 
+    /** Return the primary PostgreSQL type OID for every field. */
     [[nodiscard]] static constexpr const std::array<
         Oid,
-        fields_count>& expected_type_oids() noexcept {
+        field_count>& expected_type_oids() noexcept {
         return expected_type_oids_;
     }
 
+    /** Return whether one descriptor OID satisfies its field contract. */
     [[nodiscard]] static constexpr bool accepts_type_oid(
             std::size_t index,
             Oid actual) noexcept {
-        if (index >= fields_count) {
+        if (index >= field_count) {
             return false;
         }
-        const detail::sql_result_field_type_contract contract =
+        const detail::result_field_type_contract contract =
             type_contracts_[index];
         return !OidIsValid(contract.primary)
             || actual == contract.primary
@@ -283,119 +312,138 @@ public:
 
 private:
     inline static constexpr std::array<
-        detail::sql_result_field_type_contract,
-        fields_count> type_contracts_{
-            detail::sql_result_field_types<FieldTypes>()...};
-    inline static constexpr std::array<Oid, fields_count>
+        detail::result_field_type_contract,
+        field_count> type_contracts_{
+            detail::result_field_types<field_types>()...};
+    inline static constexpr std::array<Oid, field_count>
         expected_type_oids_{
-            (detail::sql_result_field_types<
-                FieldTypes>().primary)...};
-    std::array<Datum, fields_count> values_{};
-    std::array<bool, fields_count> nulls_{};
+            (detail::result_field_types<
+                field_types>().primary)...};
+    std::array<Datum, field_count> values_{};
+    std::array<bool, field_count> nulls_{};
 };
 
 /**
  * Encode one result row while retaining its field types for descriptor
  * validation.
  */
-template<class... Fields>
+template<class... field_types>
     requires (
-        sizeof...(Fields) > 0
-        && (detail::encodable_sql_result_field<Fields> && ...))
-[[nodiscard]] inline auto sql_result_row(Fields&&... fields) {
-    using Encoded = encoded_sql_result_row<
-        std::remove_cvref_t<Fields>...>;
-    return Encoded{
+        sizeof...(field_types) > 0
+        && (detail::encodable_result_field<field_types> && ...))
+[[nodiscard]] inline auto encode_result_row(
+        field_types&&... fields) {
+    using encoded_type = encoded_result_row<
+        std::remove_cvref_t<field_types>...>;
+    return encoded_type{
         std::array<
-            encoded_sql_result_field,
-            sizeof...(Fields)>{
-                sql_result_field(
-                    std::forward<Fields>(fields))...}};
+            encoded_result_field,
+            sizeof...(field_types)>{
+                encode_result_field(
+                    std::forward<field_types>(fields))...}};
 }
 
-namespace detail {
+}  // namespace bioseq::postgres::support
 
-template<class T>
-struct is_encoded_sql_result_row : std::false_type {};
+namespace bioseq::postgres::support::detail {
 
-template<class... FieldTypes>
-struct is_encoded_sql_result_row<
-    encoded_sql_result_row<FieldTypes...>> : std::true_type {};
+/** Trait identifying an encoded_result_row specialization. */
+template<class candidate_type>
+struct is_encoded_result_row : std::false_type {};
 
-template<class T>
+template<class... field_types>
+struct is_encoded_result_row<
+    encoded_result_row<field_types...>> : std::true_type {};
+
+/** Type satisfying the encoded result-row storage contract. */
+template<class candidate_type>
 concept encoded_result_row =
-    is_encoded_sql_result_row<
-        std::remove_cvref_t<T>>::value;
+    is_encoded_result_row<
+        std::remove_cvref_t<candidate_type>>::value;
 
-template<class Encoder, class Encoded, class = void>
+/** Trait validating an encoder's compile-time column-name array. */
+template<
+    class encoder_type,
+    class encoded_row_type,
+    class = void>
 struct has_exact_result_column_names : std::false_type {};
 
-template<class Encoder, class Encoded>
-    requires encoded_result_row<Encoded>
+template<class encoder_type, class encoded_row_type>
+    requires encoded_result_row<encoded_row_type>
 struct has_exact_result_column_names<
-    Encoder,
-    Encoded,
+    encoder_type,
+    encoded_row_type,
     std::void_t<
         decltype(
-            std::remove_cvref_t<Encoder>::column_names)>>
+            std::remove_cvref_t<encoder_type>::column_names)>>
     : std::bool_constant<
           std::same_as<
               std::remove_cvref_t<
                   decltype(
                       std::remove_cvref_t<
-                          Encoder>::column_names)>,
+                          encoder_type>::column_names)>,
               std::array<
                   std::string_view,
-                  Encoded::fields_count>>> {};
+                  encoded_row_type::field_count>>> {};
 
-template<class Encoder, class Row, class = void>
-struct is_sql_result_row_encoder : std::false_type {};
+/** Trait validating a row encoder and its encoded return type. */
+template<class encoder_type, class row_type, class = void>
+struct is_result_row_encoder : std::false_type {};
 
-template<class Encoder, class Row>
-struct is_sql_result_row_encoder<
-    Encoder,
-    Row,
+/** Specialization validating an encoder's result type and column names. */
+template<class encoder_type, class row_type>
+struct is_result_row_encoder<
+    encoder_type,
+    row_type,
     std::void_t<
-        std::invoke_result_t<Encoder&, const Row&>>>
+        std::invoke_result_t<encoder_type&, const row_type&>>>
     : has_exact_result_column_names<
-          Encoder,
+          encoder_type,
           std::remove_cvref_t<
-              std::invoke_result_t<Encoder&, const Row&>>> {};
+              std::invoke_result_t<
+                  encoder_type&,
+                  const row_type&>>> {};
 
-template<class Encoder, class Row>
-concept sql_result_row_encoder =
-    is_sql_result_row_encoder<
-        std::remove_reference_t<Encoder>,
-        Row>::value;
+/** Callable that encodes one row and declares exact column names. */
+template<class encoder_type, class row_type>
+concept result_row_encoder =
+    is_result_row_encoder<
+        std::remove_reference_t<encoder_type>,
+        row_type>::value;
 
-template<class Encoder, class Row>
+/** Encoded row type produced by an encoder. */
+template<class encoder_type, class row_type>
 using encoded_result_row_t = std::remove_cvref_t<
     std::invoke_result_t<
-        std::remove_reference_t<Encoder>&,
-        const Row&>>;
+        std::remove_reference_t<encoder_type>&,
+        const row_type&>>;
 
+/** Require a complete fmgr call frame for result materialization. */
 inline void require_result_call(FunctionCallInfo call) {
     if (call == nullptr || call->flinfo == nullptr) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "generated SQL result materialization received an incomplete "
             "call frame"};
     }
 }
 
-template<encoded_result_row Encoded, class Encoder>
+/** Validate arity, names, dropped fields, and OIDs of one tuple descriptor. */
+template<
+    encoded_result_row encoded_row_type,
+    class encoder_type>
     requires has_exact_result_column_names<
-        Encoder,
-        Encoded>::value
+        encoder_type,
+        encoded_row_type>::value
 void validate_result_descriptor(
         TupleDesc tuple_descriptor,
-        std::string_view result_kind) {
+        std::string_view result_shape_name) {
     constexpr std::size_t expected_fields =
-        Encoded::fields_count;
+        encoded_row_type::field_count;
     if (tuple_descriptor == nullptr
         || tuple_descriptor->natts
             != static_cast<int>(expected_fields)) {
-        throw sql_result_materialization_error{
-            std::string{result_kind}
+        throw result_materialization_error{
+            std::string{result_shape_name}
             + " result descriptor has the wrong arity"};
     }
 
@@ -409,31 +457,33 @@ void validate_result_descriptor(
         if (attribute->attnum
                 != static_cast<AttrNumber>(index + 1)
             || attribute->attisdropped) {
-            throw sql_result_materialization_error{
-                std::string{result_kind}
+            throw result_materialization_error{
+                std::string{result_shape_name}
                 + " result descriptor has an unusable attribute "
                 + std::to_string(index + 1)};
         }
         const std::string_view expected_name =
-            std::remove_cvref_t<Encoder>::column_names[index];
+            std::remove_cvref_t<
+                encoder_type>::column_names[index];
         if (std::string_view{NameStr(attribute->attname)}
             != expected_name) {
-            throw sql_result_materialization_error{
-                std::string{result_kind}
+            throw result_materialization_error{
+                std::string{result_shape_name}
                 + " result descriptor name mismatch at attribute "
                 + std::to_string(index + 1)};
         }
-        if (!Encoded::accepts_type_oid(
+        if (!encoded_row_type::accepts_type_oid(
                 index,
                 attribute->atttypid)) {
-            throw sql_result_materialization_error{
-                std::string{result_kind}
+            throw result_materialization_error{
+                std::string{result_shape_name}
                 + " result descriptor type mismatch at attribute "
                 + std::to_string(index + 1)};
         }
     }
 }
 
+/** Resolve and bless the composite descriptor for named output parameters. */
 [[nodiscard]] inline TupleDesc composite_result_descriptor(
         FunctionCallInfo call) {
     require_result_call(call);
@@ -447,7 +497,7 @@ void validate_result_descriptor(
         });
     if (result_class != TYPEFUNC_COMPOSITE
         || tuple_descriptor == nullptr) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "named OUT result requires a composite result descriptor"};
     }
     return invoke_pg_as_cpp(
@@ -456,34 +506,37 @@ void validate_result_descriptor(
         });
 }
 
-template<encoded_result_row Encoded>
-struct materialized_result_context final {
-    Tuplestorestate* tuplestore;
-    TupleDesc tuple_descriptor;
+/** PostgreSQL state initialized for one materialized row set. */
+struct result_materialization_context final {
+    Tuplestorestate* tuplestore{};
+    TupleDesc tuple_descriptor{};
 };
 
-template<encoded_result_row Encoded, class Encoder>
+/** Initialize PostgreSQL's materialized set-returning-function state. */
+template<
+    encoded_result_row encoded_row_type,
+    class encoder_type>
     requires has_exact_result_column_names<
-        Encoder,
-        Encoded>::value
-[[nodiscard]] materialized_result_context<Encoded>
-initialize_materialized_result(FunctionCallInfo call) {
+        encoder_type,
+        encoded_row_type>::value
+[[nodiscard]] result_materialization_context
+initialize_result_materialization(FunctionCallInfo call) {
     require_result_call(call);
     if (call->resultinfo == nullptr
         || !IsA(call->resultinfo, ReturnSetInfo)) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "row-set result requires a set-returning call context"};
     }
 
     auto* const result_info =
         reinterpret_cast<ReturnSetInfo*>(call->resultinfo);
     if ((result_info->allowedModes & SFRM_Materialize) == 0) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "row-set call context does not allow materialization"};
     }
     if (result_info->econtext == nullptr
         || result_info->econtext->ecxt_per_query_memory == nullptr) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "row-set call context has no per-query memory context"};
     }
 
@@ -493,10 +546,10 @@ initialize_materialized_result(FunctionCallInfo call) {
         });
     if (result_info->setResult == nullptr
         || result_info->setDesc == nullptr) {
-        throw sql_result_materialization_error{
+        throw result_materialization_error{
             "PostgreSQL did not initialize the materialized row set"};
     }
-    validate_result_descriptor<Encoded, Encoder>(
+    validate_result_descriptor<encoded_row_type, encoder_type>(
         result_info->setDesc,
         "row-set");
     return {
@@ -505,21 +558,25 @@ initialize_materialized_result(FunctionCallInfo call) {
     };
 }
 
+/** Encode and append every C++ row to a PostgreSQL tuplestore. */
 template<
-    class Row,
-    sql_result_kind Kind,
-    class Encoder>
-    requires sql_result_row_encoder<Encoder, Row>
+    class row_type,
+    result_shape shape,
+    class encoder_type>
+    requires result_row_encoder<encoder_type, row_type>
 [[nodiscard]] Datum materialize_row_set(
         FunctionCallInfo call,
-        owning_sql_rows<Row, Kind>& rows,
-        Encoder& encoder) {
-    using Encoded = encoded_result_row_t<Encoder, Row>;
-    const materialized_result_context<Encoded> context =
-        initialize_materialized_result<Encoded, Encoder>(call);
+        result_rows<row_type, shape>& rows,
+        encoder_type& encoder) {
+    using encoded_type =
+        encoded_result_row_t<encoder_type, row_type>;
+    const result_materialization_context context =
+        initialize_result_materialization<
+            encoded_type,
+            encoder_type>(call);
 
-    for (const Row& row : rows) {
-        Encoded encoded = std::invoke(encoder, row);
+    for (const row_type& row : rows) {
+        encoded_type encoded = std::invoke(encoder, row);
         invoke_pg_as_cpp(
             [tuplestore = context.tuplestore,
              tuple_descriptor = context.tuple_descriptor,
@@ -535,26 +592,28 @@ template<
     return static_cast<Datum>(0);
 }
 
-}  // namespace detail
+}  // namespace bioseq::postgres::support::detail
+
+export namespace bioseq::postgres::support {
 
 /**
  * Form one composite Datum for a routine with named OUT parameters.
  */
-template<class Row, class Encoder>
-    requires detail::sql_result_row_encoder<Encoder, Row>
-[[nodiscard]] inline Datum sql_result_to_datum(
+template<class row_type, class encoder_type>
+    requires detail::result_row_encoder<encoder_type, row_type>
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        named_out<Row>&& result,
-        Encoder&& encoder) {
-    using Encoded =
-        detail::encoded_result_row_t<Encoder, Row>;
+        named_output<row_type>&& result,
+        encoder_type&& encoder) {
+    using encoded_type =
+        detail::encoded_result_row_t<encoder_type, row_type>;
     const TupleDesc tuple_descriptor =
         detail::composite_result_descriptor(call);
-    detail::validate_result_descriptor<Encoded, Encoder>(
+    detail::validate_result_descriptor<encoded_type, encoder_type>(
         tuple_descriptor,
         "named OUT");
 
-    Encoded encoded = std::invoke(
+    encoded_type encoded = std::invoke(
         encoder,
         std::as_const(result).value());
     const Datum tuple = invoke_pg_as_cpp(
@@ -572,12 +631,12 @@ template<class Row, class Encoder>
 /**
  * Materialize all rows returned by a RETURNS TABLE routine.
  */
-template<class Row, class Encoder>
-    requires detail::sql_result_row_encoder<Encoder, Row>
-[[nodiscard]] inline Datum sql_result_to_datum(
+template<class row_type, class encoder_type>
+    requires detail::result_row_encoder<encoder_type, row_type>
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        returns_table<Row>&& result,
-        Encoder&& encoder) {
+        table_rows<row_type>&& result,
+        encoder_type&& encoder) {
     auto& encoder_reference = encoder;
     return detail::materialize_row_set(
         call,
@@ -588,12 +647,12 @@ template<class Row, class Encoder>
 /**
  * Materialize all rows returned by a SETOF routine with named outputs.
  */
-template<class Row, class Encoder>
-    requires detail::sql_result_row_encoder<Encoder, Row>
-[[nodiscard]] inline Datum sql_result_to_datum(
+template<class row_type, class encoder_type>
+    requires detail::result_row_encoder<encoder_type, row_type>
+[[nodiscard]] inline Datum encode_result(
         FunctionCallInfo call,
-        setof_named_out<Row>&& result,
-        Encoder&& encoder) {
+        named_output_set<row_type>&& result,
+        encoder_type&& encoder) {
     auto& encoder_reference = encoder;
     return detail::materialize_row_set(
         call,
@@ -601,62 +660,4 @@ template<class Row, class Encoder>
         encoder_reference);
 }
 
-}  // namespace bioseq::pg_utils
-
-namespace bioseq::pg_utils::detail {
-
-using scalar_result_probe =
-    encoded_sql_result_row<std::int64_t, bool>;
-using nullable_result_probe =
-    encoded_sql_result_row<
-        std::optional<std::string>,
-        std::optional<std::int64_t>>;
-using oid_result_probe = encoded_sql_result_row<Oid>;
-using exact_boundary_result_probe =
-    encoded_sql_result_row<
-        sql_jsonb,
-        sql_bytea,
-        sql_int64_array,
-        std::optional<sql_interval>,
-        std::optional<sql_timestamptz>>;
-
-static_assert(scalar_result_probe::fields_count == 2);
-static_assert(
-    scalar_result_probe::expected_type_oids()[0] == INT8OID);
-static_assert(
-    scalar_result_probe::expected_type_oids()[1] == BOOLOID);
-static_assert(
-    nullable_result_probe::expected_type_oids()[0] == TEXTOID);
-static_assert(
-    nullable_result_probe::expected_type_oids()[1] == INT8OID);
-static_assert(
-    oid_result_probe::accepts_type_oid(0, OIDOID));
-static_assert(
-    oid_result_probe::accepts_type_oid(0, REGCLASSOID));
-static_assert(
-    exact_boundary_result_probe::expected_type_oids()[0]
-        == JSONBOID);
-static_assert(
-    exact_boundary_result_probe::expected_type_oids()[1]
-        == BYTEAOID);
-static_assert(
-    exact_boundary_result_probe::expected_type_oids()[2]
-        == INT8ARRAYOID);
-static_assert(
-    exact_boundary_result_probe::expected_type_oids()[3]
-        == INTERVALOID);
-static_assert(
-    exact_boundary_result_probe::expected_type_oids()[4]
-        == TIMESTAMPTZOID);
-static_assert(
-    !oid_result_probe::accepts_type_oid(0, TEXTOID));
-static_assert(!encodable_sql_result_field<Datum>);
-static_assert(encoded_result_row<scalar_result_probe>);
-static_assert(std::is_trivially_destructible_v<
-              encoded_sql_result_field>);
-static_assert(noexcept(
-    std::declval<scalar_result_probe&>().values_data()));
-static_assert(noexcept(
-    std::declval<const scalar_result_probe&>().nulls_data()));
-
-}  // namespace bioseq::pg_utils::detail
+}  // namespace bioseq::postgres::support

@@ -5,25 +5,15 @@
 module;
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
-#include <fcntl.h>
 #include <filesystem>
-#include <limits>
 #include <span>
 #include <string>
-#include <string_view>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:publication;
 export import :types;
@@ -35,7 +25,41 @@ import :staging;
 import :stable_read_at;
 import :cleanup;
 import :namespace_publish;
-export namespace bioseq::durable_file_io {
+
+namespace bioseq::common::durable_file_io::detail {
+
+/** Remove the staging name and durably commit its directory mutation. */
+[[nodiscard]] inline std::expected<publication_result, file_error>
+complete_staging_publication(
+    int directory_descriptor,
+    const staged_regular_file& staged,
+    publication_disposition disposition,
+    const fault_injection_hooks& hooks) {
+    if (auto removed = remove_published_staging_name(
+            directory_descriptor,
+            staged.name,
+            staged.identity,
+            hooks);
+        !removed.has_value()) {
+        return std::unexpected(removed.error());
+    }
+    if (auto synced = fsync_descriptor(
+            directory_descriptor,
+            file_operation::fsync_directory,
+            hooks,
+            publication_state::visible_not_durable);
+        !synced.has_value()) {
+        return std::unexpected(synced.error());
+    }
+    return publication_result{
+        .publication = publication_state::durable,
+        .disposition = disposition,
+    };
+}
+
+}  // namespace bioseq::common::durable_file_io::detail
+
+export namespace bioseq::common::durable_file_io {
 
 /**
  * Publish bytes without replacing an existing destination.
@@ -45,20 +69,20 @@ export namespace bioseq::durable_file_io {
  * that inode and its parent directory are then fsynced before returning
  * `already_present_identical`.
  */
-[[nodiscard]] inline std::expected<durable_publish_result, file_io_error>
+[[nodiscard]] inline std::expected<publication_result, file_error>
 durable_create_file(
     const std::filesystem::path& destination,
     std::span<const std::byte> bytes,
-    const durable_publish_options& options = {},
-    const file_io_hooks& hooks = {},
-    const positional_io_operations& operations = {}) {
+    const publication_options& options = {},
+    const fault_injection_hooks& hooks = {},
+    const positional_io_callbacks& callbacks = {}) {
     const std::string destination_name =
         detail::leaf_name(destination);
     if (destination.empty()
         || !detail::valid_leaf_name(destination_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_temporary,
+            file_error_code::invalid_argument,
+            file_operation::create_staging_file,
             EINVAL));
     }
     const std::filesystem::path parent =
@@ -68,40 +92,29 @@ durable_create_file(
         return std::unexpected(directory_opened.error());
     }
     file_descriptor directory = std::move(*directory_opened);
-    auto staged = detail::stage_bytes(
+    auto staged = detail::stage_verified_regular_file(
         directory.get(),
         destination_name,
         bytes,
         options,
         hooks,
-        operations);
+        callbacks);
     if (!staged.has_value()) {
         return std::unexpected(staged.error());
     }
-    if (auto verified = detail::verify_staged_path(
-            directory.get(), *staged, hooks);
-        !verified.has_value()) {
-        return std::unexpected(detail::cleanup_error_or(
-            directory.get(),
-            staged->name,
-            staged->identity,
-            verified.error().publication,
-            verified.error(),
-            hooks));
-    }
-    const std::string temporary = staged->name;
+    const std::string staging_name = staged->name;
     if (auto linked = detail::link_name_no_replace_at(
             directory.get(),
-            temporary,
+            staging_name,
             directory.get(),
             destination_name,
             hooks,
             &staged->identity);
         !linked.has_value()) {
-        if (linked.error().code != file_io_errc::destination_exists) {
-            return std::unexpected(detail::cleanup_error_or(
+        if (linked.error().code != file_error_code::destination_exists) {
+            return std::unexpected(detail::staging_cleanup_error(
                 directory.get(),
-                temporary,
+                staging_name,
                 staged->identity,
                 linked.error().publication,
                 linked.error(),
@@ -118,11 +131,11 @@ durable_create_file(
             destination_name,
             read_options,
             hooks,
-            operations);
+            callbacks);
         if (!existing.has_value()) {
-            return std::unexpected(detail::cleanup_error_or(
+            return std::unexpected(detail::staging_cleanup_error(
                 directory.get(),
-                temporary,
+                staging_name,
                 staged->identity,
                 publication_state::unchanged,
                 existing.error(),
@@ -135,14 +148,14 @@ durable_create_file(
             existing->identity.mode & controlled_permissions;
         if ((existing_permissions
              & ~static_cast<std::uint64_t>(options.mode)) != 0) {
-            return std::unexpected(detail::cleanup_error_or(
+            return std::unexpected(detail::staging_cleanup_error(
                 directory.get(),
-                temporary,
+                staging_name,
                 staged->identity,
                 publication_state::unchanged,
                 detail::make_error(
-                    file_io_errc::permission_mismatch,
-                    file_io_operation::stat_after,
+                    file_error_code::permission_mismatch,
+                    file_operation::inspect_after_io,
                     EACCES),
                 hooks));
         }
@@ -150,14 +163,14 @@ durable_create_file(
             || !std::equal(
                 existing->bytes.begin(), existing->bytes.end(),
                 bytes.begin(), bytes.end())) {
-            return std::unexpected(detail::cleanup_error_or(
+            return std::unexpected(detail::staging_cleanup_error(
                 directory.get(),
-                temporary,
+                staging_name,
                 staged->identity,
                 publication_state::unchanged,
                 detail::make_error(
-                    file_io_errc::content_mismatch,
-                    file_io_operation::publish_link,
+                    file_error_code::content_mismatch,
+                    file_operation::link_destination,
                     EEXIST),
                 hooks));
         }
@@ -167,73 +180,42 @@ durable_create_file(
                 hooks,
                 &existing->identity);
             !synced.has_value()) {
-            return std::unexpected(detail::cleanup_error_or(
+            return std::unexpected(detail::staging_cleanup_error(
                 directory.get(),
-                temporary,
+                staging_name,
                 staged->identity,
                 publication_state::unchanged,
                 synced.error(),
                 hooks));
         }
-        if (auto removed = detail::remove_published_staging_name(
-                directory.get(),
-                temporary,
-                staged->identity,
-                hooks);
-            !removed.has_value()) {
-            return std::unexpected(removed.error());
-        }
-        if (auto directory_synced = detail::sync_descriptor(
-                directory.get(),
-                file_io_operation::sync_directory,
-                hooks,
-                publication_state::visible_not_durable);
-            !directory_synced.has_value()) {
-            return std::unexpected(directory_synced.error());
-        }
-        return durable_publish_result{
-            .publication = publication_state::durable,
-            .disposition =
-                durable_create_disposition::already_present_identical,
-        };
-    }
-    if (auto removed = detail::remove_published_staging_name(
+        return detail::complete_staging_publication(
             directory.get(),
-            temporary,
-            staged->identity,
+            *staged,
+            publication_disposition::already_present_identical,
             hooks);
-        !removed.has_value()) {
-        return std::unexpected(removed.error());
     }
-    if (auto directory_synced = detail::sync_descriptor(
-            directory.get(),
-            file_io_operation::sync_directory,
-            hooks,
-            publication_state::visible_not_durable);
-        !directory_synced.has_value()) {
-        return std::unexpected(directory_synced.error());
-    }
-    return durable_publish_result{
-        .publication = publication_state::durable,
-        .disposition = durable_create_disposition::created,
-    };
+    return detail::complete_staging_publication(
+        directory.get(),
+        *staged,
+        publication_disposition::created,
+        hooks);
 }
 
 /** Atomically replace a destination and durably publish its directory entry. */
-[[nodiscard]] inline std::expected<durable_publish_result, file_io_error>
+[[nodiscard]] inline std::expected<publication_result, file_error>
 durable_replace_file(
     const std::filesystem::path& destination,
     std::span<const std::byte> bytes,
-    const durable_publish_options& options = {},
-    const file_io_hooks& hooks = {},
-    const positional_io_operations& operations = {}) {
+    const publication_options& options = {},
+    const fault_injection_hooks& hooks = {},
+    const positional_io_callbacks& callbacks = {}) {
     const std::string destination_name =
         detail::leaf_name(destination);
     if (destination.empty()
         || !detail::valid_leaf_name(destination_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_temporary,
+            file_error_code::invalid_argument,
+            file_operation::create_staging_file,
             EINVAL));
     }
     const std::filesystem::path parent =
@@ -243,55 +225,44 @@ durable_replace_file(
         return std::unexpected(directory_opened.error());
     }
     file_descriptor directory = std::move(*directory_opened);
-    auto staged = detail::stage_bytes(
+    auto staged = detail::stage_verified_regular_file(
         directory.get(),
         destination_name,
         bytes,
         options,
         hooks,
-        operations);
+        callbacks);
     if (!staged.has_value()) {
         return std::unexpected(staged.error());
     }
-    if (auto verified = detail::verify_staged_path(
-            directory.get(), *staged, hooks);
-        !verified.has_value()) {
-        return std::unexpected(detail::cleanup_error_or(
-            directory.get(),
-            staged->name,
-            staged->identity,
-            verified.error().publication,
-            verified.error(),
-            hooks));
-    }
-    const std::string temporary = staged->name;
+    const std::string staging_name = staged->name;
     if (auto renamed = detail::rename_name_at(
             directory.get(),
-            temporary,
+            staging_name,
             directory.get(),
             destination_name,
             hooks,
             &staged->identity);
         !renamed.has_value()) {
-        return std::unexpected(detail::cleanup_error_or(
+        return std::unexpected(detail::staging_cleanup_error(
             directory.get(),
-            temporary,
+            staging_name,
             staged->identity,
             renamed.error().publication,
             renamed.error(),
             hooks));
     }
-    if (auto directory_synced = detail::sync_descriptor(
+    if (auto directory_synced = detail::fsync_descriptor(
             directory.get(),
-            file_io_operation::sync_directory,
+            file_operation::fsync_directory,
             hooks,
             publication_state::visible_not_durable);
         !directory_synced.has_value()) {
         return std::unexpected(directory_synced.error());
     }
-    return durable_publish_result{
+    return publication_result{
         .publication = publication_state::durable,
-        .disposition = durable_create_disposition::replaced,
+        .disposition = publication_disposition::replaced,
     };
 }
 
@@ -302,25 +273,25 @@ durable_replace_file(
  * Callers which need idempotent byte-identical reconciliation may use
  * `durable_create_file` explicitly after deciding that policy is appropriate.
  */
-[[nodiscard]] inline std::expected<durable_publish_result, file_io_error>
+[[nodiscard]] inline std::expected<publication_result, file_error>
 durable_publish_file(
     const std::filesystem::path& destination,
     std::span<const std::byte> bytes,
-    publish_policy policy,
-    const durable_publish_options& options = {},
-    const file_io_hooks& hooks = {},
-    const positional_io_operations& operations = {}) {
-    if (policy == publish_policy::replace_existing) {
+    publication_policy policy,
+    const publication_options& options = {},
+    const fault_injection_hooks& hooks = {},
+    const positional_io_callbacks& callbacks = {}) {
+    if (policy == publication_policy::replace_existing) {
         return durable_replace_file(
-            destination, bytes, options, hooks, operations);
+            destination, bytes, options, hooks, callbacks);
     }
     const std::string destination_name =
         detail::leaf_name(destination);
     if (destination.empty()
         || !detail::valid_leaf_name(destination_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_temporary,
+            file_error_code::invalid_argument,
+            file_operation::create_staging_file,
             EINVAL));
     }
     const std::filesystem::path parent =
@@ -330,75 +301,49 @@ durable_publish_file(
         return std::unexpected(directory_opened.error());
     }
     file_descriptor directory = std::move(*directory_opened);
-    auto staged = detail::stage_bytes(
+    auto staged = detail::stage_verified_regular_file(
         directory.get(),
         destination_name,
         bytes,
         options,
         hooks,
-        operations);
+        callbacks);
     if (!staged.has_value()) {
         return std::unexpected(staged.error());
     }
-    if (auto verified = detail::verify_staged_path(
-            directory.get(), *staged, hooks);
-        !verified.has_value()) {
-        return std::unexpected(detail::cleanup_error_or(
-            directory.get(),
-            staged->name,
-            staged->identity,
-            verified.error().publication,
-            verified.error(),
-            hooks));
-    }
-    const std::string temporary = staged->name;
+    const std::string staging_name = staged->name;
     if (auto linked = detail::link_name_no_replace_at(
             directory.get(),
-            temporary,
+            staging_name,
             directory.get(),
             destination_name,
             hooks,
             &staged->identity);
         !linked.has_value()) {
-        return std::unexpected(detail::cleanup_error_or(
+        return std::unexpected(detail::staging_cleanup_error(
             directory.get(),
-            temporary,
+            staging_name,
             staged->identity,
             linked.error().publication,
             linked.error(),
             hooks));
     }
-    if (auto removed = detail::remove_published_staging_name(
-            directory.get(),
-            temporary,
-            staged->identity,
-            hooks);
-        !removed.has_value()) {
-        return std::unexpected(removed.error());
-    }
-    if (auto directory_synced = detail::sync_descriptor(
-            directory.get(),
-            file_io_operation::sync_directory,
-            hooks,
-            publication_state::visible_not_durable);
-        !directory_synced.has_value()) {
-        return std::unexpected(directory_synced.error());
-    }
-    return durable_publish_result{
-        .publication = publication_state::durable,
-        .disposition = durable_create_disposition::created,
-    };
+    return detail::complete_staging_publication(
+        directory.get(),
+        *staged,
+        publication_disposition::created,
+        hooks);
 }
 
 /**
  * Fsync and atomically rename an existing regular file, then fsync every
  * directory whose namespace changed.
  */
-[[nodiscard]] inline std::expected<durable_publish_result, file_io_error>
+[[nodiscard]] inline std::expected<publication_result, file_error>
 durable_rename_file(
     const std::filesystem::path& source,
     const std::filesystem::path& destination,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     const std::filesystem::path source_parent =
         detail::parent_directory(source);
     const std::filesystem::path destination_parent =
@@ -410,8 +355,8 @@ durable_rename_file(
         || !detail::valid_leaf_name(source_name)
         || !detail::valid_leaf_name(destination_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::publish_rename,
+            file_error_code::invalid_argument,
+            file_operation::rename_destination,
             EINVAL));
     }
     auto source_opened = detail::open_directory_path(
@@ -447,9 +392,9 @@ durable_rename_file(
         !renamed.has_value()) {
         return std::unexpected(renamed.error());
     }
-    if (auto synced = detail::sync_descriptor(
+    if (auto synced = detail::fsync_descriptor(
             destination_descriptor,
-            file_io_operation::sync_directory,
+            file_operation::fsync_directory,
             hooks,
             publication_state::visible_not_durable);
         !synced.has_value()) {
@@ -457,19 +402,19 @@ durable_rename_file(
     }
     if (source_parent.lexically_normal()
             != destination_parent.lexically_normal()) {
-        if (auto synced = detail::sync_descriptor(
+        if (auto synced = detail::fsync_descriptor(
                 source_directory.get(),
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 publication_state::visible_not_durable);
             !synced.has_value()) {
             return std::unexpected(synced.error());
         }
     }
-    return durable_publish_result{
+    return publication_result{
         .publication = publication_state::durable,
-        .disposition = durable_create_disposition::renamed,
+        .disposition = publication_disposition::renamed,
     };
 }
 
-}  // namespace bioseq::durable_file_io
+}  // namespace bioseq::common::durable_file_io

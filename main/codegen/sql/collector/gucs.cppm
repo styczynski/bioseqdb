@@ -21,7 +21,7 @@ export module bioseq.codegen.sql.collector:gucs;
 
 import :model;
 import :options;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::sql {
@@ -47,38 +47,6 @@ struct collected_guc_enum_value {
     std::optional<std::string> alias_of;
     bool hidden{};
     bool compiled{};
-};
-
-struct collected_guc_authority_enum_value {
-    std::string name;
-    std::string wire_expression;
-    bool hidden{};
-    std::string feature_predicate;
-    std::optional<std::string> alias_of;
-};
-
-struct collected_guc_authority_omission {
-    std::string name;
-    std::string wire_expression;
-};
-
-struct collected_guc_authority {
-    std::string source_owner;
-    std::string group;
-    std::string storage_kind;
-    std::string legacy_storage;
-    std::string default_expression;
-    std::optional<std::string> minimum_expression;
-    std::optional<std::string> maximum_expression;
-    std::string context;
-    std::vector<std::string> flags;
-    std::optional<std::string> unit;
-    std::array<std::optional<std::string>, 3> hooks;
-    std::string feature_predicate;
-    std::vector<std::string> profiles;
-    std::optional<std::string> default_semantic;
-    std::vector<collected_guc_authority_enum_value> enum_values;
-    std::vector<collected_guc_authority_omission> omissions;
 };
 
 struct collected_guc_live_authority {
@@ -119,17 +87,18 @@ struct collected_guc {
     std::string short_description;
     std::string long_description;
     std::string enum_cpp_name;
+    std::string enum_default_name;
     std::vector<collected_guc_enum_value> enum_values;
+    std::string storage_kind;
+    std::string feature_predicate;
+    std::array<std::optional<std::string>, 3> hooks;
     bool reset_plan_cache{};
     std::optional<std::string> authored_assign_hook;
-    collected_guc_authority authority;
     collected_guc_live_authority generated_live_authority;
 };
 
 struct guc_inventory {
     guc_profile profile{guc_profile::production};
-    std::filesystem::path ledger_path;
-    std::string ledger_sha256;
     std::vector<collected_guc> gucs;
 };
 
@@ -156,698 +125,6 @@ struct guc_inventory {
 
 namespace guc_detail {
 
-struct json_value {
-    enum class kind {
-        null,
-        boolean,
-        number,
-        string,
-        array,
-        object,
-    } type{kind::null};
-    bool boolean{};
-    std::int64_t number{};
-    std::string string;
-    std::vector<json_value> array;
-    std::map<std::string, json_value, std::less<>> object;
-};
-
-class json_parser final {
-public:
-    explicit json_parser(std::string_view input)
-        : input_{input} {}
-
-    [[nodiscard]] json_value parse() {
-        json_value result = parse_value();
-        skip_space();
-        if (cursor_ != input_.size()) {
-            fail("trailing content");
-        }
-        return result;
-    }
-
-private:
-    [[noreturn]] void fail(std::string_view reason) const {
-        throw std::runtime_error(
-            "invalid GUC parity ledger JSON at byte "
-            + std::to_string(cursor_) + ": " + std::string{reason});
-    }
-
-    void skip_space() noexcept {
-        while (cursor_ < input_.size()) {
-            const char value = input_[cursor_];
-            if (value != ' ' && value != '\t' && value != '\n'
-                && value != '\r') {
-                break;
-            }
-            ++cursor_;
-        }
-    }
-
-    [[nodiscard]] bool consume(char expected) noexcept {
-        skip_space();
-        if (cursor_ >= input_.size() || input_[cursor_] != expected) {
-            return false;
-        }
-        ++cursor_;
-        return true;
-    }
-
-    void require(char expected) {
-        if (!consume(expected)) {
-            fail(std::string{"expected '"} + expected + "'");
-        }
-    }
-
-    [[nodiscard]] json_value parse_value() {
-        skip_space();
-        if (cursor_ >= input_.size()) fail("expected a value");
-        const char value = input_[cursor_];
-        if (value == '"') {
-            json_value result;
-            result.type = json_value::kind::string;
-            result.string = parse_string();
-            return result;
-        }
-        if (value == '[') return parse_array();
-        if (value == '{') return parse_object();
-        if (value == '-' || (value >= '0' && value <= '9')) {
-            return parse_number();
-        }
-        if (input_.substr(cursor_).starts_with("true")) {
-            cursor_ += 4;
-            json_value result;
-            result.type = json_value::kind::boolean;
-            result.boolean = true;
-            return result;
-        }
-        if (input_.substr(cursor_).starts_with("false")) {
-            cursor_ += 5;
-            json_value result;
-            result.type = json_value::kind::boolean;
-            return result;
-        }
-        if (input_.substr(cursor_).starts_with("null")) {
-            cursor_ += 4;
-            return {};
-        }
-        fail("unrecognized value");
-    }
-
-    [[nodiscard]] std::string parse_string() {
-        require('"');
-        std::string result;
-        while (cursor_ < input_.size()) {
-            const char value = input_[cursor_++];
-            if (value == '"') return result;
-            if (static_cast<unsigned char>(value) < 0x20U) {
-                fail("control character in string");
-            }
-            if (value != '\\') {
-                result.push_back(value);
-                continue;
-            }
-            if (cursor_ >= input_.size()) fail("unfinished escape");
-            const char escaped = input_[cursor_++];
-            switch (escaped) {
-                case '"': result.push_back('"'); break;
-                case '\\': result.push_back('\\'); break;
-                case '/': result.push_back('/'); break;
-                case 'b': result.push_back('\b'); break;
-                case 'f': result.push_back('\f'); break;
-                case 'n': result.push_back('\n'); break;
-                case 'r': result.push_back('\r'); break;
-                case 't': result.push_back('\t'); break;
-                default:
-                    fail("unsupported escape in ASCII ledger");
-            }
-        }
-        fail("unterminated string");
-    }
-
-    [[nodiscard]] json_value parse_number() {
-        skip_space();
-        const std::size_t begin = cursor_;
-        if (input_[cursor_] == '-') ++cursor_;
-        if (cursor_ >= input_.size()
-            || input_[cursor_] < '0' || input_[cursor_] > '9') {
-            fail("invalid integer");
-        }
-        while (cursor_ < input_.size()
-               && input_[cursor_] >= '0' && input_[cursor_] <= '9') {
-            ++cursor_;
-        }
-        std::int64_t parsed{};
-        const auto [end, error] = std::from_chars(
-            input_.data() + begin,
-            input_.data() + cursor_,
-            parsed);
-        if (error != std::errc{} || end != input_.data() + cursor_) {
-            fail("integer is outside the signed 64-bit range");
-        }
-        json_value result;
-        result.type = json_value::kind::number;
-        result.number = parsed;
-        return result;
-    }
-
-    [[nodiscard]] json_value parse_array() {
-        require('[');
-        json_value result;
-        result.type = json_value::kind::array;
-        if (consume(']')) return result;
-        for (;;) {
-            result.array.push_back(parse_value());
-            if (consume(']')) return result;
-            require(',');
-        }
-    }
-
-    [[nodiscard]] json_value parse_object() {
-        require('{');
-        json_value result;
-        result.type = json_value::kind::object;
-        if (consume('}')) return result;
-        for (;;) {
-            skip_space();
-            if (cursor_ >= input_.size() || input_[cursor_] != '"') {
-                fail("object key must be a string");
-            }
-            std::string key = parse_string();
-            require(':');
-            if (!result.object.emplace(
-                    std::move(key), parse_value()).second) {
-                fail("duplicate object key");
-            }
-            if (consume('}')) return result;
-            require(',');
-        }
-    }
-
-    std::string_view input_;
-    std::size_t cursor_{};
-};
-
-[[nodiscard]] inline const json_value& object_member(
-    const json_value& object,
-    std::string_view name) {
-    if (object.type != json_value::kind::object) {
-        throw std::runtime_error(
-            "GUC parity ledger root/member is not an object");
-    }
-    const auto found = object.object.find(name);
-    if (found == object.object.end()) {
-        throw std::runtime_error(
-            "GUC parity ledger is missing '" + std::string{name} + "'");
-    }
-    return found->second;
-}
-
-[[nodiscard]] inline std::string json_string(
-    const json_value& value,
-    std::string_view field) {
-    if (value.type != json_value::kind::string) {
-        throw std::runtime_error(
-            "GUC parity ledger field '" + std::string{field}
-            + "' is not a string");
-    }
-    return value.string;
-}
-
-[[nodiscard]] inline std::optional<std::string> nullable_json_string(
-    const json_value& value,
-    std::string_view field) {
-    if (value.type == json_value::kind::null) return std::nullopt;
-    return json_string(value, field);
-}
-
-[[nodiscard]] inline std::size_t json_size(
-    const json_value& value,
-    std::string_view field) {
-    if (value.type != json_value::kind::number || value.number < 0) {
-        throw std::runtime_error(
-            "GUC parity ledger field '" + std::string{field}
-            + "' is not a nonnegative integer");
-    }
-    return static_cast<std::size_t>(value.number);
-}
-
-[[nodiscard]] inline bool json_bool(
-    const json_value& value,
-    std::string_view field) {
-    if (value.type != json_value::kind::boolean) {
-        throw std::runtime_error(
-            "GUC parity ledger field '" + std::string{field}
-            + "' is not boolean");
-    }
-    return value.boolean;
-}
-
-struct ledger_enum_value {
-    std::string name;
-    std::string wire_expression;
-    bool hidden{};
-    std::string feature_predicate;
-    std::optional<std::string> alias_of;
-};
-
-struct ledger_omission {
-    std::string name;
-    std::string wire_expression;
-};
-
-struct ledger_row {
-    std::size_t ordinal{};
-    std::string source_owner;
-    std::string name;
-    std::string group;
-    std::string member;
-    std::string kind;
-    std::string storage_kind;
-    std::string legacy_storage;
-    std::string default_expression;
-    std::optional<std::string> minimum_expression;
-    std::optional<std::string> maximum_expression;
-    std::string context;
-    std::vector<std::string> flags;
-    std::optional<std::string> unit;
-    std::array<std::optional<std::string>, 3> hooks;
-    std::string feature_predicate;
-    std::vector<std::string> profiles;
-    std::optional<std::string> default_semantic;
-    std::vector<ledger_enum_value> enum_values;
-    std::vector<ledger_omission> omissions;
-};
-
-struct parsed_ledger {
-    std::vector<ledger_row> rows;
-    std::map<std::string, std::size_t, std::less<>> profile_counts;
-};
-
-[[nodiscard]] inline std::vector<std::string> string_array(
-    const json_value& value,
-    std::string_view field) {
-    if (value.type != json_value::kind::array) {
-        throw std::runtime_error(
-            "GUC parity ledger field '" + std::string{field}
-            + "' is not an array");
-    }
-    std::vector<std::string> result;
-    result.reserve(value.array.size());
-    for (const json_value& item : value.array) {
-        result.push_back(json_string(item, field));
-    }
-    return result;
-}
-
-[[nodiscard]] inline parsed_ledger parse_ledger(
-    std::string_view content) {
-    const json_value root = json_parser{content}.parse();
-    if (root.type != json_value::kind::object) {
-        throw std::runtime_error(
-            "GUC parity ledger root is not an object");
-    }
-    const std::set<std::string, std::less<>> expected_root_keys{
-        "baseline_legacy_description_hash_is_non_authoritative",
-        "columns",
-        "description_authority",
-        "ordinal_base",
-        "profiles",
-        "rows",
-        "schema_version",
-        "source_owner_order",
-    };
-    std::set<std::string, std::less<>> observed_root_keys;
-    for (const auto& [name, value] : root.object) {
-        static_cast<void>(value);
-        observed_root_keys.emplace(name);
-    }
-    if (observed_root_keys != expected_root_keys) {
-        throw std::runtime_error(
-            "GUC parity ledger root schema differs from version 1");
-    }
-    if (json_size(object_member(root, "schema_version"), "schema_version")
-        != 1) {
-        throw std::runtime_error(
-            "unsupported GUC parity ledger schema version");
-    }
-    if (json_string(
-            object_member(root, "description_authority"),
-            "description_authority")
-        != "cleaned_doxygen_only") {
-        throw std::runtime_error(
-            "GUC descriptions must be authoritative cleaned Doxygen");
-    }
-    if (!json_bool(
-            object_member(
-                root,
-                "baseline_legacy_description_hash_is_non_authoritative"),
-            "baseline_legacy_description_hash_is_non_authoritative")) {
-        throw std::runtime_error(
-            "legacy GUC description hashes cannot be generation authority");
-    }
-    if (json_size(object_member(root, "ordinal_base"), "ordinal_base")
-        != 0) {
-        throw std::runtime_error(
-            "GUC parity ledger ordinals must be zero based");
-    }
-    if (string_array(
-            object_member(root, "source_owner_order"),
-            "source_owner_order")
-        != std::vector<std::string>{
-            "column", "custom_scan", "batch_sort_scan"}) {
-        throw std::runtime_error(
-            "GUC parity ledger source-owner order changed");
-    }
-
-    const json_value& columns_value = object_member(root, "columns");
-    const std::vector<std::string> columns =
-        string_array(columns_value, "columns");
-    const std::vector<std::string> expected_columns{
-        "registration_ordinal",
-        "source_owner",
-        "name",
-        "group",
-        "member",
-        "kind",
-        "storage_kind",
-        "storage",
-        "default_expression",
-        "minimum_expression",
-        "maximum_expression",
-        "context",
-        "flags",
-        "unit",
-        "hooks",
-        "feature_predicate",
-        "profiles",
-        "baseline_legacy_description_sha256",
-        "default_semantic",
-        "enum_rows_name_wire_hidden_feature_alias_of",
-        "enum_omissions_name_wire",
-    };
-    if (columns != expected_columns) {
-        throw std::runtime_error(
-            "GUC parity ledger columns differ from version 1");
-    }
-    std::map<std::string, std::size_t, std::less<>> column;
-    for (std::size_t index = 0; index < columns.size(); ++index) {
-        if (!column.emplace(columns[index], index).second) {
-            throw std::runtime_error(
-                "duplicate GUC parity ledger column '" + columns[index]
-                + "'");
-        }
-    }
-    parsed_ledger result;
-    const json_value& profiles = object_member(root, "profiles");
-    if (profiles.type != json_value::kind::object) {
-        throw std::runtime_error(
-            "GUC parity ledger profiles are not an object");
-    }
-    if (profiles.object.size() != 2
-        || !profiles.object.contains("production")
-        || !profiles.object.contains("test_indexes")) {
-        throw std::runtime_error(
-            "GUC parity ledger profile schema changed");
-    }
-    for (const auto& [name, descriptor] : profiles.object) {
-        if (descriptor.type != json_value::kind::object
-            || descriptor.object.size() != 1
-            || !descriptor.object.contains("row_count")) {
-            throw std::runtime_error(
-                "GUC parity ledger profile descriptor schema changed");
-        }
-        result.profile_counts.emplace(
-            name,
-            json_size(
-                object_member(descriptor, "row_count"),
-                "profiles.row_count"));
-    }
-
-    const json_value& rows = object_member(root, "rows");
-    if (rows.type != json_value::kind::array) {
-        throw std::runtime_error(
-            "GUC parity ledger rows are not an array");
-    }
-    result.rows.reserve(rows.array.size());
-    const auto cell = [&column](const json_value& row, std::string_view name)
-        -> const json_value& {
-        if (row.type != json_value::kind::array) {
-            throw std::runtime_error(
-                "GUC parity ledger row is not an array");
-        }
-        const auto column_it = column.find(name);
-        if (column_it == column.end()) {
-            throw std::runtime_error(
-                "GUC parity ledger lacks required column '"
-                + std::string{name} + "'");
-        }
-        const std::size_t index = column_it->second;
-        if (index >= row.array.size()) {
-            throw std::runtime_error(
-                "short GUC parity ledger row for column '"
-                + std::string{name} + "'");
-        }
-        return row.array[index];
-    };
-    for (const json_value& row_value : rows.array) {
-        if (row_value.type != json_value::kind::array
-            || row_value.array.size() != columns.size()) {
-            throw std::runtime_error(
-                "GUC parity ledger row width differs from version 1");
-        }
-        const json_value& hooks_value = cell(row_value, "hooks");
-        if (hooks_value.type != json_value::kind::array
-            || hooks_value.array.size() != 3) {
-            throw std::runtime_error(
-                "GUC parity ledger hooks must contain three fields");
-        }
-        std::array<std::optional<std::string>, 3> hooks{
-            nullable_json_string(hooks_value.array[0], "hooks.check"),
-            nullable_json_string(hooks_value.array[1], "hooks.assign"),
-            nullable_json_string(hooks_value.array[2], "hooks.show"),
-        };
-        const std::string baseline_description_hash = json_string(
-            cell(row_value, "baseline_legacy_description_sha256"),
-            "baseline_legacy_description_sha256");
-        if (baseline_description_hash.size() != 64
-            || !std::ranges::all_of(
-                baseline_description_hash,
-                [](char value) {
-                    return (value >= '0' && value <= '9')
-                        || (value >= 'a' && value <= 'f');
-                })) {
-            throw std::runtime_error(
-                "GUC legacy description hash is not lowercase SHA-256");
-        }
-        ledger_row row{
-            .ordinal = json_size(
-                cell(row_value, "registration_ordinal"),
-                "registration_ordinal"),
-            .source_owner = json_string(
-                cell(row_value, "source_owner"), "source_owner"),
-            .name = json_string(cell(row_value, "name"), "name"),
-            .group = json_string(cell(row_value, "group"), "group"),
-            .member = json_string(cell(row_value, "member"), "member"),
-            .kind = json_string(cell(row_value, "kind"), "kind"),
-            .storage_kind = json_string(
-                cell(row_value, "storage_kind"), "storage_kind"),
-            .legacy_storage = json_string(
-                cell(row_value, "storage"), "storage"),
-            .default_expression = json_string(
-                cell(row_value, "default_expression"),
-                "default_expression"),
-            .minimum_expression = nullable_json_string(
-                cell(row_value, "minimum_expression"),
-                "minimum_expression"),
-            .maximum_expression = nullable_json_string(
-                cell(row_value, "maximum_expression"),
-                "maximum_expression"),
-            .context = json_string(
-                cell(row_value, "context"), "context"),
-            .flags = string_array(
-                cell(row_value, "flags"), "flags"),
-            .unit = nullable_json_string(
-                cell(row_value, "unit"), "unit"),
-            .hooks = std::move(hooks),
-            .feature_predicate = json_string(
-                cell(row_value, "feature_predicate"),
-                "feature_predicate"),
-            .profiles = string_array(
-                cell(row_value, "profiles"), "profiles"),
-            .default_semantic = nullable_json_string(
-                cell(row_value, "default_semantic"),
-                "default_semantic"),
-        };
-        const json_value& enum_rows = cell(
-            row_value,
-            "enum_rows_name_wire_hidden_feature_alias_of");
-        if (enum_rows.type != json_value::kind::array) {
-            throw std::runtime_error(
-                "GUC enum rows are not an array");
-        }
-        for (const json_value& enum_row : enum_rows.array) {
-            if (enum_row.type != json_value::kind::array
-                || enum_row.array.size() != 5) {
-                throw std::runtime_error(
-                    "GUC enum row must contain five fields");
-            }
-            row.enum_values.push_back(ledger_enum_value{
-                .name = json_string(enum_row.array[0], "enum.name"),
-                .wire_expression =
-                    json_string(enum_row.array[1], "enum.wire"),
-                .hidden = json_size(
-                    enum_row.array[2], "enum.hidden") != 0,
-                .feature_predicate =
-                    json_string(enum_row.array[3], "enum.feature"),
-                .alias_of = nullable_json_string(
-                    enum_row.array[4], "enum.alias_of"),
-            });
-        }
-        const json_value& omissions = cell(
-            row_value, "enum_omissions_name_wire");
-        if (omissions.type != json_value::kind::array) {
-            throw std::runtime_error(
-                "GUC enum omissions are not an array");
-        }
-        for (const json_value& omission : omissions.array) {
-            if (omission.type != json_value::kind::array
-                || omission.array.size() != 2) {
-                throw std::runtime_error(
-                    "GUC enum omission must contain two fields");
-            }
-            row.omissions.push_back(ledger_omission{
-                .name = json_string(omission.array[0], "omission.name"),
-                .wire_expression =
-                    json_string(omission.array[1], "omission.wire"),
-            });
-        }
-        result.rows.push_back(std::move(row));
-    }
-    std::ranges::sort(
-        result.rows, {}, &ledger_row::ordinal);
-    std::set<std::string, std::less<>> row_names;
-    std::set<std::string, std::less<>> legacy_storages;
-    std::map<std::string, std::size_t, std::less<>>
-        observed_profile_counts;
-    for (const auto& [profile, count] : result.profile_counts) {
-        static_cast<void>(count);
-        observed_profile_counts.emplace(profile, 0);
-    }
-    const auto blank_feature_predicate =
-        [](std::string_view value) noexcept {
-            return value.empty()
-                || std::ranges::all_of(
-                    value,
-                    [](char item) {
-                        return item == ' ' || item == '\t'
-                            || item == '\n' || item == '\r';
-                    });
-        };
-    for (std::size_t index = 0; index < result.rows.size(); ++index) {
-        const ledger_row& row = result.rows[index];
-        if (row.ordinal != index) {
-            throw std::runtime_error(
-                "GUC parity ledger registration ordinals are not dense");
-        }
-        if (!row_names.emplace(row.name).second) {
-            throw std::runtime_error(
-                "duplicate GUC parity ledger row '" + row.name + "'");
-        }
-        if (!legacy_storages.emplace(row.legacy_storage).second) {
-            throw std::runtime_error(
-                "duplicate GUC parity ledger legacy storage '"
-                + row.legacy_storage + "'");
-        }
-        if (blank_feature_predicate(row.feature_predicate)) {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + row.name
-                + "' has an empty feature predicate");
-        }
-        for (const ledger_enum_value& value : row.enum_values) {
-            if (blank_feature_predicate(value.feature_predicate)) {
-                throw std::runtime_error(
-                    "GUC parity ledger enum value '" + row.name + "."
-                    + value.name + "' has an empty feature predicate");
-            }
-        }
-        const std::map<std::string, std::string, std::less<>>
-            storage_kind_by_guc_kind{
-                {"bool", "bool"},
-                {"enum", "int32_enum"},
-                {"integer", "int32"},
-                {"real", "double"},
-                {"string", "string"},
-            };
-        const auto expected_storage =
-            storage_kind_by_guc_kind.find(row.kind);
-        if (expected_storage == storage_kind_by_guc_kind.end()
-            || expected_storage->second != row.storage_kind) {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + row.name
-                + "' has an invalid kind/storage ABI pair");
-        }
-        if (std::ranges::any_of(
-                row.hooks,
-                [](const std::optional<std::string>& hook) {
-                    return hook.has_value();
-                })) {
-            throw std::runtime_error(
-                "GUC parity ledger schema version 1 requires null hooks");
-        }
-        if (row.name
-                != row.group + "."
-                    + row.member) {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + row.name
-                + "' has inconsistent group/member identity");
-        }
-        if (row.source_owner != "column"
-            && row.source_owner != "custom_scan"
-            && row.source_owner != "batch_sort_scan") {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + row.name
-                + "' has an unknown source owner");
-        }
-        std::set<std::string, std::less<>> row_profiles;
-        for (const std::string& profile : row.profiles) {
-            if (!row_profiles.emplace(profile).second) {
-                throw std::runtime_error(
-                    "GUC parity ledger row '" + row.name
-                    + "' repeats profile '" + profile + "'");
-            }
-            const auto known = observed_profile_counts.find(profile);
-            if (known == observed_profile_counts.end()) {
-                throw std::runtime_error(
-                    "GUC parity ledger row '" + row.name
-                    + "' references unknown profile '" + profile + "'");
-            }
-            ++known->second;
-        }
-        const std::vector<std::string> expected_profiles =
-            row.name == "bioseq.test_force_paper_index_failure"
-            ? std::vector<std::string>{"test_indexes"}
-            : std::vector<std::string>{
-                "production", "test_indexes"};
-        if (row.profiles != expected_profiles) {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + row.name
-                + "' has an unexpected profile selection");
-        }
-    }
-    for (const auto& [profile, expected] : result.profile_counts) {
-        const std::size_t observed =
-            observed_profile_counts.at(profile);
-        if (observed != expected) {
-            throw std::runtime_error(
-                "GUC parity ledger profile '" + profile + "' declares "
-                + std::to_string(expected) + " rows but selects "
-                + std::to_string(observed));
-        }
-    }
-    return result;
-}
-
 [[nodiscard]] inline std::string lower_ascii(std::string_view value) {
     std::string result;
     result.reserve(value.size());
@@ -860,13 +137,13 @@ struct parsed_ledger {
     return result;
 }
 
-[[nodiscard]] inline std::string normalized_expression(
+[[nodiscard]] inline std::string compact_annotation_expression(
     std::string_view value) {
     std::string result;
     result.reserve(value.size());
     for (const char item : value) {
         if (item == ' ' || item == '\t' || item == '\n'
-            || item == '\r' || item == '\'' || item == '_') {
+            || item == '\r') {
             continue;
         }
         result.push_back(
@@ -874,62 +151,7 @@ struct parsed_ledger {
             ? static_cast<char>(item - 'A' + 'a')
             : item);
     }
-    while (!result.empty()
-           && (result.back() == 'u' || result.back() == 'l')) {
-        result.pop_back();
-    }
-    if (result == "compressionlevelmin") {
-        result = "compressionlevelminimum";
-    } else if (result == "compressionlevelmax") {
-        result = "compressionlevelmaximum";
-    } else if (result == "striperowcountminimum") {
-        result = "striperowcountminimum";
-    } else if (result == "striperowcountmaximum") {
-        result = "striperowcountmaximum";
-    } else if (result == "chunkrowcountminimum") {
-        result = "chunkrowcountminimum";
-    } else if (result == "chunkrowcountmaximum") {
-        result = "chunkrowcountmaximum";
-    }
     return result;
-}
-
-[[nodiscard]] inline bool numeric_expression(
-    std::string_view value,
-    long double& result) {
-    std::string normalized;
-    normalized.reserve(value.size());
-    for (const char item : value) {
-        if (item == '\'' || item == ' ' || item == '\t'
-            || item == '\n' || item == '\r') {
-            continue;
-        }
-        normalized.push_back(item);
-    }
-    while (!normalized.empty()
-           && (normalized.back() == 'u' || normalized.back() == 'U'
-               || normalized.back() == 'l'
-               || normalized.back() == 'L')) {
-        normalized.pop_back();
-    }
-    if (normalized.empty() || normalized.contains("<<")) return false;
-    char* end = nullptr;
-    result = std::strtold(normalized.c_str(), &end);
-    return end != normalized.c_str() && end == normalized.c_str()
-        + normalized.size();
-}
-
-[[nodiscard]] inline bool equivalent_expression(
-    std::string_view authored,
-    std::string_view baseline) {
-    if (normalized_expression(authored)
-        == normalized_expression(baseline)) {
-        return true;
-    }
-    long double left{};
-    long double right{};
-    return numeric_expression(authored, left)
-        && numeric_expression(baseline, right) && left == right;
 }
 
 [[nodiscard]] inline std::string natural_guc_name(
@@ -941,30 +163,129 @@ struct parsed_ledger {
         ++offset;
     }
     const std::string marker = ".settings.";
-    if (const std::size_t settings = path.find(marker);
-        settings != std::string::npos) {
-        path.erase(settings, marker.size() - 1);
+    const std::size_t settings = path.find(marker);
+    if (settings == std::string::npos
+        || path.find(marker, settings + marker.size())
+            != std::string::npos) {
+        throw std::runtime_error(
+            "annotated GUC '" + std::string{cpp_qualified_name}
+            + "' must have exactly one natural settings owner");
+    }
+    path.erase(settings, marker.size() - 1);
+    if (!path.starts_with("bioseq.") || path.ends_with('.')) {
+        throw std::runtime_error(
+            "annotated GUC '" + std::string{cpp_qualified_name}
+            + "' does not produce a Bioseq GUC name");
+    }
+    std::size_t component_begin = 0;
+    while (component_begin < path.size()) {
+        const std::size_t separator = path.find('.', component_begin);
+        const std::string_view component{path.data() + component_begin,
+            (separator == std::string::npos ? path.size() : separator)
+                - component_begin};
+        if (component.empty()
+            || !((component.front() >= 'a'
+                    && component.front() <= 'z')
+                 || component.front() == '_')
+            || !std::ranges::all_of(
+                component.substr(1),
+                [](const char value) {
+                    return (value >= 'a' && value <= 'z')
+                        || (value >= '0' && value <= '9')
+                        || value == '_';
+                })) {
+            throw std::runtime_error(
+                "annotated GUC '" + std::string{cpp_qualified_name}
+                + "' has a non-lower-snake natural name component");
+        }
+        if (separator == std::string::npos) break;
+        component_begin = separator + 1;
     }
     return path;
 }
 
-[[nodiscard]] inline std::string candidate_cpp_storage(
-    std::string_view group,
-    std::string_view member) {
-    std::string result{group};
-    std::size_t offset = 0;
-    while ((offset = result.find('.', offset)) != std::string::npos) {
-        result.replace(offset, 1, "::");
-        offset += 2;
+[[nodiscard]] inline const structural_analysis::translation_unit&
+registered_guc_source(
+    const collected_program& program,
+    const collected_entity& entity) {
+    const auto source = std::ranges::find(
+        program.translation_units,
+        entity.source_path,
+        &structural_analysis::translation_unit::source_path);
+    if (source == program.translation_units.end()) {
+        throw std::runtime_error(
+            "annotated GUC '" + entity.cpp_qualified_name
+            + "' does not belong to a registered SQL source");
     }
-    result += "::settings::";
-    result += member;
-    return result;
+    if (source->module_name != entity.source_module
+        || source->source_sha256 != entity.source_sha256) {
+        throw std::runtime_error(
+            "annotated GUC '" + entity.cpp_qualified_name
+            + "' disagrees with its registered-source provenance");
+    }
+    const auto declaration = std::ranges::find_if(
+        source->declarations,
+        [&entity](
+            const structural_analysis::declaration_record& candidate) {
+            return candidate.kind == entity.declaration_kind
+                && candidate.qualified_name
+                    == entity.cpp_qualified_name;
+        });
+    if (declaration == source->declarations.end()) {
+        throw std::runtime_error(
+            "annotated GUC '" + entity.cpp_qualified_name
+            + "' is absent from its registered SQL source");
+    }
+    const std::string source_path =
+        source->source_path.generic_string();
+    if (source_path.contains("/backend/pg/")
+        && !source_path.contains("/backend/pg/configuration/")) {
+        throw std::runtime_error(
+            "annotated GUC '" + entity.cpp_qualified_name
+            + "' is owned by an unsupported PostgreSQL adapter path");
+    }
+    return *source;
 }
 
-[[nodiscard]] inline std::string candidate_source_module(
-    std::string_view group) {
-    return std::string{group} + ".sql_guc_settings";
+[[nodiscard]] inline std::string guc_owner_key(
+    const structural_analysis::translation_unit& source) {
+    static constexpr std::string_view prefix =
+        "bioseq.postgres.configuration.";
+    if (!source.module_name.starts_with(prefix)) {
+        throw std::runtime_error(
+            source.source_path.string()
+            + ": registered GUC source module must begin with '"
+            + std::string{prefix} + "'");
+    }
+    const std::string_view suffix =
+        std::string_view{source.module_name}.substr(prefix.size());
+    if (suffix == "core") return "bioseq";
+    if (suffix == "aligner" || suffix == "scheduler"
+        || suffix == "storage") {
+        return std::string{suffix};
+    }
+    throw std::runtime_error(
+        source.source_path.string()
+        + ": registered GUC source has unsupported configuration owner '"
+        + std::string{suffix} + "'");
+}
+
+[[nodiscard]] inline std::string registration_member(
+    std::string_view natural_name,
+    std::string_view owner_key) {
+    const std::string prefix = owner_key == "bioseq"
+        ? "bioseq."
+        : "bioseq." + std::string{owner_key} + ".";
+    if (!natural_name.starts_with(prefix)
+        || natural_name.size() == prefix.size()) {
+        throw std::runtime_error(
+            "natural GUC name '" + std::string{natural_name}
+            + "' does not belong to registered owner '"
+            + std::string{owner_key} + "'");
+    }
+    std::string result{natural_name.substr(prefix.size())};
+    std::ranges::replace(result, '.', '_');
+    return result;
 }
 
 [[nodiscard]] inline std::string compact_cpp_type(
@@ -1136,59 +457,6 @@ struct parsed_ledger {
     return {};
 }
 
-[[nodiscard]] inline std::string enum_default_leaf(
-    std::string_view initializer) {
-    const auto trim = [](std::string_view value) noexcept {
-        while (!value.empty()
-               && (value.front() == ' ' || value.front() == '\t'
-                   || value.front() == '\n' || value.front() == '\r')) {
-            value.remove_prefix(1);
-        }
-        while (!value.empty()
-               && (value.back() == ' ' || value.back() == '\t'
-                   || value.back() == '\n' || value.back() == '\r')) {
-            value.remove_suffix(1);
-        }
-        return value;
-    };
-    initializer = trim(initializer);
-    if (initializer.ends_with('}')) {
-        const std::size_t open = initializer.find('{');
-        if (open != std::string_view::npos) {
-            initializer = trim(initializer.substr(
-                open + 1, initializer.size() - open - 2));
-        }
-    }
-    const std::size_t separator = initializer.rfind("::");
-    if (separator == std::string_view::npos) {
-        const bool identifier =
-            !initializer.empty()
-            && ((initializer.front() >= 'a'
-                    && initializer.front() <= 'z')
-                || (initializer.front() >= 'A'
-                    && initializer.front() <= 'Z')
-                || initializer.front() == '_')
-            && std::ranges::all_of(
-                initializer.substr(1),
-                [](char value) {
-                    return (value >= 'a' && value <= 'z')
-                        || (value >= 'A' && value <= 'Z')
-                        || (value >= '0' && value <= '9')
-                        || value == '_';
-                });
-        return identifier ? std::string{initializer} : std::string{};
-    }
-    std::size_t end = separator + 2;
-    while (end < initializer.size()
-           && ((initializer[end] >= 'a' && initializer[end] <= 'z')
-               || (initializer[end] >= 'A' && initializer[end] <= 'Z')
-               || (initializer[end] >= '0' && initializer[end] <= '9')
-               || initializer[end] == '_')) {
-        ++end;
-    }
-    return std::string{initializer.substr(
-        separator + 2, end - separator - 2)};
-}
 
 [[nodiscard]] inline bool condition_enabled_for_profile(
     std::string_view condition,
@@ -1252,18 +520,6 @@ struct parsed_ledger {
             "expression");
     }
     return std::string{condition};
-}
-
-[[nodiscard]] inline std::string effective_feature_predicate(
-    std::string_view owner_condition,
-    std::string_view member_condition) {
-    const std::string owner =
-        canonical_feature_predicate(owner_condition);
-    const std::string member =
-        canonical_feature_predicate(member_condition);
-    if (owner == "true") return member;
-    if (member == "true" || member == owner) return owner;
-    return "(" + owner + ") && (" + member + ")";
 }
 
 [[nodiscard]] inline std::string condition_at(
@@ -1346,6 +602,7 @@ struct parsed_enumerator {
 struct parsed_enum {
     std::string qualified_name;
     std::map<std::string, parsed_enumerator, std::less<>> values;
+    std::vector<std::string> declaration_order;
 };
 
 [[nodiscard]] inline parsed_enum parse_enum(
@@ -1355,13 +612,13 @@ struct parsed_enum {
     const auto unit = std::ranges::find(
         program.translation_units,
         entity.source_path,
-        &clang_structural::translation_unit::source_path);
+        &structural_analysis::translation_unit::source_path);
     if (unit == program.translation_units.end()) {
         throw std::runtime_error(
             "cannot find translation unit for enum GUC '" + entity.name
             + "'");
     }
-    const std::string source = read_file(unit->source_path);
+    const std::string source = read_artifact_bytes(unit->source_path);
     const auto& tokens = unit->tokens;
     std::size_t enum_name = tokens.size();
     std::size_t open = tokens.size();
@@ -1467,7 +724,7 @@ struct parsed_enum {
         }
         const std::size_t offset =
             tokens[name_token].range.begin.byte_offset;
-        result.values.emplace(
+        const auto [value, inserted] = result.values.emplace(
             name,
             parsed_enumerator{
                 .name = name,
@@ -1475,6 +732,13 @@ struct parsed_enum {
                 .initializer_text = std::move(initializer),
                 .active_condition = condition_at(source, offset),
             });
+        static_cast<void>(value);
+        if (!inserted) {
+            throw std::runtime_error(
+                "enum type '" + result.qualified_name
+                + "' duplicates value '" + name + "'");
+        }
+        result.declaration_order.push_back(name);
     };
 
     std::size_t segment_begin = open + 1;
@@ -1526,7 +790,8 @@ guc_value_exceptions(
         value_exception exception;
         if (const option_value* omit = find_option(entity, "omit")) {
             exception.omit =
-                normalized_expression(omit->expression) == "true";
+                compact_annotation_expression(omit->expression)
+                    == "true";
         }
         if (const option_value* aliases = find_option(entity, "aliases")) {
             const std::string& expression = aliases->expression;
@@ -1542,7 +807,7 @@ guc_value_exceptions(
                 }
             }
             exception.alias_hidden =
-                normalized_expression(expression).contains(
+                compact_annotation_expression(expression).contains(
                     ".hidden=true");
         }
         result.emplace(entity.name, std::move(exception));
@@ -1576,267 +841,301 @@ inline void validate_documentation(const collected_entity& entity) {
     }
 }
 
-inline void validate_scalar_parity(
-    const collected_entity& entity,
-    const ledger_row& row,
-    guc_kind kind) {
-    const auto require_equivalent = [&row](
-                                         std::string_view authored,
-                                         std::string_view baseline,
-                                         std::string_view field) {
-        if (!equivalent_expression(authored, baseline)) {
-            throw std::runtime_error(
-                "GUC '" + row.name + "' " + std::string{field}
-                + " differs from the parity ledger: authored '"
-                + std::string{authored} + "', ledger '"
-                + std::string{baseline} + "'");
-        }
-    };
-    require_equivalent(
-        entity.initializer_expression,
-        row.default_expression,
-        "default");
-    if (kind == guc_kind::integer || kind == guc_kind::real) {
-        const std::optional<std::string> minimum =
-            range_option(entity, "minimum");
-        const std::optional<std::string> maximum =
-            range_option(entity, "maximum");
-        if (!minimum || !maximum || !row.minimum_expression
-            || !row.maximum_expression) {
-            throw std::runtime_error(
-                "numeric GUC '" + row.name
-                + "' must retain explicit parity bounds");
-        }
-        require_equivalent(
-            *minimum, *row.minimum_expression, "minimum");
-        require_equivalent(
-            *maximum, *row.maximum_expression, "maximum");
+[[nodiscard]] inline bool compiled_enumerator(
+    const collected_program& program,
+    const parsed_enumerator& value) {
+    if (program.compiler_profile.empty()) {
+        return canonical_feature_predicate(value.active_condition)
+            == "true";
     }
+    return std::ranges::any_of(
+        program.translation_units,
+        [&value](const structural_analysis::translation_unit& unit) {
+            return std::ranges::any_of(
+                unit.declarations,
+                [&value](
+                    const structural_analysis::declaration_record&
+                        declaration) {
+                    return declaration.kind
+                            == structural_analysis::declaration_kind::
+                                enumerator
+                        && declaration.qualified_name
+                            == value.qualified_name;
+                });
+        });
 }
 
 [[nodiscard]] inline std::vector<collected_guc_enum_value>
 collect_enum_values(
     const collected_program& program,
     const collected_entity& entity,
-    const ledger_row& row,
-    std::string& enum_cpp_name) {
-    const std::string enum_leaf = enum_type_leaf(entity.cpp_return_type);
-    const parsed_enum parsed =
-        parse_enum(program, entity, enum_leaf);
-    enum_cpp_name = parsed.qualified_name;
-    const auto& declarations = parsed.values;
+    const parsed_enum& parsed) {
     const auto exceptions =
-        guc_value_exceptions(program, enum_cpp_name);
-    // Transitional source-only contract fixtures have no compiler profile and
-    // therefore cannot expose Clang's post-preprocessing enumerator set. Keep
-    // those fixtures useful by admitting only lexically unconditional values;
-    // profiled generation must always use the exact compiled declarations.
-    const bool source_only_fixture =
-        program.compiler_profile.empty();
-    const auto compiled_enumerator =
-        [&program, source_only_fixture](
-            const parsed_enumerator& value) {
-            if (source_only_fixture) {
-                return canonical_feature_predicate(
-                           value.active_condition)
-                    == "true";
-            }
-            for (const clang_structural::translation_unit& unit :
-                 program.translation_units) {
-                if (std::ranges::any_of(
-                        unit.declarations,
-                        [&value](
-                            const clang_structural::declaration_record&
-                                declaration) {
-                            return declaration.kind
-                                    == clang_structural::
-                                        declaration_kind::enumerator
-                                && declaration.qualified_name
-                                    == value.qualified_name;
-                        })) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    if (!row.default_semantic) {
-        throw std::runtime_error(
-            "enum GUC '" + row.name
-            + "' has no semantic default in the parity ledger");
-    }
-    const std::string authored_default =
-        enum_default_leaf(entity.initializer_expression);
-    const bool feature_selected_compression_default =
-        authored_default == "default_compression_type"
-        && *row.default_semantic == "best_compiled_algorithm";
-    if (authored_default != *row.default_semantic
-        && !feature_selected_compression_default) {
-        throw std::runtime_error(
-            "enum GUC '" + row.name + "' default is '"
-            + authored_default + "', expected '" + *row.default_semantic
-            + "'");
-    }
-
-    std::set<std::string, std::less<>> accounted;
-    std::vector<collected_guc_enum_value> result;
-    result.reserve(row.enum_values.size());
-    for (const ledger_enum_value& expected : row.enum_values) {
-        if (expected.alias_of) {
-            const auto exception = exceptions.find(*expected.alias_of);
-            if (exception == exceptions.end()
-                || exception->second.alias != expected.name
-                || exception->second.alias_hidden != expected.hidden) {
-                std::string detail =
-                    exception == exceptions.end()
-                    ? "no matching exception owner"
-                    : "declared alias '"
-                        + exception->second.alias.value_or("<none>")
-                        + "', hidden="
-                        + (exception->second.alias_hidden
-                            ? "true"
-                            : "false");
-                throw std::runtime_error(
-                    "enum GUC '" + row.name + "' alias '"
-                    + expected.name + "' is not declared as a guc_value "
-                      "exception (" + detail + "; enum owner '"
-                    + enum_cpp_name + "')");
-            }
-            const auto canonical = declarations.find(*expected.alias_of);
-            if (canonical == declarations.end()) {
-                throw std::runtime_error(
-                    "enum GUC '" + row.name + "' alias target '"
-                    + *expected.alias_of + "' does not exist");
-            }
-            const std::string& actual_wire =
-                canonical->second.initializer_text;
-            const bool planner_debug_alias =
-                row.name == "bioseq.planner_debug_level"
-                && *expected.alias_of == "debug2"
-                && equivalent_expression(actual_wire, "13")
-                && equivalent_expression(
-                    expected.wire_expression, "DEBUG2");
-            if (!planner_debug_alias
-                && !equivalent_expression(
-                    actual_wire, expected.wire_expression)) {
-                throw std::runtime_error(
-                    "enum GUC '" + row.name + "' alias '"
-                    + expected.name
-                    + "' wire value differs from declared target '"
-                    + *expected.alias_of + "'");
-            }
-            const std::string actual_feature_predicate =
-                effective_feature_predicate(
-                    entity.active_condition,
-                    canonical->second.active_condition);
-            if (actual_feature_predicate
-                != canonical_feature_predicate(
-                    expected.feature_predicate)) {
-                throw std::runtime_error(
-                    "enum GUC '" + row.name + "' alias '"
-                    + expected.name
-                    + "' feature gating differs from the parity ledger");
-            }
-            result.push_back(collected_guc_enum_value{
-                .name = expected.name,
-                .cpp_name = canonical->second.qualified_name,
-                .wire_expression = canonical->second.initializer_text,
-                .active_condition = canonical->second.active_condition,
-                .alias_of = expected.alias_of,
-                .hidden = expected.hidden,
-                .compiled = compiled_enumerator(canonical->second),
-            });
-            continue;
-        }
-        const auto declaration = declarations.find(expected.name);
-        if (declaration == declarations.end()) {
+        guc_value_exceptions(program, parsed.qualified_name);
+    for (const auto& [name, exception] : exceptions) {
+        static_cast<void>(exception);
+        if (!parsed.values.contains(name)) {
             throw std::runtime_error(
-                "enum GUC '" + row.name + "' value '"
-                + expected.name + "' does not exist");
-        }
-        accounted.insert(expected.name);
-        const std::string actual_wire =
-            declaration->second.initializer_text;
-        const std::string actual_feature_predicate =
-            effective_feature_predicate(
-                entity.active_condition,
-                declaration->second.active_condition);
-        if (actual_feature_predicate
-            != canonical_feature_predicate(
-                expected.feature_predicate)) {
-            throw std::runtime_error(
-                "enum GUC '" + row.name + "' value '"
-                + expected.name
-                + "' feature gating differs from the parity ledger");
-        }
-        const bool planner_constant =
-            row.name == "bioseq.planner_debug_level"
-            && ((expected.name == "debug5"
-                    && equivalent_expression(actual_wire, "10"))
-                || (expected.name == "debug4"
-                    && equivalent_expression(actual_wire, "11"))
-                || (expected.name == "debug3"
-                    && equivalent_expression(actual_wire, "12"))
-                || (expected.name == "debug2"
-                    && equivalent_expression(actual_wire, "13"))
-                || (expected.name == "debug1"
-                    && equivalent_expression(actual_wire, "14"))
-                || (expected.name == "log"
-                    && equivalent_expression(actual_wire, "15"))
-                || (expected.name == "info"
-                    && equivalent_expression(actual_wire, "17"))
-                || (expected.name == "notice"
-                    && equivalent_expression(actual_wire, "18"))
-                || (expected.name == "warning"
-                    && equivalent_expression(actual_wire, "19")));
-        if (!planner_constant
-            && !equivalent_expression(
-                actual_wire, expected.wire_expression)) {
-            throw std::runtime_error(
-                "enum GUC '" + row.name + "' value '"
-                + expected.name + "' changed wire value");
-        }
-        result.push_back(collected_guc_enum_value{
-            .name = expected.name,
-            .cpp_name = declaration->second.qualified_name,
-            .wire_expression = actual_wire,
-            .active_condition =
-                declaration->second.active_condition,
-            .hidden = expected.hidden,
-            .compiled = compiled_enumerator(declaration->second),
-        });
-    }
-    for (const ledger_omission& omission : row.omissions) {
-        const auto declaration = declarations.find(omission.name);
-        const auto exception = exceptions.find(omission.name);
-        if (declaration == declarations.end()
-            || exception == exceptions.end()
-            || !exception->second.omit) {
-            throw std::runtime_error(
-                "enum GUC '" + row.name + "' omission '"
-                + omission.name
-                + "' is not declared as a guc_value exception");
-        }
-        if (!equivalent_expression(
-                declaration->second.initializer_text,
-                omission.wire_expression)) {
-            throw std::runtime_error(
-                "enum GUC '" + row.name + "' omitted value '"
-                + omission.name + "' changed wire value");
-        }
-        accounted.insert(omission.name);
-    }
-    for (const auto& [name, declaration] : declarations) {
-        static_cast<void>(declaration);
-        if (!accounted.contains(name)) {
-            throw std::runtime_error(
-                "enum GUC '" + row.name + "' has unaccounted value '"
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' has a guc_value annotation for unknown value '"
                 + name + "'");
         }
+    }
+
+    std::set<std::string, std::less<>> emitted_names;
+    std::vector<collected_guc_enum_value> result;
+    result.reserve(parsed.declaration_order.size());
+    for (const std::string& name : parsed.declaration_order) {
+        const parsed_enumerator& declaration =
+            parsed.values.at(name);
+        const auto exception = exceptions.find(name);
+        const bool omitted =
+            exception != exceptions.end() && exception->second.omit;
+        if (omitted && exception->second.alias) {
+            throw std::runtime_error(
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' value '" + name
+                + "' cannot be both omitted and aliased");
+        }
+        if (omitted) continue;
+        if (!emitted_names.emplace(name).second) {
+            throw std::runtime_error(
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' duplicates emitted value '" + name + "'");
+        }
+        result.push_back(collected_guc_enum_value{
+            .name = name,
+            .cpp_name = declaration.qualified_name,
+            .wire_expression = declaration.initializer_text,
+            .active_condition = declaration.active_condition,
+            .hidden = false,
+            .compiled = compiled_enumerator(program, declaration),
+        });
+        if (exception == exceptions.end()
+            || !exception->second.alias) {
+            continue;
+        }
+        const std::string& alias = *exception->second.alias;
+        if (alias.empty()
+            || !((alias.front() >= 'a' && alias.front() <= 'z')
+                 || alias.front() == '_')
+            || !std::ranges::all_of(
+                std::string_view{alias}.substr(1),
+                [](const char value) {
+                    return (value >= 'a' && value <= 'z')
+                        || (value >= '0' && value <= '9')
+                        || value == '_';
+                })
+            || !emitted_names.emplace(alias).second) {
+            throw std::runtime_error(
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' has invalid or duplicate alias '" + alias + "'");
+        }
+        result.push_back(collected_guc_enum_value{
+            .name = alias,
+            .cpp_name = declaration.qualified_name,
+            .wire_expression = declaration.initializer_text,
+            .active_condition = declaration.active_condition,
+            .alias_of = name,
+            .hidden = exception->second.alias_hidden,
+            .compiled = compiled_enumerator(program, declaration),
+        });
+    }
+    if (result.empty()) {
+        throw std::runtime_error(
+            "enum GUC '" + natural_guc_name(
+                entity.cpp_qualified_name)
+            + "' has no registered values");
     }
     return result;
 }
 
+[[nodiscard]] inline std::string_view trim_enum_expression(
+        std::string_view value) noexcept {
+    while (!value.empty()
+           && (value.front() == ' ' || value.front() == '\t'
+               || value.front() == '\n' || value.front() == '\r')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty()
+           && (value.back() == ' ' || value.back() == '\t'
+               || value.back() == '\n' || value.back() == '\r')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+[[nodiscard]] inline std::string enum_initializer_argument(
+    std::string_view initializer) {
+    initializer = trim_enum_expression(initializer);
+    if (initializer.ends_with('}')) {
+        const std::size_t open = initializer.rfind('{');
+        if (open == std::string_view::npos) {
+            throw std::runtime_error(
+                "malformed enum GUC storage initializer");
+        }
+        initializer = trim_enum_expression(initializer.substr(
+            open + 1, initializer.size() - open - 2));
+    }
+    if (initializer.empty()) {
+        throw std::runtime_error(
+            "enum GUC storage initializer has no default expression");
+    }
+    return std::string{initializer};
+}
+
+[[nodiscard]] inline std::string qualified_identifier_leaf(
+    std::string_view expression) {
+    expression = trim_enum_expression(expression);
+    if (expression.starts_with("::")) expression.remove_prefix(2);
+    std::size_t component_begin = 0;
+    while (component_begin < expression.size()) {
+        const std::size_t separator =
+            expression.find("::", component_begin);
+        const std::string_view component = expression.substr(
+            component_begin,
+            (separator == std::string_view::npos
+                 ? expression.size()
+                 : separator)
+                - component_begin);
+        if (component.empty()
+            || !((component.front() >= 'a'
+                    && component.front() <= 'z')
+                 || (component.front() >= 'A'
+                     && component.front() <= 'Z')
+                 || component.front() == '_')
+            || !std::ranges::all_of(
+                component.substr(1),
+                [](const char value) {
+                    return (value >= 'a' && value <= 'z')
+                        || (value >= 'A' && value <= 'Z')
+                        || (value >= '0' && value <= '9')
+                        || value == '_';
+                })) {
+            return {};
+        }
+        if (separator == std::string_view::npos) {
+            return std::string{component};
+        }
+        component_begin = separator + 2;
+    }
+    return {};
+}
+
+struct resolved_enum_default {
+    std::string cpp_expression;
+    std::string value_name;
+};
+
+[[nodiscard]] inline resolved_enum_default resolve_enum_default(
+    const collected_program& program,
+    const collected_entity& entity,
+    const parsed_enum& parsed,
+    const std::vector<collected_guc_enum_value>& values) {
+    const std::string authored =
+        enum_initializer_argument(entity.initializer_expression);
+    const std::string leaf = qualified_identifier_leaf(authored);
+    if (leaf.empty()) {
+        throw std::runtime_error(
+            "enum GUC '" + natural_guc_name(
+                entity.cpp_qualified_name)
+            + "' has a non-identifier default expression '"
+            + authored + "'");
+    }
+
+    std::string cpp_expression;
+    std::string value_name;
+    if (const auto direct = parsed.values.find(leaf);
+        direct != parsed.values.end()) {
+        cpp_expression = direct->second.qualified_name;
+        value_name = leaf;
+    } else {
+        const structural_analysis::translation_unit& source =
+            registered_guc_source(program, entity);
+        std::vector<
+            const structural_analysis::declaration_record*>
+            constants;
+        for (const structural_analysis::declaration_record& candidate :
+             source.declarations) {
+            if (candidate.kind
+                    != structural_analysis::declaration_kind::variable
+                || candidate.name != leaf
+                || candidate.initializer_text.empty()
+                || !candidate.signature_text.contains("constexpr")) {
+                continue;
+            }
+            std::string requested = authored;
+            if (requested.starts_with("::")) requested.erase(0, 2);
+            if (authored.contains("::")
+                && candidate.qualified_name != requested) {
+                continue;
+            }
+            constants.push_back(&candidate);
+        }
+        if (constants.empty()) {
+            throw std::runtime_error(
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' cannot resolve constexpr default '" + authored
+                + "' in its registered source");
+        }
+        cpp_expression = constants.front()->qualified_name;
+        std::set<std::string, std::less<>> resolved_values;
+        for (const auto* constant : constants) {
+            if (constant->qualified_name != cpp_expression) {
+                throw std::runtime_error(
+                    "enum GUC '" + natural_guc_name(
+                        entity.cpp_qualified_name)
+                    + "' has ambiguous constexpr default '" + authored
+                    + "'");
+            }
+            const std::string resolved_name =
+                qualified_identifier_leaf(
+                    constant->initializer_text);
+            if (parsed.values.contains(resolved_name)) {
+                resolved_values.emplace(resolved_name);
+            }
+        }
+        if (resolved_values.size() == 1) {
+            value_name = *resolved_values.begin();
+        } else if (program.compiler_profile.empty()) {
+            for (const collected_guc_enum_value& value : values) {
+                if (value.compiled && !value.hidden
+                    && !value.alias_of) {
+                    value_name = value.name;
+                }
+            }
+        }
+        if (value_name.empty()) {
+            throw std::runtime_error(
+                "enum GUC '" + natural_guc_name(
+                    entity.cpp_qualified_name)
+                + "' cannot resolve constexpr default '" + authored
+                + "' to one enum value");
+        }
+    }
+    const auto registered = std::ranges::find_if(
+        values,
+        [&value_name](const collected_guc_enum_value& value) {
+            return value.name == value_name && value.compiled
+                && !value.hidden && !value.alias_of;
+        });
+    if (registered == values.end()) {
+        throw std::runtime_error(
+            "enum GUC '" + natural_guc_name(
+                entity.cpp_qualified_name)
+            + "' default '" + value_name
+            + "' is not a compiled registered value");
+    }
+    return {
+        .cpp_expression = std::move(cpp_expression),
+        .value_name = std::move(value_name),
+    };
+}
 [[nodiscard]] inline std::string_view trim_expression(
         std::string_view value) noexcept {
     while (!value.empty()
@@ -2028,9 +1327,9 @@ private:
 
 [[nodiscard]] inline std::optional<std::string>
 source_only_integer_initializer(
-    const clang_structural::translation_unit& unit,
+    const structural_analysis::translation_unit& unit,
     std::string_view identifier) {
-    const std::string source = read_file(unit.source_path);
+    const std::string source = read_artifact_bytes(unit.source_path);
     const auto& tokens = unit.tokens;
     std::optional<std::string> result;
     for (std::size_t index = 0; index + 2 < tokens.size(); ++index) {
@@ -2123,7 +1422,7 @@ source_only_integer_initializer(
         const auto unit = std::ranges::find(
             program.translation_units,
             owner.source_path,
-            &clang_structural::translation_unit::source_path);
+            &structural_analysis::translation_unit::source_path);
         if (unit == program.translation_units.end()) {
             throw std::runtime_error(
                 "cannot resolve generated integer GUC owner source");
@@ -2131,9 +1430,9 @@ source_only_integer_initializer(
         const auto declaration = std::ranges::find_if(
             unit->declarations,
             [expression](
-                const clang_structural::declaration_record& candidate) {
+                const structural_analysis::declaration_record& candidate) {
                 return candidate.kind
-                        == clang_structural::declaration_kind::variable
+                        == structural_analysis::declaration_kind::variable
                     && candidate.name == expression
                     && !candidate.initializer_text.empty();
             });
@@ -2253,9 +1552,9 @@ make_generated_live_authority(
         .included_in_sample =
             !std::ranges::contains(guc.flags, "not_in_sample"),
         .hook_presence = {
-            guc.authority.hooks[0].has_value(),
-            guc.authority.hooks[1].has_value(),
-            guc.authority.hooks[2].has_value(),
+            guc.hooks[0].has_value(),
+            guc.hooks[1].has_value(),
+            guc.hooks[2].has_value(),
         },
     };
     if (result.context.empty()) {
@@ -2317,16 +1616,12 @@ make_generated_live_authority(
                 }
             }
             if (result.visible_enum_values.empty()
-                || !guc.authority.default_semantic) {
+                || guc.enum_default_name.empty()) {
                 throw std::runtime_error(
                     "cannot resolve generated enum values for GUC '"
                     + guc.name + "'");
             }
-            result.boot_value =
-                *guc.authority.default_semantic
-                    == "best_compiled_algorithm"
-                ? result.visible_enum_values.back()
-                : *guc.authority.default_semantic;
+            result.boot_value = guc.enum_default_name;
             if (!std::ranges::contains(
                     result.visible_enum_values,
                     result.boot_value)) {
@@ -2345,160 +1640,101 @@ make_generated_live_authority(
 
 [[nodiscard]] inline guc_inventory collect_guc_inventory(
     const collected_program& program,
-    const std::filesystem::path& ledger_path,
     guc_profile profile) {
-    const std::string ledger_content = read_file(ledger_path);
-    const guc_detail::parsed_ledger ledger =
-        guc_detail::parse_ledger(ledger_content);
     const std::string profile_spelling{guc_profile_name(profile)};
-    const auto expected_profile_count =
-        ledger.profile_counts.find(profile_spelling);
-    if (expected_profile_count == ledger.profile_counts.end()) {
+    if (!program.compiler_profile.empty()
+        && program.compiler_profile != profile_spelling) {
         throw std::runtime_error(
-            "GUC parity ledger has no profile '" + profile_spelling + "'");
+            "annotated GUC inventory profile '" + profile_spelling
+            + "' disagrees with registered compiler profile '"
+            + program.compiler_profile + "'");
     }
 
-    std::map<std::string, const guc_detail::ledger_row*, std::less<>>
-        selected_ledger;
-    for (const guc_detail::ledger_row& row : ledger.rows) {
-        if (!std::ranges::contains(row.profiles, profile_spelling)) {
-            continue;
-        }
-        selected_ledger.emplace(row.name, &row);
-    }
-    if (selected_ledger.size() != expected_profile_count->second) {
-        throw std::runtime_error(
-            "GUC parity ledger profile '" + profile_spelling
-            + "' selects " + std::to_string(selected_ledger.size())
-            + " rows; expected "
-            + std::to_string(expected_profile_count->second));
-    }
-
-    std::map<std::string, const collected_entity*, std::less<>>
-        selected_annotated;
+    std::vector<const collected_entity*> selected;
+    std::set<std::string, std::less<>> natural_names;
     for (const collected_entity& entity : program.entities) {
         if (entity.kind != entity_kind::guc) continue;
+        static_cast<void>(
+            guc_detail::registered_guc_source(program, entity));
+        const std::string name =
+            guc_detail::natural_guc_name(entity.cpp_qualified_name);
+        const std::string predicate =
+            guc_detail::canonical_feature_predicate(
+                entity.active_condition);
+        if (predicate != "true"
+            && !predicate.contains("BIOSEQ_TEST_INDEXES")) {
+            throw std::runtime_error(
+                "annotated GUC '" + name
+                + "' has unsupported profile predicate '"
+                + predicate + "'");
+        }
         if (!guc_detail::condition_enabled_for_profile(
                 entity.active_condition, profile)) {
             continue;
         }
-        const std::string name =
-            guc_detail::natural_guc_name(entity.cpp_qualified_name);
-        if (!selected_annotated.emplace(name, &entity).second) {
+        if (!natural_names.emplace(name).second) {
             throw std::runtime_error(
                 "duplicate annotated GUC '" + name
                 + "' in profile '" + profile_spelling + "'");
         }
+        selected.push_back(&entity);
     }
-    if (selected_annotated.size() != selected_ledger.size()) {
+    if (selected.empty()) {
         throw std::runtime_error(
-            "annotated GUC profile '" + profile_spelling + "' has "
-            + std::to_string(selected_annotated.size())
-            + " rows; parity ledger selects "
-            + std::to_string(selected_ledger.size()));
-    }
-    for (const auto& [name, entity] : selected_annotated) {
-        static_cast<void>(entity);
-        if (!selected_ledger.contains(name)) {
-            throw std::runtime_error(
-                "annotated GUC '" + name + "' is not selected by parity "
-                "ledger profile '" + profile_spelling + "'");
-        }
-    }
-    for (const auto& [name, row] : selected_ledger) {
-        static_cast<void>(row);
-        if (!selected_annotated.contains(name)) {
-            throw std::runtime_error(
-                "GUC parity ledger row '" + name
-                + "' has no annotated owner in profile '"
-                + profile_spelling + "'");
-        }
+            "annotated GUC profile '" + profile_spelling
+            + "' has no registrations");
     }
 
-    guc_inventory result{
-        .profile = profile,
-        .ledger_path = ledger_path,
-        .ledger_sha256 = sha256_hex(ledger_content),
-    };
-    for (const guc_detail::ledger_row& row : ledger.rows) {
-        if (!selected_ledger.contains(row.name)) continue;
-        const auto found = selected_annotated.find(row.name);
-        const collected_entity& entity = *found->second;
+    guc_inventory result{.profile = profile};
+    result.gucs.reserve(selected.size());
+    std::map<
+        std::string,
+        std::set<std::string, std::less<>>,
+        std::less<>>
+        members_by_owner;
+    for (const collected_entity* selected_entity : selected) {
+        const collected_entity& entity = *selected_entity;
         guc_detail::validate_documentation(entity);
-        const std::string expected_source_module =
-            guc_detail::candidate_source_module(row.group);
-        const std::string expected_cpp_storage =
-            guc_detail::candidate_cpp_storage(
-                row.group, row.member);
-        if (entity.source_module != expected_source_module
-            || entity.source_path.generic_string().contains(
-                "/backend/pg/")) {
+        const structural_analysis::translation_unit& source =
+            guc_detail::registered_guc_source(program, entity);
+        const std::string name =
+            guc_detail::natural_guc_name(entity.cpp_qualified_name);
+        const std::string owner_key =
+            guc_detail::guc_owner_key(source);
+        const std::string member =
+            guc_detail::registration_member(name, owner_key);
+        if (!members_by_owner[owner_key].emplace(member).second) {
             throw std::runtime_error(
-                "GUC '" + row.name
-                + "' must be owned by candidate module '"
-                + expected_source_module
-                + "' outside the PostgreSQL adapter");
+                "annotated GUC owner '" + owner_key
+                + "' has duplicate generated member '" + member + "'");
         }
-        if (entity.cpp_qualified_name != expected_cpp_storage) {
-            throw std::runtime_error(
-                "GUC '" + row.name + "' backing cell is '"
-                + entity.cpp_qualified_name + "', expected '"
-                + expected_cpp_storage + "'");
-        }
-        if (entity.name != row.member) {
-            throw std::runtime_error(
-                "GUC '" + row.name + "' member differs from ledger '"
-                + row.member + "'");
-        }
+
         const guc_kind kind =
             guc_detail::kind_from_entity(entity);
-        if (guc_kind_name(kind) != row.kind) {
+        std::optional<std::string> minimum =
+            guc_detail::range_option(entity, "minimum");
+        std::optional<std::string> maximum =
+            guc_detail::range_option(entity, "maximum");
+        if ((kind == guc_kind::integer
+                || kind == guc_kind::real)
+            && (!minimum || !maximum)) {
             throw std::runtime_error(
-                "GUC '" + row.name + "' kind differs from ledger");
+                "numeric GUC '" + name
+                + "' requires explicit annotation bounds");
         }
-        if (guc_detail::storage_kind_from_entity(entity)
-            != row.storage_kind) {
+        if (kind != guc_kind::integer
+            && kind != guc_kind::real
+            && (minimum || maximum)) {
             throw std::runtime_error(
-                "GUC '" + row.name
-                + "' candidate storage ABI differs from ledger");
+                "non-numeric GUC '" + name
+                + "' cannot declare numeric bounds");
         }
-        if (guc_detail::context_name(entity) != row.context) {
-            throw std::runtime_error(
-                "GUC '" + row.name + "' context differs from ledger");
-        }
-        std::vector<std::string> flags =
-            guc_detail::guc_flags(entity);
-        std::ranges::sort(flags);
-        std::vector<std::string> expected_flags = row.flags;
-        std::ranges::sort(expected_flags);
-        if (flags != expected_flags
-            || guc_detail::guc_unit(entity) != row.unit) {
-            throw std::runtime_error(
-                "GUC '" + row.name + "' flags or unit differ from ledger");
-        }
-        const std::string actual_feature_predicate =
-            guc_detail::canonical_feature_predicate(
-                entity.active_condition);
-        const std::string expected_feature_predicate =
-            guc_detail::canonical_feature_predicate(
-                row.feature_predicate);
-        if (actual_feature_predicate != expected_feature_predicate) {
-            throw std::runtime_error(
-                "GUC '" + row.name
-                + "' feature gating differs from ledger: candidate '"
-                + actual_feature_predicate + "', ledger '"
-                + expected_feature_predicate + "'");
-        }
-        if (kind != guc_kind::enumeration) {
-            guc_detail::validate_scalar_parity(entity, row, kind);
-        }
+
         collected_guc guc{
-            .registration_ordinal = row.ordinal,
-            .name = row.name,
-            .owner_key = row.group == "bioseq"
-                ? "bioseq"
-                : row.group.substr(row.group.find('.') + 1),
-            .member = row.member,
+            .registration_ordinal = result.gucs.size(),
+            .name = name,
+            .owner_key = owner_key,
+            .member = member,
             .kind = kind,
             .cpp_qualified_name = entity.cpp_qualified_name,
             .source_module = entity.source_module,
@@ -2506,93 +1742,55 @@ make_generated_live_authority(
             .source_sha256 = entity.source_sha256,
             .active_condition = entity.active_condition,
             .default_expression = entity.initializer_expression,
-            .minimum_expression =
-                guc_detail::range_option(entity, "minimum"),
-            .maximum_expression =
-                guc_detail::range_option(entity, "maximum"),
-            .context = row.context,
-            .flags = std::move(flags),
-            .unit = row.unit,
+            .minimum_expression = std::move(minimum),
+            .maximum_expression = std::move(maximum),
+            .context = guc_detail::context_name(entity),
+            .flags = guc_detail::guc_flags(entity),
+            .unit = guc_detail::guc_unit(entity),
             .short_description = entity.documentation.brief,
             .long_description = entity.documentation.details,
+            .storage_kind =
+                guc_detail::storage_kind_from_entity(entity),
+            .feature_predicate =
+                guc_detail::canonical_feature_predicate(
+                    entity.active_condition),
             .reset_plan_cache =
                 guc_detail::resets_plan_cache(entity),
-            .authored_assign_hook = row.hooks[1],
-            .authority = collected_guc_authority{
-                .source_owner = row.source_owner,
-                .group = row.group,
-                .storage_kind = row.storage_kind,
-                .legacy_storage = row.legacy_storage,
-                .default_expression = row.default_expression,
-                .minimum_expression = row.minimum_expression,
-                .maximum_expression = row.maximum_expression,
-                .context = row.context,
-                .flags = row.flags,
-                .unit = row.unit,
-                .hooks = row.hooks,
-                .feature_predicate = row.feature_predicate,
-                .profiles = row.profiles,
-                .default_semantic = row.default_semantic,
-            },
         };
         if (guc.reset_plan_cache) {
-            guc.authority.hooks[1] =
-                "assign_" + guc.member + "_and_reset_plan_cache";
-        }
-        guc.authority.enum_values.reserve(row.enum_values.size());
-        for (const guc_detail::ledger_enum_value& value :
-             row.enum_values) {
-            guc.authority.enum_values.push_back(
-                collected_guc_authority_enum_value{
-                    .name = value.name,
-                    .wire_expression = value.wire_expression,
-                    .hidden = value.hidden,
-                    .feature_predicate = value.feature_predicate,
-                    .alias_of = value.alias_of,
-                });
-        }
-        guc.authority.omissions.reserve(row.omissions.size());
-        for (const guc_detail::ledger_omission& omission :
-             row.omissions) {
-            guc.authority.omissions.push_back(
-                collected_guc_authority_omission{
-                    .name = omission.name,
-                    .wire_expression = omission.wire_expression,
-                });
+            guc.hooks[1] =
+                "assign_" + guc.member
+                + "_and_reset_plan_cache";
         }
         if (kind == guc_kind::enumeration) {
-            guc.enum_values = guc_detail::collect_enum_values(
-                program, entity, row, guc.enum_cpp_name);
-            const std::string default_leaf =
-                guc_detail::enum_default_leaf(
-                    entity.initializer_expression);
-            if (default_leaf == "default_compression_type") {
-                const std::size_t owner =
-                    entity.cpp_qualified_name.find("::settings::");
-                if (owner == std::string::npos) {
-                    throw std::runtime_error(
-                        "feature-selected enum default lacks a settings owner");
-                }
-                guc.default_expression =
-                    entity.cpp_qualified_name.substr(0, owner)
-                    + "::" + default_leaf;
-            } else {
-                guc.default_expression =
-                    guc.enum_cpp_name + "::" + default_leaf;
+            const std::string enum_leaf =
+                guc_detail::enum_type_leaf(
+                    entity.cpp_return_type);
+            if (enum_leaf.empty()) {
+                throw std::runtime_error(
+                    "enum GUC '" + name
+                    + "' has no postgres_enum_storage type argument");
             }
+            const guc_detail::parsed_enum parsed =
+                guc_detail::parse_enum(
+                    program, entity, enum_leaf);
+            guc.enum_cpp_name = parsed.qualified_name;
+            guc.enum_values =
+                guc_detail::collect_enum_values(
+                    program, entity, parsed);
+            guc_detail::resolved_enum_default resolved_default =
+                guc_detail::resolve_enum_default(
+                    program, entity, parsed, guc.enum_values);
+            guc.default_expression =
+                std::move(resolved_default.cpp_expression);
+            guc.enum_default_name =
+                std::move(resolved_default.value_name);
         }
         guc.generated_live_authority =
             guc_detail::make_generated_live_authority(
                 program, entity, guc);
         result.gucs.push_back(std::move(guc));
     }
-    if (result.gucs.size() != expected_profile_count->second) {
-        throw std::runtime_error(
-            "generated GUC profile '" + profile_spelling + "' has "
-            + std::to_string(result.gucs.size()) + " rows; expected "
-            + std::to_string(expected_profile_count->second));
-    }
     return result;
 }
-
 }  // namespace bioseq::codegen::sql

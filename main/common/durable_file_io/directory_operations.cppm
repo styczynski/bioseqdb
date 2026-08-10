@@ -4,24 +4,14 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
 #include <filesystem>
-#include <limits>
-#include <span>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -35,7 +25,7 @@ import :sync;
 import :cleanup;
 import :namespace_publish;
 
-export namespace bioseq::durable_file_io {
+export namespace bioseq::common::durable_file_io {
 /**
  * Create and durably publish a relative directory chain below a pinned anchor.
  *
@@ -49,28 +39,20 @@ export namespace bioseq::durable_file_io {
  * by this call; the process umask may remove bits. Existing components are
  * type/symlink validated and durability-synced but are not chmod'd.
  */
-[[nodiscard]] inline std::expected<void, file_io_error>
+[[nodiscard]] inline std::expected<void, file_error>
 durable_create_directories_at(
     const file_descriptor& anchor,
     const std::filesystem::path& relative_directory,
     mode_t mode = S_IRWXU | S_IRWXG | S_IRWXO,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     if (!anchor.valid()
         || relative_directory.is_absolute()
-        || mode == 0
-        || (mode & ~(S_IRWXU | S_IRWXG | S_IRWXO)) != 0) {
+        || !detail::valid_creation_mode(mode)
+        || detail::contains_parent_traversal(relative_directory)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_directory,
+            file_error_code::invalid_argument,
+            file_operation::create_directory,
             EINVAL));
-    }
-    for (const std::filesystem::path& component : relative_directory) {
-        if (component == "..") {
-            return std::unexpected(detail::make_error(
-                file_io_errc::invalid_argument,
-                file_io_operation::create_directory,
-                EINVAL));
-        }
     }
     file_descriptor owned_current;
     int current_descriptor = anchor.get();
@@ -85,16 +67,16 @@ durable_create_directories_at(
         }
         if (!detail::valid_leaf_name(name)) {
             return std::unexpected(detail::make_error(
-                file_io_errc::invalid_argument,
-                file_io_operation::create_directory,
+                file_error_code::invalid_argument,
+                file_operation::create_directory,
                 EINVAL));
         }
-        if (const int injected = detail::injected_error(
-                hooks, file_io_operation::create_directory);
+        if (const int injected = detail::injected_errno(
+                hooks, file_operation::create_directory);
             injected != 0) {
             return std::unexpected(detail::make_error(
-                file_io_errc::directory_create_failed,
-                file_io_operation::create_directory,
+                file_error_code::directory_create_failed,
+                file_operation::create_directory,
                 injected,
                 0,
                 completed_publication));
@@ -106,8 +88,8 @@ durable_create_directories_at(
         } while (create_result != 0 && errno == EINTR);
         if (create_result != 0 && errno != EEXIST) {
             return std::unexpected(detail::make_error(
-                file_io_errc::directory_create_failed,
-                file_io_operation::create_directory,
+                file_error_code::directory_create_failed,
+                file_operation::create_directory,
                 errno,
                 0,
                 completed_publication));
@@ -119,22 +101,22 @@ durable_create_directories_at(
         auto child_opened = detail::open_directory_at(
             current_descriptor, name, hooks);
         if (!child_opened.has_value()) {
-            file_io_error error = child_opened.error();
+            file_error error = child_opened.error();
             error.publication = pending_publication;
             return std::unexpected(error);
         }
         file_descriptor child = std::move(*child_opened);
-        if (auto synced = detail::sync_descriptor(
+        if (auto synced = detail::fsync_descriptor(
                 child.get(),
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 pending_publication);
             !synced.has_value()) {
             return std::unexpected(synced.error());
         }
-        if (auto synced = detail::sync_descriptor(
+        if (auto synced = detail::fsync_descriptor(
                 current_descriptor,
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 pending_publication);
             !synced.has_value()) {
@@ -166,26 +148,18 @@ durable_create_directories_at(
  * component and its parent are fsynced, including EEXIST components; `mode`
  * applies only to components this call creates. `..` traversal is rejected.
  */
-[[nodiscard]] inline std::expected<void, file_io_error>
+[[nodiscard]] inline std::expected<void, file_error>
 durable_create_directories(
     const std::filesystem::path& directory,
     mode_t mode = S_IRWXU | S_IRWXG | S_IRWXO,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     if (directory.empty()
-        || mode == 0
-        || (mode & ~(S_IRWXU | S_IRWXG | S_IRWXO)) != 0) {
+        || !detail::valid_creation_mode(mode)
+        || detail::contains_parent_traversal(directory)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_directory,
+            file_error_code::invalid_argument,
+            file_operation::create_directory,
             EINVAL));
-    }
-    for (const std::filesystem::path& component : directory) {
-        if (component == "..") {
-            return std::unexpected(detail::make_error(
-                file_io_errc::invalid_argument,
-                file_io_operation::create_directory,
-                EINVAL));
-        }
     }
 
     std::filesystem::path candidate =
@@ -201,17 +175,17 @@ durable_create_directories(
             return std::unexpected(parent_opened.error());
         }
         file_descriptor actual_parent = std::move(*parent_opened);
-        if (auto synced = detail::sync_descriptor(
+        if (auto synced = detail::fsync_descriptor(
                 requested.get(),
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 publication_state::unchanged);
             !synced.has_value()) {
             return std::unexpected(synced.error());
         }
-        if (auto synced = detail::sync_descriptor(
+        if (auto synced = detail::fsync_descriptor(
                 actual_parent.get(),
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 publication_state::unchanged);
             !synced.has_value()) {
@@ -231,8 +205,8 @@ durable_create_directories(
     const std::string requested_name = candidate.filename().string();
     if (!detail::valid_leaf_name(requested_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::create_directory,
+            file_error_code::invalid_argument,
+            file_operation::create_directory,
             EINVAL));
     }
     missing_components.push_back(requested_name);
@@ -241,10 +215,10 @@ durable_create_directories(
     candidate = requested_parent.empty()
         ? std::filesystem::path{"."}
         : requested_parent;
-    std::expected<file_descriptor, file_io_error> anchor =
+    std::expected<file_descriptor, file_error> anchor =
         std::unexpected(detail::make_error(
-            file_io_errc::directory_open_failed,
-            file_io_operation::open_directory,
+            file_error_code::directory_open_failed,
+            file_operation::open_directory,
             ENOENT));
     for (;;) {
         anchor = detail::open_directory_path(candidate, hooks);
@@ -281,48 +255,51 @@ durable_create_directories(
         *anchor, hooks, publication_state::durable);
 }
 
-/** Open and pin a no-follow directory for subsequent *at operations. */
-[[nodiscard]] inline std::expected<file_descriptor, file_io_error>
+/**
+ * Open and pin a no-follow directory for subsequent descriptor-relative
+ * operations.
+ */
+[[nodiscard]] inline std::expected<file_descriptor, file_error>
 open_directory_descriptor(
     const std::filesystem::path& directory,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     return detail::open_directory_path(directory, hooks);
 }
 
 /** Fsync an already-open pinned directory descriptor. */
-[[nodiscard]] inline std::expected<void, file_io_error>
+[[nodiscard]] inline std::expected<void, file_error>
 fsync_directory_descriptor(
     int descriptor,
-    const file_io_hooks& hooks = {},
+    const fault_injection_hooks& hooks = {},
     publication_state publication = publication_state::unchanged) noexcept {
     if (descriptor < 0) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::sync_directory,
+            file_error_code::invalid_argument,
+            file_operation::fsync_directory,
             EBADF,
             0,
             publication));
     }
-    return detail::sync_descriptor(
+    return detail::fsync_descriptor(
         descriptor,
-        file_io_operation::sync_directory,
+        file_operation::fsync_directory,
         hooks,
         publication);
 }
 
 /** Fsync an already-open file descriptor with typed EINTR handling. */
-[[nodiscard]] inline std::expected<void, file_io_error>
+[[nodiscard]] inline std::expected<void, file_error>
 fsync_file_descriptor(
     int descriptor,
-    const file_io_hooks& hooks = {}) noexcept {
+    const fault_injection_hooks& hooks = {}) noexcept {
     if (descriptor < 0) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::sync_file,
+            file_error_code::invalid_argument,
+            file_operation::fsync_file,
             EBADF));
     }
-    return detail::sync_descriptor(
-        descriptor, file_io_operation::sync_file, hooks);
+    return detail::fsync_descriptor(
+        descriptor, file_operation::fsync_file, hooks);
 }
 
 /**
@@ -332,19 +309,19 @@ fsync_file_descriptor(
  * caller must unlink its staging name and fsync the containing directory
  * before treating the publication as durable.
  */
-[[nodiscard]] inline std::expected<publication_state, file_io_error>
+[[nodiscard]] inline std::expected<publication_state, file_error>
 link_file_no_replace(
     const std::filesystem::path& source,
     const std::filesystem::path& destination,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     const std::string source_name = detail::leaf_name(source);
     const std::string destination_name = detail::leaf_name(destination);
     if (source.empty() || destination.empty()
         || !detail::valid_leaf_name(source_name)
         || !detail::valid_leaf_name(destination_name)) {
         return std::unexpected(detail::make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::publish_link,
+            file_error_code::invalid_argument,
+            file_operation::link_destination,
             EINVAL));
     }
     const std::filesystem::path source_parent =
@@ -378,13 +355,13 @@ link_file_no_replace(
 }
 
 /** No-replace hard-link publication relative to pinned directory handles. */
-[[nodiscard]] inline std::expected<publication_state, file_io_error>
+[[nodiscard]] inline std::expected<publication_state, file_error>
 link_file_no_replace_at(
     int source_directory,
     std::string_view source_name,
     int destination_directory,
     std::string_view destination_name,
-    const file_io_hooks& hooks = {},
+    const fault_injection_hooks& hooks = {},
     const regular_file_identity* expected_source = nullptr) {
     return detail::link_name_no_replace_at(
         source_directory,
@@ -398,13 +375,13 @@ link_file_no_replace_at(
 /** Remove a pinned-directory entry only if it still names `expected`. */
 [[nodiscard]] inline std::expected<
     conditional_remove_disposition,
-    file_io_error>
+    file_error>
 remove_file_if_same_inode_at(
     int directory_descriptor,
     std::string_view name,
     const regular_file_identity& expected,
     publication_state publication = publication_state::unchanged,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     return detail::remove_name_if_same_inode_at(
         directory_descriptor,
         std::string{name},
@@ -414,24 +391,24 @@ remove_file_if_same_inode_at(
 }
 
 /** Capture one regular entry relative to a pinned directory descriptor. */
-[[nodiscard]] inline std::expected<regular_file_identity, file_io_error>
+[[nodiscard]] inline std::expected<regular_file_identity, file_error>
 capture_regular_file_identity_at(
     int directory_descriptor,
     std::string_view name,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     const std::string owned_name{name};
     auto opened = detail::open_regular_file_at(
         directory_descriptor,
         owned_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto current = detail::capture_identity(
-        descriptor.get(), file_io_operation::stat_before, hooks);
+    auto current = detail::capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_before_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
@@ -442,25 +419,25 @@ capture_regular_file_identity_at(
 }
 
 /** Compare one pinned-directory entry with a captured regular identity. */
-[[nodiscard]] inline std::expected<bool, file_io_error>
-same_regular_file_identity_at(
+[[nodiscard]] inline std::expected<bool, file_error>
+matches_regular_file_identity_at(
     int directory_descriptor,
     std::string_view name,
     const regular_file_identity& expected,
-    const file_io_hooks& hooks = {}) {
+    const fault_injection_hooks& hooks = {}) {
     const std::string owned_name{name};
     auto opened = detail::open_regular_file_at(
         directory_descriptor,
         owned_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         hooks);
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     file_descriptor descriptor = std::move(*opened);
-    auto current = detail::capture_identity(
-        descriptor.get(), file_io_operation::stat_after, hooks);
+    auto current = detail::capture_regular_file_identity_snapshot(
+        descriptor.get(), file_operation::inspect_after_io, hooks);
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
@@ -470,4 +447,4 @@ same_regular_file_identity_at(
     return *current == expected;
 }
 
-}  // namespace bioseq::durable_file_io
+}  // namespace bioseq::common::durable_file_io

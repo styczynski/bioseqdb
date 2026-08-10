@@ -36,7 +36,7 @@ export module bioseq.common.memory_budget;
 export namespace bioseq::common::memory {
 
 /** A single coherent sample used by pure admission arithmetic. */
-struct MemorySnapshot {
+struct memory_snapshot {
     std::uint64_t process_footprint_bytes = 0;
     std::uint64_t system_available_bytes = 0;
     std::uint64_t system_total_bytes = 0;
@@ -207,13 +207,13 @@ darwin_conservative_available_page_bytes(
 }
 
 /** Policy governing process memory growth against live system memory. */
-struct MemoryBudget {
+struct memory_budget {
     double cap_fraction = 0.80;
     std::uint64_t min_free_bytes = std::uint64_t{2} << 30;
 
     /** Obtain a coherent best-effort snapshot from the operating system. */
-    [[nodiscard]] MemorySnapshot snapshot() const noexcept {
-        return MemorySnapshot{
+    [[nodiscard]] memory_snapshot snapshot() const noexcept {
+        return memory_snapshot{
             .process_footprint_bytes = process_footprint_bytes(),
             .system_available_bytes = system_available_bytes(),
             .system_total_bytes = system_total_bytes(),
@@ -253,7 +253,7 @@ struct MemoryBudget {
 
     /** Compute allocatable bytes from a coherent snapshot. */
     [[nodiscard]] std::uint64_t allocatable_bytes(
-        const MemorySnapshot& sample) const noexcept {
+        const memory_snapshot& sample) const noexcept {
         if (sample.system_total_bytes == 0
             || sample.system_available_bytes == 0) {
             return (std::numeric_limits<std::uint64_t>::max)();
@@ -276,7 +276,7 @@ struct MemoryBudget {
 
     /** Report whether the supplied snapshot is beyond either safety boundary. */
     [[nodiscard]] bool under_pressure(
-        const MemorySnapshot& sample) const noexcept {
+        const memory_snapshot& sample) const noexcept {
         if (sample.system_total_bytes == 0
             || sample.system_available_bytes == 0) {
             return false;
@@ -305,8 +305,8 @@ struct MemoryBudget {
 };
 
 /** Return the process-wide default memory-budget policy. */
-[[nodiscard]] inline MemoryBudget& default_budget() noexcept {
-    static MemoryBudget budget{};
+[[nodiscard]] inline memory_budget& default_budget() noexcept {
+    static memory_budget budget{};
     return budget;
 }
 

@@ -4,20 +4,11 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <expected>
-#include <fcntl.h>
-#include <filesystem>
 #include <limits>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <type_traits>
@@ -27,36 +18,36 @@ module;
 
 export module bioseq.common.durable_file_io:types;
 
-export namespace bioseq::durable_file_io {
+export namespace bioseq::common::durable_file_io {
 
 /** The syscall/checkpoint at which a durable-file operation failed. */
-enum class file_io_operation : std::uint8_t {
+enum class file_operation : std::uint8_t {
     none,
-    open_file,
-    stat_before,
+    open_regular_file,
+    inspect_before_io,
     positional_read,
     positional_write,
-    stat_after,
-    sync_file,
+    inspect_after_io,
+    fsync_file,
     close_file,
-    create_temporary,
+    create_staging_file,
     create_directory,
-    publish_link,
-    publish_rename,
-    remove_temporary,
+    link_destination,
+    rename_destination,
+    remove_staging_file,
     open_directory,
-    sync_directory,
+    fsync_directory,
     close_directory,
 };
 
-/** Stable, source-neutral error categories for file consumers. */
-enum class file_io_errc : std::uint8_t {
+/** Stable, source-neutral error categories for durable-file consumers. */
+enum class file_error_code : std::uint8_t {
     invalid_argument,
     unsupported_platform,
     offset_overflow,
-    open_failed,
+    file_open_failed,
     symlink_rejected,
-    stat_failed,
+    file_status_failed,
     not_regular_file,
     invalid_file_size,
     size_limit_exceeded,
@@ -65,14 +56,14 @@ enum class file_io_errc : std::uint8_t {
     write_failed,
     no_write_progress,
     identity_changed,
-    file_sync_failed,
-    close_failed,
+    file_fsync_failed,
+    descriptor_close_failed,
     destination_exists,
     content_mismatch,
-    rename_failed,
+    namespace_update_failed,
     directory_open_failed,
     directory_create_failed,
-    directory_sync_failed,
+    directory_fsync_failed,
     cleanup_failed,
     permission_mismatch,
 };
@@ -90,52 +81,65 @@ enum class publication_state : std::uint8_t {
     durable,
 };
 
-/** Trivially copyable error safe to map at PostgreSQL longjmp boundaries. */
-struct file_io_error {
-    file_io_errc code{file_io_errc::invalid_argument};
-    file_io_operation operation{file_io_operation::none};
+/**
+ * Trivially copyable durable-file failure.
+ *
+ * `system_error` is the captured POSIX errno, or zero when the failure is a
+ * semantic invariant violation. `offset` is populated only for positional
+ * I/O failures. `publication` records whether a destination name became
+ * visible before the failure, so a caller never mistakes visibility for
+ * durability.
+ */
+struct file_error {
+    file_error_code code{file_error_code::invalid_argument};
+    file_operation operation{file_operation::none};
     int system_error{};
     std::uint64_t offset{};
     publication_state publication{publication_state::unchanged};
 };
 
-static_assert(std::is_trivially_copyable_v<file_io_error>);
+static_assert(std::is_trivially_copyable_v<file_error>);
 
 /**
- * Optional syscall policy for complete positional I/O.
+ * Optional syscall callbacks for complete positional I/O.
  *
  * `poll` may invoke PostgreSQL's CHECK_FOR_INTERRUPTS. The complete-I/O
  * functions keep only trivially destructible state live while invoking it.
  */
-struct positional_io_operations {
-    using read_at_fn = ssize_t (*)(
+struct positional_io_callbacks {
+    using read_at_callback = ssize_t (*)(
         void*, int, void*, std::size_t, off_t) noexcept;
-    using write_at_fn = ssize_t (*)(
+    using write_at_callback = ssize_t (*)(
         void*, int, const void*, std::size_t, off_t) noexcept;
-    using poll_fn = void (*)(void*) noexcept;
+    using poll_callback = void (*)(void*) noexcept;
 
     void* context{};
-    read_at_fn read_at{};
-    write_at_fn write_at{};
-    poll_fn poll{};
+    read_at_callback read_at{};
+    write_at_callback write_at{};
+    poll_callback poll{};
 };
 
 /**
- * Explicit operation hook used by deterministic contract tests.
+ * Explicit fault-injection hook used by deterministic contract tests.
  *
  * Returning zero allows the real syscall. Returning an errno value injects a
  * failure before it. A hook may also mutate its own fixture at a checkpoint.
  * Production callers leave this empty.
  */
-struct file_io_hooks {
-    using before_operation_fn = int (*)(
-        void*, file_io_operation) noexcept;
+struct fault_injection_hooks {
+    using before_operation_callback = int (*)(
+        void*, file_operation) noexcept;
 
     void* context{};
-    before_operation_fn before_operation{};
+    before_operation_callback before_operation{};
 };
 
-/** Stable identity used to detect replacement and in-place mutation. */
+/**
+ * Stable regular-file snapshot used to detect replacement and mutation.
+ *
+ * Device/inode identify the file object; size, link count, ownership, mode,
+ * and timestamps detect mutations relevant to safe publication and reads.
+ */
 struct regular_file_identity {
     std::uint64_t device{};
     std::uint64_t inode{};
@@ -158,7 +162,12 @@ struct stable_regular_file {
     regular_file_identity identity{};
 };
 
-/** Bounds for a symlink-safe stable regular-file read. */
+/**
+ * Bounds for a symlink-safe stable regular-file read.
+ *
+ * When `require_exact_size` is true, `exact_bytes` must lie within the
+ * inclusive minimum/maximum range and the file must match it exactly.
+ */
 struct stable_read_options {
     std::uint64_t minimum_bytes{};
     std::uint64_t maximum_bytes{
@@ -167,8 +176,8 @@ struct stable_read_options {
     bool require_exact_size{};
 };
 
-/** Result of an atomic durable publication. */
-enum class durable_create_disposition : std::uint8_t {
+/** How a successful durable namespace publication completed. */
+enum class publication_disposition : std::uint8_t {
     created,
     already_present_identical,
     replaced,
@@ -176,25 +185,27 @@ enum class durable_create_disposition : std::uint8_t {
 };
 
 /** Namespace replacement policy for `durable_publish_file`. */
-enum class publish_policy : std::uint8_t {
+enum class publication_policy : std::uint8_t {
     exclusive_no_replace,
     replace_existing,
 };
 
+/** Result of inode-conditional staging-name removal. */
 enum class conditional_remove_disposition : std::uint8_t {
     removed,
     already_absent,
     identity_mismatch,
 };
 
-struct durable_publish_result {
+/** Durable namespace publication outcome. */
+struct publication_result {
     publication_state publication{publication_state::unchanged};
-    durable_create_disposition disposition{
-        durable_create_disposition::created};
+    publication_disposition disposition{
+        publication_disposition::created};
 };
 
 /** Maximum requested permissions; the process umask may remove bits. */
-struct durable_publish_options {
+struct publication_options {
     mode_t mode{S_IRUSR | S_IWUSR};
 };
 
@@ -262,14 +273,14 @@ public:
         }
     }
 
-    [[nodiscard]] std::expected<void, file_io_error> close() noexcept {
+    [[nodiscard]] std::expected<void, file_error> close() noexcept {
         const int descriptor = release();
         if (descriptor < 0 || ::close(descriptor) == 0) {
             return {};
         }
-        return std::unexpected(file_io_error{
-            .code = file_io_errc::close_failed,
-            .operation = file_io_operation::close_file,
+        return std::unexpected(file_error{
+            .code = file_error_code::descriptor_close_failed,
+            .operation = file_operation::close_file,
             .system_error = errno,
         });
     }
@@ -278,4 +289,4 @@ private:
     int descriptor_{-1};
 };
 
-}  // namespace bioseq::durable_file_io
+}  // namespace bioseq::common::durable_file_io

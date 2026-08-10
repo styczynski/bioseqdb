@@ -1,6 +1,6 @@
 {
   "params": {
-    "bioseq_block_vulkan_phase_c_frontend_just_index": {
+    "bioseq_block_vulkan_resident_gpu_index_frontend_just_index": {
       "pipeline_mode": {
         "type": "string",
         "default": "single",
@@ -19,7 +19,7 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0294 scheduler mode for the explicitly named async-persistence diagnostic"
+        "description": "Scheduler mode for the explicitly named async-persistence diagnostic"
       },
       "minimizer_index": {
         "type": "string",
@@ -68,12 +68,12 @@
         "minimap2_split_bp": 2000000352,
         "seed": 3219876
       },
-      "description": "DOC0296 per-sequence no-index focus: dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
+      "description": "Per-sequence no-index focus: dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
     }
   },
   "bench_e2e": {
     "tags": ["e2e", "per_sequence", "no_index", "gpu"],
-    "description": "DOC0296 focused per-sequence no-index task_parallel 2Gbp dna4 measurement",
+    "description": "Focused per-sequence no-index task_parallel 2Gbp dna4 measurement",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "matrix": {
@@ -85,7 +85,7 @@
           "recompute_async_persist": ["on"],
           "mps_pair_sort_impl": ["std_sort"]
         },
-        "bioseq_block_vulkan_phase_c_frontend_just_index": {
+        "bioseq_block_vulkan_resident_gpu_index_frontend_just_index": {
           "minimizer_index": ["minimizers_per_sequence"]
         }
       },

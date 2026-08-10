@@ -2,7 +2,7 @@
  * @file bench_framework/index.cppm
  * @brief Generic, algorithm-agnostic benchmark orchestration framework.
  *
- * Public surface lives in `bioseq::bench_framework`. Users describe a
+ * Public surface lives in `bioseq::bench::framework`. Users describe a
  * benchmark with `create_benchmark<Input, Output>(...)` (three lambdas:
  * input builder, algorithm runner, output evaluator). They then pass any
  * number of those benchmark handles to `run(...)`. The framework parses
@@ -12,13 +12,12 @@
  * counter snapshots, evaluation-handler outputs), evaluates rules from
  * the config, and writes a single `report.json`.
  *
- * Design choices documented in main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V2_IMPL_PLAN__DOC0198.md. Keep that file in
- * sync with this implementation.
+ * Configuration, scheduling, measurement, and report production are owned by
+ * this module; interactive rendering is supplied by its implementation unit.
  */
 module;
 
-#include "common.h"
-
+#include <libassert/assert.hpp>
 #include <simdjson.h>
 
 #include <nlohmann/json.hpp>
@@ -31,18 +30,18 @@ module;
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 
-#include <hwinfo/platform.h>
-#include <hwinfo/ram.h>
-
 #include <cpptrace/cpptrace.hpp>
 #include <cpptrace/from_current.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +53,7 @@ module;
 #include <fstream>
 #include <functional>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -69,20 +69,22 @@ module;
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <ctime>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
-export module bench_framework;
+export module bioseq.bench.framework;
 
-import bioseq.common.mlogging;
-import bioseq.instr;
+import bioseq.common.logging;
+import bioseq.common.memory_budget;
+import bioseq.instrumentation;
 
 // ---------------------------------------------------------------------------
 //  Public surface
 // ---------------------------------------------------------------------------
 
-export namespace bioseq::bench_framework {
+export namespace bioseq::bench::framework {
 
 /**
  * @brief Variant-like wrapper for JSON-derived configuration values.
@@ -96,26 +98,42 @@ export namespace bioseq::bench_framework {
  * value never compares equal to an integer, even if the integer's
  * decimal spelling matches the string.
  */
-struct ConfigValue {
-    /// Recognised scalar kinds plus a sentinel `NonScalar` for arrays /
-    /// objects / nulls. The framework refuses to treat NonScalar values as
+struct config_value {
+    /// Recognised scalar kinds plus a sentinel for arrays, objects, and
+    /// nulls. The framework refuses to treat non-scalar values as
     /// matching any declared parameter type, so semantic validation surfaces
     /// `value_type_mismatch` for nested structures used where a scalar was
     /// expected. `string_value` carries the source JSON spelling for
-    /// NonScalar so error messages can show what the user wrote.
-    enum class Kind : std::uint8_t { String, Integer, Double, Boolean, NonScalar };
+    /// nested data so error messages can show what the user wrote.
+    enum class value_kind : std::uint8_t {
+        string,
+        integer,
+        floating_point,
+        boolean,
+        non_scalar,
+    };
 
-    Kind         kind = Kind::String;
+    value_kind   kind = value_kind::string;
     std::string  string_value{};
     std::int64_t integer_value = 0;
     double       double_value = 0.0;
     bool         boolean_value = false;
 
-    [[nodiscard]] constexpr bool is_string()    const noexcept { return kind == Kind::String; }
-    [[nodiscard]] constexpr bool is_integer()   const noexcept { return kind == Kind::Integer; }
-    [[nodiscard]] constexpr bool is_double()    const noexcept { return kind == Kind::Double; }
-    [[nodiscard]] constexpr bool is_boolean()   const noexcept { return kind == Kind::Boolean; }
-    [[nodiscard]] constexpr bool is_non_scalar() const noexcept { return kind == Kind::NonScalar; }
+    [[nodiscard]] constexpr bool is_string() const noexcept {
+        return kind == value_kind::string;
+    }
+    [[nodiscard]] constexpr bool is_integer() const noexcept {
+        return kind == value_kind::integer;
+    }
+    [[nodiscard]] constexpr bool is_double() const noexcept {
+        return kind == value_kind::floating_point;
+    }
+    [[nodiscard]] constexpr bool is_boolean() const noexcept {
+        return kind == value_kind::boolean;
+    }
+    [[nodiscard]] constexpr bool is_non_scalar() const noexcept {
+        return kind == value_kind::non_scalar;
+    }
 
     [[nodiscard]] std::string_view as_string()  const noexcept { return string_value; }
     [[nodiscard]] std::int64_t     as_integer() const noexcept { return integer_value; }
@@ -141,38 +159,38 @@ struct ConfigValue {
         return is_boolean() && boolean_value == rhs;
     }
 
-    [[nodiscard]] bool operator==(const ConfigValue& other) const noexcept {
+    [[nodiscard]] bool operator==(const config_value& other) const noexcept {
         if (kind != other.kind) return false;
         switch (kind) {
-            case Kind::String:    return string_value == other.string_value;
-            case Kind::Integer:   return integer_value == other.integer_value;
-            case Kind::Double:    return double_value == other.double_value;
-            case Kind::Boolean:   return boolean_value == other.boolean_value;
-            case Kind::NonScalar: return string_value == other.string_value;
+            case value_kind::string: return string_value == other.string_value;
+            case value_kind::integer: return integer_value == other.integer_value;
+            case value_kind::floating_point: return double_value == other.double_value;
+            case value_kind::boolean: return boolean_value == other.boolean_value;
+            case value_kind::non_scalar: return string_value == other.string_value;
         }
         return false;
     }
 
     /// Templated factory replacing four near-identical `from_T` helpers.
-    template<typename T>
-    [[nodiscard]] static ConfigValue from(T raw_value) noexcept {
-        ConfigValue out{};
-        if constexpr (std::is_same_v<T, std::string>
-                      || std::is_same_v<T, std::string_view>
-                      || std::is_same_v<T, const char*>) {
-            out.kind = ConfigValue::Kind::String;
+    template<typename p_value_type>
+    [[nodiscard]] static config_value from(p_value_type raw_value) noexcept {
+        config_value out{};
+        if constexpr (std::is_same_v<p_value_type, std::string>
+                      || std::is_same_v<p_value_type, std::string_view>
+                      || std::is_same_v<p_value_type, const char*>) {
+            out.kind = config_value::value_kind::string;
             out.string_value = std::string{raw_value};
-        } else if constexpr (std::is_same_v<T, bool>) {
-            out.kind = ConfigValue::Kind::Boolean;
+        } else if constexpr (std::is_same_v<p_value_type, bool>) {
+            out.kind = config_value::value_kind::boolean;
             out.boolean_value = raw_value;
-        } else if constexpr (std::is_integral_v<T>) {
-            out.kind = ConfigValue::Kind::Integer;
+        } else if constexpr (std::is_integral_v<p_value_type>) {
+            out.kind = config_value::value_kind::integer;
             out.integer_value = static_cast<std::int64_t>(raw_value);
-        } else if constexpr (std::is_floating_point_v<T>) {
-            out.kind = ConfigValue::Kind::Double;
+        } else if constexpr (std::is_floating_point_v<p_value_type>) {
+            out.kind = config_value::value_kind::floating_point;
             out.double_value = static_cast<double>(raw_value);
         } else {
-            static_assert(sizeof(T) == 0, "unsupported ConfigValue source type");
+            static_assert(sizeof(p_value_type) == 0, "unsupported config_value source type");
         }
         return out;
     }
@@ -181,17 +199,18 @@ struct ConfigValue {
     /// configuration values; callers that want to accept them must walk
     /// the simdjson element directly. For exotic input we fall back to a
     /// stringified form so the value is preserved end-to-end.
-    [[nodiscard]] static ConfigValue from_simdjson(simdjson::dom::element element) noexcept;
+    [[nodiscard]] static config_value from_simdjson(
+        simdjson::dom::element element) noexcept;
 };
 
 /// Per-algorithm parameter map: param_name -> value (with defaults filled in).
-using ParamMap = std::map<std::string, ConfigValue>;
+using parameter_map = std::map<std::string, config_value>;
 
 /// Framework-resolved execution tuple exposed read-only to `on_input` through
-/// RunConstraints after matrix expansion and `cases=` pruning.
-struct ResolvedExecutionTuple {
+/// run_constraints after matrix expansion and `cases=` pruning.
+struct resolved_execution_tuple {
     std::string algorithm_name{};
-    ParamMap params{};
+    parameter_map params{};
 };
 
 /**
@@ -213,7 +232,7 @@ struct ResolvedExecutionTuple {
  * harmless — the second call that would yield a different value never
  * happens.
  */
-struct RunConstraints {
+struct run_constraints {
     /// Bytes that must remain reserved between `on_input` and
     /// `on_cleanup` (i.e. for the lifetime of the cached `Input`).
     /// Default 0 = no reservation.
@@ -228,7 +247,7 @@ struct RunConstraints {
     /// contents before `on_input` observes the value. Input builders may use
     /// it to avoid preparing algorithm/policy-specific untimed fixtures for
     /// rows that cannot run in this batch.
-    std::vector<ResolvedExecutionTuple> execution_tuples{};
+    std::vector<resolved_execution_tuple> execution_tuples{};
 };
 
 /**
@@ -237,7 +256,7 @@ struct RunConstraints {
  * Public so the variadic `run(...)` parameter pack can be deduced. Users
  * never construct this directly.
  */
-struct ErasedBenchmark {
+struct erased_benchmark {
     std::string title;
     std::string benchmark_key;
     std::string config_path;
@@ -245,14 +264,14 @@ struct ErasedBenchmark {
     /// Owns the typed lambdas + iteration loop. The first call prepares and
     /// enqueues this benchmark without blocking a oneTBB worker; the returned
     /// closure joins its batches and publishes the completed report state.
-    std::function<std::function<void()>(struct BenchmarkContext&)> execute;
+    std::function<std::function<void()>(struct benchmark_context&)> execute;
 };
 
 /// Test-only process-local fault seam for the durable raw-evidence syscalls.
 /// Production callers leave this at `none`; unlike the removed environment
 /// variable, this cannot be enabled accidentally by an inherited process
 /// environment. Tests must reset the seam after each injected run.
-enum class RawEvidenceIoFaultForTesting : std::uint8_t {
+enum class raw_evidence_io_fault : std::uint8_t {
     none,
     short_write,
     partial_write_failure,
@@ -260,26 +279,26 @@ enum class RawEvidenceIoFaultForTesting : std::uint8_t {
 };
 
 void set_raw_evidence_io_fault_for_testing(
-    RawEvidenceIoFaultForTesting fault) noexcept;
+    raw_evidence_io_fault fault) noexcept;
 
 /// Test-only corruption seam for proving paired schedule evidence fails
 /// closed. It changes only the retained evidence coordinates after the real
 /// scheduler has selected the correct execution order.
-enum class PairedScheduleEvidenceFaultForTesting : std::uint8_t {
+enum class paired_schedule_evidence_fault : std::uint8_t {
     none,
     wrong_shuffle_seed,
     wrong_first_tuple_order_position,
 };
 
 void set_paired_schedule_evidence_fault_for_testing(
-    PairedScheduleEvidenceFaultForTesting fault) noexcept;
+    paired_schedule_evidence_fault fault) noexcept;
 
 namespace detail {
 
 [[nodiscard]] int run_impl(int argc, char** argv,
                             std::string report_dir,
                             std::string data_dir,
-                            std::vector<ErasedBenchmark> benchmarks);
+                            std::vector<erased_benchmark> benchmarks);
 
 }  // namespace detail
 
@@ -298,7 +317,7 @@ namespace detail {
  * during enqueue. Worker-side callback failures are caught at the scheduler
  * boundary: independent batches drain, the original exception is rethrown at
  * the explicit join, and `run()` writes completed samples as a failed partial
- * report instead of allowing `~BatchScheduler() noexcept` to terminate.
+ * report instead of allowing `~batch_scheduler() noexcept` to terminate.
  *
  * @param title             Human-readable label echoed in the report's `title` field.
  * @param benchmark_key     Unique key used (a) to look up the matching block in
@@ -308,7 +327,7 @@ namespace detail {
  *                          which block this `create_benchmark` call describes.
  * @param config_path       Path to the bench configuration JSON (validated against
  *                          a built-in JSON schema before use).
- * @param on_estimate_resources  Returns a `RunConstraints` describing the memory
+ * @param on_estimate_resources  Returns a `run_constraints` describing the memory
  *                          this batch will need. Called at most once per
  *                          `(test_case, group)` batch, before `on_input`. The
  *                          framework reserves `base_memory` from a shared 5 GiB
@@ -318,7 +337,7 @@ namespace detail {
  *                          framework only invokes the lambda once per
  *                          `(test_case, group)` pair. Must not throw.
  * @param on_input          Builds the test-case `Input` from the parsed JSON data
- *                          and the framework-determined `RunConstraints`. Called
+ *                          and the framework-determined `run_constraints`. Called
  *                          exactly once per `(test_case, group)` batch — when a
  *                          test_case is split into N parallel groups, the framework
  *                          calls `on_input` once per group, each with its own
@@ -352,33 +371,33 @@ namespace detail {
  *                          but it is single-threaded *within* one batch.
  *                          **Must not throw**, same contract as `on_input`.
  */
-template<typename Input, typename Output>
-[[nodiscard]] ErasedBenchmark create_benchmark(
+template<typename p_input, typename p_output>
+[[nodiscard]] erased_benchmark create_benchmark(
     std::string title,
     std::string benchmark_key,
     std::string config_path,
-    std::function<RunConstraints(std::string_view data_dir,
+    std::function<run_constraints(std::string_view data_dir,
                                   std::string_view test_case_name,
                                   simdjson::dom::element test_case_data)> on_estimate_resources,
-    std::function<Input(std::string_view data_dir,
+    std::function<p_input(std::string_view data_dir,
                         std::string_view test_case_name,
                         simdjson::dom::element test_case_data,
-                        const RunConstraints& constraints)> on_input,
-    std::function<Output(std::string_view algorithm_name,
-                         const ParamMap& params,
-                         const Input& input)> on_run,
+                        const run_constraints& constraints)> on_input,
+    std::function<p_output(std::string_view algorithm_name,
+                         const parameter_map& params,
+                         const p_input& input)> on_run,
     std::function<std::map<std::string, double>(std::string_view algorithm_name,
-                                                const ParamMap& params,
-                                                const Input&  input,
-                                                const Output& output)> on_evaluate,
+                                                const parameter_map& params,
+                                                const p_input& input,
+                                                const p_output& output)> on_evaluate,
     std::function<void(std::string_view data_dir,
                        std::string_view test_case_name,
                        simdjson::dom::element test_case_data,
-                       const Input& input)> on_cleanup = {},
+                       const p_input& input)> on_cleanup = {},
     std::function<std::string(std::string_view algorithm_name,
-                              const ParamMap& params,
-                              const Input& input,
-                              const Output& output)>
+                              const parameter_map& params,
+                              const p_input& input,
+                              const p_output& output)>
         serialize_raw_sample_payload = {});
 
 /**
@@ -386,47 +405,48 @@ template<typename Input, typename Output>
  *        or any config failed to parse / validate.
  *
  * Variadic for syntax fidelity with the user's `main.cpp` example;
- * collects the pack into `vector<ErasedBenchmark>` and delegates.
+ * collects the pack into `vector<erased_benchmark>` and delegates.
  */
-template<typename... Benchmarks>
+template<typename... p_benchmark_types>
 [[nodiscard]] int run(int argc, char** argv,
                      std::string report_dir,
                      std::string data_dir,
-                     Benchmarks&&... benchmarks)
+                     p_benchmark_types&&... benchmarks)
 {
-    std::vector<ErasedBenchmark> erased_list;
-    erased_list.reserve(sizeof...(Benchmarks));
-    (erased_list.push_back(std::forward<Benchmarks>(benchmarks)), ...);
+    std::vector<erased_benchmark> erased_list;
+    erased_list.reserve(sizeof...(p_benchmark_types));
+    (erased_list.push_back(
+         std::forward<p_benchmark_types>(benchmarks)), ...);
     return detail::run_impl(argc, argv,
                             std::move(report_dir), std::move(data_dir),
                             std::move(erased_list));
 }
 
-}  // namespace bioseq::bench_framework
+}  // namespace bioseq::bench::framework
 
 // ---------------------------------------------------------------------------
 //  Internals
 // ---------------------------------------------------------------------------
 
-namespace bioseq::bench_framework {
+namespace bioseq::bench::framework {
 
 namespace detail {
-inline std::atomic<RawEvidenceIoFaultForTesting>
+inline std::atomic<raw_evidence_io_fault>
     raw_evidence_io_fault_for_testing{
-        RawEvidenceIoFaultForTesting::none};
-inline std::atomic<PairedScheduleEvidenceFaultForTesting>
+        raw_evidence_io_fault::none};
+inline std::atomic<paired_schedule_evidence_fault>
     paired_schedule_evidence_fault_for_testing{
-        PairedScheduleEvidenceFaultForTesting::none};
+        paired_schedule_evidence_fault::none};
 }  // namespace detail
 
 void set_raw_evidence_io_fault_for_testing(
-        const RawEvidenceIoFaultForTesting fault) noexcept {
+        const raw_evidence_io_fault fault) noexcept {
     detail::raw_evidence_io_fault_for_testing.store(
         fault, std::memory_order_release);
 }
 
 void set_paired_schedule_evidence_fault_for_testing(
-        const PairedScheduleEvidenceFaultForTesting fault) noexcept {
+        const paired_schedule_evidence_fault fault) noexcept {
     detail::paired_schedule_evidence_fault_for_testing.store(
         fault, std::memory_order_release);
 }
@@ -434,55 +454,60 @@ void set_paired_schedule_evidence_fault_for_testing(
 /// Canonical compile-time profiler args used by the framework. Timing-only
 /// is enough for `wall_clock_ns`; the framework does not need PMU counters
 /// or sampling.
-using profiler_args_t = bioseq::instr::context_args_profiling_timing_only;
+using profiler_configuration =
+    bioseq::instrumentation::benchmark_profiling_configuration;
 
 namespace detail {
 
 // ----------------- shared types -----------------
 
-enum class CompareOp : std::uint8_t { LessThan, GreaterThan, Equal };
+enum class comparison_operator : std::uint8_t {
+    less_than,
+    greater_than,
+    equal,
+};
 
 /// Aggregation function applied to a sample vector when reducing it to a
 /// single value before a comparator runs. Used by both per-rule
-/// comparators (the LHS / RHS aggregates of a `Rule`) and regression
-/// rules (the `aggregate` field on a `RegressionRule`). Matches the six
+/// comparators (the LHS / RHS aggregates of a `benchmark_rule`) and regression
+/// rules (the `aggregate` field on a `regression_rule`). Matches the six
 /// values allowed by the JSON enum: sum / min / max / p01 / p50 / p99.
-enum class Aggregate : std::uint8_t { Sum, Min, Max, P01, P50, P99 };
+enum class sample_aggregate : std::uint8_t { sum, min, max, p01, p50, p99 };
 
 /// One row of the aggregate registry. `percentile_fraction` is meaningful
 /// only for the three percentile entries; the other three carry NaN to
 /// signal "not a percentile". Adding a new percentile just means adding a
 /// row — `aggregate_samples` reads the fraction from here.
-struct AggregateEntry {
+struct sample_aggregate_entry {
     std::string_view    name;
-    Aggregate           kind;
+    sample_aggregate           kind;
     double              percentile_fraction;     // NaN for non-percentile aggregates
 };
 
 /// Compile-time table linking the JSON spelling to the enumerator. Single
 /// source of truth for parsers, validators, the `aggregate_samples`
 /// dispatch, and the report writer; mirrors the
-/// `kBuiltinMetricRegistry` pattern.
-inline constexpr std::array<AggregateEntry, 6> kAggregateRegistry{ {
-    { "sum", Aggregate::Sum, std::numeric_limits<double>::quiet_NaN() },
-    { "min", Aggregate::Min, std::numeric_limits<double>::quiet_NaN() },
-    { "max", Aggregate::Max, std::numeric_limits<double>::quiet_NaN() },
-    { "p01", Aggregate::P01, 0.01 },
-    { "p50", Aggregate::P50, 0.50 },
-    { "p99", Aggregate::P99, 0.99 },
+/// `k_builtin_metric_registry` pattern.
+inline constexpr std::array<sample_aggregate_entry, 6> k_aggregate_registry{ {
+    { "sum", sample_aggregate::sum, std::numeric_limits<double>::quiet_NaN() },
+    { "min", sample_aggregate::min, std::numeric_limits<double>::quiet_NaN() },
+    { "max", sample_aggregate::max, std::numeric_limits<double>::quiet_NaN() },
+    { "p01", sample_aggregate::p01, 0.01 },
+    { "p50", sample_aggregate::p50, 0.50 },
+    { "p99", sample_aggregate::p99, 0.99 },
 } };
 
-[[nodiscard]] inline constexpr std::optional<Aggregate>
+[[nodiscard]] inline constexpr std::optional<sample_aggregate>
 parse_aggregate(std::string_view text) noexcept {
-    for (const auto& entry : kAggregateRegistry) {
+    for (const auto& entry : k_aggregate_registry) {
         if (entry.name == text) return entry.kind;
     }
     return std::nullopt;
 }
 
 [[nodiscard]] inline constexpr std::string_view
-aggregate_name(Aggregate aggregate) noexcept {
-    for (const auto& entry : kAggregateRegistry) {
+aggregate_name(sample_aggregate aggregate) noexcept {
+    for (const auto& entry : k_aggregate_registry) {
         if (entry.kind == aggregate) return entry.name;
     }
     return "?";
@@ -492,75 +517,75 @@ aggregate_name(Aggregate aggregate) noexcept {
 /// aggregates, or NaN for the additive Sum / Min / Max kinds. The NaN
 /// sentinel keeps `aggregate_samples`' percentile branch table-driven.
 [[nodiscard]] inline constexpr double
-aggregate_percentile(Aggregate aggregate) noexcept {
-    for (const auto& entry : kAggregateRegistry) {
+aggregate_percentile(sample_aggregate aggregate) noexcept {
+    for (const auto& entry : k_aggregate_registry) {
         if (entry.kind == aggregate) return entry.percentile_fraction;
     }
     return std::numeric_limits<double>::quiet_NaN();
 }
 
 /// Every recognised metric flavour. The first batch are produced by the
-/// framework from the iteration-local `ProfilerBlock<Args>` aggregates;
-/// `Counter` and `Evaluation` route through the user's instrumentation
+/// framework from the iteration-local `profiler_state<Args>` aggregates;
+/// Counter and evaluation metrics route through the user's instrumentation
 /// counters / evaluation lambda.
-enum class MetricKind : std::uint8_t {
-    WallClockNs,                 // outer clock around on_run
-    RegionTotalNs,
-    RegionVisits,
-    RegionMinNs,
-    RegionMaxNs,
-    RegionP50Ns,
-    RegionP99Ns,
-    RegionTotalCycles,
-    RegionTotalInstructions,
-    RegionTotalBranches,
-    RegionTotalBranchMisses,
-    RegionIpc,
-    RegionBranchMissRate,
-    LoopTotalIterations,
-    LoopTotalWork,
-    LoopEmptyVisits,
-    LoopMinPerIterNs,
-    LoopMaxPerIterNs,
-    LoopP50PerIterNs,
-    LoopP99PerIterNs,
-    LoopMeanPerIterNs,
-    LoopWorkPerIter,
-    Counter,
-    Evaluation,
+enum class metric_kind : std::uint8_t {
+    wall_clock_ns,
+    region_total_ns,
+    region_visits,
+    region_min_ns,
+    region_max_ns,
+    region_p50_ns,
+    region_p99_ns,
+    region_total_cycles,
+    region_total_instructions,
+    region_total_branches,
+    region_total_branch_misses,
+    region_ipc,
+    region_branch_miss_rate,
+    loop_total_iterations,
+    loop_total_work,
+    loop_empty_visits,
+    loop_min_per_iteration_ns,
+    loop_max_per_iteration_ns,
+    loop_p50_per_iteration_ns,
+    loop_p99_per_iteration_ns,
+    loop_mean_per_iteration_ns,
+    loop_work_per_iteration,
+    counter,
+    evaluation,
 };
 
 /// Source family (drives schema validation, parsing, and which descriptor
 /// table to walk).
-enum class MetricSource : std::uint8_t {
-    OuterClock,    // WallClockNs only
-    Region,        // walks RegionAggregate
-    Loop,          // walks LoopAggregate
-    Counter,       // walks resolved Counter handles
-    Evaluation,    // walks the evaluation_metrics map
+enum class metric_source : std::uint8_t {
+    outer_clock,
+    region,
+    loop,
+    counter,
+    evaluation,
 };
 
 /// Cross-descriptor combiner (only meaningful for Region / Loop). Drives
 /// the per-iteration "fold every visited descriptor's value into one
 /// number" step in `append_iteration_samples`.
-enum class MetricCombiner : std::uint8_t {
-    Sum,                 // additive; e.g. visits, total_ns
-    HistogramSum,        // sum the 32-bucket log2 histograms then run hist_percentile
-    PmuRatio,            // (Σ instructions) / (Σ cycles); skip iteration when denom == 0
-    BranchMissRatio,     // (Σ branch_misses) / (Σ branches); skip when denom == 0
-    LoopMeanNs,          // (Σ total_ns) / (Σ total_iterations); skip when denom == 0
-    LoopWorkPerIter,     // (Σ total_work) / (Σ total_iterations); skip when denom == 0
-    RequiresRegion,      // min / max — must have explicit `region` filter; rejected at config load
+enum class metric_combiner : std::uint8_t {
+    sum,
+    histogram_sum,
+    pmu_ratio,
+    branch_miss_ratio,
+    loop_mean_ns,
+    loop_work_per_iteration,
+    requires_region,
 };
 
 /// Static registry of every framework-built-in metric. Schema validation,
 /// metric parsing, semantic checks, and the iteration extraction step all
 /// consume this single source of truth.
-struct BuiltinMetricEntry {
+struct builtin_metric_entry {
     std::string_view name;
-    MetricKind       kind;
-    MetricSource     source;
-    MetricCombiner   combiner;
+    metric_kind       kind;
+    metric_source     source;
+    metric_combiner   combiner;
     /// True iff the metric reads any PMU-derived field. Used by the
     /// `pmu_unavailable` runtime warning.
     bool             needs_pmu = false;
@@ -568,48 +593,48 @@ struct BuiltinMetricEntry {
     double           percentile = 0.0;
 };
 
-inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
-    { "wall_clock_ns",                MetricKind::WallClockNs,             MetricSource::OuterClock, MetricCombiner::Sum, false, 0.0 },
-    { "region_total_ns",              MetricKind::RegionTotalNs,           MetricSource::Region,     MetricCombiner::Sum, false, 0.0 },
-    { "region_visits",                MetricKind::RegionVisits,            MetricSource::Region,     MetricCombiner::Sum, false, 0.0 },
-    { "region_min_ns",                MetricKind::RegionMinNs,             MetricSource::Region,     MetricCombiner::RequiresRegion, false, 0.0 },
-    { "region_max_ns",                MetricKind::RegionMaxNs,             MetricSource::Region,     MetricCombiner::RequiresRegion, false, 0.0 },
-    { "region_p50_ns",                MetricKind::RegionP50Ns,             MetricSource::Region,     MetricCombiner::HistogramSum, false, 0.50 },
-    { "region_p99_ns",                MetricKind::RegionP99Ns,             MetricSource::Region,     MetricCombiner::HistogramSum, false, 0.99 },
-    { "region_total_cycles",          MetricKind::RegionTotalCycles,       MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
-    { "region_total_instructions",    MetricKind::RegionTotalInstructions, MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
-    { "region_total_branches",        MetricKind::RegionTotalBranches,     MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
-    { "region_total_branch_misses",   MetricKind::RegionTotalBranchMisses, MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
-    { "region_ipc",                   MetricKind::RegionIpc,               MetricSource::Region,     MetricCombiner::PmuRatio, true, 0.0 },
-    { "region_branch_miss_rate",      MetricKind::RegionBranchMissRate,    MetricSource::Region,     MetricCombiner::BranchMissRatio, true, 0.0 },
-    { "loop_total_iterations",        MetricKind::LoopTotalIterations,     MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
-    { "loop_total_work",              MetricKind::LoopTotalWork,           MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
-    { "loop_empty_visits",            MetricKind::LoopEmptyVisits,         MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
-    { "loop_min_per_iter_ns",         MetricKind::LoopMinPerIterNs,        MetricSource::Loop,       MetricCombiner::RequiresRegion, false, 0.0 },
-    { "loop_max_per_iter_ns",         MetricKind::LoopMaxPerIterNs,        MetricSource::Loop,       MetricCombiner::RequiresRegion, false, 0.0 },
-    { "loop_p50_per_iter_ns",         MetricKind::LoopP50PerIterNs,        MetricSource::Loop,       MetricCombiner::HistogramSum, false, 0.50 },
-    { "loop_p99_per_iter_ns",         MetricKind::LoopP99PerIterNs,        MetricSource::Loop,       MetricCombiner::HistogramSum, false, 0.99 },
-    { "loop_mean_per_iter_ns",        MetricKind::LoopMeanPerIterNs,       MetricSource::Loop,       MetricCombiner::LoopMeanNs, false, 0.0 },
-    { "loop_work_per_iter",           MetricKind::LoopWorkPerIter,         MetricSource::Loop,       MetricCombiner::LoopWorkPerIter, false, 0.0 },
+inline constexpr std::array<builtin_metric_entry, 22> k_builtin_metric_registry{ {
+    { "wall_clock_ns",                metric_kind::wall_clock_ns,             metric_source::outer_clock, metric_combiner::sum, false, 0.0 },
+    { "region_total_ns",              metric_kind::region_total_ns,           metric_source::region,     metric_combiner::sum, false, 0.0 },
+    { "region_visits",                metric_kind::region_visits,            metric_source::region,     metric_combiner::sum, false, 0.0 },
+    { "region_min_ns",                metric_kind::region_min_ns,             metric_source::region,     metric_combiner::requires_region, false, 0.0 },
+    { "region_max_ns",                metric_kind::region_max_ns,             metric_source::region,     metric_combiner::requires_region, false, 0.0 },
+    { "region_p50_ns",                metric_kind::region_p50_ns,             metric_source::region,     metric_combiner::histogram_sum, false, 0.50 },
+    { "region_p99_ns",                metric_kind::region_p99_ns,             metric_source::region,     metric_combiner::histogram_sum, false, 0.99 },
+    { "region_total_cycles",          metric_kind::region_total_cycles,       metric_source::region,     metric_combiner::sum, true,  0.0 },
+    { "region_total_instructions",    metric_kind::region_total_instructions, metric_source::region,     metric_combiner::sum, true,  0.0 },
+    { "region_total_branches",        metric_kind::region_total_branches,     metric_source::region,     metric_combiner::sum, true,  0.0 },
+    { "region_total_branch_misses",   metric_kind::region_total_branch_misses, metric_source::region,     metric_combiner::sum, true,  0.0 },
+    { "region_ipc",                   metric_kind::region_ipc,               metric_source::region,     metric_combiner::pmu_ratio, true, 0.0 },
+    { "region_branch_miss_rate",      metric_kind::region_branch_miss_rate,    metric_source::region,     metric_combiner::branch_miss_ratio, true, 0.0 },
+    { "loop_total_iterations",        metric_kind::loop_total_iterations,     metric_source::loop,       metric_combiner::sum, false, 0.0 },
+    { "loop_total_work",              metric_kind::loop_total_work,           metric_source::loop,       metric_combiner::sum, false, 0.0 },
+    { "loop_empty_visits",            metric_kind::loop_empty_visits,         metric_source::loop,       metric_combiner::sum, false, 0.0 },
+    { "loop_min_per_iter_ns",         metric_kind::loop_min_per_iteration_ns,        metric_source::loop,       metric_combiner::requires_region, false, 0.0 },
+    { "loop_max_per_iter_ns",         metric_kind::loop_max_per_iteration_ns,        metric_source::loop,       metric_combiner::requires_region, false, 0.0 },
+    { "loop_p50_per_iter_ns",         metric_kind::loop_p50_per_iteration_ns,        metric_source::loop,       metric_combiner::histogram_sum, false, 0.50 },
+    { "loop_p99_per_iter_ns",         metric_kind::loop_p99_per_iteration_ns,        metric_source::loop,       metric_combiner::histogram_sum, false, 0.99 },
+    { "loop_mean_per_iter_ns",        metric_kind::loop_mean_per_iteration_ns,       metric_source::loop,       metric_combiner::loop_mean_ns, false, 0.0 },
+    { "loop_work_per_iter",           metric_kind::loop_work_per_iteration,         metric_source::loop,       metric_combiner::loop_work_per_iteration, false, 0.0 },
 } };
 
 /// Look up a builtin metric by canonical name. Returns nullptr if absent.
-[[nodiscard]] inline constexpr const BuiltinMetricEntry* lookup_builtin_metric(
+[[nodiscard]] inline constexpr const builtin_metric_entry* lookup_builtin_metric(
     std::string_view metric_name) noexcept
 {
-    for (const auto& entry : kBuiltinMetricRegistry) {
+    for (const auto& entry : k_builtin_metric_registry) {
         if (entry.name == metric_name) return &entry;
     }
     return nullptr;
 }
 
-[[nodiscard]] inline constexpr const char* metric_kind_name(MetricKind metric_kind) noexcept {
+[[nodiscard]] inline constexpr const char* metric_kind_name(metric_kind metric_kind) noexcept {
     switch (metric_kind) {
-        case MetricKind::Counter:    return "counter";
-        case MetricKind::Evaluation: return "evaluation";
+        case metric_kind::counter:    return "counter";
+        case metric_kind::evaluation: return "evaluation";
         default: break;
     }
-    for (const auto& entry : kBuiltinMetricRegistry) {
+    for (const auto& entry : k_builtin_metric_registry) {
         if (entry.kind == metric_kind) return entry.name.data();
     }
     return "?";
@@ -619,34 +644,34 @@ inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
 /// `std::nullopt` for unrecognised strings; the caller distinguishes
 /// "counter" / "evaluation" from registry-driven sources by inspecting
 /// the source enumerator.
-[[nodiscard]] inline std::optional<MetricSource> parse_metric_type(std::string_view type_text) noexcept {
-    if (type_text == "builtin")    return MetricSource::OuterClock;
-    if (type_text == "region")     return MetricSource::Region;
-    if (type_text == "loop")       return MetricSource::Loop;
-    if (type_text == "counter")    return MetricSource::Counter;
-    if (type_text == "evaluation") return MetricSource::Evaluation;
+[[nodiscard]] inline std::optional<metric_source> parse_metric_type(std::string_view type_text) noexcept {
+    if (type_text == "builtin")    return metric_source::outer_clock;
+    if (type_text == "region")     return metric_source::region;
+    if (type_text == "loop")       return metric_source::loop;
+    if (type_text == "counter")    return metric_source::counter;
+    if (type_text == "evaluation") return metric_source::evaluation;
     return std::nullopt;
 }
 
-/// Inverse of `parse_metric_type`. Renders a `MetricSource` as its
+/// Inverse of `parse_metric_type`. Renders a `metric_source` as its
 /// JSON-side spelling (`"region"`, `"loop"`, `"builtin"`, `"counter"`,
 /// `"evaluation"`). Used by diagnostic messages — the strings round-trip
 /// with `parse_metric_type`.
-[[nodiscard]] inline constexpr std::string_view metric_source_name(MetricSource source) noexcept {
+[[nodiscard]] inline constexpr std::string_view metric_source_name(metric_source source) noexcept {
     switch (source) {
-        case MetricSource::OuterClock: return "builtin";
-        case MetricSource::Region:     return "region";
-        case MetricSource::Loop:       return "loop";
-        case MetricSource::Counter:    return "counter";
-        case MetricSource::Evaluation: return "evaluation";
+        case metric_source::outer_clock: return "builtin";
+        case metric_source::region:     return "region";
+        case metric_source::loop:       return "loop";
+        case metric_source::counter:    return "counter";
+        case metric_source::evaluation: return "evaluation";
     }
     return "?";
 }
 
-[[nodiscard]] inline std::optional<CompareOp> parse_compare_op(std::string_view op_text) noexcept {
-    if (op_text == "<") return CompareOp::LessThan;
-    if (op_text == ">") return CompareOp::GreaterThan;
-    if (op_text == "=") return CompareOp::Equal;
+[[nodiscard]] inline std::optional<comparison_operator> parse_compare_op(std::string_view op_text) noexcept {
+    if (op_text == "<") return comparison_operator::less_than;
+    if (op_text == ">") return comparison_operator::greater_than;
+    if (op_text == "=") return comparison_operator::equal;
     return std::nullopt;
 }
 
@@ -657,33 +682,31 @@ inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
 /// Keeping the source coordinates on each side lets one within-run rule
 /// compare two differently named instrumentation regions without deriving or
 /// replacing either raw metric in the report.
-struct RuleSelector {
+struct rule_selector {
     std::string algorithm_key;
-    ParamMap    match{};
+    parameter_map    match{};
     std::string test_case{};
     std::string region{};
 };
 
-struct RuleComparator {
-    enum class PairingMode : std::uint8_t {
+struct rule_comparator {
+    enum class pairing_mode : std::uint8_t {
         independent_aggregates,
         by_iteration_ratio,
         by_iteration_exact,
     };
 
-    CompareOp op = CompareOp::Equal;
+    comparison_operator op = comparison_operator::equal;
     double    threshold_pct = 0.0;
     double    tolerance_pct = 0.0;
     /// Reduction applied to each side's sample vector before the
-    /// comparator runs. Defaults to `P50` (the framework's percentile
-    /// median) for backward-compatibility with pre-V5 rules that
-    /// hardcoded median behaviour.
-    Aggregate aggregate = Aggregate::P50;
+    /// comparator runs. Defaults to the framework's p50 percentile.
+    sample_aggregate aggregate = sample_aggregate::p50;
     /// The historical/default rule path reduces LHS and RHS independently.
     /// Ratio-paired rules build one LHS/RHS ratio for each logical repeat and
     /// reduce that vector. Exact-paired rules compare the finite IEEE-754 value
     /// of every aligned repeat without reducing either source vector.
-    PairingMode pairing = PairingMode::independent_aggregates;
+    pairing_mode pairing = pairing_mode::independent_aggregates;
     /// Reference ratio used as the ratio-paired comparator's RHS. Keeping this
     /// separate from `tolerance_pct` makes a rule state "report_76 ratio R
     /// with N% relative noise" directly, including baselines greater than 1.
@@ -699,42 +722,42 @@ struct RuleComparator {
 };
 
 [[nodiscard]] inline constexpr std::string_view pairing_mode_report_name(
-    RuleComparator::PairingMode mode) noexcept
+    rule_comparator::pairing_mode mode) noexcept
 {
     switch (mode) {
-        case RuleComparator::PairingMode::independent_aggregates:
+        case rule_comparator::pairing_mode::independent_aggregates:
             return "independent_aggregates";
-        case RuleComparator::PairingMode::by_iteration_ratio:
+        case rule_comparator::pairing_mode::by_iteration_ratio:
             return "paired_iteration_ratio";
-        case RuleComparator::PairingMode::by_iteration_exact:
+        case rule_comparator::pairing_mode::by_iteration_exact:
             return "paired_iteration_exact";
     }
     return "independent_aggregates";
 }
 
-struct Rule {
+struct benchmark_rule {
     std::string     name;
     std::string     metric_name;
-    MetricKind      metric_kind = MetricKind::WallClockNs;
-    RuleSelector    lhs;
-    RuleComparator  cmp;
-    RuleSelector    rhs;
+    metric_kind      metric_kind = metric_kind::wall_clock_ns;
+    rule_selector    lhs;
+    rule_comparator  cmp;
+    rule_selector    rhs;
 };
 
-struct MetricSpec {
+struct metric_specification {
     std::string  name;
-    MetricKind   kind = MetricKind::WallClockNs;
+    metric_kind   kind = metric_kind::wall_clock_ns;
     /// `"type"` string the user declared (or the implicit "builtin"
     /// default). Stored separately from `kind` so semantic validation can
     /// detect cross-source typos like `"type": "loop"` with key
     /// `region_total_ns` — the registry resolves the kind from the name
     /// regardless of `type`, but a mismatch is still a config error.
-    MetricSource declared_source = MetricSource::OuterClock;
+    metric_source declared_source = metric_source::outer_clock;
     /// For `kind == Counter`: canonical name of the instrumentation counter
     /// to snapshot. Defaults to `name` when the config omits the explicit
     /// `"counter"` field.
     std::string  counter_name{};
-    /// For `MetricSource::Region` / `MetricSource::Loop` metrics: when
+    /// For `metric_source::region` / `metric_source::loop` metrics: when
     /// non-empty, restrict the metric to descriptors whose name equals
     /// this string. When empty, every visited descriptor contributes via
     /// the registry's combiner (Sum, HistogramSum, PmuRatio, etc.).
@@ -743,10 +766,10 @@ struct MetricSpec {
     /// loop_max_per_iter_ns) — semantic_validate_config rejects those if
     /// `region` is empty.
     std::string  region{};
-    std::vector<Rule> rules{};
+    std::vector<benchmark_rule> rules{};
 };
 
-struct ConcurrencyOpts {
+struct concurrency_options {
     /// If true, this benchmark runs alone (every item-iteration loop
     /// acquires the cross-bench unique lock; siblings queue behind it).
     bool bench_lock  = false;
@@ -756,24 +779,23 @@ struct ConcurrencyOpts {
     /// worker happens to pick them up next, but never two at once.
     bool concurrency = true;
 
-    // V11 NOTE: `test_case_lock` (V10 default true) is deleted. The new
     // batched scheduler runs at most one tuple at a time per
     // (test_case, group), so the contention this flag was guarding
     // against is impossible by construction.
 };
 
-struct ParamSchema {
+struct parameter_schema {
     std::string algorithm_name;
     std::string param_name;
     std::string json_type;
-    std::vector<ConfigValue>     enum_values{};
-    std::optional<ConfigValue>   default_value{};
+    std::vector<config_value>     enum_values{};
+    std::optional<config_value>   default_value{};
     std::string description;
 };
 
-struct AlgorithmSchema {
+struct algorithm_schema {
     std::string algorithm_name;
-    std::vector<ParamSchema> params{};
+    std::vector<parameter_schema> params{};
 };
 
 /// Default per-test-case concurrency: max(1, hw_concurrency-1). Cached
@@ -787,7 +809,7 @@ struct AlgorithmSchema {
     return cached;
 }
 
-struct TestCaseSpec {
+struct test_case_specification {
     std::string name;
     std::string description;
     /// Maximum number of parallel groups this test case may be split
@@ -797,12 +819,12 @@ struct TestCaseSpec {
     /// one). Read from `test_cases.<name>.concurrency`; defaults to
     /// `default_test_case_concurrency()` when the key is omitted.
     std::size_t concurrency = 0;
-    /// View into the parser pool of the owning `BenchmarkExecutionState`.
+    /// View into the parser pool of the owning `benchmark_execution_state`.
     simdjson::dom::element data{};
 };
 
-struct BenchmarkConfig {
-    enum class IterationOrderMode : std::uint8_t {
+struct benchmark_configuration {
+    enum class iteration_order_mode : std::uint8_t {
         item_major,
         interleaved_seeded,
     };
@@ -810,9 +832,9 @@ struct BenchmarkConfig {
     std::string benchmark_key;
     std::string description;
     bool fast = false;
-    ConcurrencyOpts concurrency{};
+    concurrency_options concurrency{};
     bool by_regions = false;
-    IterationOrderMode iteration_order = IterationOrderMode::item_major;
+    iteration_order_mode iteration_order = iteration_order_mode::item_major;
     std::uint64_t iteration_order_seed = 0;
     /// Tag labels for `--filter tags=...` selection. REQUIRED in the config
     /// JSON (may be an empty array). Order preserved as declared; duplicates
@@ -822,20 +844,20 @@ struct BenchmarkConfig {
     /// (test_case_name, iterations) pairs declared in `matrix.for`.
     std::vector<std::pair<std::string, std::size_t>> for_each{};
     /// algorithm_name -> param_name -> declared values list (one cross-product axis).
-    std::map<std::string, std::map<std::string, std::vector<ConfigValue>>> matrix_over{};
+    std::map<std::string, std::map<std::string, std::vector<config_value>>> matrix_over{};
     /// Schemas for every algorithm registered in top-level `params`. Cloned
     /// into the per-benchmark config so matrix expansion can fill defaults.
-    std::map<std::string, AlgorithmSchema> algorithm_schemas{};
+    std::map<std::string, algorithm_schema> algorithm_schemas{};
     /// Metrics declared by this benchmark. Iteration order preserved.
-    std::vector<MetricSpec> metrics{};
+    std::vector<metric_specification> metrics{};
 
     /// Optional fail-closed acceptance contract for benchmarks whose result is
     /// only meaningful when the complete declared comparison matrix ran.  The
     /// algorithm list names exact report rows (one expanded tuple per name),
     /// while the test-case map fixes the exact iteration count for each row.
     /// An empty algorithm list keeps the historical permissive behaviour.
-    struct AcceptanceContract {
-        struct NamedRegionSampleMultiplicity {
+    struct acceptance_contract {
+        struct named_region_sample_multiplicity {
             std::string algorithm{};
             std::string test_case{};
             std::string region{};
@@ -853,7 +875,7 @@ struct BenchmarkConfig {
         /// Historical descriptor-weighted total. For every coordinate the
         /// total must divide by its accepted iteration count; that quotient is
         /// the exact raw descriptor count required in each logical iteration.
-        std::vector<NamedRegionSampleMultiplicity>
+        std::vector<named_region_sample_multiplicity>
             exact_named_region_sample_multiplicities{};
 
         [[nodiscard]] bool enabled() const noexcept {
@@ -862,16 +884,16 @@ struct BenchmarkConfig {
     } acceptance{};
 };
 
-struct ExecutionTuple {
+struct execution_tuple {
     std::string algorithm_name;
-    ParamMap    params{};      // every parameter resolved (declared or defaulted)
+    parameter_map    params{};      // every parameter resolved (declared or defaulted)
 };
 
-/// Exact scheduler coordinates observed by one completed Cell iteration.
+/// Exact scheduler coordinates observed by one completed measurement_cell iteration.
 /// Paired-rule evidence records these values rather than reconstructing the
 /// configured shuffle after the run, so a malformed execution order cannot be
 /// presented as if it followed the requested interleaved schedule.
-struct IterationScheduleSample {
+struct iteration_schedule_sample {
     std::size_t repeat = 0;
     std::size_t order_position = 0;
     std::uint64_t shuffle_seed = 0;
@@ -880,9 +902,9 @@ struct IterationScheduleSample {
 /// Fully resolved source route for one side of a ratio-paired rule.
 /// The tuple index and complete parameter map distinguish two expanded tuples
 /// that happen to share an algorithm name.
-struct PairedRuleRouteEvidence {
+struct paired_rule_route_evidence {
     std::string algorithm{};
-    ParamMap params{};
+    parameter_map params{};
     std::size_t tuple_index = 0;
     std::string test_case{};
     std::string region{};
@@ -892,7 +914,7 @@ struct PairedRuleRouteEvidence {
 /// Lossless inputs used to form one logical repeat ratio. Named regions may
 /// contain multiple same-name descriptors, so the descriptor samples are
 /// retained beside the reduced logical values used by the comparator.
-struct PairedRuleRepeatEvidence {
+struct paired_rule_repeat_evidence {
     std::size_t repeat = 0;
     bool included_after_warmup = false;
     std::vector<double> numerator_samples{};
@@ -905,29 +927,29 @@ struct PairedRuleRepeatEvidence {
     double ratio = 0.0;
     bool numerator_schedule_present = false;
     bool denominator_schedule_present = false;
-    IterationScheduleSample numerator_schedule{};
-    IterationScheduleSample denominator_schedule{};
+    iteration_schedule_sample numerator_schedule{};
+    iteration_schedule_sample denominator_schedule{};
     bool schedule_identity_matches = false;
 };
 
 /// Reconstructable result of one resolved ratio-paired gate. This is the
 /// single evidence object shared by the final report and the crash-resilient
 /// debug JSONL stream; neither writer derives its own ratios or identities.
-struct PairedRuleEvidence {
+struct paired_rule_evidence {
     std::string config_path{};
     std::string benchmark_key{};
     std::string rule_name{};
     std::string test_case{};
     std::string metric{};
-    RuleComparator comparator{};
-    PairedRuleRouteEvidence numerator_route{};
-    PairedRuleRouteEvidence denominator_route{};
+    rule_comparator comparator{};
+    paired_rule_route_evidence numerator_route{};
+    paired_rule_route_evidence denominator_route{};
     std::size_t benchmark_index = 0;
     std::size_t test_case_index = 0;
     std::size_t group_index = 0;
     std::string schedule_mode{};
     std::uint64_t configured_schedule_seed = 0;
-    std::vector<PairedRuleRepeatEvidence> repeats{};
+    std::vector<paired_rule_repeat_evidence> repeats{};
     std::array<bool, 2> inputs_present{false, false};
     bool observed_paired_ratio_present = false;
     double observed_paired_ratio = 0.0;
@@ -937,9 +959,8 @@ struct PairedRuleEvidence {
 /// One (test_case × group × execution_tuple) cell holding iteration
 /// metrics for a single group's slice of iterations.
 ///
-/// `Cell` is owned via `std::unique_ptr<Cell>` (see `BenchmarkExecutionState`)
-/// because the framework hands out stable `Cell*` to TBB workers and the
-/// pointer must outlive any vector reallocation. Per main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §5,
+/// `measurement_cell` is owned via `std::unique_ptr<measurement_cell>` (see `benchmark_execution_state`)
+/// because the framework hands out stable `measurement_cell*` to TBB workers and the
 /// smart pointers exist here because the per-benchmark state owns every
 /// cell for the lifetime of the run; the alternative would be a
 /// stable-iterator container like `std::list` plus manual lookup, which
@@ -952,22 +973,19 @@ struct PairedRuleEvidence {
 /// every group of the same `(test_case, tuple)` pair — see
 /// `merge_group_samples` in the writer / rule evaluator.
 ///
-/// Thread-safety: V11 schedules at most one batch per `(tc, group)`, and
-/// items inside a batch run sequentially. A `Cell` is therefore never
+/// items inside a batch run sequentially. A `measurement_cell` is therefore never
 /// touched by two threads at once, so `samples` does not need any
-/// mutex around its writes. (Pre-V11 needed `samples_mu` because the
 /// flat work-unit list let two threads race the same cell across
-/// concurrent iterations of a single tuple — V11 deletes that path.)
 /// Raw descriptor emission counts for one completed logical iteration:
 /// region name -> metric name -> number of same-name descriptor samples.
 /// Unlike the aggregate `samples` vectors this retains iteration boundaries,
 /// which strict acceptance needs to reject skewed historical-P50 weighting.
-using NamedRegionIterationSampleCounts =
+using named_region_iteration_sample_counts =
     std::map<std::string, std::map<std::string, std::size_t>>;
 
-struct Cell {
-    const TestCaseSpec*  test_case = nullptr;
-    const ExecutionTuple* tuple = nullptr;
+struct measurement_cell {
+    const test_case_specification*  test_case = nullptr;
+    const execution_tuple* tuple = nullptr;
     /// Iterations *for this group* (= `split_iterations(total, group_count)[group_index]`).
     std::size_t          iterations = 0;
     /// Stable index into the test_cases vector. Lets the per-batch
@@ -979,14 +997,14 @@ struct Cell {
     /// upper-bound + 1). Cached on every cell so the writer does not
     /// have to re-derive it from the global state.
     std::size_t          group_count = 1;
-    /// Stable index in BenchmarkExecutionState::execution_tuples. Required
+    /// Stable index in benchmark_execution_state::execution_tuples. Required
     /// because distinct parameter tuples may share one algorithm name.
     std::size_t          tuple_index = 0;
 
     /// region_name -> metric_name -> sample values. "all_regions" is a
     /// synthetic bucket holding the iteration-level wall_clock_ns and every
     /// counter / evaluation metric. Per-region buckets only appear when
-    /// `BenchmarkConfig::by_regions == true`.
+    /// `benchmark_configuration::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
     /// Named instrumentation buckets may contain more than one descriptor
     /// with the same name.  Keep their raw samples unchanged for historical
@@ -1000,27 +1018,27 @@ struct Cell {
     /// acceptance is active. The outer vector supplies collision-free local
     /// ordinals; group merging rebases them by concatenating in group-index
     /// order instead of treating each group's local repeat 0 as the same run.
-    std::vector<NamedRegionIterationSampleCounts>
+    std::vector<named_region_iteration_sample_counts>
         named_region_iteration_sample_counts{};
     /// Actual scheduler coordinates for every completed iteration when this
     /// benchmark contains at least one paired ratio rule.
-    std::vector<IterationScheduleSample> iteration_schedule_samples{};
+    std::vector<iteration_schedule_sample> iteration_schedule_samples{};
     /// Lossless benchmark-specific JSON objects, one per completed
     /// iteration. Written only by this cell's single batch worker.
     std::vector<std::string> raw_samples{};
 
-    Cell() = default;
-    Cell(const Cell&) = delete;
-    Cell& operator=(const Cell&) = delete;
-    Cell(Cell&&) = delete;
-    Cell& operator=(Cell&&) = delete;
+    measurement_cell() = default;
+    measurement_cell(const measurement_cell&) = delete;
+    measurement_cell& operator=(const measurement_cell&) = delete;
+    measurement_cell(measurement_cell&&) = delete;
+    measurement_cell& operator=(measurement_cell&&) = delete;
 };
 
 /// Per-case (per matrix.over key) debug progress. Populated once, single-
 /// threaded, before batches are enqueued; thereafter only the atomics mutate,
 /// concurrently across TBB workers (the map structure is read-only). Present
 /// only when --debug is active (empty otherwise).
-struct CaseDebugProgress {
+struct case_debug_progress {
     std::atomic<std::size_t> remaining_cells{0};  // cells not yet finished
     std::atomic<bool>        started{false};       // CASE_STARTED already emitted?
     std::atomic<bool>        emitted{false};       // CASE_RESULTS already emitted? (exactly-once)
@@ -1028,49 +1046,48 @@ struct CaseDebugProgress {
 
 /// Pinned (move + copy deleted) — `simdjson::dom::element` views handed to
 /// the user reference `parser`, and any move would invalidate them. The
-/// owning slot is `std::shared_ptr<BenchmarkExecutionState>` inside
-/// `BenchmarkContext::reports`; the shared_ptr lets the non-blocking prepare
+/// owning slot is `std::shared_ptr<benchmark_execution_state>` inside
+/// `benchmark_context::reports`; the shared_ptr lets the non-blocking prepare
 /// phase and its later finalizer retain the same stable heap allocation.
-struct BenchmarkExecutionState {
+struct benchmark_execution_state {
     /// User-facing title from `create_benchmark`, copied here so the report
     /// writer doesn't need a separate channel.
     std::string                         title{};
     simdjson::dom::parser              parser{};
     std::string                         config_body{};
-    BenchmarkConfig                     config{};
-    std::vector<TestCaseSpec>           test_cases{};
-    std::vector<ExecutionTuple>         execution_tuples{};
-    std::vector<std::unique_ptr<Cell>>  cells{};
+    benchmark_configuration                     config{};
+    std::vector<test_case_specification>           test_cases{};
+    std::vector<execution_tuple>         execution_tuples{};
+    std::vector<std::unique_ptr<measurement_cell>>  cells{};
     /// Every resolved paired ratio gate, including accepted gates. The
     /// report writer emits this vector and the debug sink streams the same
     /// objects as soon as post-run evaluation completes.
-    std::vector<PairedRuleEvidence>     paired_rule_evidence{};
+    std::vector<paired_rule_evidence>     paired_rule_evidence{};
     bool                                raw_samples_enabled = false;
     std::size_t                         driver_benchmark_index = 0;
     /// Per-case (per matrix.over key) debug progress for `--debug`. Keyed by
-    /// ExecutionTuple::algorithm_name (== case name). std::map keeps stable
+    /// execution_tuple::algorithm_name (== case name). std::map keeps stable
     /// references; populated before the parallel run, read-only structure
     /// after (only the per-node atomics mutate). Empty unless --debug is on.
-    std::map<std::string, CaseDebugProgress> case_debug_progress{};
+    std::map<std::string, case_debug_progress> case_debug_progress{};
 
-    // V16: `serial_mu` deleted — the scheduler enforces
     // `concurrency.concurrency: false` by admitting at most one batch
-    // per benchmark at a time (see BatchScheduler::concurrency_admissible_locked).
+    // per benchmark at a time (see batch_scheduler::concurrency_admissible_locked).
 
-    BenchmarkExecutionState() = default;
-    BenchmarkExecutionState(BenchmarkExecutionState&&) = delete;
-    BenchmarkExecutionState(const BenchmarkExecutionState&) = delete;
-    BenchmarkExecutionState& operator=(BenchmarkExecutionState&&) = delete;
-    BenchmarkExecutionState& operator=(const BenchmarkExecutionState&) = delete;
+    benchmark_execution_state() = default;
+    benchmark_execution_state(benchmark_execution_state&&) = delete;
+    benchmark_execution_state(const benchmark_execution_state&) = delete;
+    benchmark_execution_state& operator=(benchmark_execution_state&&) = delete;
+    benchmark_execution_state& operator=(const benchmark_execution_state&) = delete;
 };
 
 /// One axis of the `--filter` selector. Each axis may be set at most once.
-enum class FilterDimension : std::uint8_t { Tags, Benchmark, Cases };
+enum class filter_dimension : std::uint8_t { tags, benchmark, cases };
 
 /// Whole-run filter assembled from every `--filter key=v,v` occurrence.
 /// An absent (nullopt) axis means "do not constrain on this axis". A present
 /// axis is a non-empty OR-set. `empty()` is true iff no axis is constrained.
-struct FilterSpec {
+struct filter_specification {
     std::optional<std::vector<std::string>> tags{};
     std::optional<std::vector<std::string>> benchmark{};   // benchmark KEYS (singular CLI spelling)
     std::optional<std::vector<std::string>> cases{};       // matrix.over keys
@@ -1080,36 +1097,29 @@ struct FilterSpec {
     }
 };
 
-struct ParsedCli {
+struct parsed_cli {
     bool                       fast_filter = false;
-    /// V14: `--ui` opens a long-running interactive ftxui dashboard.
-    /// Replaces the V8 `--summary` one-shot. Mutually exclusive with
     /// `--fast` / `--threads` (warn-and-ignore on collision).
     bool                       ui_mode = false;
-    /// V14: `--ui-ascii` substitutes ASCII fallbacks for emoji glyphs.
     /// Useful when the terminal locale is `C` or DejaVu / JetBrains
     /// Mono is unavailable.
     bool                       ui_ascii_fallback = false;
-    /// V18: `--ui-test-mode` disables the 1-Hz reload-countdown
     /// animation and the periodic 30-s reload tick, and emits a
     /// `\x1b]666;render-N\x07` OSC sentinel after every render so a
     /// PTY-driven Python harness can synchronise on completed frames
-    /// (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §10.4.1). Manual `Ctrl-R` and the
-    /// V14 selection-debounce-reparse path remain functional.
     bool                       ui_test_mode = false;
     /// `--debug`: stream a crash-resilient `report_debug_<N>.jsonl` event
     /// log alongside the normal report. Requires a non-empty `filter`.
     bool                       debug = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
-    /// V12: `--memory-buffer N` (0..50, default 40). Determines how
     /// much headroom to leave above peak system usage when computing
-    /// the dynamic memory cap. See `MemoryBudget::cap_for`.
+    /// the dynamic memory cap. See `benchmark_memory_budget::cap_for`.
     double                     memory_buffer_pct = 40.0;
     /// Subset selection assembled from every `--filter key=v,v` occurrence.
-    FilterSpec                 filter{};
+    filter_specification                 filter{};
     /// Hard launch errors found while parsing (e.g. duplicate dimension,
-    /// malformed value). Each becomes a `ValidationDiag` Error in run_impl
+    /// malformed value). Each becomes a `validation_diagnostic` Error in run_impl
     /// with code carried as the first ':'-separated token.
     std::vector<std::string>   cli_errors{};
 };
@@ -1122,7 +1132,7 @@ struct ParsedCli {
 /// essential for `regression_since_commit` cross-reference. `created`
 /// is an ISO 8601 UTC string built from `gmtime_r` + `strftime`;
 /// `timestamp` is unix seconds for machine consumers.
-struct ReportMeta {
+struct report_metadata {
     std::string  commit{};
     bool         dirty = false;
     std::int64_t timestamp = 0;
@@ -1136,16 +1146,16 @@ struct ReportMeta {
     bool         history_eligible = false;
 };
 
-struct Violation {
+struct violation {
     std::string config_path;
     std::string benchmark_key;
     std::string rule_name;
     std::string test_case;
     std::string metric;
     std::string lhs_algorithm;
-    ParamMap    lhs_full_params{};
+    parameter_map    lhs_full_params{};
     std::string rhs_algorithm;
-    ParamMap    rhs_full_params{};
+    parameter_map    rhs_full_params{};
     /// Index 0 = LHS aggregate; index 1 = RHS aggregate. Mirrors the spec's
     /// `"args": [...]` field on the output.
     std::array<double, 2> args{0.0, 0.0};
@@ -1158,17 +1168,17 @@ struct Violation {
     /// rules report [aggregate(lhs[i] / rhs[i]), configured paired baseline].
     /// Exact-paired rules report the first unequal [lhs[i], rhs[i]] witnesses.
     /// Keep the mode explicit so report consumers do not conflate these shapes.
-    RuleComparator::PairingMode comparison_mode =
-        RuleComparator::PairingMode::independent_aggregates;
+    rule_comparator::pairing_mode comparison_mode =
+        rule_comparator::pairing_mode::independent_aggregates;
     std::size_t warmup_repetitions = 0;
     bool blocking = true;
 };
 
 /// Comparator payload for a regression rule. `threshold%` is forbidden by
 /// the schema, so we only carry `tolerance%` — the underlying compare op
-/// reuses the existing `CompareOp` family.
-struct RegressionOperator {
-    CompareOp op = CompareOp::Equal;
+/// reuses the existing `comparison_operator` family.
+struct regression_operator {
+    comparison_operator op = comparison_operator::equal;
     double    tolerance_pct = 0.0;
 };
 
@@ -1176,7 +1186,7 @@ struct RegressionOperator {
 /// time so the evaluator never has to special-case the
 /// `"all_regions"` shorthand: the literal string lands in the vector as
 /// the single element.
-struct RegressionRule {
+struct regression_rule {
     std::string config_path;
     std::string name;
     /// Empty means "applies to every benchmark in the same config file".
@@ -1188,8 +1198,8 @@ struct RegressionRule {
     /// Always non-empty after parse. Defaults to `{"all_regions"}`.
     std::vector<std::string> regions{};
     std::string metric;
-    Aggregate aggregate = Aggregate::Sum;
-    RegressionOperator  op{};
+    sample_aggregate aggregate = sample_aggregate::sum;
+    regression_operator  op{};
     /// Test cases excluded from this rule. Schema requires non-empty if
     /// the array is present at all.
     std::vector<std::string> exclude_cases{};
@@ -1206,7 +1216,7 @@ struct RegressionRule {
 /// rule references must be validated against this universe rather than the
 /// post-CLI-filter report map; otherwise a valid rule scoped to a filtered-out
 /// benchmark is misdiagnosed as a typo.
-struct RegressionBenchmarkDeclaration {
+struct regression_benchmark_declaration {
     std::string benchmark_key;
     std::vector<std::string> config_algorithms{};
     std::vector<std::string> config_test_cases{};
@@ -1215,23 +1225,23 @@ struct RegressionBenchmarkDeclaration {
     std::vector<std::string> metrics{};
 };
 
-using RegressionValidationUniverse =
-    std::map<std::string, std::vector<RegressionBenchmarkDeclaration>>;
+using regression_validation_universe =
+    std::map<std::string, std::vector<regression_benchmark_declaration>>;
 
 /// One detected regression. Mirrors the user-visible JSON shape: arrays of
 /// size 1 for `violating_tuples` / `test_cases` so the writer doesn't need
 /// to special-case singletons. `regression_since` is empty-string when
 /// the rule wants `null` in the output.
-struct RegressionEntry {
+struct regression_entry {
     std::string config_path;
     std::string benchmark;
     std::string rule_name;
     std::string algorithm_name;
-    ParamMap    violating_params{};
+    parameter_map    violating_params{};
     std::string test_case;
     std::string region;
     std::string metric;
-    Aggregate aggregate = Aggregate::Sum;
+    sample_aggregate aggregate = sample_aggregate::sum;
     bool        blocking = true;
     double      previously = 0.0;
     double      now = 0.0;
@@ -1241,7 +1251,6 @@ struct RegressionEntry {
     /// Commit SHA captured by the historical report identified by
     /// `regression_since` (its `meta.commit` field). Empty string ⇒
     /// JSON `null` — happens when `regression_since` itself is null,
-    /// when the historical report was written before V5 (no `meta`
     /// block), or when `meta.commit` was empty in that report (the
     /// older run wasn't in a git repo).
     std::string regression_since_commit{};
@@ -1251,7 +1260,7 @@ struct RegressionEntry {
 /// that file. Populated lazily by the per-benchmark closure under
 /// `regression_rules_mu`; consumed by the global validator and the
 /// regression evaluator after the parallel benchmark loop has joined.
-using RegressionRulesByConfig = std::map<std::string, std::vector<RegressionRule>>;
+using regression_rules_by_configuration = std::map<std::string, std::vector<regression_rule>>;
 
 /// One sanity-warning finding emitted at end-of-run. Sanity checks
 /// catch suspicious uniformity that no other validation pass could
@@ -1264,9 +1273,8 @@ using RegressionRulesByConfig = std::map<std::string, std::vector<RegressionRule
 /// Currently the only emitted `type` is `"metric_looks_constant"`;
 /// the field is a free-form string so additional checks can land
 /// without touching consumers' parsers.
-struct SanityWarning {
+struct sanity_warning {
     /// Stable identifier for the check kind. `"metric_looks_constant"`
-    /// is the only value emitted in V6.
     std::string type;
     /// Metric name whose data tripped the check.
     std::string metric;
@@ -1285,13 +1293,13 @@ struct SanityWarning {
     std::string warning_since_commit;
 };
 
-// Forward declarations used by BenchmarkContext.
-struct ProgressState;
-struct ValidationDiag;
-class  MemoryBudget;
-class  BatchScheduler;
-class  DebugReportSink;
-class  DurableRawEvidenceSink;
+// Forward declarations used by benchmark_context.
+struct progress_state;
+struct validation_diagnostic;
+class  benchmark_memory_budget;
+class  batch_scheduler;
+class  debug_report_sink;
+class  durable_raw_evidence_sink;
 
 }  // namespace detail
 
@@ -1299,70 +1307,68 @@ class  DurableRawEvidenceSink;
  * @brief Per-benchmark context passed to the `execute` closure.
  *
  * The closure does not see this directly — the type is forward-declared
- * publicly so the public `ErasedBenchmark` struct can carry a
- * `function<void(BenchmarkContext&)>` member without exposing the full
+ * publicly so the public `erased_benchmark` struct can carry a
+ * `function<void(benchmark_context&)>` member without exposing the full
  * private layout.
  */
-struct BenchmarkContext {
+struct benchmark_context {
     std::string                                    data_dir;
     std::string                                    report_dir;
     bool                                            fast_filter = false;
-    // V16: `cross_bench_mu` deleted — bench-lock semantics enforced by
     // the scheduler's admission predicates (see
-    // BatchScheduler::bench_lock_admissible_locked).
-    detail::ProgressState*                          progress = nullptr;
+    // batch_scheduler::bench_lock_admissible_locked).
+    detail::progress_state*                          progress = nullptr;
     std::size_t                                     benchmark_index = 0;
     std::mutex*                                     violations_mu = nullptr;
-    std::vector<detail::Violation>*                 violations = nullptr;
+    std::vector<detail::violation>*                 violations = nullptr;
     std::mutex*                                     reports_mu = nullptr;
     /// Map from benchmark_key to the per-benchmark execution state. The
-    /// value is `shared_ptr` because `BenchmarkExecutionState` is pinned
+    /// value is `shared_ptr` because `benchmark_execution_state` is pinned
     /// (the simdjson parser inside is non-movable) and must remain alive from
     /// the non-blocking prepare phase through the later finalizer.
-    std::map<std::string, std::shared_ptr<detail::BenchmarkExecutionState>>* reports = nullptr;
+    std::map<std::string, std::shared_ptr<detail::benchmark_execution_state>>* reports = nullptr;
     /// Aggregated validation diagnostics across all benchmarks. Each
     /// benchmark's closure appends its schema + semantic findings under
     /// `diagnostics_mu`; `run_impl` prints them and uses the error count
     /// to drive the exit code.
     std::mutex*                                     diagnostics_mu = nullptr;
-    std::vector<detail::ValidationDiag>*            diagnostics = nullptr;
+    std::vector<detail::validation_diagnostic>*            diagnostics = nullptr;
     /// Shared registry of regression rules keyed by config_path. The
     /// closure inserts under `regression_rules_mu` the first time it sees
     /// each unique config; subsequent benchmarks sharing the same config
     /// skip parsing.
     std::mutex*                                     regression_rules_mu = nullptr;
-    detail::RegressionRulesByConfig*                regression_rules_by_config = nullptr;
-    /// V16: process-wide batch scheduler. The per-benchmark prepare phase
+    detail::regression_rules_by_configuration*                regression_rules_by_config = nullptr;
     /// enqueues batches into this scheduler; its returned finalizer drains
-    /// them before publishing results, so captured state (`Cell::samples`,
-    /// `BenchmarkExecutionState`, etc.) outlives the bodies. The
+    /// them before publishing results, so captured state (`measurement_cell::samples`,
+    /// `benchmark_execution_state`, etc.) outlives the bodies. The
     /// scheduler also owns a non-owning reference to the host's
-    /// `MemoryBudget` — callers that need budget metadata go through
+    /// `benchmark_memory_budget` — callers that need budget metadata go through
     /// the scheduler instead of duplicating the pointer here.
-    detail::BatchScheduler*                         scheduler = nullptr;
+    detail::batch_scheduler*                         scheduler = nullptr;
     /// Case allow-list from `--filter cases=...`. nullptr == run all cases.
     /// Points at run_impl's `case_allow_list` (outlives every closure).
     const std::set<std::string>*                    filter_cases = nullptr;
     /// Crash-resilient JSONL event sink for `--debug`. nullptr == no debug
-    /// stream. Points at run_impl's `DebugReportSink` (outlives every closure).
-    detail::DebugReportSink*                        debug_sink = nullptr;
+    /// stream. Points at run_impl's `debug_report_sink` (outlives every closure).
+    detail::debug_report_sink*                        debug_sink = nullptr;
     /// Durable raw sidecar sink. A raw-enabled iteration is incomplete until
     /// its append and fsync succeed.
-    detail::DurableRawEvidenceSink*                 raw_evidence_sink = nullptr;
+    detail::durable_raw_evidence_sink*                 raw_evidence_sink = nullptr;
 };
 
-// ----------------- ConfigValue::from_simdjson -----------------
+// ----------------- config_value::from_simdjson -----------------
 
-// ConfigValue helpers must be visible to translation units that import the module,
+// config_value helpers must be visible to translation units that import the module,
 // so the body sits in the public namespace block.
-[[nodiscard]] inline ConfigValue ConfigValue::from_simdjson(simdjson::dom::element element) noexcept {
+[[nodiscard]] inline config_value config_value::from_simdjson(simdjson::dom::element element) noexcept {
     using element_type = simdjson::dom::element_type;
-    ConfigValue out{};
+    config_value out{};
     switch (element.type()) {
         case element_type::INT64: {
             std::int64_t parsed = 0;
             if (element.get(parsed) == simdjson::SUCCESS) {
-                out.kind  = Kind::Integer;
+                out.kind  = value_kind::integer;
                 out.integer_value = parsed;
             }
             return out;
@@ -1370,7 +1376,7 @@ struct BenchmarkContext {
         case element_type::UINT64: {
             std::uint64_t parsed = 0;
             if (element.get(parsed) == simdjson::SUCCESS) {
-                out.kind  = Kind::Integer;
+                out.kind  = value_kind::integer;
                 out.integer_value = static_cast<std::int64_t>(parsed);
             }
             return out;
@@ -1378,7 +1384,7 @@ struct BenchmarkContext {
         case element_type::DOUBLE: {
             double parsed = 0.0;
             if (element.get(parsed) == simdjson::SUCCESS) {
-                out.kind  = Kind::Double;
+                out.kind  = value_kind::floating_point;
                 out.double_value = parsed;
             }
             return out;
@@ -1386,7 +1392,7 @@ struct BenchmarkContext {
         case element_type::BOOL: {
             bool parsed = false;
             if (element.get(parsed) == simdjson::SUCCESS) {
-                out.kind   = Kind::Boolean;
+                out.kind   = value_kind::boolean;
                 out.boolean_value = parsed;
             }
             return out;
@@ -1394,17 +1400,17 @@ struct BenchmarkContext {
         case element_type::STRING: {
             std::string_view parsed{};
             if (element.get(parsed) == simdjson::SUCCESS) {
-                out.kind  = Kind::String;
+                out.kind  = value_kind::string;
                 out.string_value = std::string{parsed};
             }
             return out;
         }
         default:
             // Object / array / null: not a scalar configuration value.
-            // Mark with the NonScalar sentinel so semantic validation can
+            // Mark with the non-scalar sentinel so semantic validation can
             // refuse it against any declared parameter type. We still keep
             // the JSON text in `string_value` for diagnostic messages.
-            out.kind  = Kind::NonScalar;
+            out.kind  = value_kind::non_scalar;
             out.string_value = simdjson::to_string(element);
             return out;
     }
@@ -1412,16 +1418,15 @@ struct BenchmarkContext {
 
 namespace detail {
 
-// ----------------- V12 framework constants -----------------
 
 /// Hardcoded ceiling on the number of consecutive failed attempts at
 /// `on_input` (G2) and `on_cleanup` (G3) before the framework declares
 /// the batch unrecoverable. Set to 5 per spec; not exposed via CLI.
-inline constexpr std::size_t kMaxTaskInputHandlerErrorCount = 5;
+inline constexpr std::size_t k_max_task_input_handler_error_count = 5;
 
 /// Maximum number of stack-trace frames to render in the dashboard
 /// per failure. Anything past this is dropped with an "elided" marker.
-inline constexpr std::size_t kMaxStackTraceLines = 30;
+inline constexpr std::size_t k_max_stack_trace_lines = 30;
 
 /// Minimum time the retry-failure row stays in the dashboard before
 /// the next attempt is taken. Without this, a fast-failing user
@@ -1431,99 +1436,28 @@ inline constexpr std::size_t kMaxStackTraceLines = 30;
 /// for the retry sequence at all. 300 ms is slightly longer than the
 /// 200 ms render cadence so every attempt's failure state is
 /// guaranteed to show up in at least one frame.
-inline constexpr std::chrono::milliseconds kRetryFailureMinDisplayTime{300};
+inline constexpr std::chrono::milliseconds k_retry_failure_min_display_time{300};
 
-// ----------------- sysinfo bridge -----------------
-
-/// Best-effort live memory snapshot. The primary source is
-/// `bioseq::instr::detail::sysinfo`, matching the production extension's
-/// MemoryBudget. `hwinfo::Memory` remains a fallback only when the direct
-/// platform probe cannot report total/available memory.
-struct SystemMemorySnapshot {
-    std::uint64_t total_bytes   = 0;
-    std::uint64_t free_bytes    = 0;
-    std::uint64_t process_bytes = 0;
-};
-
-[[nodiscard]] inline SystemMemorySnapshot snapshot_system_memory() noexcept {
-    hwinfo::Memory mem{};
-    SystemMemorySnapshot snap{};
-
-    // The vcpkg-installed hwinfo (lfreist-hwinfo, vcpkg edition) exposes
-    // total_Bytes() / free_Bytes() / available_Bytes() as `int64_t`.
-    // Negative values are sentinel "I don't know"; treat as zero.
-    auto clamp_positive = [] (std::int64_t v) noexcept -> std::uint64_t {
-        return v <= 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(v);
-    };
-
-    // DOC0276 — PRIMARY source is the direct mach/POSIX probe in
-    // `bioseq::instr::detail::sysinfo` (the same probe the production extension's
-    // MemoryBudget uses). It exists precisely because the vcpkg hwinfo
-    // `free_Bytes()` routes through `host_statistics64`, which returns -1
-    // (failure) on the vcpkg ARM-macOS build — so the old code's "free" read 0
-    // and fell back to ~total, i.e. the framework's memory estimates were always
-    // (effectively) zero-pressure. `system_available_bytes()` calls
-    // host_statistics64(HOST_VM_INFO64) directly (which DOES work) and reports
-    // (free + inactive + speculative + purgeable) pages. hwinfo stays only as a
-    // last-resort fallback when the direct probe is unavailable.
-    namespace sysinfo = bioseq::instr::detail::sysinfo;
-    snap.total_bytes = sysinfo::system_total_bytes();
-    snap.process_bytes = sysinfo::process_footprint_bytes();
-    if (snap.total_bytes == 0) {
-        snap.total_bytes = clamp_positive(mem.total_Bytes());
-        if (snap.total_bytes == 0) snap.total_bytes = clamp_positive(mem.available_Bytes());
-    }
-
-    snap.free_bytes = sysinfo::system_available_bytes();
-    if (snap.free_bytes == 0) {
-        // Direct probe unavailable — fall back to hwinfo per platform.
-#if defined(HWINFO_UNIX) && !defined(HWINFO_APPLE)
-        snap.free_bytes = clamp_positive(mem.available_Bytes());
-#elif defined(HWINFO_APPLE)
-        snap.free_bytes = clamp_positive(mem.free_Bytes());
-        if (snap.free_bytes == 0) snap.free_bytes = clamp_positive(mem.available_Bytes());
-#else
-        snap.free_bytes = clamp_positive(mem.free_Bytes());
-#endif
-    }
-
-    // Defensive clamps: never let `free` exceed `total`. If both are
-    // zero (broken hwinfo), pretend infinite total so the framework
-    // can still run; the operator gets a startup log line so the
-    // anomaly is visible.
-    if (snap.total_bytes == 0) {
-        snap.total_bytes = std::numeric_limits<std::uint64_t>::max();
-    }
-    if (snap.free_bytes > snap.total_bytes) {
-        snap.free_bytes = snap.total_bytes;
-    }
-    return snap;
-}
-
-// ----------------- MemoryBudget -----------------
+// ----------------- benchmark_memory_budget -----------------
 
 // Forward declaration kept so the renderer can store a pointer.
-struct ProgressGroup;
+struct progress_group;
 
-/// V16 slim form: sysinfo snapshotter plus the buffered-cap math. All
-/// reservation tracking moved to `BatchScheduler` (§3.7 of
-/// main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md). Removing the per-batch acquire/release
-/// path eliminates the worker-blocking cv-wait loop that was the
-/// secondary bottleneck under the V12 design.
-class MemoryBudget {
+/// Applies the benchmark process cap to snapshots from the common memory
+/// budget service. Reservation ownership remains in `batch_scheduler`.
+class benchmark_memory_budget {
 public:
-    /// hwinfo TTL — every snapshot reads /proc/meminfo / sysctl / WMI.
-    /// Cache the last one so concurrent renderer paints + scheduler
-    /// ticks collapse to one syscall per 200 ms window.
-    static constexpr std::chrono::milliseconds kBudgetSnapshotTtl{200};
+    /// Cache platform probes so concurrent scheduler and renderer reads
+    /// collapse to one sample per window.
+    static constexpr std::chrono::milliseconds k_budget_snapshot_ttl{200};
 
     /// Constructed once in `run_impl`. `memory_buffer_pct` is already
     /// validated to `[0, 50]` by `parse_cli`.
-    explicit MemoryBudget(double memory_buffer_pct) noexcept
+    explicit benchmark_memory_budget(double memory_buffer_pct) noexcept
         : memory_buffer_pct_(memory_buffer_pct)
     {
         DEBUG_ASSERT(memory_buffer_pct >= 0.0 && memory_buffer_pct <= 50.0,
-            "MemoryBudget memory_buffer_pct must be in [0, 50]");
+            "benchmark_memory_budget memory_buffer_pct must be in [0, 50]");
     }
 
     /// Compute the cap (`C = T·(1 − buffer/100)`) for an arbitrary `T`.
@@ -1534,18 +1468,21 @@ public:
     }
 
     /// Scheduler admission room under the process-footprint cap. The live
-    /// `free_bytes` value is still surfaced in logs/UI, but admission must not
+    /// system-available value is still surfaced in logs/UI, but admission must not
     /// subtract every other process and reclaimable page from this benchmark's
-    /// cap: that made a serial 6 Gbp DOC0286 batch unschedulable on macOS even
+    /// cap: that can make a large serial batch unschedulable even
     /// when the benchmark process itself stayed below the configured cap.
     [[nodiscard]] static constexpr std::uint64_t
-    process_room_for(const SystemMemorySnapshot& sys,
+    process_room_for(const bioseq::common::memory::memory_snapshot& system_snapshot,
                      double buffer_pct,
                      std::uint64_t reserved) noexcept {
-        const auto cap = cap_for(sys.total_bytes, buffer_pct);
-        return (cap > sys.process_bytes + reserved)
-            ? (cap - sys.process_bytes - reserved)
-            : std::uint64_t{0};
+        const auto cap = cap_for(system_snapshot.system_total_bytes, buffer_pct);
+        if (reserved > std::numeric_limits<std::uint64_t>::max()
+                         - system_snapshot.process_footprint_bytes) {
+            return 0;
+        }
+        const auto committed = system_snapshot.process_footprint_bytes + reserved;
+        return cap > committed ? cap - committed : std::uint64_t{0};
     }
 
     [[nodiscard]] double memory_buffer_pct() const noexcept { return memory_buffer_pct_; }
@@ -1554,31 +1491,41 @@ public:
     /// many concurrent callers (scheduler + renderer) collapse to one
     /// syscall per cache window. `const` because the cache fields are
     /// `mutable`; observable state of the budget is unchanged.
-    [[nodiscard]] SystemMemorySnapshot current_system_snapshot() const noexcept {
+    [[nodiscard]] bioseq::common::memory::memory_snapshot
+    current_system_snapshot() const noexcept {
         std::lock_guard<std::mutex> guard(cache_mu_);
-        const auto now_ns = static_cast<std::int64_t>(bioseq::instr::clock::now_ns());
+        const auto now_ns =
+            static_cast<std::int64_t>(bioseq::instrumentation::clock::now_ns());
         constexpr auto ttl_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    kBudgetSnapshotTtl).count();
+                                    k_budget_snapshot_ttl).count();
         if (cached_snapshot_ns_ == 0 || (now_ns - cached_snapshot_ns_) >= ttl_ns) {
-            cached_snapshot_    = snapshot_system_memory();
+            cached_snapshot_ = system_budget_.snapshot();
+            if (cached_snapshot_.system_total_bytes == 0) {
+                cached_snapshot_.system_total_bytes =
+                    std::numeric_limits<std::uint64_t>::max();
+            }
+            cached_snapshot_.system_available_bytes = std::min(
+                cached_snapshot_.system_available_bytes,
+                cached_snapshot_.system_total_bytes);
             cached_snapshot_ns_ = now_ns;
         }
         return cached_snapshot_;
     }
 
-    MemoryBudget(const MemoryBudget&) = delete;
-    MemoryBudget(MemoryBudget&&) = delete;
-    MemoryBudget& operator=(const MemoryBudget&) = delete;
-    MemoryBudget& operator=(MemoryBudget&&) = delete;
+    benchmark_memory_budget(const benchmark_memory_budget&) = delete;
+    benchmark_memory_budget(benchmark_memory_budget&&) = delete;
+    benchmark_memory_budget& operator=(const benchmark_memory_budget&) = delete;
+    benchmark_memory_budget& operator=(benchmark_memory_budget&&) = delete;
 
 private:
-    mutable std::mutex             cache_mu_{};
-    mutable SystemMemorySnapshot   cached_snapshot_{};
-    mutable std::int64_t           cached_snapshot_ns_ = 0;
-    double                         memory_buffer_pct_;
+    mutable std::mutex                            cache_mu_{};
+    mutable bioseq::common::memory::memory_budget system_budget_{};
+    mutable bioseq::common::memory::memory_snapshot cached_snapshot_{};
+    mutable std::int64_t                          cached_snapshot_ns_ = 0;
+    double                                        memory_buffer_pct_;
 };
 
-// ----------------- ProgressState -----------------
+// ----------------- progress_state -----------------
 
 /// One group of one test_case. Hot-path counter is `done`; the
 /// scheduler updates `label` only at item boundaries (cold path).
@@ -1586,7 +1533,6 @@ private:
 /// Failure / wait state observed by the renderer:
 ///   - `input_retry_attempt`  — current `on_input` retry index (0 = clear).
 ///   - `cleanup_retry_attempt`— current `on_cleanup` retry index (0 = clear).
-///   - `idle_start_ns`        — V16: written by the scheduler via
 ///                               `mirror_idle_to_ui` while a batch is
 ///                               pending and starves. The renderer
 ///                               shows a "🕑 waiting Ns / 30s" row
@@ -1600,7 +1546,7 @@ private:
 /// `_trace`) are guarded by a separate `failure_mu` rather than the
 /// hot-path `label_mu` — the latter sits inside the iteration loop and
 /// must not be widened.
-struct ProgressGroup {
+struct progress_group {
     std::size_t                group_index = 0;
     std::atomic<std::uint64_t> done{0};
     std::uint64_t              total = 0;
@@ -1614,12 +1560,12 @@ struct ProgressGroup {
     std::string                label{};
     std::mutex                 label_mu{};
 
-    /// Input retry status. 0 = clear; 1..kMaxTaskInputHandlerErrorCount
+    /// Input retry status. 0 = clear; 1..k_max_task_input_handler_error_count
     /// = current attempt (1-based).
     std::atomic<std::uint8_t>  input_retry_attempt{0};
     /// Cleanup retry status. Same shape as input_retry_attempt.
     std::atomic<std::uint8_t>  cleanup_retry_attempt{0};
-    /// Nanoseconds since `bioseq::instr::clock::now_ns()` epoch at
+    /// Nanoseconds since `bioseq::instrumentation::clock::now_ns()` epoch at
     /// which the batch entered the idle-wait state. Written by the
     /// scheduler via `mirror_idle_to_ui`. 0 = not waiting on memory.
     std::atomic<std::int64_t>  idle_start_ns{0};
@@ -1648,11 +1594,11 @@ struct ProgressGroup {
 /// atomic so the renderer thread (started in `run_impl` before the
 /// per-benchmark closures populate this struct) sees a consistent
 /// value on weakly-ordered hardware.
-struct ProgressTestCase {
+struct progress_test_case {
     std::string                                test_case_name{};
     std::atomic<std::uint64_t>                 tuple_done{0};       // cumulative items finished
     std::atomic<std::uint64_t>                 tuple_total{0};
-    std::vector<std::unique_ptr<ProgressGroup>> groups{};
+    std::vector<std::unique_ptr<progress_group>> groups{};
     std::atomic<std::int64_t>                  start_ns{0};
     std::atomic<std::int64_t>                  finish_ns{0};
 };
@@ -1661,43 +1607,42 @@ struct ProgressTestCase {
 /// writes via three helpers below.
 ///
 /// Per-benchmark `test_cases` is populated by the closure that drives a
-/// single `ErasedBenchmark` (running on some TBB worker) AFTER the
+/// single `erased_benchmark` (running on some TBB worker) AFTER the
 /// renderer thread has already started polling. To avoid a data race
 /// on the vector's structural state, the writer signals completion via
 /// `setup_done.store(true, release)` and readers gate every traversal
 /// on `setup_done.load(acquire)`. After the writer signals, the
 /// vector and every `unique_ptr` it holds are stable for the rest of
 /// the run.
-// Forward-declared so ProgressState can carry a non-owning pointer to it
+// Forward-declared so progress_state can carry a non-owning pointer to it
 // even though the class body lives further down in the module.
-class BatchScheduler;
+class batch_scheduler;
 
-struct ProgressState {
-    struct Per {
+struct progress_state {
+    struct per_benchmark_state {
         std::string                                       title{};
         std::string                                       benchmark_key{};
-        std::vector<std::unique_ptr<ProgressTestCase>>    test_cases{};
+        std::vector<std::unique_ptr<progress_test_case>>    test_cases{};
         std::atomic<bool>                                 setup_done{false};
     };
-    std::vector<std::unique_ptr<Per>> per_benchmark;
+    std::vector<std::unique_ptr<per_benchmark_state>> per_benchmark;
     std::atomic<bool> running{true};
     std::atomic<bool> tty_render{false};   // set true if stderr is a TTY at startup
-    /// V16: scheduler exposes pending/running counters + reservation
     /// totals consumed by the dashboard header. nullptr = no scheduler
     /// installed (e.g. in `--ui` review mode). Memory-budget access is
     /// routed through the scheduler too, so there's a single owner.
-    BatchScheduler*  scheduler     = nullptr;
+    batch_scheduler*  scheduler     = nullptr;
 };
 
-// ----------------- BatchScheduler -----------------
+// ----------------- batch_scheduler -----------------
 
 /// One pending or running batch, type-erased. Owned by the scheduler.
 /// The body is constructed by `prepare_typed_benchmark` and captures
-/// references back into the per-benchmark `BenchmarkExecutionState` —
+/// references back into the per-benchmark `benchmark_execution_state` —
 /// so the scheduler must guarantee the body has run to completion
 /// before the returned finalizer releases that state.
 /// `wait_for_benchmark` enforces that contract.
-struct ScheduledBatch {
+struct scheduled_batch {
     std::size_t      scheduler_id      = 0;
     std::size_t      benchmark_index   = 0;
     /// `concurrency.bench_lock` from the parsed config — true ⇒
@@ -1706,7 +1651,6 @@ struct ScheduledBatch {
     /// bench-locked batch from this benchmark has drained).
     bool             bench_lock        = false;
     /// `!concurrency.concurrency` — true ⇒ scheduler admits at most
-    /// one batch from this benchmark at a time (preserves V12's
     /// "Strict latency-sensitive run" semantics).
     bool             concurrency_serial = false;
     /// Memory reservation requested by `on_estimate_resources`.
@@ -1719,13 +1663,13 @@ struct ScheduledBatch {
     /// cannot be represented by this signed accounting type.
     std::int64_t     total_bytes       = 0;
     /// Body executed by the TBB task pool. Wrapped at admission time
-    /// by an enclosing lambda that owns a `ScopedSchedulerFinish` so
+    /// by an enclosing lambda that owns a `scoped_scheduler_finish` so
     /// the reservation always releases on every return path.
     std::function<void()> body{};
     /// UI mirror — the renderer reads `idle_start_ns` to colour the
     /// "🕑 waiting Ns / 30s" row when this batch is the sole holdout.
     /// May be nullptr (no progress dashboard installed).
-    ProgressGroup*   group_for_ui      = nullptr;
+    progress_group*   group_for_ui      = nullptr;
     /// Per-batch idle clock (ns). 0 = "not idle yet". Mutated only by
     /// the scheduler thread under `mu_`.
     std::int64_t     last_idle_start_ns = 0;
@@ -1735,15 +1679,14 @@ struct ScheduledBatch {
     std::string      test_case_name{};
     std::size_t      test_case_index   = 0;
     std::size_t      group_index       = 0;
-    /// Non-owning pointer to the BenchmarkContext used to push
+    /// Non-owning pointer to the benchmark_context used to push
     /// diagnostics + UI updates. Lifetime is the same as `run_impl`.
-    BenchmarkContext* context           = nullptr;
+    benchmark_context* context           = nullptr;
 };
 
 /// Free helper used inside the scheduler when mirroring the idle clock
-/// to the per-group UI atomic. Replaces V12's
-/// `MemoryBudget::mirror_idle_to_ui`.
-inline void mirror_idle_to_ui(const ScheduledBatch& batch,
+/// `benchmark_memory_budget::mirror_idle_to_ui`.
+inline void mirror_idle_to_ui(const scheduled_batch& batch,
                                std::int64_t idle_start_ns) noexcept {
     if (batch.group_for_ui != nullptr) {
         batch.group_for_ui->idle_start_ns.store(
@@ -1751,51 +1694,47 @@ inline void mirror_idle_to_ui(const ScheduledBatch& batch,
     }
 }
 
-/// Forward declaration so `ScopedSchedulerFinish` can refer to the
+/// Forward declaration so `scoped_scheduler_finish` can refer to the
 /// scheduler before its body is defined.
-class BatchScheduler;
+class batch_scheduler;
 
 /// RAII guard installed by the scheduler around every enqueued body.
-/// `~ScopedSchedulerFinish` calls `BatchScheduler::notify_batch_finished`
+/// `~scoped_scheduler_finish` calls `batch_scheduler::notify_batch_finished`
 /// so any return path (normal, diagnostic-emit, exception inside
 /// `cpptrace::try_catch` catchers, or an escaped worker exception captured by
 /// the scheduler wrapper) decrements reservations exactly once.
-struct ScopedSchedulerFinish {
-    BatchScheduler* scheduler;
+struct scoped_scheduler_finish {
+    batch_scheduler* scheduler;
     std::size_t     scheduler_id;
-    ~ScopedSchedulerFinish() noexcept;
+    ~scoped_scheduler_finish() noexcept;
 };
 
-/// Single scheduler thread + TBB task pool. Replaces the V12
 /// `tbb::parallel_for_each(batches…)` model.
 ///
 /// Memory reservations live exclusively here — bodies never block on
-/// `MemoryBudget` directly. Bench-lock + serial-concurrency rules are
+/// `benchmark_memory_budget` directly. Bench-lock + serial-concurrency rules are
 /// also enforced by admission predicates instead of process-global
-/// mutexes; see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.4.
-class BatchScheduler {
+class batch_scheduler {
 public:
     /// Scheduler tick cadence. Wakeups also fire on every batch
     /// completion, so the wall-clock latency between "a slot opens"
     /// and "the next batch is admitted" is dominated by
     /// `notify_batch_finished` rather than the tick (the tick exists
-    /// only to re-poll hwinfo and re-check idle timeouts).
-    static constexpr std::chrono::seconds kSchedulerTickInterval{1};
-    /// `MAX_TASK_IDLE_WAITING_TIME` — preserved verbatim from V12.
+    /// only to refresh memory probes and re-check idle timeouts).
+    static constexpr std::chrono::seconds k_scheduler_tick_interval{1};
     /// A pending batch whose constraints don't fit AND whose peers
     /// are all idle for this long aborts with
     /// `memory_budget_constraint_timeout`.
-    static constexpr std::chrono::seconds kMaxIdleWaitingTime{30};
+    static constexpr std::chrono::seconds k_max_idle_waiting_time{30};
 
-    BatchScheduler(MemoryBudget& budget,
+    batch_scheduler(benchmark_memory_budget& budget,
                     oneapi::tbb::task_arena& arena) noexcept
         : budget_(budget), arena_(arena)
     {
         thread_ = std::thread{[this] { scheduler_loop(); }};
     }
 
-    ~BatchScheduler() noexcept {
-        // Dtor sequence (see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §4.5):
+    ~batch_scheduler() noexcept {
         // 1. Stop the scheduler thread.
         // 2. Drain any TBB tasks already enqueued.
         // 3. Members destruct.
@@ -1813,14 +1752,14 @@ public:
             (void)tg_.wait();
         } catch (const std::exception& error) {
             std::fprintf(stderr,
-                "[bench_framework] BatchScheduler destructor suppressed an "
+                "[bench_framework] batch_scheduler destructor suppressed an "
                 "unexpected task-group exception after the explicit join "
                 "boundary was bypassed: %s\n",
                 error.what());
             std::fflush(stderr);
         } catch (...) {
             std::fputs(
-                "[bench_framework] BatchScheduler destructor suppressed an "
+                "[bench_framework] batch_scheduler destructor suppressed an "
                 "unexpected non-std task-group exception after the explicit "
                 "join boundary was bypassed\n",
                 stderr);
@@ -1828,14 +1767,14 @@ public:
         }
     }
 
-    BatchScheduler(const BatchScheduler&) = delete;
-    BatchScheduler(BatchScheduler&&) = delete;
-    BatchScheduler& operator=(const BatchScheduler&) = delete;
-    BatchScheduler& operator=(BatchScheduler&&) = delete;
+    batch_scheduler(const batch_scheduler&) = delete;
+    batch_scheduler(batch_scheduler&&) = delete;
+    batch_scheduler& operator=(const batch_scheduler&) = delete;
+    batch_scheduler& operator=(batch_scheduler&&) = delete;
 
     /// Add a batch to the pending queue. Thread-safe — called from
     /// every per-benchmark closure during the enqueue phase.
-    void enqueue_batch(ScheduledBatch batch) noexcept {
+    void enqueue_batch(scheduled_batch batch) noexcept {
         {
             std::lock_guard<std::mutex> guard(mu_);
             batch.scheduler_id = next_id_++;
@@ -1877,7 +1816,7 @@ public:
         // the wrapper by a few instructions. Join the task group here, at a
         // deliberately non-noexcept boundary, before observing the captured
         // worker error. Because every worker body is caught below, TBB has no
-        // user exception of its own to defer into BatchScheduler's destructor.
+        // user exception of its own to defer into batch_scheduler's destructor.
         (void)tg_.wait();
 
         std::exception_ptr worker_exception;
@@ -1899,27 +1838,27 @@ public:
         return worker_exception_count_;
     }
 
-    /// Called from the body's `ScopedSchedulerFinish` destructor.
+    /// Called from the body's `scoped_scheduler_finish` destructor.
     void notify_batch_finished(std::size_t scheduler_id) noexcept {
         // Splice the finished node into a local list so its destructor
         // (which destroys `body`'s captures — potentially a chain of
         // std::function copies) runs OUTSIDE `mu_`. Keeps lock-hold
         // duration bounded by counter updates only.
-        std::list<ScheduledBatch> to_drop;
+        std::list<scheduled_batch> to_drop;
         {
             std::lock_guard<std::mutex> guard(mu_);
             const auto it = std::find_if(running_batches_.begin(),
                                           running_batches_.end(),
-                [scheduler_id](const ScheduledBatch& candidate) noexcept {
+                [scheduler_id](const scheduled_batch& candidate) noexcept {
                     return candidate.scheduler_id == scheduler_id;
                 });
             DEBUG_ASSERT(it != running_batches_.end(),
-                "BatchScheduler::notify_batch_finished: id not found");
+                "batch_scheduler::notify_batch_finished: id not found");
             const auto need = it->total_bytes;
             DEBUG_ASSERT(need >= 0,
-                "BatchScheduler stored a negative total byte requirement");
+                "batch_scheduler stored a negative total byte requirement");
             DEBUG_ASSERT(reserved_bytes_ >= need,
-                "BatchScheduler reserved_bytes_ underflow");
+                "batch_scheduler reserved_bytes_ underflow");
             reserved_bytes_ -= need;
             decrement_or_erase_locked(active_bench_lock_holder_,
                                        it->benchmark_index, it->bench_lock);
@@ -1936,8 +1875,8 @@ public:
     }
 
     /// Snapshot exposed to the renderer header. Recomputes from a
-    /// fresh hwinfo read (cached by `MemoryBudget`).
-    struct LiveSnapshot {
+    /// fresh platform probe (cached by `benchmark_memory_budget`).
+    struct live_snapshot {
         std::uint64_t total_bytes;
         std::uint64_t cap_bytes;
         std::uint64_t used_bytes;
@@ -1947,20 +1886,20 @@ public:
         std::size_t   pending_count;
         std::size_t   running_count;
     };
-    [[nodiscard]] LiveSnapshot live_snapshot() const noexcept {
+    [[nodiscard]] live_snapshot live_snapshot() const noexcept {
         const auto sys = budget_.current_system_snapshot();
-        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+        const auto cap = benchmark_memory_budget::cap_for(sys.system_total_bytes,
                                                 budget_.memory_buffer_pct());
         std::lock_guard<std::mutex> guard(mu_);
         const auto reserved = static_cast<std::uint64_t>(
                                   std::max<std::int64_t>(reserved_bytes_, 0));
-        const auto available = MemoryBudget::process_room_for(
+        const auto available = benchmark_memory_budget::process_room_for(
             sys, budget_.memory_buffer_pct(), reserved);
-        return LiveSnapshot{
-            .total_bytes     = sys.total_bytes,
+        return live_snapshot{
+            .total_bytes     = sys.system_total_bytes,
             .cap_bytes       = cap,
-            .used_bytes      = sys.process_bytes,
-            .system_available_bytes = sys.free_bytes,
+            .used_bytes      = sys.process_footprint_bytes,
+            .system_available_bytes = sys.system_available_bytes,
             .reserved_bytes  = reserved,
             .available_bytes = available,
             .pending_count   = pending_.size(),
@@ -1972,9 +1911,14 @@ public:
         return budget_.memory_buffer_pct();
     }
 
+    [[nodiscard]] bioseq::common::memory::memory_snapshot
+    current_system_snapshot() const noexcept {
+        return budget_.current_system_snapshot();
+    }
+
 private:
     /// Scheduler thread body — admits whatever fits, then sleeps until
-    /// either a notify or the next tick. The hwinfo snapshot is taken
+    /// either a notify or the next tick. The platform snapshot is taken
     /// OUTSIDE `mu_` so the only path that takes both `mu_` and
     /// `cache_mu_` is `live_snapshot()`/`scheduler_loop`, both in the
     /// `mu_`-released → `cache_mu_`-acquired order. Keeps the lock
@@ -1987,18 +1931,19 @@ private:
             guard.lock();
             check_idle_timeouts_locked();
             admit_locked(system_snapshot);
-            cv_.wait_for(guard, kSchedulerTickInterval);
+            cv_.wait_for(guard, k_scheduler_tick_interval);
         }
     }
 
-    /// Greedy admission. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.3. The system
-    /// memory snapshot is provided by `scheduler_loop` so this body
+    /// Greedy admission. The system memory snapshot is provided by
+    /// `scheduler_loop` so this body
     /// never re-enters `current_system_snapshot()` while holding `mu_`.
-    void admit_locked(const SystemMemorySnapshot& sys) noexcept {
+    void admit_locked(
+        const bioseq::common::memory::memory_snapshot& system_snapshot) noexcept {
         if (pending_.empty()) return;
 
-        std::uint64_t available = MemoryBudget::process_room_for(
-            sys,
+        std::uint64_t available = benchmark_memory_budget::process_room_for(
+            system_snapshot,
             budget_.memory_buffer_pct(),
             static_cast<std::uint64_t>(std::max<std::int64_t>(reserved_bytes_, 0)));
 
@@ -2007,7 +1952,7 @@ private:
         // enqueue (no streaming), starvation is impossible (see plan
         // §4.17).
         std::stable_sort(pending_.begin(), pending_.end(),
-            [](const ScheduledBatch& lhs, const ScheduledBatch& rhs) noexcept {
+            [](const scheduled_batch& lhs, const scheduled_batch& rhs) noexcept {
                 return lhs.total_bytes < rhs.total_bytes;
             });
 
@@ -2015,7 +1960,7 @@ private:
         while (pending_iter != pending_.end()) {
             const bool total_nonnegative = pending_iter->total_bytes >= 0;
             DEBUG_ASSERT(total_nonnegative,
-                "BatchScheduler stored a negative total byte requirement");
+                "batch_scheduler stored a negative total byte requirement");
             const auto need = total_nonnegative
                 ? static_cast<std::uint64_t>(pending_iter->total_bytes)
                 : (std::numeric_limits<std::uint64_t>::max)();
@@ -2044,7 +1989,7 @@ private:
                 pending_iter = pending_.erase(pending_iter);
 
                 // The enqueued lambda is an enclosing wrapper that
-                // owns the ScopedSchedulerFinish on its own stack. The
+                // owns the scoped_scheduler_finish on its own stack. The
                 // wrapper lives in TBB's task_handle storage, the
                 // inner body lives in the std::list node. Erasing the
                 // node from notify_batch_finished only destroys the
@@ -2052,7 +1997,7 @@ private:
                 auto* running_ptr = std::addressof(running_batches_.back());
                 const auto running_id = running_ptr->scheduler_id;
                 arena_.enqueue([this, running_ptr, running_id] {
-                    ScopedSchedulerFinish finish_guard{this, running_id};
+                    scoped_scheduler_finish finish_guard{this, running_id};
                     try {
                         running_ptr->body();
                     } catch (...) {
@@ -2062,11 +2007,11 @@ private:
             } else {
                 // Update idle clock for the rejected batch. While
                 // peers are running we RESET the timer to "now" (it
-                // never crosses kMaxIdleWaitingTime). When this is
+                // never crosses k_max_idle_waiting_time). When this is
                 // the sole holdout we LATCH the timer at the first
                 // observation.
                 const auto now_ns = static_cast<std::int64_t>(
-                                         bioseq::instr::clock::now_ns());
+                                         bioseq::instrumentation::clock::now_ns());
                 if (!running_batches_.empty()) {
                     pending_iter->last_idle_start_ns = now_ns;
                 } else if (pending_iter->last_idle_start_ns == 0) {
@@ -2080,14 +2025,14 @@ private:
     }
 
     /// Walk pending and abort any batch that has been the sole
-    /// holdout for longer than `kMaxIdleWaitingTime`.
+    /// holdout for longer than `k_max_idle_waiting_time`.
     void check_idle_timeouts_locked() noexcept {
         if (!running_batches_.empty()) return;
         const auto now_ns = static_cast<std::int64_t>(
-                                bioseq::instr::clock::now_ns());
+                                bioseq::instrumentation::clock::now_ns());
         constexpr auto budget_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                kMaxIdleWaitingTime).count();
+                k_max_idle_waiting_time).count();
         auto pending_iter = pending_.begin();
         bool aborted_any = false;
         while (pending_iter != pending_.end()) {
@@ -2116,10 +2061,10 @@ private:
     /// `progress_mark_batch_aborted` / `push_runtime_diagnostic`
     /// helpers (which the scheduler depends on but which appear
     /// later in this module).
-    void emit_idle_timeout_locked(const ScheduledBatch& batch) noexcept;
+    void emit_idle_timeout_locked(const scheduled_batch& batch) noexcept;
 
     [[nodiscard]] bool bench_lock_admissible_locked(
-        const ScheduledBatch& batch) const noexcept
+        const scheduled_batch& batch) const noexcept
     {
         if (!active_bench_lock_holder_.empty()) {
             // A lock holder is one globally exclusive batch. No second locked
@@ -2130,8 +2075,8 @@ private:
 
         const auto oldest_pending_lock = std::min_element(
             pending_.begin(), pending_.end(),
-            [](const ScheduledBatch& lhs,
-               const ScheduledBatch& rhs) noexcept {
+            [](const scheduled_batch& lhs,
+               const scheduled_batch& rhs) noexcept {
                 const auto lhs_id = lhs.bench_lock
                     ? lhs.scheduler_id
                     : (std::numeric_limits<std::size_t>::max)();
@@ -2159,7 +2104,7 @@ private:
     }
 
     [[nodiscard]] bool concurrency_admissible_locked(
-        const ScheduledBatch& batch) const noexcept
+        const scheduled_batch& batch) const noexcept
     {
         if (!batch.concurrency_serial) return true;
         const auto it = running_per_benchmark_.find(batch.benchmark_index);
@@ -2183,20 +2128,20 @@ private:
     /// `benchmark_index → count` map, with `[[present]]` guarding the
     /// `active_bench_lock_holder_` case where only `bench_lock=true`
     /// batches contribute. Caller holds `mu_`.
-    template <typename Map>
+    template <typename p_map>
     static void decrement_or_erase_locked(
-        Map& map, typename Map::key_type key, bool present) noexcept
+        p_map& map, typename p_map::key_type key, bool present) noexcept
     {
         if (!present) return;
         const auto it = map.find(key);
         DEBUG_ASSERT(it != map.end(),
-            "BatchScheduler counter map underflow");
+            "batch_scheduler counter map underflow");
         if (it != map.end() && --it->second == 0) {
             map.erase(it);
         }
     }
 
-    MemoryBudget&                budget_;
+    benchmark_memory_budget&                budget_;
     oneapi::tbb::task_arena&     arena_;
     oneapi::tbb::task_group      tg_{};
     std::thread                  thread_{};
@@ -2204,12 +2149,12 @@ private:
     std::condition_variable      cv_{};
     std::atomic<bool>            running_{true};
 
-    std::vector<ScheduledBatch>  pending_{};
+    std::vector<scheduled_batch>  pending_{};
     /// `std::list` (not vector) so iterator/pointer stability holds
     /// across subsequent pushes. The lambda enqueued into TBB
     /// captures `&running_batches_.back()`; a vector reallocation
     /// would invalidate the pointer.
-    std::list<ScheduledBatch>    running_batches_{};
+    std::list<scheduled_batch>    running_batches_{};
     std::size_t                  next_id_         = 0;
     std::size_t                  total_enqueued_  = 0;
     std::size_t                  total_finished_  = 0;
@@ -2230,22 +2175,22 @@ private:
     std::map<std::size_t, std::size_t> outstanding_per_benchmark_{};
 };
 
-inline ScopedSchedulerFinish::~ScopedSchedulerFinish() noexcept {
+inline scoped_scheduler_finish::~scoped_scheduler_finish() noexcept {
     scheduler->notify_batch_finished(scheduler_id);
 }
 
 // ----------------- Diagnostics -----------------
 //
-// Validation produces a flat list of `ValidationDiag` records. Both
+// Validation produces a flat list of `validation_diagnostic` records. Both
 // schema-driven errors (from the JSON schema validator) and post-parse
 // semantic checks share this type so `report_diagnostics` can pretty-print
 // them uniformly. `Severity::Error` aborts; `Severity::Warning` is logged
 // but does not stop the run.
 
 /// One validation finding — schema or semantic.
-struct ValidationDiag {
-    enum class Severity : std::uint8_t { Error, Warning };
-    Severity    severity = Severity::Error;
+struct validation_diagnostic {
+    enum class diagnostic_severity : std::uint8_t { error, warning };
+    diagnostic_severity severity = diagnostic_severity::error;
     /// Short machine-readable token (e.g. "unknown_algorithm",
     /// "value_type_mismatch", "schema").
     std::string code;
@@ -2258,9 +2203,9 @@ struct ValidationDiag {
 
 /// Custom error handler that captures every validation error (vs. the
 /// default `basic_error_handler` that throws on the first). One instance
-/// per validation pass; collected entries are converted to `ValidationDiag`
+/// per validation pass; collected entries are converted to `validation_diagnostic`
 /// records by `validate_against_schema`.
-class CollectingErrorHandler : public nlohmann::json_schema::basic_error_handler {
+class collecting_error_handler : public nlohmann::json_schema::basic_error_handler {
 public:
     void error(const nlohmann::json::json_pointer& pointer,
                const nlohmann::json& /*instance*/,
@@ -2270,11 +2215,11 @@ public:
         captured_.push_back({pointer.to_string(), message});
     }
 
-    struct Entry { std::string pointer; std::string message; };
-    [[nodiscard]] const std::vector<Entry>& entries() const noexcept { return captured_; }
+    struct entry { std::string pointer; std::string message; };
+    [[nodiscard]] const std::vector<entry>& entries() const noexcept { return captured_; }
 
 private:
-    std::vector<Entry> captured_;
+    std::vector<entry> captured_;
 };
 
 // ----------------- Schema definitions (built-in) -----------------
@@ -2296,10 +2241,10 @@ private:
 // `matrix.over.<algo>` and `params.<algo>`, value-vs-declared-type checks,
 // per-rule duplicate-name checks) is enforced by `semantic_validate_config`.
 
-inline constexpr std::string_view kBenchConfigSchema = R"json({
+inline constexpr std::string_view k_bench_config_schema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "BenchFrameworkConfig",
-  "description": "Configuration for one or more benchmarks driven by bioseq::bench_framework. The top-level object always carries the keys 'params' and 'test_cases'; every other top-level key names a benchmark and matches the BenchmarkBlock schema. Benchmark identifiers must be non-empty.",
+  "description": "Configuration for one or more benchmarks driven by bioseq::bench::framework. The top-level object always carries the keys 'params' and 'test_cases'; every other top-level key names a benchmark and matches the BenchmarkBlock schema. Benchmark identifiers must be non-empty.",
   "type": "object",
   "required": ["params", "test_cases"],
   "propertyNames": {
@@ -2316,7 +2261,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       "additionalProperties": {
         "type": "object",
         "minProperties": 1,
-        "description": "Per-algorithm parameter map. Each key is a parameter name; the value follows the ParamSchema definition.",
+        "description": "Per-algorithm parameter map. Each key is a parameter name; the value follows the parameter_schema definition.",
         "propertyNames": { "minLength": 1 },
         "additionalProperties": { "$ref": "#/definitions/param_schema" }
       },
@@ -2377,7 +2322,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
   "additionalProperties": { "$ref": "#/definitions/benchmark" },
   "definitions": {
     "param_schema": {
-      "title": "ParamSchema",
+      "title": "parameter_schema",
       "description": "Subset of JSON Schema describing one algorithm parameter. 'type' is mandatory; 'default' is required for any parameter not enumerated in 'matrix.over' (otherwise matrix expansion has nothing to fill in).",
       "type": "object",
       "required": ["type"],
@@ -2466,7 +2411,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "concurrency": {
       "title": "ConcurrencyOptions",
-      "description": "Per-benchmark concurrency knobs. Defaults: bench_lock=false, concurrency=true. (V11 dropped 'test_case_lock' — the new batched scheduler runs at most one tuple at a time against a given (test_case, group) cached Input, so the lock had no purpose.)",
+      "description": "Per-benchmark concurrency knobs. Defaults: bench_lock=false, concurrency=true. The batched scheduler runs at most one tuple at a time against a given (test_case, group) cached input.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -2530,14 +2475,14 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         "by_regions": {
           "type": "boolean",
           "default": false,
-          "description": "If true, the report splits per-iteration wall_clock_ns by instrumentation region (every named bioseq::instr::region scope contributes its own bucket). When false, only the synthetic 'all_regions' bucket is emitted."
+          "description": "If true, the report splits per-iteration wall_clock_ns by instrumentation region (every named bioseq::instrumentation::region scope contributes its own bucket). When false, only the synthetic 'all_regions' bucket is emitted."
         },
         "acceptance": { "$ref": "#/definitions/acceptance_contract" },
         "metrics": {
           "title": "MetricSpecs",
           "type": "object",
           "minProperties": 1,
-          "description": "Metrics to collect, keyed by metric name. The framework recognises three flavours selected via the 'type' field; see the MetricSpec oneOf for details.",
+          "description": "Metrics to collect, keyed by metric name. The framework recognises three flavours selected via the 'type' field; see the metric_specification oneOf for details.",
           "propertyNames": { "minLength": 1 },
           "additionalProperties": { "$ref": "#/definitions/metric_spec" }
         }
@@ -2572,7 +2517,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       }
     },
     "named_region_sample_multiplicity": {
-      "title": "NamedRegionSampleMultiplicity",
+      "title": "named_region_sample_multiplicity",
       "description": "Exact raw descriptor-weighted sample count for one named rule source. The count must divide evenly by that test case's accepted iteration count; the quotient is also enforced for every individual iteration. This preserves historical P50 weighting and its per-run topology rather than allowing duplicate descriptors to move between iterations.",
       "type": "object",
       "required": ["algorithm", "test_case", "region", "metric", "exact_samples"],
@@ -2586,8 +2531,8 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       }
     },
     "metric_spec": {
-      "title": "MetricSpec",
-      "description": "One metric. 'type' selects the flavour. Five families: (a) BUILTIN — outer wall_clock_ns measured around on_run; metric key MUST be 'wall_clock_ns' and 'type' is implicit when omitted. (b) REGION — a scalar derived from one or every visited bioseq::instr::region's RegionAggregate (e.g. region_total_ns, region_visits, region_p50_ns, region_max_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate). (c) LOOP — a scalar from one or every visited bioseq::instr::loop's LoopAggregate (e.g. loop_total_iterations, loop_total_work, loop_p50_per_iter_ns, loop_max_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter, loop_empty_visits). (d) COUNTER — snapshot a global bioseq::instr counter; forces serial iteration. (e) EVALUATION — value returned by the user's on_evaluate handler. The metric KEY must match one of the registered builtin names for REGION/LOOP/BUILTIN and is enforced semantically.",
+      "title": "metric_specification",
+      "description": "One metric. 'type' selects the flavour. Five families: (a) BUILTIN — outer wall_clock_ns measured around on_run; metric key MUST be 'wall_clock_ns' and 'type' is implicit when omitted. (b) REGION — a scalar derived from one or every visited bioseq::instrumentation::region's region_aggregate (e.g. region_total_ns, region_visits, region_p50_ns, region_max_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate). (c) LOOP — a scalar from one or every visited bioseq::instrumentation::loop's loop_aggregate (e.g. loop_total_iterations, loop_total_work, loop_p50_per_iter_ns, loop_max_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter, loop_empty_visits). (d) COUNTER — snapshot a global bioseq::instrumentation counter; forces serial iteration. (e) EVALUATION — value returned by the user's on_evaluate handler. The metric KEY must match one of the registered builtin names for REGION/LOOP/BUILTIN and is enforced semantically.",
       "oneOf": [
         { "$ref": "#/definitions/metric_spec_builtin" },
         { "$ref": "#/definitions/metric_spec_region" },
@@ -2598,7 +2543,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "metric_spec_builtin": {
       "title": "BuiltinMetric",
-      "description": "Built-in wall-clock metric. The metric key MUST be 'wall_clock_ns'; the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and writes the result under 'all_regions.wall_clock_ns'. The 'type' field is optional ('builtin' is implicit when omitted).",
+      "description": "Built-in wall-clock metric. The metric key MUST be 'wall_clock_ns'; the framework times every iteration with bioseq::instrumentation::clock::now_ns() around on_run and writes the result under 'all_regions.wall_clock_ns'. The 'type' field is optional ('builtin' is implicit when omitted).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -2611,8 +2556,8 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       }
     },
     "metric_spec_region": {
-      "title": "RegionAggregateMetric",
-      "description": "A scalar derived from each iteration's bioseq::instr::region aggregates. Recognised metric keys: region_total_ns, region_visits, region_min_ns, region_max_ns, region_p50_ns, region_p99_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate. Without 'region', cross-descriptor combiners apply: Sum for additive metrics, summed-histogram + hist_percentile for p50/p99, event-weighted ratios for IPC and branch_miss_rate. region_min_ns / region_max_ns REQUIRE 'region' (cross-region min/max is meaningless). PMU-derived metrics (cycles, instructions, branches, branch_misses, ipc, branch_miss_rate) report 0 on platforms without PMU access; the framework warns once via the pmu_unavailable diagnostic. region_p50_ns / region_p99_ns return the upper bound of the 32-bucket log2 histogram bucket containing the requested percentile and overshoot the true percentile by up to a factor of 2 — treat them as order-of-magnitude tail-latency indicators, not exact quantiles.",
+      "title": "region_aggregateMetric",
+      "description": "A scalar derived from each iteration's bioseq::instrumentation::region aggregates. Recognised metric keys: region_total_ns, region_visits, region_min_ns, region_max_ns, region_p50_ns, region_p99_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate. Without 'region', cross-descriptor combiners apply: Sum for additive metrics, summed-histogram + estimate_percentile for p50/p99, event-weighted ratios for IPC and branch_miss_rate. region_min_ns / region_max_ns REQUIRE 'region' (cross-region min/max is meaningless). PMU-derived metrics (cycles, instructions, branches, branch_misses, ipc, branch_miss_rate) report 0 on platforms without PMU access; the framework warns once via the pmu_unavailable diagnostic. region_p50_ns / region_p99_ns return the upper bound of the 32-bucket log2 histogram bucket containing the requested percentile and overshoot the true percentile by up to a factor of 2 — treat them as order-of-magnitude tail-latency indicators, not exact quantiles.",
       "type": "object",
       "required": ["type"],
       "additionalProperties": false,
@@ -2631,8 +2576,8 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       ]
     },
     "metric_spec_loop": {
-      "title": "LoopAggregateMetric",
-      "description": "A scalar derived from each iteration's bioseq::instr::loop aggregates. Recognised metric keys: loop_total_iterations, loop_total_work, loop_empty_visits, loop_min_per_iter_ns, loop_max_per_iter_ns, loop_p50_per_iter_ns, loop_p99_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter. Without 'region', cross-descriptor combiners apply (Sum, histogram-summed percentile, ratio-weighted). loop_min_per_iter_ns / loop_max_per_iter_ns REQUIRE 'region'. loop_p50_per_iter_ns / loop_p99_per_iter_ns are coarse percentiles from the 32-bucket log2 per-iteration histogram (bucket-upper-bound, up to factor-of-2 overshoot) — treat as order-of-magnitude only.",
+      "title": "loop_aggregateMetric",
+      "description": "A scalar derived from each iteration's bioseq::instrumentation::loop aggregates. Recognised metric keys: loop_total_iterations, loop_total_work, loop_empty_visits, loop_min_per_iter_ns, loop_max_per_iter_ns, loop_p50_per_iter_ns, loop_p99_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter. Without 'region', cross-descriptor combiners apply (Sum, histogram-summed percentile, ratio-weighted). loop_min_per_iter_ns / loop_max_per_iter_ns REQUIRE 'region'. loop_p50_per_iter_ns / loop_p99_per_iter_ns are coarse percentiles from the 32-bucket log2 per-iteration histogram (bucket-upper-bound, up to factor-of-2 overshoot) — treat as order-of-magnitude only.",
       "type": "object",
       "required": ["type"],
       "additionalProperties": false,
@@ -2651,7 +2596,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "metric_spec_counter": {
       "title": "CounterMetric",
-      "description": "Snapshot-based counter metric. The framework reads bioseq::instr::counter('<counter>').value before and after each iteration and records the delta. Counters use per-thread storage as of V5, so the before/after delta on a TBB worker only reflects that worker's increments — counter benchmarks may run in parallel.",
+      "description": "Snapshot-based counter metric. The framework resolves bioseq::instrumentation::get_named_counter('<counter>'), reads it with current_thread_counter_value before and after each iteration, and records the delta. The delta reflects the current worker's per-thread counter increments, so counter benchmarks may run in parallel.",
       "type": "object",
       "required": ["type"],
       "additionalProperties": false,
@@ -2694,7 +2639,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       "description": "List of rules to evaluate against this metric. May be empty."
     },
     "rule": {
-      "title": "Rule",
+      "title": "benchmark_rule",
       "description": "A 4-tuple [name, lhs_selector, comparator, rhs_selector] expressed as a JSON array. The rule iterates over every (lhs_cell, rhs_cell) pair where the selectors match. Selectors may independently scope the source test_case and instrumentation region; omitted source coordinates mean every configured test case and 'all_regions'. By default the configured aggregate is taken independently from each untouched source metric array. pairing=by_iteration_ratio forms lhs[i]/rhs[i] for every aligned logical repeat (after warmup_repetitions) and aggregates those ratios. pairing=by_iteration_exact requires exact finite IEEE-754 equality at every aligned logical repeat and performs no aggregate reduction.",
       "type": "array",
       "minItems": 4,
@@ -2703,7 +2648,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         {
           "type": "string",
           "minLength": 1,
-          "description": "Rule name. Reported in violations and the stderr summary. Must be unique within the benchmark."
+          "description": "benchmark_rule name. Reported in violations and the stderr summary. Must be unique within the benchmark."
         },
         { "$ref": "#/definitions/selector" },
         { "$ref": "#/definitions/comparator" },
@@ -2717,7 +2662,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       ]
     },
     "selector": {
-      "title": "RuleSelector",
+      "title": "rule_selector",
       "description": "Partial-match selector for one side of a rule. The 'key' field names the algorithm. Reserved optional fields 'test_case' and 'region' select the source cell and instrumentation bucket; every other field is a (param_name, expected_value) constraint. Only constrained params must match. The algorithm, source test case, and parameter values are validated semantically.",
       "type": "object",
       "required": ["key"],
@@ -2750,13 +2695,13 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       ]
     },
     "aggregate_enum": {
-      "title": "Aggregate",
+      "title": "sample_aggregate",
       "type": "string",
       "enum": ["sum", "min", "max", "p01", "p50", "p99"],
       "description": "Reduction applied to a per-iteration sample vector. Percentiles select the sample at index floor(p * (n - 1)) after a partial sort via std::nth_element (matches NumPy's 'lower' interpolation for discrete indices)."
     },
     "comparator": {
-      "title": "RuleComparator",
+      "title": "rule_comparator",
       "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBy default both source arrays are reduced independently via aggregate. pairing=by_iteration_ratio first forms the logical-repeat vector lhs[i]/rhs[i], discards warmup_repetitions leading pairs, reduces that vector via aggregate, and compares the result against paired_baseline (default 1.0). This makes tolerance% a direct relative noise allowance around the historical ratio. If a named region has duplicate same-name descriptors, aggregate first reduces that repeat's descriptor partition to one logical value. Ratio-paired rules require an exclusive serial, one-group, interleaved benchmark and fail closed on missing/non-finite samples or a zero RHS. pairing=by_iteration_exact is equality-only, zero-tolerance, evaluation-only, all_regions-only, one-group samplewise identity; it permits concurrent benchmark scheduling because it does not compare timing ratios.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
       "oneOf": [
         {
@@ -2856,7 +2801,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       ]
     },
     "regression_rule": {
-      "title": "RegressionRule",
+      "title": "regression_rule",
       "description": "One regression check. Iterates a target metric across (benchmark, execution_tuple, test_case, region) combos in the current run, aggregates the samples per the 'aggregate' field, and compares to the same combo in the newest eligible historical report. Candidate selection walks backward over failed, malformed, incomplete, mode-mismatched, or cardinality-incompatible reports, and the same eligibility rule governs regression_since attribution. Operator semantics are inherited from the rule comparator with 'threshold%' fixed at 0; the schema rejects any explicit 'threshold%' in the operator block.",
       "type": "object",
       "required": ["name", "metric", "aggregate", "operator"],
@@ -2865,7 +2810,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         "name": {
           "type": "string",
           "minLength": 1,
-          "description": "Rule name. Must be unique within the config file. Reported in 'regressions' entries and the stderr summary."
+          "description": "benchmark_rule name. Must be unique within the config file. Reported in 'regressions' entries and the stderr summary."
         },
         "benchmarks": {
           "type": "array",
@@ -2930,7 +2875,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       ]
     },
     "regression_operator": {
-      "title": "RegressionOperator",
+      "title": "regression_operator",
       "description": "Comparator for a regression rule. Accepts the same three operators as the per-rule comparator (<, >, =) but does NOT accept 'threshold%' — that knob is implicitly zero, leaving 'tolerance%' as the only relaxation. An exactly unchanged zero (including -0 versus +0) passes every regression operator before ordered comparison; otherwise, with t = tolerance% / 100: '<' passes iff now < previously*(1+t); '>' passes iff now > previously*(1-t); '=' passes iff |now - previously| <= |previously|*t.",
       "oneOf": [
         {
@@ -2976,10 +2921,10 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
   }
 })json";
 
-inline constexpr std::string_view kBenchReportSchema = R"json({
+inline constexpr std::string_view k_bench_report_schema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "BenchFrameworkReport",
-  "description": "Output report.json produced by bioseq::bench_framework. Top-level fields include 'meta' (run identity), 'raw_evidence' (durable raw sidecar authority), 'paired_rule_evidence' (reconstructable paired-ratio gate inputs and outcomes), 'rule_violations' (every rule that didn't pass), 'regressions' (cross-run regression entries), 'sanity_warnings' (hardcoded end-of-run anomaly checks; non-blocking) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
+  "description": "Output report.json produced by bioseq::bench::framework. Top-level fields include 'meta' (run identity), 'raw_evidence' (durable raw sidecar authority), 'paired_rule_evidence' (reconstructable paired-ratio gate inputs and outcomes), 'rule_violations' (every rule that didn't pass), 'regressions' (cross-run regression entries), 'sanity_warnings' (hardcoded end-of-run anomaly checks; non-blocking) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
   "type": "object",
   "required": ["meta", "raw_evidence", "paired_rule_evidence", "rule_violations", "regressions", "sanity_warnings", "benchmarks"],
   "additionalProperties": false,
@@ -3020,7 +2965,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
   },
   "definitions": {
     "meta": {
-      "title": "ReportMeta",
+      "title": "report_metadata",
       "description": "Identity and history-authority card for one report. Run identity is captured at start; history_eligible is promoted only after configuration, raw-evidence, within-run-rule, regression, report-write, and report-schema validation.",
       "type": "object",
       "required": ["commit", "dirty", "timestamp", "created", "fast", "history_eligible"],
@@ -3035,7 +2980,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       }
     },
     "param_value": {
-      "description": "A single parameter value. ConfigValue serialises into one of these scalar JSON types: string, number (covers integer + double), or boolean.",
+      "description": "A single parameter value. config_value serialises into one of these scalar JSON types: string, number (covers integer + double), or boolean.",
       "type": ["string", "number", "boolean"]
     },
     "param_value_object": {
@@ -3094,7 +3039,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       }
     },
     "paired_rule_evidence": {
-      "title": "PairedRuleEvidence",
+      "title": "paired_rule_evidence",
       "type": "object",
       "required": ["location", "benchmark", "rule_name", "test_case", "metric", "comparison_mode", "numerator_route", "denominator_route", "comparator", "schedule_identity", "repeats", "inputs_present", "observed_paired_ratio", "accepted"],
       "additionalProperties": false,
@@ -3148,7 +3093,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "properties": {
         "location":  { "type": "string", "description": "Path to the config file the rule comes from." },
         "benchmark": { "type": "string", "description": "benchmark_key the rule belongs to." },
-        "rule_name": { "type": "string", "description": "Rule name as declared in the config." },
+        "rule_name": { "type": "string", "description": "benchmark_rule name as declared in the config." },
         "execution_tuple": {
           "description": "Both LHS and RHS algorithm params that triggered this violation. 1-2 keys (LHS-only when both selectors named the same algorithm).",
           "type": "object",
@@ -3330,18 +3275,18 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
     },
     "test_case_block": {
       "title": "TestCaseBlock",
-      "description": "Per-test-case sample buckets. The 'all_regions' key always exists and holds the iteration-level wall-clock plus every counter and evaluation metric. When 'by_regions' is true on the benchmark, additional keys appear — one per visited bioseq::instr region — each carrying that region's per-iteration wall_clock_ns.",
+      "description": "Per-test-case sample buckets. The 'all_regions' key always exists and holds the iteration-level wall-clock plus every counter and evaluation metric. When 'by_regions' is true on the benchmark, additional keys appear — one per visited bioseq::instrumentation region — each carrying that region's per-iteration wall_clock_ns.",
       "type": "object",
       "minProperties": 1,
       "additionalProperties": { "$ref": "#/definitions/region_block" }
     },
     "region_block": {
       "type": "object",
-      "description": "Map from metric name to its aggregated samples. V17 replaced the per-iteration array with this fixed-shape summary so report.json stays compact even for benchmarks that emit thousands of samples per cell.",
+      "description": "Map from metric name to its fixed-shape aggregated samples, keeping report.json compact even for benchmarks that emit thousands of samples per cell.",
       "additionalProperties": { "$ref": "#/definitions/aggregated_samples" }
     },
     "aggregated_samples": {
-      "title": "AggregatedSamples",
+      "title": "aggregated_samples",
       "description": "Fixed-shape summary of one (benchmark, tuple, test_case, region, metric) cell's per-iteration samples. Always reflects the FINITE subset (NaN / +inf / -inf are filtered before any arithmetic). 'samples_count' is the original emission count; 'k-best.top10'/'bottom10' and the histogram bucket counts together let downstream consumers reason about the data without the raw vector.",
       "type": "object",
       "required": ["samples_count", "stats", "percentiles", "k-best", "histogram"],
@@ -3359,7 +3304,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       }
     },
     "aggregate_stats": {
-      "title": "AggregateStats",
+      "title": "aggregate_statistics",
       "description": "Per-cell summary statistics over the finite subset. Default-constructed (every field 0.0) when no finite samples were observed. 'mean90' is the trimmed mean: drop floor(0.1 * finite_count) samples from each end of the sorted finite subset, average the rest. Equals 'mean' when finite_count < 10. 'stddev' uses the n-1 denominator and falls to 0 when finite_count < 2 OR when 'mean' is non-finite (sum overflowed).",
       "type": "object",
       "required": ["min", "max", "mean", "mean90", "sum", "stddev"],
@@ -3374,7 +3319,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       }
     },
     "aggregate_percentiles": {
-      "title": "AggregatePercentiles",
+      "title": "aggregate_percentiles",
       "description": "Discrete-index percentiles over the sorted finite subset: P{n} = sorted_finite[floor(n/100 * (finite_count - 1))]. P01 / P50 / P99 match the canonical aggregate semantics used by per-rule comparators and regression rules. P20 / P80 are reported for downstream UI consumers and are not currently rule-addressable.",
       "type": "object",
       "required": ["P01", "P20", "P50", "P80", "P99"],
@@ -3426,7 +3371,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       }
     },
     "regression_entry": {
-      "title": "RegressionEntry",
+      "title": "regression_entry",
       "description": "One detected regression. Granularity: one entry per (rule, benchmark, algorithm, tuple, test_case, region). 'violating_tuples' and 'test_cases' are arrays of size 1 in every entry — they exist as arrays so a future aggregation pass can group entries without breaking the schema. 'regression_since' is the basename of the oldest report on disk where the rule still fails when compared to the current run, or null when the framework hit a missing report (gap) or a tuple/region that disappeared in a historical run.",
       "type": "object",
       "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "blocking", "previously", "now", "regression_since", "regression_since_commit"],
@@ -3460,12 +3405,12 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         },
         "regression_since_commit": {
           "type": ["string", "null"],
-          "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null, when the historical report was written by a pre-V5 framework (no meta block), or when meta.commit was empty in that report."
+          "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null, when the historical report has no meta block, or when meta.commit was empty in that report."
         }
       }
     },
     "sanity_warning": {
-      "title": "SanityWarning",
+      "title": "sanity_warning",
       "description": "One sanity-check finding. The framework runs a small set of hardcoded checks looking for suspicious uniformity in the metric data. Findings cannot be disabled and never affect the exit code, but are surfaced both here and on stderr at end-of-run so the operator notices.",
       "type": "object",
       "required": ["type", "metric", "message", "warning_since", "warning_since_commit"],
@@ -3492,7 +3437,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         },
         "warning_since_commit": {
           "type": ["string", "null"],
-          "description": "meta.commit field of the historical report identified by 'warning_since'. Null when warning_since is null, when the older report was written by a pre-V5 framework (no meta block), or when meta.commit was empty in that report."
+          "description": "meta.commit field of the historical report identified by 'warning_since'. Null when warning_since is null, when the older report has no meta block, or when meta.commit was empty in that report."
         }
       }
     }
@@ -3501,18 +3446,18 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
 
 // ----------------- Validation utilities -----------------
 
-/// Format a list of `ValidationDiag` to stderr. Returns true iff any
+/// Format a list of `validation_diagnostic` to stderr. Returns true iff any
 /// diagnostic has Severity::Error (caller can use this to drive the exit
 /// code / abort flag).
 [[nodiscard]] inline bool report_diagnostics(
-    std::span<const ValidationDiag> diagnostics,
+    std::span<const validation_diagnostic> diagnostics,
     std::string_view phase_label) noexcept
 {
     if (diagnostics.empty()) return false;
     int error_count = 0;
     int warning_count = 0;
     for (const auto& diag : diagnostics) {
-        if (diag.severity == ValidationDiag::Severity::Error) ++error_count;
+        if (diag.severity == validation_diagnostic::diagnostic_severity::error) ++error_count;
         else ++warning_count;
     }
 
@@ -3525,7 +3470,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         warning_count, warning_count == 1 ? "" : "s");
     for (const auto& diag : diagnostics) {
         const char* severity_text =
-            (diag.severity == ValidationDiag::Severity::Error) ? "ERROR" : "WARN ";
+            (diag.severity == validation_diagnostic::diagnostic_severity::error) ? "ERROR" : "WARN ";
         std::fprintf(stderr, "  [%s] %s\n",
             severity_text, diag.code.c_str());
         std::fprintf(stderr, "          at: %s\n", diag.location.c_str());
@@ -3541,8 +3486,8 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
 /// so the call site doesn't have to guard. The source vector is cleared
 /// after the move so callers can reuse it without leaking stale entries.
 inline void drain_diagnostics_to_context(
-    BenchmarkContext& context,
-    std::vector<ValidationDiag>& source) noexcept
+    benchmark_context& context,
+    std::vector<validation_diagnostic>& source) noexcept
 {
     if (source.empty()
         || context.diagnostics == nullptr
@@ -3555,21 +3500,21 @@ inline void drain_diagnostics_to_context(
 }
 
 /// Run a JSON document through one of the framework's hardcoded schemas
-/// and convert any findings to `ValidationDiag` records. Catches thrown
+/// and convert any findings to `validation_diagnostic` records. Catches thrown
 /// `std::exception`s from the underlying nlohmann library so the framework
 /// itself stays exception-free.
-[[nodiscard]] inline std::vector<ValidationDiag> validate_against_schema(
+[[nodiscard]] inline std::vector<validation_diagnostic> validate_against_schema(
     const std::string& json_text,
     std::string_view schema_text,
     std::string_view source_label) noexcept
 {
-    std::vector<ValidationDiag> diagnostics;
+    std::vector<validation_diagnostic> diagnostics;
     try {
         const auto schema_document  = nlohmann::json::parse(schema_text);
         const auto target_document  = nlohmann::json::parse(json_text);
         nlohmann::json_schema::json_validator validator;
         validator.set_root_schema(schema_document);
-        CollectingErrorHandler handler;
+        collecting_error_handler handler;
         validator.validate(target_document, handler);
         for (const auto& entry : handler.entries()) {
             // The validator's error callback delivers a JSON pointer to the
@@ -3586,7 +3531,7 @@ inline void drain_diagnostics_to_context(
                 location_text += ')';
             }
             diagnostics.push_back({
-                ValidationDiag::Severity::Error,
+                validation_diagnostic::diagnostic_severity::error,
                 "schema",
                 std::move(location_text),
                 entry.message
@@ -3594,7 +3539,7 @@ inline void drain_diagnostics_to_context(
         }
     } catch (const std::exception& exc) {
         diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "schema_parse",
             std::string{source_label},
             exc.what()
@@ -3604,7 +3549,7 @@ inline void drain_diagnostics_to_context(
 }
 
 // `validate_against_schema` is the single entry point: callers pass
-// either `kBenchConfigSchema` or `kBenchReportSchema` directly. The
+// either `k_bench_config_schema` or `k_bench_report_schema` directly. The
 // previous one-line wrappers were pure forwarders.
 
 // ----------------- Config parsing helpers -----------------
@@ -3627,30 +3572,30 @@ inline void drain_diagnostics_to_context(
 /// parameter not explicitly listed in `matrix.over`. Sets `parse_ok = false`
 /// on any malformed entry but keeps walking the rest of the document so the
 /// user sees as many errors as possible per build.
-[[nodiscard]] inline std::map<std::string, AlgorithmSchema> parse_top_level_params(
+[[nodiscard]] inline std::map<std::string, algorithm_schema> parse_top_level_params(
     simdjson::dom::object params_object,
     bool& parse_ok)
 {
-    std::map<std::string, AlgorithmSchema> result;
+    std::map<std::string, algorithm_schema> result;
     for (auto algorithm_field : params_object) {
-        AlgorithmSchema algorithm_schema;
+        algorithm_schema algorithm_schema;
         algorithm_schema.algorithm_name = std::string{algorithm_field.key};
 
         simdjson::dom::object param_object;
         if (algorithm_field.value.get(param_object) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] params.{} is not an object", algorithm_field.key);
+            bioseq_log<logging_level::error>("[bench_framework] params.{} is not an object", algorithm_field.key);
             parse_ok = false;
             continue;
         }
 
         for (auto param_field : param_object) {
-            ParamSchema schema;
+            parameter_schema schema;
             schema.algorithm_name = algorithm_schema.algorithm_name;
             schema.param_name     = std::string{param_field.key};
 
             simdjson::dom::object schema_obj;
             if (param_field.value.get(schema_obj) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] params.{}.{} is not an object",
+                bioseq_log<logging_level::error>("[bench_framework] params.{}.{} is not an object",
                              algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
@@ -3658,7 +3603,7 @@ inline void drain_diagnostics_to_context(
 
             std::string_view type_text;
             if (schema_obj["type"].get(type_text) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] params.{}.{} missing 'type'",
+                bioseq_log<logging_level::error>("[bench_framework] params.{}.{} missing 'type'",
                              algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
@@ -3668,13 +3613,13 @@ inline void drain_diagnostics_to_context(
             simdjson::dom::array enum_array;
             if (schema_obj["enum"].get(enum_array) == simdjson::SUCCESS) {
                 for (auto element : enum_array) {
-                    schema.enum_values.push_back(ConfigValue::from_simdjson(element));
+                    schema.enum_values.push_back(config_value::from_simdjson(element));
                 }
             }
 
             simdjson::dom::element default_element;
             if (schema_obj["default"].get(default_element) == simdjson::SUCCESS) {
-                schema.default_value = ConfigValue::from_simdjson(default_element);
+                schema.default_value = config_value::from_simdjson(default_element);
             }
 
             std::string_view description_text;
@@ -3691,22 +3636,22 @@ inline void drain_diagnostics_to_context(
 }
 
 /// Parse the top-level `test_cases` block. Each entry produces a
-/// `TestCaseSpec` whose `data` element is a non-owning view into the parser
+/// `test_case_specification` whose `data` element is a non-owning view into the parser
 /// pool — the parser must outlive the returned vector, which is true because
-/// both live as members on `BenchmarkExecutionState`.
-[[nodiscard]] inline std::vector<TestCaseSpec> parse_test_cases(
+/// both live as members on `benchmark_execution_state`.
+[[nodiscard]] inline std::vector<test_case_specification> parse_test_cases(
     simdjson::dom::object test_cases_object,
     bool& parse_ok)
 {
-    std::vector<TestCaseSpec> result;
+    std::vector<test_case_specification> result;
     for (auto field : test_cases_object) {
         simdjson::dom::object inner_obj;
         if (field.value.get(inner_obj) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] test_cases.{} is not an object", field.key);
+            bioseq_log<logging_level::error>("[bench_framework] test_cases.{} is not an object", field.key);
             parse_ok = false;
             continue;
         }
-        TestCaseSpec spec;
+        test_case_specification spec;
         spec.name = std::string{field.key};
 
         std::string_view description_text;
@@ -3714,7 +3659,6 @@ inline void drain_diagnostics_to_context(
             spec.description = std::string{description_text};
         }
 
-        // V11: optional `concurrency` integer (schema enforces minimum: 1).
         // Default is the cached `default_test_case_concurrency()`.
         std::int64_t concurrency_raw = 0;
         if (inner_obj["concurrency"].get(concurrency_raw) == simdjson::SUCCESS
@@ -3726,7 +3670,7 @@ inline void drain_diagnostics_to_context(
 
         simdjson::dom::element data_element;
         if (inner_obj["data"].get(data_element) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] test_cases.{}.data missing", field.key);
+            bioseq_log<logging_level::error>("[bench_framework] test_cases.{}.data missing", field.key);
             parse_ok = false;
             continue;
         }
@@ -3742,16 +3686,16 @@ inline void drain_diagnostics_to_context(
 /// mandatory and names the algorithm; every other field is treated as a
 /// (param_name, expected_value) match constraint. Empty constraint set
 /// matches every tuple of that algorithm.
-[[nodiscard]] inline RuleSelector parse_rule_selector(
+[[nodiscard]] inline rule_selector parse_rule_selector(
     simdjson::dom::object selector_obj,
     bool& parse_ok)
 {
-    RuleSelector selector;
+    rule_selector selector;
     for (auto field : selector_obj) {
         if (field.key == "key") {
             std::string_view algorithm_name;
             if (field.value.get(algorithm_name) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] rule selector 'key' is not a string");
+                bioseq_log<logging_level::error>("[bench_framework] rule selector 'key' is not a string");
                 parse_ok = false;
                 return selector;
             }
@@ -3759,7 +3703,7 @@ inline void drain_diagnostics_to_context(
         } else if (field.key == "test_case") {
             std::string_view test_case_name;
             if (field.value.get(test_case_name) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] rule selector 'test_case' is not a string");
+                bioseq_log<logging_level::error>("[bench_framework] rule selector 'test_case' is not a string");
                 parse_ok = false;
                 return selector;
             }
@@ -3767,18 +3711,18 @@ inline void drain_diagnostics_to_context(
         } else if (field.key == "region") {
             std::string_view region_name;
             if (field.value.get(region_name) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] rule selector 'region' is not a string");
+                bioseq_log<logging_level::error>("[bench_framework] rule selector 'region' is not a string");
                 parse_ok = false;
                 return selector;
             }
             selector.region = std::string{region_name};
         } else {
             selector.match.emplace(std::string{field.key},
-                                   ConfigValue::from_simdjson(field.value));
+                                   config_value::from_simdjson(field.value));
         }
     }
     if (selector.algorithm_key.empty()) {
-        bioseq_log<ERR>("[bench_framework] rule selector missing 'key' field");
+        bioseq_log<logging_level::error>("[bench_framework] rule selector missing 'key' field");
         parse_ok = false;
     }
     return selector;
@@ -3789,7 +3733,7 @@ inline void drain_diagnostics_to_context(
 /// nullopt + flips `parse_ok` on missing / unknown `compare`. `tolerance%`
 /// defaults to 0 silently — the JSON schema enforces both bounds and
 /// presence rules upstream, so omission means "use the default".
-[[nodiscard]] inline std::optional<std::pair<CompareOp, double>>
+[[nodiscard]] inline std::optional<std::pair<comparison_operator, double>>
 parse_compare_and_tolerance(
     simdjson::dom::object op_obj,
     std::string_view diag_label,
@@ -3797,13 +3741,13 @@ parse_compare_and_tolerance(
 {
     std::string_view op_text;
     if (op_obj["compare"].get(op_text) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] {} missing 'compare'", diag_label);
+        bioseq_log<logging_level::error>("[bench_framework] {} missing 'compare'", diag_label);
         parse_ok = false;
         return std::nullopt;
     }
     const auto parsed_op = parse_compare_op(op_text);
     if (!parsed_op.has_value()) {
-        bioseq_log<ERR>("[bench_framework] {}: unknown compare op '{}'", diag_label, op_text);
+        bioseq_log<logging_level::error>("[bench_framework] {}: unknown compare op '{}'", diag_label, op_text);
         parse_ok = false;
         return std::nullopt;
     }
@@ -3815,14 +3759,13 @@ parse_compare_and_tolerance(
 /// Parse a rule's comparator object. `compare` is mandatory; the two `%`
 /// fields and `warmup_repetitions` default to zero;
 /// `aggregate` defaults to `"p50"` (the legacy median behaviour for
-/// pre-V5 rules); `pairing` defaults to independent source reductions. See
 /// `comparator_passes` for how the values turn into a pass/fail decision and
 /// `aggregate_samples` for the reduction.
-[[nodiscard]] inline RuleComparator parse_rule_comparator(
+[[nodiscard]] inline rule_comparator parse_rule_comparator(
     simdjson::dom::object cmp_obj,
     bool& parse_ok)
 {
-    RuleComparator out;
+    rule_comparator out;
     const auto compare_and_tolerance = parse_compare_and_tolerance(
         cmp_obj, "rule comparator", parse_ok);
     if (!compare_and_tolerance.has_value()) return out;
@@ -3836,7 +3779,7 @@ parse_compare_and_tolerance(
     if (cmp_obj["aggregate"].get(aggregate_text) == simdjson::SUCCESS) {
         const auto parsed = parse_aggregate(aggregate_text);
         if (!parsed.has_value()) {
-            bioseq_log<ERR>("[bench_framework] rule comparator: unknown aggregate '{}'",
+            bioseq_log<logging_level::error>("[bench_framework] rule comparator: unknown aggregate '{}'",
                  aggregate_text);
             parse_ok = false;
         } else {
@@ -3848,13 +3791,13 @@ parse_compare_and_tolerance(
     if (cmp_obj["pairing"].get(pairing_text) == simdjson::SUCCESS) {
         if (pairing_text == "independent") {
             out.pairing =
-                RuleComparator::PairingMode::independent_aggregates;
+                rule_comparator::pairing_mode::independent_aggregates;
         } else if (pairing_text == "by_iteration_ratio") {
-            out.pairing = RuleComparator::PairingMode::by_iteration_ratio;
+            out.pairing = rule_comparator::pairing_mode::by_iteration_ratio;
         } else if (pairing_text == "by_iteration_exact") {
-            out.pairing = RuleComparator::PairingMode::by_iteration_exact;
+            out.pairing = rule_comparator::pairing_mode::by_iteration_exact;
         } else {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[bench_framework] rule comparator: unknown pairing '{}'",
                 pairing_text);
             parse_ok = false;
@@ -3888,28 +3831,28 @@ parse_compare_and_tolerance(
 /// Parse one rule entry. Rules are 4-element JSON arrays:
 /// `[name, lhs_selector, comparator, rhs_selector]`. Returns nullopt and
 /// flips `parse_ok` to false on any structural problem.
-[[nodiscard]] inline std::optional<Rule> parse_one_rule(
+[[nodiscard]] inline std::optional<benchmark_rule> parse_one_rule(
     simdjson::dom::array rule_array,
     const std::string& metric_name,
-    MetricKind metric_kind,
+    metric_kind metric_kind,
     bool& parse_ok)
 {
     std::vector<simdjson::dom::element> elements;
     for (auto entry : rule_array) elements.push_back(entry);
     if (elements.size() != 4) {
-        bioseq_log<ERR>("[bench_framework] rule array must have 4 elements (name, lhs, cmp, rhs); got {}",
+        bioseq_log<logging_level::error>("[bench_framework] rule array must have 4 elements (name, lhs, cmp, rhs); got {}",
                      elements.size());
         parse_ok = false;
         return std::nullopt;
     }
 
-    Rule rule;
+    benchmark_rule rule;
     rule.metric_name = metric_name;
     rule.metric_kind = metric_kind;
 
     std::string_view rule_name;
     if (elements[0].get(rule_name) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] rule[0] (name) is not a string");
+        bioseq_log<logging_level::error>("[bench_framework] rule[0] (name) is not a string");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3917,7 +3860,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object lhs_obj;
     if (elements[1].get(lhs_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] rule[1] (lhs selector) is not an object");
+        bioseq_log<logging_level::error>("[bench_framework] rule[1] (lhs selector) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3925,7 +3868,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object cmp_obj;
     if (elements[2].get(cmp_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] rule[2] (comparator) is not an object");
+        bioseq_log<logging_level::error>("[bench_framework] rule[2] (comparator) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3933,7 +3876,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object rhs_obj;
     if (elements[3].get(rhs_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] rule[3] (rhs selector) is not an object");
+        bioseq_log<logging_level::error>("[bench_framework] rule[3] (rhs selector) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3947,13 +3890,13 @@ parse_compare_and_tolerance(
 /// `parse_compare_and_tolerance` helper. The schema's
 /// `additionalProperties: false` rejects any explicit `threshold%` field
 /// before we get here, so we don't read it.
-[[nodiscard]] inline std::optional<RegressionOperator> parse_regression_operator(
+[[nodiscard]] inline std::optional<regression_operator> parse_regression_operator(
     simdjson::dom::object op_obj, bool& parse_ok)
 {
     const auto compare_and_tolerance = parse_compare_and_tolerance(
         op_obj, "regression operator", parse_ok);
     if (!compare_and_tolerance.has_value()) return std::nullopt;
-    return RegressionOperator{
+    return regression_operator{
         .op = compare_and_tolerance->first,
         .tolerance_pct = compare_and_tolerance->second,
     };
@@ -3965,26 +3908,26 @@ parse_compare_and_tolerance(
 /// document. `regions` is normalised here: the literal `"all_regions"`
 /// shorthand and an array form both end up as a non-empty vector of
 /// region names.
-[[nodiscard]] inline std::vector<RegressionRule> parse_regression_rules(
+[[nodiscard]] inline std::vector<regression_rule> parse_regression_rules(
     simdjson::dom::array rules_array,
     const std::string& config_path,
     bool& parse_ok)
 {
-    std::vector<RegressionRule> result;
+    std::vector<regression_rule> result;
     for (auto entry : rules_array) {
         simdjson::dom::object rule_obj;
         if (entry.get(rule_obj) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] regression_rules entry is not an object");
+            bioseq_log<logging_level::error>("[bench_framework] regression_rules entry is not an object");
             parse_ok = false;
             continue;
         }
 
-        RegressionRule rule;
+        regression_rule rule;
         rule.config_path = config_path;
 
         std::string_view name_text;
         if (rule_obj["name"].get(name_text) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] regression rule missing 'name'");
+            bioseq_log<logging_level::error>("[bench_framework] regression rule missing 'name'");
             parse_ok = false;
             continue;
         }
@@ -3995,7 +3938,7 @@ parse_compare_and_tolerance(
             for (auto bench_entry : benchmarks_array) {
                 std::string_view bench_key;
                 if (bench_entry.get(bench_key) != simdjson::SUCCESS) {
-                    bioseq_log<ERR>("[bench_framework] regression rule '{}' benchmarks[*] is not a string",
+                    bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' benchmarks[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -4010,7 +3953,7 @@ parse_compare_and_tolerance(
             for (auto bench_entry : exclude_benchmarks_array) {
                 std::string_view bench_key;
                 if (bench_entry.get(bench_key) != simdjson::SUCCESS) {
-                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_benchmarks[*] is not a string",
+                    bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' exclude_benchmarks[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -4029,7 +3972,7 @@ parse_compare_and_tolerance(
                 for (auto region_entry : regions_array) {
                     std::string_view region_name;
                     if (region_entry.get(region_name) != simdjson::SUCCESS) {
-                        bioseq_log<ERR>("[bench_framework] regression rule '{}' regions[*] is not a string",
+                        bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' regions[*] is not a string",
                              rule.name);
                         parse_ok = false;
                         continue;
@@ -4037,7 +3980,7 @@ parse_compare_and_tolerance(
                     rule.regions.emplace_back(region_name);
                 }
             } else {
-                bioseq_log<ERR>("[bench_framework] regression rule '{}' regions must be a string or array",
+                bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' regions must be a string or array",
                      rule.name);
                 parse_ok = false;
             }
@@ -4051,7 +3994,7 @@ parse_compare_and_tolerance(
 
         std::string_view metric_text;
         if (rule_obj["metric"].get(metric_text) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'metric'", rule.name);
+            bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' missing 'metric'", rule.name);
             parse_ok = false;
             continue;
         }
@@ -4059,13 +4002,13 @@ parse_compare_and_tolerance(
 
         std::string_view aggregate_text;
         if (rule_obj["aggregate"].get(aggregate_text) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'aggregate'", rule.name);
+            bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' missing 'aggregate'", rule.name);
             parse_ok = false;
             continue;
         }
         const auto parsed_aggregate = parse_aggregate(aggregate_text);
         if (!parsed_aggregate.has_value()) {
-            bioseq_log<ERR>("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
+            bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
                  rule.name, aggregate_text);
             parse_ok = false;
             continue;
@@ -4074,7 +4017,7 @@ parse_compare_and_tolerance(
 
         simdjson::dom::object op_obj;
         if (rule_obj["operator"].get(op_obj) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'operator'", rule.name);
+            bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' missing 'operator'", rule.name);
             parse_ok = false;
             continue;
         }
@@ -4087,7 +4030,7 @@ parse_compare_and_tolerance(
             for (auto exclude_entry : exclude_array) {
                 std::string_view exclude_name;
                 if (exclude_entry.get(exclude_name) != simdjson::SUCCESS) {
-                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_cases[*] is not a string",
+                    bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' exclude_cases[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -4102,7 +4045,7 @@ parse_compare_and_tolerance(
             for (auto exclude_entry : exclude_algorithms_array) {
                 std::string_view exclude_name;
                 if (exclude_entry.get(exclude_name) != simdjson::SUCCESS) {
-                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_algorithms[*] is not a string",
+                    bioseq_log<logging_level::error>("[bench_framework] regression rule '{}' exclude_algorithms[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -4121,21 +4064,21 @@ parse_compare_and_tolerance(
     return result;
 }
 
-/// Parse the `matrix.metrics` block. Each entry contributes a `MetricSpec`
+/// Parse the `matrix.metrics` block. Each entry contributes a `metric_specification`
 /// with optional `type`, optional `counter`, and a list of rules. Defaults:
 /// `type="builtin"`, `counter=metric_name`.
-[[nodiscard]] inline std::vector<MetricSpec> parse_metrics(
+[[nodiscard]] inline std::vector<metric_specification> parse_metrics(
     simdjson::dom::object metrics_obj,
     bool& parse_ok)
 {
-    std::vector<MetricSpec> result;
+    std::vector<metric_specification> result;
     for (auto field : metrics_obj) {
-        MetricSpec metric;
+        metric_specification metric;
         metric.name = std::string{field.key};
 
         simdjson::dom::object inner_obj;
         if (field.value.get(inner_obj) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] metrics.{} is not an object", field.key);
+            bioseq_log<logging_level::error>("[bench_framework] metrics.{} is not an object", field.key);
             parse_ok = false;
             continue;
         }
@@ -4147,27 +4090,27 @@ parse_compare_and_tolerance(
         }
         const auto parsed_source = parse_metric_type(type_text);
         if (!parsed_source.has_value()) {
-            bioseq_log<ERR>("[bench_framework] metrics.{}: unknown type '{}'", field.key, type_text);
+            bioseq_log<logging_level::error>("[bench_framework] metrics.{}: unknown type '{}'", field.key, type_text);
             parse_ok = false;
             continue;
         }
         metric.declared_source = *parsed_source;
 
-        // Map (source, metric_name) → MetricKind. Counter and Evaluation
-        // bypass the registry — their MetricKind is fixed. Builtin /
+        // Map (source, metric_name) → metric_kind. Counter and Evaluation
+        // bypass the registry — their metric_kind is fixed. Builtin /
         // Region / Loop look up the canonical entry; mismatches between
         // the declared `type` and the entry's source are deferred to
         // semantic_validate_config so all errors collect in one pass.
         switch (*parsed_source) {
-            case MetricSource::Counter:
-                metric.kind = MetricKind::Counter;
+            case metric_source::counter:
+                metric.kind = metric_kind::counter;
                 break;
-            case MetricSource::Evaluation:
-                metric.kind = MetricKind::Evaluation;
+            case metric_source::evaluation:
+                metric.kind = metric_kind::evaluation;
                 break;
-            case MetricSource::OuterClock:
-            case MetricSource::Region:
-            case MetricSource::Loop: {
+            case metric_source::outer_clock:
+            case metric_source::region:
+            case metric_source::loop: {
                 const auto* entry = lookup_builtin_metric(metric.name);
                 if (entry != nullptr) {
                     metric.kind = entry->kind;
@@ -4175,7 +4118,7 @@ parse_compare_and_tolerance(
                     // Unknown name — fall back to a placeholder that
                     // semantic_validate_config rejects with a precise
                     // message based on the declared `type`.
-                    metric.kind = MetricKind::WallClockNs;
+                    metric.kind = metric_kind::wall_clock_ns;
                 }
                 break;
             }
@@ -4197,7 +4140,7 @@ parse_compare_and_tolerance(
             for (auto entry : rules_array) {
                 simdjson::dom::array as_array;
                 if (entry.get(as_array) != simdjson::SUCCESS) {
-                    bioseq_log<ERR>("[bench_framework] metric '{}' rule entry is not an array", metric.name);
+                    bioseq_log<logging_level::error>("[bench_framework] metric '{}' rule entry is not an array", metric.name);
                     parse_ok = false;
                     continue;
                 }
@@ -4214,12 +4157,12 @@ parse_compare_and_tolerance(
 }
 
 /// Walk one benchmark block (`bench1`, `bench2`, etc.) inside the top-level
-/// config and fill the `BenchmarkConfig`. The benchmark's identity, schema,
+/// config and fill the `benchmark_configuration`. The benchmark's identity, schema,
 /// and test_cases are populated separately by the caller. Returns false on
 /// any structural problem (missing `matrix`, missing `for`/`over`, etc.).
 [[nodiscard]] inline bool parse_benchmark_block(
     simdjson::dom::object benchmark_obj,
-    BenchmarkConfig& benchmark)
+    benchmark_configuration& benchmark)
 {
     bool parse_ok = true;
 
@@ -4239,7 +4182,7 @@ parse_compare_and_tolerance(
         for (auto entry : tags_array) {
             std::string_view tag_text;
             if (entry.get(tag_text) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] benchmark '{}' tag entry is not a string",
+                bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' tag entry is not a string",
                                 benchmark.benchmark_key);
                 parse_ok = false;
                 continue;
@@ -4248,7 +4191,7 @@ parse_compare_and_tolerance(
         }
     } else {
         // Schema makes this unreachable, but fail loudly if a caller bypassed it.
-        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing required 'tags' array",
+        bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' missing required 'tags' array",
                         benchmark.benchmark_key);
         parse_ok = false;
     }
@@ -4263,7 +4206,6 @@ parse_compare_and_tolerance(
         if (concurrency_obj["concurrency"].get(concurrency_flag) == simdjson::SUCCESS) {
             benchmark.concurrency.concurrency = concurrency_flag;
         }
-        // V11: `test_case_lock` is gone. Schema's
         // `additionalProperties: false` rejects the key, so older
         // configs surface as validation errors.
     }
@@ -4276,7 +4218,7 @@ parse_compare_and_tolerance(
             parse_ok = false;
         } else if (mode == "item_major") {
             benchmark.iteration_order =
-                BenchmarkConfig::IterationOrderMode::item_major;
+                benchmark_configuration::iteration_order_mode::item_major;
             simdjson::dom::element explicit_seed;
             if (iteration_order_obj["seed"].get(explicit_seed)
                 == simdjson::SUCCESS) {
@@ -4284,7 +4226,7 @@ parse_compare_and_tolerance(
             }
         } else if (mode == "interleaved_seeded") {
             benchmark.iteration_order =
-                BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+                benchmark_configuration::iteration_order_mode::interleaved_seeded;
             std::uint64_t seed = 0;
             if (iteration_order_obj["seed"].get(seed)
                 != simdjson::SUCCESS) {
@@ -4296,7 +4238,7 @@ parse_compare_and_tolerance(
             parse_ok = false;
         }
         if (!parse_ok) {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[bench_framework] benchmark '{}' has invalid iteration_order",
                 benchmark.benchmark_key);
         }
@@ -4304,7 +4246,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object matrix_obj;
     if (benchmark_obj["matrix"].get(matrix_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix'", benchmark.benchmark_key);
+        bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' missing 'matrix'", benchmark.benchmark_key);
         return false;
     }
 
@@ -4369,8 +4311,8 @@ parse_compare_and_tolerance(
                     parse_ok = false;
                     continue;
                 }
-                BenchmarkConfig::AcceptanceContract::
-                    NamedRegionSampleMultiplicity multiplicity;
+                benchmark_configuration::acceptance_contract::
+                    named_region_sample_multiplicity multiplicity;
                 std::string_view algorithm;
                 std::string_view test_case;
                 std::string_view region;
@@ -4398,7 +4340,7 @@ parse_compare_and_tolerance(
             }
         }
         if (!parse_ok) {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[bench_framework] benchmark '{}' has invalid matrix.acceptance",
                 benchmark.benchmark_key);
         }
@@ -4406,13 +4348,13 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object for_obj;
     if (matrix_obj["for"].get(for_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix.for'", benchmark.benchmark_key);
+        bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' missing 'matrix.for'", benchmark.benchmark_key);
         return false;
     }
     for (auto field : for_obj) {
         std::int64_t iterations = 0;
         if (field.value.get(iterations) != simdjson::SUCCESS || iterations < 0) {
-            bioseq_log<ERR>("[bench_framework] matrix.for.{} must be a non-negative integer", field.key);
+            bioseq_log<logging_level::error>("[bench_framework] matrix.for.{} must be a non-negative integer", field.key);
             parse_ok = false;
             continue;
         }
@@ -4422,28 +4364,28 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object over_obj;
     if (matrix_obj["over"].get(over_obj) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix.over'", benchmark.benchmark_key);
+        bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' missing 'matrix.over'", benchmark.benchmark_key);
         return false;
     }
     for (auto algo_field : over_obj) {
         simdjson::dom::object params_for_algo;
         if (algo_field.value.get(params_for_algo) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] matrix.over.{} is not an object", algo_field.key);
+            bioseq_log<logging_level::error>("[bench_framework] matrix.over.{} is not an object", algo_field.key);
             parse_ok = false;
             continue;
         }
-        std::map<std::string, std::vector<ConfigValue>> per_algo;
+        std::map<std::string, std::vector<config_value>> per_algo;
         for (auto param_field : params_for_algo) {
             simdjson::dom::array values_array;
             if (param_field.value.get(values_array) != simdjson::SUCCESS) {
-                bioseq_log<ERR>("[bench_framework] matrix.over.{}.{} is not an array",
+                bioseq_log<logging_level::error>("[bench_framework] matrix.over.{}.{} is not an array",
                              algo_field.key, param_field.key);
                 parse_ok = false;
                 continue;
             }
-            std::vector<ConfigValue> values;
+            std::vector<config_value> values;
             for (auto entry : values_array) {
-                values.push_back(ConfigValue::from_simdjson(entry));
+                values.push_back(config_value::from_simdjson(entry));
             }
             per_algo.emplace(std::string{param_field.key}, std::move(values));
         }
@@ -4461,7 +4403,7 @@ parse_compare_and_tolerance(
 /// Top-level config parser. Slurps `config_path`, validates against the
 /// built-in JSON schema, parses with simdjson into `state.parser`, then walks
 /// `params`, `test_cases`, and the requested `benchmark_key` block. The
-/// resulting `BenchmarkExecutionState` owns the parser and config body so
+/// resulting `benchmark_execution_state` owns the parser and config body so
 /// the simdjson `dom::element` views handed to the user remain valid for
 /// the entire run.
 /// Outcome of `parse_config_file`. `ok=true` means the parser walked the
@@ -4469,30 +4411,30 @@ parse_compare_and_tolerance(
 /// from the JSON-schema pass plus structural problems from the simdjson
 /// walk). On parse failure `ok=false` and the caller must abort *before*
 /// reading anything else from the state — the partial parse is undefined.
-struct ConfigParseOutcome {
+struct config_parse_outcome {
     bool ok = true;
-    std::vector<ValidationDiag> diagnostics{};
+    std::vector<validation_diagnostic> diagnostics{};
     /// Top-level `regression_rules` array, parsed and normalised. The
-    /// closure registers these into the global `RegressionRulesByConfig`
+    /// closure registers these into the global `regression_rules_by_configuration`
     /// registry the first time it sees a given `config_path` (subsequent
     /// benchmarks sharing the file see the entry already present and
     /// skip).
-    std::vector<RegressionRule> regression_rules{};
+    std::vector<regression_rule> regression_rules{};
 };
 
-[[nodiscard]] inline ConfigParseOutcome parse_config_file(
+[[nodiscard]] inline config_parse_outcome parse_config_file(
     const std::string& config_path,
     const std::string& benchmark_key,
-    BenchmarkExecutionState& state)
+    benchmark_execution_state& state)
 {
-    ConfigParseOutcome outcome;
+    config_parse_outcome outcome;
     state.config.config_path   = config_path;
     state.config.benchmark_key = benchmark_key;
     state.config_body = slurp_file(config_path);
     if (state.config_body.empty()) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "config_unreadable",
             config_path,
             "config file is empty or unreadable"
@@ -4506,9 +4448,9 @@ struct ConfigParseOutcome {
     //    possible so semantic_validate_config can layer further checks
     //    on top.
     auto schema_diagnostics = validate_against_schema(
-        state.config_body, kBenchConfigSchema, config_path);
+        state.config_body, k_bench_config_schema, config_path);
     for (auto& diag : schema_diagnostics) {
-        if (diag.severity == ValidationDiag::Severity::Error) outcome.ok = false;
+        if (diag.severity == validation_diagnostic::diagnostic_severity::error) outcome.ok = false;
         outcome.diagnostics.push_back(std::move(diag));
     }
 
@@ -4521,7 +4463,7 @@ struct ConfigParseOutcome {
     if (root_result.get(root_element) != simdjson::SUCCESS) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "simdjson_parse",
             config_path,
             "simdjson failed to parse the config file"
@@ -4533,7 +4475,7 @@ struct ConfigParseOutcome {
     if (root_element.get(root_obj) != simdjson::SUCCESS) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "not_object",
             config_path,
             "top-level value is not a JSON object"
@@ -4549,7 +4491,7 @@ struct ConfigParseOutcome {
     } else {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "missing_params",
             config_path,
             "config has no top-level 'params' object"
@@ -4562,7 +4504,7 @@ struct ConfigParseOutcome {
     } else {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "missing_test_cases",
             config_path,
             "config has no top-level 'test_cases' object"
@@ -4573,7 +4515,7 @@ struct ConfigParseOutcome {
     if (root_obj[benchmark_key].get(benchmark_element) != simdjson::SUCCESS) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "missing_benchmark_block",
             std::string{config_path} + ":" + benchmark_key,
             "config has no top-level key for the requested benchmark"
@@ -4584,7 +4526,7 @@ struct ConfigParseOutcome {
     if (benchmark_element.get(benchmark_obj) != simdjson::SUCCESS) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             "benchmark_not_object",
             std::string{config_path} + ":" + benchmark_key,
             "benchmark block is not a JSON object"
@@ -4610,13 +4552,13 @@ struct ConfigParseOutcome {
         outcome.ok = false;
         const bool already_has_error = std::any_of(
             outcome.diagnostics.begin(), outcome.diagnostics.end(),
-            [](const ValidationDiag& diagnostic) {
+            [](const validation_diagnostic& diagnostic) {
                 return diagnostic.severity
-                    == ValidationDiag::Severity::Error;
+                    == validation_diagnostic::diagnostic_severity::error;
             });
         if (!already_has_error) {
             outcome.diagnostics.push_back({
-                ValidationDiag::Severity::Error,
+                validation_diagnostic::diagnostic_severity::error,
                 "structural_parse_failed",
                 std::string{config_path} + ":" + benchmark_key,
                 "configuration failed structural parsing"
@@ -4629,7 +4571,7 @@ struct ConfigParseOutcome {
 // ----------------- Semantic config validation -----------------
 //
 // Once the JSON schema and the simdjson walk have populated
-// `BenchmarkExecutionState`, the framework runs cross-field checks the
+// `benchmark_execution_state`, the framework runs cross-field checks the
 // schema cannot express:
 //   - matrix.over.<algorithm> references an algorithm declared in 'params'
 //   - matrix.over.<algorithm>.<parameter> references a declared parameter
@@ -4647,7 +4589,7 @@ struct ConfigParseOutcome {
 /// True iff `value` matches the declared `param`. Type promotion: a
 /// `number`-typed parameter accepts both Integer and Double values.
 [[nodiscard]] inline bool value_matches_param_schema(
-    const ConfigValue& value, const ParamSchema& param) noexcept
+    const config_value& value, const parameter_schema& param) noexcept
 {
     bool type_ok = false;
     if      (param.json_type == "string"  && value.is_string())  type_ok = true;
@@ -4664,8 +4606,8 @@ struct ConfigParseOutcome {
 
 /// Look up one parameter's schema inside an algorithm's parameter list.
 /// Returns nullptr if either the algorithm or the parameter is unknown.
-[[nodiscard]] inline const ParamSchema* find_param_schema(
-    const std::map<std::string, AlgorithmSchema>& schemas,
+[[nodiscard]] inline const parameter_schema* find_param_schema(
+    const std::map<std::string, algorithm_schema>& schemas,
     const std::string& algorithm_name,
     const std::string& param_name) noexcept
 {
@@ -4680,7 +4622,7 @@ struct ConfigParseOutcome {
 /// Helper for building human-readable diagnostic locations. Returns
 /// `<config_path>:<benchmark_key>/<sub_path>`.
 [[nodiscard]] inline std::string semantic_location(
-    const BenchmarkExecutionState& state, std::string_view sub_path) noexcept
+    const benchmark_execution_state& state, std::string_view sub_path) noexcept
 {
     std::string out = state.config.config_path;
     out += ':';
@@ -4690,32 +4632,32 @@ struct ConfigParseOutcome {
     return out;
 }
 
-/// Render a ConfigValue's *kind* as a JSON-Schema-style type name, used by
+/// Render a config_value's *kind* as a JSON-Schema-style type name, used by
 /// `value_type_mismatch` diagnostics so the user sees what was passed vs.
 /// what was declared.
-[[nodiscard]] inline std::string_view config_value_kind_name(const ConfigValue& value) noexcept {
+[[nodiscard]] inline std::string_view config_value_kind_name(const config_value& value) noexcept {
     switch (value.kind) {
-        case ConfigValue::Kind::String:    return "string";
-        case ConfigValue::Kind::Integer:   return "integer";
-        case ConfigValue::Kind::Double:    return "number";
-        case ConfigValue::Kind::Boolean:   return "boolean";
-        case ConfigValue::Kind::NonScalar: return "non-scalar (object/array/null)";
+        case config_value::value_kind::string:    return "string";
+        case config_value::value_kind::integer:   return "integer";
+        case config_value::value_kind::floating_point:    return "number";
+        case config_value::value_kind::boolean:   return "boolean";
+        case config_value::value_kind::non_scalar: return "non-scalar (object/array/null)";
     }
     return "?";
 }
 
-/// Walk every cross-reference inside a parsed `BenchmarkExecutionState`
-/// and emit `ValidationDiag` records for anything inconsistent. Returns a
+/// Walk every cross-reference inside a parsed `benchmark_execution_state`
+/// and emit `validation_diagnostic` records for anything inconsistent. Returns a
 /// flat vector covering every benchmark-level concern (no early-exit so
 /// the user sees every issue in one pass).
-[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_config(
-    const BenchmarkExecutionState& state) noexcept
+[[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_config(
+    const benchmark_execution_state& state) noexcept
 {
-    std::vector<ValidationDiag> diagnostics;
+    std::vector<validation_diagnostic> diagnostics;
     const auto& config  = state.config;
     const auto& schemas = config.algorithm_schemas;
 
-    auto emit = [&](ValidationDiag::Severity severity,
+    auto emit = [&](validation_diagnostic::diagnostic_severity severity,
                     std::string code,
                     std::string sub_path,
                     std::string message) {
@@ -4727,11 +4669,11 @@ struct ConfigParseOutcome {
         });
     };
     auto error   = [&](std::string code, std::string sub_path, std::string message) {
-        emit(ValidationDiag::Severity::Error,   std::move(code),
+        emit(validation_diagnostic::diagnostic_severity::error,   std::move(code),
              std::move(sub_path), std::move(message));
     };
     auto warning = [&](std::string code, std::string sub_path, std::string message) {
-        emit(ValidationDiag::Severity::Warning, std::move(code),
+        emit(validation_diagnostic::diagnostic_severity::warning, std::move(code),
              std::move(sub_path), std::move(message));
     };
 
@@ -4826,12 +4768,12 @@ struct ConfigParseOutcome {
                   "named-region iteration coverage requires matrix.by_regions=true");
         }
 
-        using NamedSourceCoordinate =
+        using named_source_coordinate =
             std::tuple<std::string, std::string, std::string, std::string>;
-        std::set<NamedSourceCoordinate> named_rule_sources;
+        std::set<named_source_coordinate> named_rule_sources;
         const auto add_named_rule_source =
             [&config, &named_rule_sources](
-                const RuleSelector& selector,
+                const rule_selector& selector,
                 const std::string& metric_name) {
                 if (selector.region.empty()
                     || selector.region == "all_regions") return;
@@ -4855,10 +4797,10 @@ struct ConfigParseOutcome {
             }
         }
 
-        std::set<NamedSourceCoordinate> configured_multiplicities;
+        std::set<named_source_coordinate> configured_multiplicities;
         for (const auto& multiplicity :
              config.acceptance.exact_named_region_sample_multiplicities) {
-            const NamedSourceCoordinate coordinate{
+            const named_source_coordinate coordinate{
                 multiplicity.algorithm,
                 multiplicity.test_case,
                 multiplicity.region,
@@ -4909,7 +4851,7 @@ struct ConfigParseOutcome {
             }
             const bool metric_declared = std::any_of(
                 config.metrics.begin(), config.metrics.end(),
-                [&multiplicity](const MetricSpec& metric) {
+                [&multiplicity](const metric_specification& metric) {
                     return metric.name == multiplicity.metric;
                 });
             if (!metric_declared) {
@@ -4935,8 +4877,8 @@ struct ConfigParseOutcome {
     // 3. Walk every rule. Selector validation, rule name uniqueness,
     //    threshold/tolerance always-pass warnings.
     std::set<std::string> seen_rule_names;
-    auto validate_selector = [&schemas, &config, &error](const RuleSelector& selector,
-                                  const MetricSpec& metric,
+    auto validate_selector = [&schemas, &config, &error](const rule_selector& selector,
+                                  const metric_specification& metric,
                                   std::string_view rule_name,
                                   std::string_view metric_name,
                                   std::string_view side) {
@@ -4963,8 +4905,8 @@ struct ConfigParseOutcome {
         }
         if (!selector.region.empty() && selector.region != "all_regions") {
             const bool source_has_named_regions =
-                metric.declared_source == MetricSource::Region
-                || metric.declared_source == MetricSource::Loop;
+                metric.declared_source == metric_source::region
+                || metric.declared_source == metric_source::loop;
             if (!source_has_named_regions) {
                 error("rule_region_requires_region_metric",
                       base_loc + ".region",
@@ -5012,12 +4954,12 @@ struct ConfigParseOutcome {
         // (Counter / Evaluation flavours skip these checks — their metric
         // names are user-chosen and the schema's `additionalProperties:
         // false` already rejects a `region` field on those branches.)
-        if (metric.kind != MetricKind::Counter && metric.kind != MetricKind::Evaluation) {
+        if (metric.kind != metric_kind::counter && metric.kind != metric_kind::evaluation) {
             const auto* entry = lookup_builtin_metric(metric.name);
             if (entry == nullptr) {
                 error("invalid_builtin_metric_name",
                       fmt::format("matrix.metrics.{}", metric.name),
-                      fmt::format("metric '{}' is not a recognised framework builtin; either rename it to a registered builtin (e.g. wall_clock_ns, region_total_ns, region_visits, region_p99_ns, loop_total_iterations, loop_p50_per_iter_ns; see the kBuiltinMetricRegistry table) or declare 'type' as 'counter' / 'evaluation'",
+                      fmt::format("metric '{}' is not a recognised framework builtin; either rename it to a registered builtin (e.g. wall_clock_ns, region_total_ns, region_visits, region_p99_ns, loop_total_iterations, loop_p50_per_iter_ns; see the k_builtin_metric_registry table) or declare 'type' as 'counter' / 'evaluation'",
                                   metric.name));
                 continue;
             }
@@ -5037,7 +4979,7 @@ struct ConfigParseOutcome {
             // 4c. Min / Max metrics require an explicit `region` filter —
             //     cross-region "min of mins" / "max of maxes" would lose
             //     meaning.
-            if (entry->combiner == MetricCombiner::RequiresRegion && metric.region.empty()) {
+            if (entry->combiner == metric_combiner::requires_region && metric.region.empty()) {
                 error("min_max_metric_requires_region",
                       fmt::format("matrix.metrics.{}", metric.name),
                       fmt::format("metric '{}' aggregates min/max across descriptors and is meaningless without a 'region' filter; add 'region': '<descriptor_name>' to the metric block",
@@ -5063,9 +5005,9 @@ struct ConfigParseOutcome {
             }
 
             const bool ratio_paired = rule.cmp.pairing
-                == RuleComparator::PairingMode::by_iteration_ratio;
+                == rule_comparator::pairing_mode::by_iteration_ratio;
             const bool exact_paired = rule.cmp.pairing
-                == RuleComparator::PairingMode::by_iteration_exact;
+                == rule_comparator::pairing_mode::by_iteration_exact;
             const bool iteration_paired = ratio_paired || exact_paired;
             const std::string comparator_location = fmt::format(
                 "matrix.metrics.{}.rules.{}.comparator",
@@ -5090,7 +5032,7 @@ struct ConfigParseOutcome {
                 if (!config.concurrency.bench_lock
                     || config.concurrency.concurrency
                     || config.iteration_order
-                        != BenchmarkConfig::IterationOrderMode::interleaved_seeded) {
+                        != benchmark_configuration::iteration_order_mode::interleaved_seeded) {
                     error("paired_rule_requires_serial_interleaving",
                           comparator_location + ".pairing",
                           "by_iteration_ratio requires bench_lock=true, concurrency=false and iteration_order.mode=interleaved_seeded");
@@ -5101,7 +5043,7 @@ struct ConfigParseOutcome {
                 const bool rhs_named = !rule.rhs.region.empty()
                     && rule.rhs.region != "all_regions";
                 if ((lhs_named || rhs_named)
-                    && metric.kind != MetricKind::RegionTotalNs) {
+                    && metric.kind != metric_kind::region_total_ns) {
                     error("paired_named_region_requires_total_ns",
                           comparator_location + ".pairing",
                           "paired named-region rules currently support only region_total_ns, whose duplicate same-name descriptors can be partitioned and reduced exactly per repeat");
@@ -5117,7 +5059,7 @@ struct ConfigParseOutcome {
 
             }
             if (exact_paired) {
-                if (rule.cmp.op != CompareOp::Equal
+                if (rule.cmp.op != comparison_operator::equal
                     || rule.cmp.threshold_pct != 0.0
                     || rule.cmp.tolerance_pct != 0.0) {
                     error("exact_iteration_rule_requires_zero_tolerance_equality",
@@ -5128,7 +5070,7 @@ struct ConfigParseOutcome {
                     && rule.lhs.region != "all_regions";
                 const bool rhs_named = !rule.rhs.region.empty()
                     && rule.rhs.region != "all_regions";
-                if (metric.kind != MetricKind::Evaluation
+                if (metric.kind != metric_kind::evaluation
                     || lhs_named || rhs_named) {
                     error("exact_iteration_rule_requires_all_regions_evaluation",
                           comparator_location + ".pairing",
@@ -5146,7 +5088,7 @@ struct ConfigParseOutcome {
                     }
                     const auto test_case_it = std::find_if(
                         state.test_cases.begin(), state.test_cases.end(),
-                        [&test_case_name](const TestCaseSpec& spec) {
+                        [&test_case_name](const test_case_specification& spec) {
                             return spec.name == test_case_name;
                         });
                     if (test_case_it == state.test_cases.end()
@@ -5192,10 +5134,10 @@ struct ConfigParseOutcome {
 /// Post-run validation. Checks evaluation-metric emission and, when present,
 /// the exact complete-matrix acceptance contract. These checks require the
 /// final merged iteration state and therefore cannot run during config parse.
-[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_post_run(
-    const BenchmarkExecutionState& state) noexcept
+[[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_post_run(
+    const benchmark_execution_state& state) noexcept
 {
-    std::vector<ValidationDiag> diagnostics;
+    std::vector<validation_diagnostic> diagnostics;
 
     // Single-pass walk: invoke `body(samples)` for every cell that has
     // collected `metric_name` in `all_regions`, and stop early when
@@ -5238,7 +5180,7 @@ struct ConfigParseOutcome {
             actual_algorithms.insert(algorithm);
             if (count != 1) {
                 diagnostics.push_back({
-                    ValidationDiag::Severity::Error,
+                    validation_diagnostic::diagnostic_severity::error,
                     "acceptance_execution_tuple_multiplicity",
                     semantic_location(state, "matrix.acceptance"),
                     fmt::format("acceptance row '{}' expanded to {} tuples; exactly one is required",
@@ -5250,7 +5192,7 @@ struct ConfigParseOutcome {
             || state.execution_tuples.size()
                 != contract.exact_algorithm_rows.size()) {
             diagnostics.push_back({
-                ValidationDiag::Severity::Error,
+                validation_diagnostic::diagnostic_severity::error,
                 "acceptance_execution_rows_incomplete",
                 semantic_location(state, "matrix.acceptance"),
                 fmt::format("complete-matrix acceptance requires exactly {} configured rows; {} expanded rows were present",
@@ -5292,7 +5234,7 @@ struct ConfigParseOutcome {
                     && wall_samples_all_finite.at(key);
                 if (completed != iterations || !all_finite) {
                     diagnostics.push_back({
-                        ValidationDiag::Severity::Error,
+                        validation_diagnostic::diagnostic_severity::error,
                         "acceptance_iteration_matrix_incomplete",
                         semantic_location(state, "matrix.acceptance"),
                         fmt::format("acceptance row '{}'/{} completed {} finite wall-clock samples; exactly {} are required",
@@ -5304,7 +5246,7 @@ struct ConfigParseOutcome {
         }
         if (completed_total != expected_total) {
             diagnostics.push_back({
-                ValidationDiag::Severity::Error,
+                validation_diagnostic::diagnostic_severity::error,
                 "acceptance_execution_total_incomplete",
                 semantic_location(state, "matrix.acceptance"),
                 fmt::format("complete-matrix acceptance requires exactly {} executions; {} completed wall-clock samples were recorded",
@@ -5313,9 +5255,9 @@ struct ConfigParseOutcome {
         }
 
 
-        using NamedSourceCoordinate =
+        using named_source_coordinate =
             std::tuple<std::string, std::string, std::string, std::string>;
-        std::map<NamedSourceCoordinate, std::size_t> raw_named_sample_counts;
+        std::map<named_source_coordinate, std::size_t> raw_named_sample_counts;
 
         // Preserve each logical iteration's same-name descriptor count.
         // `repeat` is local to a group, so merging by that numeric ID would
@@ -5323,9 +5265,9 @@ struct ConfigParseOutcome {
         // cell's already ordered local vector in explicit group-index order;
         // the resulting vector positions are fresh global ordinals for this
         // accepted (tuple, test-case) pair.
-        using IterationMultiplicityPair =
-            std::pair<const ExecutionTuple*, std::string>;
-        std::map<IterationMultiplicityPair, std::vector<const Cell*>>
+        using iteration_multiplicity_pair =
+            std::pair<const execution_tuple*, std::string>;
+        std::map<iteration_multiplicity_pair, std::vector<const measurement_cell*>>
             multiplicity_cells_by_pair;
         for (const auto& cell_ptr : state.cells) {
             multiplicity_cells_by_pair[
@@ -5335,7 +5277,7 @@ struct ConfigParseOutcome {
                  cell_ptr->samples) {
                 if (region_name == "all_regions") continue;
                 for (const auto& [metric_name, samples] : metric_samples) {
-                    raw_named_sample_counts[NamedSourceCoordinate{
+                    raw_named_sample_counts[named_source_coordinate{
                         cell_ptr->tuple->algorithm_name,
                         cell_ptr->test_case->name,
                         region_name,
@@ -5344,17 +5286,17 @@ struct ConfigParseOutcome {
             }
         }
 
-        std::map<IterationMultiplicityPair,
-                 std::vector<NamedRegionIterationSampleCounts>>
+        std::map<iteration_multiplicity_pair,
+                 std::vector<named_region_iteration_sample_counts>>
             merged_iteration_multiplicities;
         for (auto& [pair_key, pair_cells] : multiplicity_cells_by_pair) {
             std::sort(
                 pair_cells.begin(), pair_cells.end(),
-                [](const Cell* lhs, const Cell* rhs) noexcept {
+                [](const measurement_cell* lhs, const measurement_cell* rhs) noexcept {
                     return lhs->group_index < rhs->group_index;
                 });
             auto& merged = merged_iteration_multiplicities[pair_key];
-            for (const Cell* cell : pair_cells) {
+            for (const measurement_cell* cell : pair_cells) {
                 merged.insert(
                     merged.end(),
                     cell->named_region_iteration_sample_counts.begin(),
@@ -5362,7 +5304,7 @@ struct ConfigParseOutcome {
             }
         }
 
-        std::map<std::string, const ExecutionTuple*> unique_tuple_by_algorithm;
+        std::map<std::string, const execution_tuple*> unique_tuple_by_algorithm;
         std::set<std::string> duplicate_tuple_algorithms;
         for (const auto& tuple : state.execution_tuples) {
             if (!unique_tuple_by_algorithm.emplace(
@@ -5375,7 +5317,7 @@ struct ConfigParseOutcome {
         }
 
         const auto count_for_iteration = [](
-                const NamedRegionIterationSampleCounts& counts,
+                const named_region_iteration_sample_counts& counts,
                 const std::string& region,
                 const std::string& metric) noexcept {
             const auto region_it = counts.find(region);
@@ -5387,7 +5329,7 @@ struct ConfigParseOutcome {
         };
         for (const auto& multiplicity :
              contract.exact_named_region_sample_multiplicities) {
-            const NamedSourceCoordinate coordinate{
+            const named_source_coordinate coordinate{
                 multiplicity.algorithm,
                 multiplicity.test_case,
                 multiplicity.region,
@@ -5395,7 +5337,7 @@ struct ConfigParseOutcome {
             const std::size_t actual = raw_named_sample_counts[coordinate];
             if (actual != multiplicity.exact_samples) {
                 diagnostics.push_back({
-                    ValidationDiag::Severity::Error,
+                    validation_diagnostic::diagnostic_severity::error,
                     "acceptance_named_region_multiplicity_mismatch",
                     semantic_location(state, "matrix.acceptance"),
                     fmt::format("acceptance source '{}'/{} region '{}' metric '{}' emitted {} raw descriptor samples; exactly {} are required",
@@ -5429,7 +5371,7 @@ struct ConfigParseOutcome {
                 multiplicity.exact_samples / expected_iterations;
             const auto merged_it = merged_iteration_multiplicities.find(
                 {tuple_it->second, multiplicity.test_case});
-            static const std::vector<NamedRegionIterationSampleCounts>
+            static const std::vector<named_region_iteration_sample_counts>
                 empty_iteration_counts;
             const auto& merged_counts =
                 merged_it == merged_iteration_multiplicities.end()
@@ -5459,7 +5401,7 @@ struct ConfigParseOutcome {
                 }
                 rendered_distribution += ']';
                 diagnostics.push_back({
-                    ValidationDiag::Severity::Error,
+                    validation_diagnostic::diagnostic_severity::error,
                     "acceptance_named_region_iteration_multiplicity_mismatch",
                     semantic_location(state, "matrix.acceptance"),
                     fmt::format("acceptance source '{}'/{} region '{}' metric '{}' emitted per-iteration raw descriptor distribution {}; exactly {} samples in each of {} iterations are required",
@@ -5478,8 +5420,8 @@ struct ConfigParseOutcome {
     if (!any_iteration_ran) {
         diagnostics.push_back({
             state.config.acceptance.enabled()
-                ? ValidationDiag::Severity::Error
-                : ValidationDiag::Severity::Warning,
+                ? validation_diagnostic::diagnostic_severity::error
+                : validation_diagnostic::diagnostic_severity::warning,
             "benchmark_did_not_run",
             semantic_location(state, "matrix"),
             "benchmark did not execute any iteration (matrix.for entries either name unknown test cases or set iterations to 0); evaluation-metric coverage check skipped"
@@ -5512,13 +5454,13 @@ struct ConfigParseOutcome {
     // so the user understands why the values are degenerate.
     bool pmu_warning_emitted = false;
     for (const auto& metric : state.config.metrics) {
-        if (metric.kind == MetricKind::Counter || metric.kind == MetricKind::Evaluation) continue;
+        if (metric.kind == metric_kind::counter || metric.kind == metric_kind::evaluation) continue;
         const auto* entry = lookup_builtin_metric(metric.name);
         if (entry == nullptr || !entry->needs_pmu) continue;
         if (metric_was_emitted(metric.name) && !metric_has_non_zero_sample(metric.name)) {
             if (!pmu_warning_emitted) {
                 diagnostics.push_back({
-                    ValidationDiag::Severity::Warning,
+                    validation_diagnostic::diagnostic_severity::warning,
                     "pmu_unavailable",
                     semantic_location(state, "matrix.metrics"),
                     "PMU counters were unavailable on this platform — every sample of region_total_cycles / region_total_instructions / region_total_branches / region_total_branch_misses / region_ipc / region_branch_miss_rate read as zero. On macOS arm64 the kpc interface requires entitlements; on Linux the perf_event_open syscall may be sandbox-restricted. Re-run with the appropriate privileges or remove the PMU-derived metrics from this benchmark."
@@ -5530,10 +5472,10 @@ struct ConfigParseOutcome {
 
     for (const auto& metric : state.config.metrics) {
 
-        if (metric.kind == MetricKind::Evaluation) {
+        if (metric.kind == metric_kind::evaluation) {
             if (!metric_was_emitted(metric.name)) {
                 diagnostics.push_back({
-                    ValidationDiag::Severity::Error,
+                    validation_diagnostic::diagnostic_severity::error,
                     "missing_evaluation_metric",
                     semantic_location(state,
                         fmt::format("matrix.metrics.{}", metric.name)),
@@ -5551,7 +5493,7 @@ struct ConfigParseOutcome {
         // median(0).
         if (!metric.region.empty() && !metric_was_emitted(metric.name)) {
             diagnostics.push_back({
-                ValidationDiag::Severity::Warning,
+                validation_diagnostic::diagnostic_severity::warning,
                 "region_filter_never_matched",
                 semantic_location(state,
                     fmt::format("matrix.metrics.{}", metric.name)),
@@ -5561,7 +5503,6 @@ struct ConfigParseOutcome {
         }
     }
 
-    // V7 note: returned-but-undeclared evaluation keys are dropped
     // silently. The on_evaluate lambda is typically shared across
     // multiple benchmarks (one returns `accuracy` and `latency`,
     // another only declares `accuracy`); flagging extra keys would
@@ -5576,7 +5517,7 @@ struct ConfigParseOutcome {
 /// `run_impl` after every benchmark closure has finished registering its
 /// state. Each rule is checked against the benchmarks loaded from its
 /// own `config_path`:
-///   - Rule names must be unique within the same config file.
+///   - benchmark_rule names must be unique within the same config file.
 ///   - Every entry of `benchmarks` (when present) must name a benchmark
 ///     that is registered for this config_path.
 ///   - Every benchmark/algorithm deny-list entry must name a declaration in
@@ -5592,21 +5533,21 @@ struct ConfigParseOutcome {
 ///     `regression_rule_matched_nothing` check still catches semantic
 ///     emptiness (e.g. region listed but never visited); this catches
 ///     the syntactic case at parse time.
-[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_regression_rules(
-    const RegressionRulesByConfig& regression_rules_by_config,
-    const RegressionValidationUniverse& validation_universe) noexcept
+[[nodiscard]] inline std::vector<validation_diagnostic> semantic_validate_regression_rules(
+    const regression_rules_by_configuration& regression_rules_by_config,
+    const regression_validation_universe& validation_universe) noexcept
 {
-    std::vector<ValidationDiag> diagnostics;
+    std::vector<validation_diagnostic> diagnostics;
     auto error = [&diagnostics](
         std::string code, std::string location, std::string message) {
         diagnostics.push_back({
-            ValidationDiag::Severity::Error,
+            validation_diagnostic::diagnostic_severity::error,
             std::move(code), std::move(location), std::move(message)
         });
     };
 
     for (const auto& [config_path, rules] : regression_rules_by_config) {
-        std::vector<const RegressionBenchmarkDeclaration*>
+        std::vector<const regression_benchmark_declaration*>
             declarations_for_config;
         if (const auto universe_it = validation_universe.find(config_path);
             universe_it != validation_universe.end()) {
@@ -5621,7 +5562,7 @@ struct ConfigParseOutcome {
             const std::string base_loc = fmt::format(
                 "{}/regression_rules/{}", config_path, rule.name);
 
-            // 1. Rule name uniqueness within the config file.
+            // 1. benchmark_rule name uniqueness within the config file.
             if (!seen_rule_names.insert(rule.name).second) {
                 error("regression_duplicate_rule_name", base_loc,
                     fmt::format("regression rule name '{}' is used more than once in '{}'; names must be unique within a config file",
@@ -5629,7 +5570,7 @@ struct ConfigParseOutcome {
             }
 
             // 2. Determine matching benchmarks within this config_path.
-            std::vector<const RegressionBenchmarkDeclaration*>
+            std::vector<const regression_benchmark_declaration*>
                 matching_declarations;
             const std::set<std::string> excluded_benchmarks(
                 rule.exclude_benchmarks.begin(), rule.exclude_benchmarks.end());
@@ -5679,7 +5620,7 @@ struct ConfigParseOutcome {
 
             // 3. Metric existence check.
             const auto metric_in_declaration = [&rule](
-                    const RegressionBenchmarkDeclaration& declaration) noexcept {
+                    const regression_benchmark_declaration& declaration) noexcept {
                 return std::find(
                     declaration.metrics.begin(), declaration.metrics.end(),
                     rule.metric) != declaration.metrics.end();
@@ -5796,27 +5737,27 @@ struct ConfigParseOutcome {
 /// the expansion if no default is available). Iteration order over
 /// `declared` is the std::map alpha-sort, which we propagate to the report
 /// so cross-build comparisons see a stable tuple order.
-[[nodiscard]] inline std::vector<ExecutionTuple> expand_one_algorithm(
+[[nodiscard]] inline std::vector<execution_tuple> expand_one_algorithm(
     const std::string& algorithm_name,
-    const std::map<std::string, std::vector<ConfigValue>>& declared,
-    const AlgorithmSchema& schema,
+    const std::map<std::string, std::vector<config_value>>& declared,
+    const algorithm_schema& schema,
     bool& expansion_ok) noexcept
 {
-    std::vector<ExecutionTuple> seed;
-    seed.push_back(ExecutionTuple{algorithm_name, ParamMap{}});
+    std::vector<execution_tuple> seed;
+    seed.push_back(execution_tuple{algorithm_name, parameter_map{}});
 
     // Cross-product over declared parameters in iteration order.
     for (const auto& [param_name, value_list] : declared) {
         if (value_list.empty()) {
-            bioseq_log<ERR>("[bench_framework] matrix.over.{}.{} has no values", algorithm_name, param_name);
+            bioseq_log<logging_level::error>("[bench_framework] matrix.over.{}.{} has no values", algorithm_name, param_name);
             expansion_ok = false;
             continue;
         }
-        std::vector<ExecutionTuple> next_round;
+        std::vector<execution_tuple> next_round;
         next_round.reserve(seed.size() * value_list.size());
         for (const auto& accumulated_tuple : seed) {
             for (const auto& candidate_value : value_list) {
-                ExecutionTuple expanded = accumulated_tuple;
+                execution_tuple expanded = accumulated_tuple;
                 expanded.params[param_name] = candidate_value;
                 next_round.push_back(std::move(expanded));
             }
@@ -5829,7 +5770,7 @@ struct ConfigParseOutcome {
         const bool was_declared = (declared.find(param_schema.param_name) != declared.end());
         if (was_declared) continue;
         if (!param_schema.default_value.has_value()) {
-            bioseq_log<ERR>("[bench_framework] {}.{} not declared in matrix.over and has no default",
+            bioseq_log<logging_level::error>("[bench_framework] {}.{} not declared in matrix.over and has no default",
                          algorithm_name, param_schema.param_name);
             expansion_ok = false;
             continue;
@@ -5846,11 +5787,11 @@ struct ConfigParseOutcome {
 /// `matrix.over`. The total tuple count is the **sum** (not product) of
 /// per-algorithm cross-products — each (algorithm, params) pair is a
 /// distinct row in the report.
-[[nodiscard]] inline std::vector<ExecutionTuple> expand_matrix(
-    const BenchmarkConfig& config,
+[[nodiscard]] inline std::vector<execution_tuple> expand_matrix(
+    const benchmark_configuration& config,
     bool& expansion_ok) noexcept
 {
-    std::vector<ExecutionTuple> result;
+    std::vector<execution_tuple> result;
     for (const auto& [algorithm_name, declared] : config.matrix_over) {
         auto schema_it = config.algorithm_schemas.find(algorithm_name);
         // Invariant: every algorithm in `matrix_over` was declared in
@@ -5872,7 +5813,7 @@ struct ConfigParseOutcome {
     return result;
 }
 
-// ----------------- Cell construction -----------------
+// ----------------- measurement_cell construction -----------------
 
 /// Distribute `iterations` across `groups` groups, minimising max-min.
 /// Returns a vector of size `min(groups, iterations)` summing to
@@ -5899,8 +5840,8 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 /// count across all tuples for this test_case (a group that would have
 /// 0 iterations is meaningless, so we never create one).
 [[nodiscard]] inline std::size_t group_count_for_test_case(
-    const BenchmarkConfig& config,
-    const TestCaseSpec&    test_case_spec,
+    const benchmark_configuration& config,
+    const test_case_specification&    test_case_spec,
     std::size_t            iterations_per_tuple) noexcept
 {
     if (iterations_per_tuple == 0) return 0;
@@ -5915,10 +5856,10 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 /// cell holds one group's slice of iterations for one tuple. Groups
 /// are merged by the report writer / rule evaluator so the
 /// user-visible report still has one entry per (test_case, tuple).
-[[nodiscard]] inline std::vector<std::unique_ptr<Cell>> build_cells(
-    const BenchmarkExecutionState& state)
+[[nodiscard]] inline std::vector<std::unique_ptr<measurement_cell>> build_cells(
+    const benchmark_execution_state& state)
 {
-    std::vector<std::unique_ptr<Cell>> cells;
+    std::vector<std::unique_ptr<measurement_cell>> cells;
     // Rough upper bound: assume default concurrency for every (tc × tuple).
     cells.reserve(state.config.for_each.size() * state.execution_tuples.size()
                   * default_test_case_concurrency());
@@ -5938,7 +5879,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
         const auto found_it = test_case_by_name.find(
             std::string_view{test_case_name});
         if (found_it == test_case_by_name.end()) {
-            bioseq_log<ERR>("[bench_framework] test_case '{}' referenced by matrix.for but not declared",
+            bioseq_log<logging_level::error>("[bench_framework] test_case '{}' referenced by matrix.for but not declared",
                          test_case_name);
             continue;
         }
@@ -5949,7 +5890,6 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 
         if (group_count == 0) {
             // Zero-iteration test case — emit no cells so the writer's
-            // "skip empty samples" path treats it as absent (matches V10
             // behaviour, which also produced no samples for these).
             continue;
         }
@@ -5959,7 +5899,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
              tuple_index < state.execution_tuples.size(); ++tuple_index) {
             const auto& tuple = state.execution_tuples[tuple_index];
             for (std::size_t group_index = 0; group_index < split.size(); ++group_index) {
-                auto cell = std::make_unique<Cell>();
+                auto cell = std::make_unique<measurement_cell>();
                 cell->test_case        = &state.test_cases[test_case_index];
                 cell->test_case_index  = test_case_index;
                 cell->tuple            = &tuple;
@@ -5982,21 +5922,21 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 /// they require an explicit `region` filter — the caller's combiner handles
 /// the cross-descriptor logic.
 [[nodiscard]] inline double extract_from_region(
-    MetricKind kind,
-    const bioseq::instr::RegionAggregate& region_agg) noexcept
+    metric_kind kind,
+    const bioseq::instrumentation::region_aggregate& region_agg) noexcept
 {
-    using bioseq::instr::access::hist_percentile;
+    using bioseq::instrumentation::summary::estimate_percentile;
     switch (kind) {
-        case MetricKind::RegionTotalNs:           return static_cast<double>(region_agg.total_ns);
-        case MetricKind::RegionVisits:            return static_cast<double>(region_agg.visits);
-        case MetricKind::RegionMinNs:             return static_cast<double>(region_agg.min_ns);
-        case MetricKind::RegionMaxNs:             return static_cast<double>(region_agg.max_ns);
-        case MetricKind::RegionP50Ns:             return static_cast<double>(hist_percentile(region_agg.ns_hist, 0.50));
-        case MetricKind::RegionP99Ns:             return static_cast<double>(hist_percentile(region_agg.ns_hist, 0.99));
-        case MetricKind::RegionTotalCycles:       return static_cast<double>(region_agg.total_cycles);
-        case MetricKind::RegionTotalInstructions: return static_cast<double>(region_agg.total_instructions);
-        case MetricKind::RegionTotalBranches:     return static_cast<double>(region_agg.total_branches);
-        case MetricKind::RegionTotalBranchMisses: return static_cast<double>(region_agg.total_branch_misses);
+        case metric_kind::region_total_ns:           return static_cast<double>(region_agg.total_ns);
+        case metric_kind::region_visits:            return static_cast<double>(region_agg.visits);
+        case metric_kind::region_min_ns:             return static_cast<double>(region_agg.min_ns);
+        case metric_kind::region_max_ns:             return static_cast<double>(region_agg.max_ns);
+        case metric_kind::region_p50_ns:             return static_cast<double>(estimate_percentile(region_agg.duration_distribution, 0.50));
+        case metric_kind::region_p99_ns:             return static_cast<double>(estimate_percentile(region_agg.duration_distribution, 0.99));
+        case metric_kind::region_total_cycles:       return static_cast<double>(region_agg.total_cycles);
+        case metric_kind::region_total_instructions: return static_cast<double>(region_agg.total_instructions);
+        case metric_kind::region_total_branches:     return static_cast<double>(region_agg.total_branches);
+        case metric_kind::region_total_branch_misses: return static_cast<double>(region_agg.total_branch_misses);
         default: return 0.0;     // ratios/loop-only metrics use the
                                   // accumulator below, never this scalar
                                   // path.
@@ -6004,18 +5944,18 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 }
 
 [[nodiscard]] inline double extract_from_loop(
-    MetricKind kind,
-    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+    metric_kind kind,
+    const bioseq::instrumentation::loop_aggregate& loop_agg) noexcept
 {
-    using bioseq::instr::access::hist_percentile;
+    using bioseq::instrumentation::summary::estimate_percentile;
     switch (kind) {
-        case MetricKind::LoopTotalIterations: return static_cast<double>(loop_agg.total_iterations);
-        case MetricKind::LoopTotalWork:       return static_cast<double>(loop_agg.total_work);
-        case MetricKind::LoopEmptyVisits:     return static_cast<double>(loop_agg.empty_visits);
-        case MetricKind::LoopMinPerIterNs:    return static_cast<double>(loop_agg.min_per_iter_ns);
-        case MetricKind::LoopMaxPerIterNs:    return static_cast<double>(loop_agg.max_per_iter_ns);
-        case MetricKind::LoopP50PerIterNs:    return static_cast<double>(hist_percentile(loop_agg.per_iter_ns_hist, 0.50));
-        case MetricKind::LoopP99PerIterNs:    return static_cast<double>(hist_percentile(loop_agg.per_iter_ns_hist, 0.99));
+        case metric_kind::loop_total_iterations: return static_cast<double>(loop_agg.total_iterations);
+        case metric_kind::loop_total_work:       return static_cast<double>(loop_agg.total_work);
+        case metric_kind::loop_empty_visits:     return static_cast<double>(loop_agg.empty_visits);
+        case metric_kind::loop_min_per_iteration_ns:    return static_cast<double>(loop_agg.min_per_iter_ns);
+        case metric_kind::loop_max_per_iteration_ns:    return static_cast<double>(loop_agg.max_per_iter_ns);
+        case metric_kind::loop_p50_per_iteration_ns:    return static_cast<double>(estimate_percentile(loop_agg.per_iteration_duration_distribution, 0.50));
+        case metric_kind::loop_p99_per_iteration_ns:    return static_cast<double>(estimate_percentile(loop_agg.per_iteration_duration_distribution, 0.99));
         default: return 0.0;
     }
 }
@@ -6026,15 +5966,15 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 /// default arm. Returns nullopt when the denominator is zero (the per-
 /// region sample is then suppressed).
 [[nodiscard]] inline std::optional<double> ratio_per_region(
-    MetricKind kind,
-    const bioseq::instr::RegionAggregate& region_agg) noexcept
+    metric_kind kind,
+    const bioseq::instrumentation::region_aggregate& region_agg) noexcept
 {
     switch (kind) {
-        case MetricKind::RegionIpc:
+        case metric_kind::region_ipc:
             if (region_agg.total_cycles == 0) return std::nullopt;
             return static_cast<double>(region_agg.total_instructions)
                  / static_cast<double>(region_agg.total_cycles);
-        case MetricKind::RegionBranchMissRate:
+        case metric_kind::region_branch_miss_rate:
             if (region_agg.total_branches == 0) return std::nullopt;
             return static_cast<double>(region_agg.total_branch_misses)
                  / static_cast<double>(region_agg.total_branches);
@@ -6044,15 +5984,15 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 }
 
 [[nodiscard]] inline std::optional<double> ratio_per_loop(
-    MetricKind kind,
-    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+    metric_kind kind,
+    const bioseq::instrumentation::loop_aggregate& loop_agg) noexcept
 {
     switch (kind) {
-        case MetricKind::LoopMeanPerIterNs:
+        case metric_kind::loop_mean_per_iteration_ns:
             if (loop_agg.total_iterations == 0) return std::nullopt;
             return static_cast<double>(loop_agg.total_ns)
                  / static_cast<double>(loop_agg.total_iterations);
-        case MetricKind::LoopWorkPerIter:
+        case metric_kind::loop_work_per_iteration:
             if (loop_agg.total_iterations == 0) return std::nullopt;
             return static_cast<double>(loop_agg.total_work)
                  / static_cast<double>(loop_agg.total_iterations);
@@ -6065,7 +6005,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
 /// iteration-level value for region/loop metrics. The combiner field on
 /// the registry entry decides which fields are populated and how they
 /// finalise.
-struct CrossDescriptorAccumulator {
+struct cross_descriptor_accumulator {
     double                       sum = 0.0;
     std::uint64_t                ratio_numerator = 0;
     std::uint64_t                ratio_denominator = 0;
@@ -6074,73 +6014,73 @@ struct CrossDescriptorAccumulator {
 };
 
 inline void combine_region(
-    CrossDescriptorAccumulator& accumulator,
-    MetricCombiner combiner,
-    MetricKind kind,
-    const bioseq::instr::RegionAggregate& region_agg) noexcept
+    cross_descriptor_accumulator& accumulator,
+    metric_combiner combiner,
+    metric_kind kind,
+    const bioseq::instrumentation::region_aggregate& region_agg) noexcept
 {
     accumulator.any_contribution = true;
     switch (combiner) {
-        case MetricCombiner::Sum:
+        case metric_combiner::sum:
             accumulator.sum += extract_from_region(kind, region_agg);
             return;
-        case MetricCombiner::HistogramSum: {
-            const auto& source_hist = region_agg.ns_hist.buckets;
+        case metric_combiner::histogram_sum: {
+            const auto& source_hist = region_agg.duration_distribution.buckets;
             for (std::size_t i = 0; i < source_hist.size(); ++i) {
                 accumulator.hist_sum[i] += source_hist[i];
             }
             return;
         }
-        case MetricCombiner::PmuRatio:
+        case metric_combiner::pmu_ratio:
             accumulator.ratio_numerator   += region_agg.total_instructions;
             accumulator.ratio_denominator += region_agg.total_cycles;
             return;
-        case MetricCombiner::BranchMissRatio:
+        case metric_combiner::branch_miss_ratio:
             accumulator.ratio_numerator   += region_agg.total_branch_misses;
             accumulator.ratio_denominator += region_agg.total_branches;
             return;
-        case MetricCombiner::RequiresRegion:
+        case metric_combiner::requires_region:
             // With explicit `region` filter, only one descriptor
             // contributes — pass the value straight through.
             accumulator.sum = extract_from_region(kind, region_agg);
             return;
-        case MetricCombiner::LoopMeanNs:
-        case MetricCombiner::LoopWorkPerIter:
+        case metric_combiner::loop_mean_ns:
+        case metric_combiner::loop_work_per_iteration:
             return;     // not applicable to region-source metrics.
     }
 }
 
 inline void combine_loop(
-    CrossDescriptorAccumulator& accumulator,
-    MetricCombiner combiner,
-    MetricKind kind,
-    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+    cross_descriptor_accumulator& accumulator,
+    metric_combiner combiner,
+    metric_kind kind,
+    const bioseq::instrumentation::loop_aggregate& loop_agg) noexcept
 {
     accumulator.any_contribution = true;
     switch (combiner) {
-        case MetricCombiner::Sum:
+        case metric_combiner::sum:
             accumulator.sum += extract_from_loop(kind, loop_agg);
             return;
-        case MetricCombiner::HistogramSum: {
-            const auto& source_hist = loop_agg.per_iter_ns_hist.buckets;
+        case metric_combiner::histogram_sum: {
+            const auto& source_hist = loop_agg.per_iteration_duration_distribution.buckets;
             for (std::size_t i = 0; i < source_hist.size(); ++i) {
                 accumulator.hist_sum[i] += source_hist[i];
             }
             return;
         }
-        case MetricCombiner::LoopMeanNs:
+        case metric_combiner::loop_mean_ns:
             accumulator.ratio_numerator   += loop_agg.total_ns;
             accumulator.ratio_denominator += loop_agg.total_iterations;
             return;
-        case MetricCombiner::LoopWorkPerIter:
+        case metric_combiner::loop_work_per_iteration:
             accumulator.ratio_numerator   += loop_agg.total_work;
             accumulator.ratio_denominator += loop_agg.total_iterations;
             return;
-        case MetricCombiner::RequiresRegion:
+        case metric_combiner::requires_region:
             accumulator.sum = extract_from_loop(kind, loop_agg);
             return;
-        case MetricCombiner::PmuRatio:
-        case MetricCombiner::BranchMissRatio:
+        case metric_combiner::pmu_ratio:
+        case metric_combiner::branch_miss_ratio:
             return;     // loop metrics never use PMU ratios directly.
     }
 }
@@ -6149,27 +6089,27 @@ inline void combine_loop(
 /// metric should be skipped this iteration (zero-denominator ratios, no
 /// contributions, etc.).
 [[nodiscard]] inline std::optional<double> finalise_combined_metric(
-    const CrossDescriptorAccumulator& accumulator,
-    MetricCombiner combiner,
+    const cross_descriptor_accumulator& accumulator,
+    metric_combiner combiner,
     double percentile) noexcept
 {
     if (!accumulator.any_contribution) return std::nullopt;
     switch (combiner) {
-        case MetricCombiner::Sum:
-        case MetricCombiner::RequiresRegion:
+        case metric_combiner::sum:
+        case metric_combiner::requires_region:
             return accumulator.sum;
-        case MetricCombiner::HistogramSum: {
-            // Build a temporary Histogram16 view over the summed buckets
-            // and run the public hist_percentile helper.
-            bioseq::instr::Histogram16 summed{};
+        case metric_combiner::histogram_sum: {
+            // Build a temporary duration_histogram view over the summed buckets
+            // and run the public percentile estimator.
+            bioseq::instrumentation::duration_histogram summed{};
             summed.buckets = accumulator.hist_sum;
             return static_cast<double>(
-                bioseq::instr::access::hist_percentile(summed, percentile));
+                bioseq::instrumentation::summary::estimate_percentile(summed, percentile));
         }
-        case MetricCombiner::PmuRatio:
-        case MetricCombiner::BranchMissRatio:
-        case MetricCombiner::LoopMeanNs:
-        case MetricCombiner::LoopWorkPerIter:
+        case metric_combiner::pmu_ratio:
+        case metric_combiner::branch_miss_ratio:
+        case metric_combiner::loop_mean_ns:
+        case metric_combiner::loop_work_per_iteration:
             if (accumulator.ratio_denominator == 0) return std::nullopt;
             return static_cast<double>(accumulator.ratio_numerator)
                  / static_cast<double>(accumulator.ratio_denominator);
@@ -6187,15 +6127,14 @@ inline void combine_loop(
 ///   `<descriptor_name>[<metric_name>]`.
 /// - counters use the snapshotted before/after deltas.
 /// - evaluation metrics read the user's returned map.
-/// V11: no per-cell mutex needed — items in a batch run sequentially
-/// against a unique `Cell*`, so `samples` has a single writer.
+/// against a unique `measurement_cell*`, so `samples` has a single writer.
 inline void append_iteration_samples(
-    Cell& cell,
+    measurement_cell& cell,
     bool by_regions,
     bool track_named_region_iteration_sample_counts,
-    bioseq::instr::ProfilerBlock<profiler_args_t>& profiler_block,
+    bioseq::instrumentation::profiler_state<profiler_configuration>& profiler_block,
     double iteration_wall_clock_ns,
-    const std::vector<MetricSpec>& metrics,
+    const std::vector<metric_specification>& metrics,
     const std::vector<std::int64_t>& counters_before,
     const std::vector<std::int64_t>& counters_after,
     const std::map<std::string, double>& evaluation_metrics) noexcept
@@ -6203,14 +6142,14 @@ inline void append_iteration_samples(
     auto& all_regions = cell.samples["all_regions"];
     all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
 
-    NamedRegionIterationSampleCounts* iteration_named_sample_counts = nullptr;
+    named_region_iteration_sample_counts* iteration_named_sample_counts = nullptr;
     if (track_named_region_iteration_sample_counts) {
         cell.named_region_iteration_sample_counts.emplace_back();
         iteration_named_sample_counts =
             &cell.named_region_iteration_sample_counts.back();
     }
 
-    const auto descriptor_total = bioseq::instr::descriptor_count();
+    const auto descriptor_total = bioseq::instrumentation::registered_descriptor_count();
     std::size_t counter_index = 0;
 
     // Walk the declared metrics; pull each declared evaluation metric
@@ -6223,17 +6162,17 @@ inline void append_iteration_samples(
     // a typo in the config.
     for (const auto& metric : metrics) {
         switch (metric.kind) {
-            case MetricKind::WallClockNs:
+            case metric_kind::wall_clock_ns:
                 // Already pushed above.
                 continue;
-            case MetricKind::Counter: {
+            case metric_kind::counter: {
                 const auto delta = counters_after[counter_index]
                                   - counters_before[counter_index];
                 all_regions[metric.name].push_back(static_cast<double>(delta));
                 ++counter_index;
                 continue;
             }
-            case MetricKind::Evaluation: {
+            case metric_kind::evaluation: {
                 if (auto found = evaluation_metrics.find(metric.name);
                     found != evaluation_metrics.end())
                 {
@@ -6252,7 +6191,7 @@ inline void append_iteration_samples(
         const auto* entry = lookup_builtin_metric(metric.name);
         if (entry == nullptr) continue;     // already-flagged by semantic validation
 
-        CrossDescriptorAccumulator accumulator;
+        cross_descriptor_accumulator accumulator;
         const bool restrict_to_one_region = !metric.region.empty();
         std::set<std::string> named_regions_contributed;
         const auto append_named_region_sample =
@@ -6269,13 +6208,13 @@ inline void append_iteration_samples(
         // Walk every visited descriptor whose name and kind match the
         // metric's source family.
         for (std::uint32_t descriptor_id = 1; descriptor_id <= descriptor_total; ++descriptor_id) {
-            const auto* descriptor = bioseq::instr::descriptor_lookup(descriptor_id);
+            const auto* descriptor = bioseq::instrumentation::find_descriptor(descriptor_id);
             if (descriptor == nullptr || descriptor->name == nullptr) continue;
             if (restrict_to_one_region
                 && std::string_view{descriptor->name} != std::string_view{metric.region}) continue;
 
-            if (entry->source == MetricSource::Region) {
-                const auto* region_agg = profiler_block.aggregates.try_get(descriptor_id);
+            if (entry->source == metric_source::region) {
+                const auto* region_agg = profiler_block.aggregates.find(descriptor_id);
                 if (region_agg == nullptr || region_agg->visits == 0) continue;
                 combine_region(accumulator, entry->combiner, entry->kind, *region_agg);
                 if (by_regions) {
@@ -6283,8 +6222,8 @@ inline void append_iteration_samples(
                     // denominator computation; the scalar `extract_*` path
                     // only knows how to dump a single field, so it would
                     // emit literal 0 for IPC / branch_miss_rate.
-                    if (entry->combiner == MetricCombiner::PmuRatio
-                     || entry->combiner == MetricCombiner::BranchMissRatio) {
+                    if (entry->combiner == metric_combiner::pmu_ratio
+                     || entry->combiner == metric_combiner::branch_miss_ratio) {
                         if (auto ratio = ratio_per_region(entry->kind, *region_agg);
                             ratio.has_value()) {
                             append_named_region_sample(descriptor->name, *ratio);
@@ -6295,13 +6234,13 @@ inline void append_iteration_samples(
                             extract_from_region(entry->kind, *region_agg));
                     }
                 }
-            } else if (entry->source == MetricSource::Loop) {
-                const auto* loop_agg = profiler_block.loop_aggregates.try_get(descriptor_id);
+            } else if (entry->source == metric_source::loop) {
+                const auto* loop_agg = profiler_block.loop_aggregates.find(descriptor_id);
                 if (loop_agg == nullptr || loop_agg->visits == 0) continue;
                 combine_loop(accumulator, entry->combiner, entry->kind, *loop_agg);
                 if (by_regions) {
-                    if (entry->combiner == MetricCombiner::LoopMeanNs
-                     || entry->combiner == MetricCombiner::LoopWorkPerIter) {
+                    if (entry->combiner == metric_combiner::loop_mean_ns
+                     || entry->combiner == metric_combiner::loop_work_per_iteration) {
                         if (auto ratio = ratio_per_loop(entry->kind, *loop_agg);
                             ratio.has_value()) {
                             append_named_region_sample(descriptor->name, *ratio);
@@ -6332,18 +6271,18 @@ inline void append_iteration_samples(
 
 // ----------------- Counter snapshotting -----------------
 
-/// Look up `bioseq::instr::Counter*` for every metric whose kind is
+/// Look up `bioseq::instrumentation::named_counter*` for every metric whose kind is
 /// `Counter`. Called once before the iteration loop because the underlying
 /// `counter()` lookup is a cold-path mutex acquisition; we never want to
 /// pay it per iteration.
-[[nodiscard]] inline std::vector<bioseq::instr::Counter*> resolve_counter_handles(
-    const std::vector<MetricSpec>& metrics) noexcept
+[[nodiscard]] inline std::vector<bioseq::instrumentation::named_counter*> resolve_counter_handles(
+    const std::vector<metric_specification>& metrics) noexcept
 {
-    std::vector<bioseq::instr::Counter*> handles;
+    std::vector<bioseq::instrumentation::named_counter*> handles;
     handles.reserve(metrics.size());
     for (const auto& metric : metrics) {
-        if (metric.kind != MetricKind::Counter) continue;
-        handles.push_back(&bioseq::instr::counter(metric.counter_name));
+        if (metric.kind != metric_kind::counter) continue;
+        handles.push_back(&bioseq::instrumentation::get_named_counter(metric.counter_name));
     }
     return handles;
 }
@@ -6352,50 +6291,50 @@ inline void append_iteration_samples(
 /// aligned with `handles` so the call site can do `after - before`
 /// per-index. Counter reads are relaxed atomic loads.
 [[nodiscard]] inline std::vector<std::int64_t> snapshot_counters(
-    const std::vector<bioseq::instr::Counter*>& handles) noexcept
+    const std::vector<bioseq::instrumentation::named_counter*>& handles) noexcept
 {
     std::vector<std::int64_t> values;
     values.reserve(handles.size());
     for (const auto* handle : handles) {
-        values.push_back(bioseq::instr::counter_value(*handle));
+        values.push_back(bioseq::instrumentation::current_thread_counter_value(*handle));
     }
     return values;
 }
 
-// ----------------- WorkBatch + scheduler -----------------
+// ----------------- work_batch + scheduler -----------------
 
 /// One entry inside a batch — one tuple's iteration loop bound to the
 /// batch's cached `Input`.
-struct WorkBatchItem {
-    Cell* cell = nullptr;        // points back into state.cells
+struct work_batch_item {
+    measurement_cell* cell = nullptr;        // points back into state.cells
     /// Cached strong reference to the underlying tuple. Saves a hop in
     /// the UI label updater on the cold path.
-    const ExecutionTuple* tuple = nullptr;
+    const execution_tuple* tuple = nullptr;
 };
 
 /// One scheduling unit: every item in the batch shares one cached
 /// `Input` instance built from the same `(test_case, group)`. Items
 /// run sequentially within the batch; batches run in parallel.
-struct WorkBatch {
+struct work_batch {
     std::size_t test_case_index = 0;
     std::size_t group_index     = 0;
     std::size_t group_count     = 1;
     /// Sequence number of this batch in `state.cells`-order. Used as a
     /// stable index into the per-batch slot vector by the scheduler.
     std::size_t batch_index     = 0;
-    std::vector<WorkBatchItem> items{};
+    std::vector<work_batch_item> items{};
 };
 
 /// Walk `state.cells` once and group entries by `(test_case_index,
 /// group_index)`. The result is one batch per group; items inside each
 /// batch are tuples in `state.execution_tuples`-declared order.
-[[nodiscard]] inline std::vector<WorkBatch> build_work_batches(
-    BenchmarkExecutionState& state)
+[[nodiscard]] inline std::vector<work_batch> build_work_batches(
+    benchmark_execution_state& state)
 {
     // Use an ordered map keyed by the (tc_index, group_index) pair so
     // batches come out in a deterministic order. The driver later treats
     // `batches[i].batch_index` as i (assigned below in a final pass).
-    std::map<std::pair<std::size_t, std::size_t>, WorkBatch> by_key;
+    std::map<std::pair<std::size_t, std::size_t>, work_batch> by_key;
     for (auto& cell_ptr : state.cells) {
         const auto key = std::pair{cell_ptr->test_case_index, cell_ptr->group_index};
         auto& batch = by_key[key];
@@ -6404,10 +6343,10 @@ struct WorkBatch {
             batch.group_index     = cell_ptr->group_index;
             batch.group_count     = cell_ptr->group_count;
         }
-        batch.items.push_back(WorkBatchItem{ cell_ptr.get(), cell_ptr->tuple });
+        batch.items.push_back(work_batch_item{ cell_ptr.get(), cell_ptr->tuple });
     }
 
-    std::vector<WorkBatch> batches;
+    std::vector<work_batch> batches;
     batches.reserve(by_key.size());
     for (auto& [key, batch] : by_key) {
         (void)key;
@@ -6419,13 +6358,13 @@ struct WorkBatch {
 
 // ----------------- Progress helpers (single source of writes) -----------------
 
-/// Lazily resolve the `ProgressTestCase` for the current benchmark
+/// Lazily resolve the `progress_test_case` for the current benchmark
 /// closure. Returns nullptr when the progress dashboard wasn't
 /// installed, the per-benchmark slot hasn't completed setup yet, or
 /// any index is out of bounds. Centralised so the five `progress_*`
 /// helpers don't repeat the same five-line guard chain.
-[[nodiscard]] inline ProgressTestCase* progress_test_case_for(
-    const BenchmarkContext& context, std::size_t test_case_index) noexcept
+[[nodiscard]] inline progress_test_case* progress_test_case_for(
+    const benchmark_context& context, std::size_t test_case_index) noexcept
 {
     if (context.progress == nullptr) return nullptr;
     if (context.benchmark_index >= context.progress->per_benchmark.size())
@@ -6436,11 +6375,11 @@ struct WorkBatch {
     return per.test_cases[test_case_index].get();
 }
 
-/// Lazily resolve the `ProgressGroup` for the current benchmark
+/// Lazily resolve the `progress_group` for the current benchmark
 /// closure. Returns nullptr when no test case or group exists at the
 /// supplied indices.
-[[nodiscard]] inline ProgressGroup* progress_group_for(
-    const BenchmarkContext& context,
+[[nodiscard]] inline progress_group* progress_group_for(
+    const benchmark_context& context,
     std::size_t test_case_index, std::size_t group_index) noexcept
 {
     auto* tc = progress_test_case_for(context, test_case_index);
@@ -6450,13 +6389,13 @@ struct WorkBatch {
 }
 
 inline void progress_mark_test_case_start(
-    BenchmarkContext& context, const WorkBatch& batch) noexcept
+    benchmark_context& context, const work_batch& batch) noexcept
 {
     auto* tc = progress_test_case_for(context, batch.test_case_index);
     if (tc == nullptr) return;
     std::int64_t expected = 0;
     tc->start_ns.compare_exchange_strong(
-        expected, bioseq::instr::clock::now_ns(),
+        expected, bioseq::instrumentation::clock::now_ns(),
         std::memory_order_relaxed, std::memory_order_relaxed);
     if (batch.group_index < tc->groups.size()) {
         tc->groups[batch.group_index]->active.store(true, std::memory_order_relaxed);
@@ -6464,8 +6403,8 @@ inline void progress_mark_test_case_start(
 }
 
 inline void progress_update_label(
-    BenchmarkContext& context, const WorkBatch& batch,
-    const WorkBatchItem& item, std::string_view benchmark_key) noexcept
+    benchmark_context& context, const work_batch& batch,
+    const work_batch_item& item, std::string_view benchmark_key) noexcept
 {
     auto* group = progress_group_for(context, batch.test_case_index, batch.group_index);
     if (group == nullptr) return;
@@ -6476,7 +6415,7 @@ inline void progress_update_label(
 }
 
 inline void progress_tick_iteration(
-    BenchmarkContext& context, const Cell& cell) noexcept
+    benchmark_context& context, const measurement_cell& cell) noexcept
 {
     auto* group = progress_group_for(context, cell.test_case_index, cell.group_index);
     if (group == nullptr) return;
@@ -6484,7 +6423,7 @@ inline void progress_tick_iteration(
 }
 
 inline void progress_tick_item_done(
-    BenchmarkContext& context, const WorkBatch& batch) noexcept
+    benchmark_context& context, const work_batch& batch) noexcept
 {
     auto* tc = progress_test_case_for(context, batch.test_case_index);
     if (tc == nullptr) return;
@@ -6492,7 +6431,7 @@ inline void progress_tick_item_done(
 }
 
 inline void progress_mark_group_done(
-    BenchmarkContext& context, const WorkBatch& batch) noexcept
+    benchmark_context& context, const work_batch& batch) noexcept
 {
     auto* tc = progress_test_case_for(context, batch.test_case_index);
     if (tc == nullptr) return;
@@ -6509,26 +6448,25 @@ inline void progress_mark_group_done(
     if (tc->tuple_done.load(std::memory_order_relaxed) >= total) {
         std::int64_t expected = 0;
         tc->finish_ns.compare_exchange_strong(
-            expected, bioseq::instr::clock::now_ns(),
+            expected, bioseq::instrumentation::clock::now_ns(),
             std::memory_order_relaxed, std::memory_order_relaxed);
     }
 }
 
-// ----------------- V12 progress helpers (retry / abort) -----------------
 //
 // All of these follow the same nullptr-safe lookup pattern through
 // `progress_group_for`. Failure-string fields are guarded by
-// `ProgressGroup::failure_mu`; the renderer only consults them when the
+// `progress_group::failure_mu`; the renderer only consults them when the
 // matching atomic counter is non-zero.
 
 /// Retry-failure category; templated over the "kind" so input and
-/// cleanup paths share one body. Members map onto matching ProgressGroup
+/// cleanup paths share one body. Members map onto matching progress_group
 /// fields.
-enum class RetryKind : std::uint8_t { Input, Cleanup };
+enum class retry_kind : std::uint8_t { input, cleanup };
 
 inline void progress_record_retry_failure(
-    BenchmarkContext& context, const WorkBatch& batch,
-    RetryKind kind, std::uint8_t attempt,
+    benchmark_context& context, const work_batch& batch,
+    retry_kind kind, std::uint8_t attempt,
     std::string_view error_message,
     std::string_view stack_trace) noexcept
 {
@@ -6537,7 +6475,7 @@ inline void progress_record_retry_failure(
     if (group == nullptr) return;
     {
         std::lock_guard<std::mutex> guard(group->failure_mu);
-        if (kind == RetryKind::Input) {
+        if (kind == retry_kind::input) {
             group->input_failure_message = std::string{error_message};
             group->input_failure_trace   = std::string{stack_trace};
         } else {
@@ -6545,15 +6483,15 @@ inline void progress_record_retry_failure(
             group->cleanup_failure_trace   = std::string{stack_trace};
         }
     }
-    auto& counter = (kind == RetryKind::Input)
+    auto& counter = (kind == retry_kind::input)
                        ? group->input_retry_attempt
                        : group->cleanup_retry_attempt;
     counter.store(attempt, std::memory_order_release);
 }
 
 inline void progress_clear_retry_failure(
-    BenchmarkContext& context, const WorkBatch& batch,
-    RetryKind kind) noexcept
+    benchmark_context& context, const work_batch& batch,
+    retry_kind kind) noexcept
 {
     auto* group = progress_group_for(context,
                                       batch.test_case_index, batch.group_index);
@@ -6565,12 +6503,12 @@ inline void progress_clear_retry_failure(
     // then render with empty strings" race window. See `build_detail_rows`
     // for the read side; both writers (record and clear) and the reader
     // must agree on this protocol.
-    auto& counter = (kind == RetryKind::Input)
+    auto& counter = (kind == retry_kind::input)
                        ? group->input_retry_attempt
                        : group->cleanup_retry_attempt;
     counter.store(0, std::memory_order_release);
     std::lock_guard<std::mutex> guard(group->failure_mu);
-    if (kind == RetryKind::Input) {
+    if (kind == retry_kind::input) {
         group->input_failure_message.clear();
         group->input_failure_trace.clear();
     } else {
@@ -6580,10 +6518,9 @@ inline void progress_clear_retry_failure(
 }
 
 /// Mark a batch as aborted using bare indices. Shared between the
-/// V12 `WorkBatch`-driven path and the V16 scheduler-driven idle-
-/// timeout path (the latter has no live `WorkBatch`).
+/// timeout path (the latter has no live `work_batch`).
 inline void progress_mark_batch_aborted_at(
-    BenchmarkContext& context,
+    benchmark_context& context,
     std::size_t test_case_index, std::size_t group_index,
     std::string_view reason) noexcept
 {
@@ -6614,33 +6551,32 @@ inline void progress_mark_batch_aborted_at(
     // for an aborted batch.
     std::int64_t expected = 0;
     tc->finish_ns.compare_exchange_strong(
-        expected, bioseq::instr::clock::now_ns(),
+        expected, bioseq::instrumentation::clock::now_ns(),
         std::memory_order_relaxed, std::memory_order_relaxed);
 }
 
 inline void progress_mark_batch_aborted(
-    BenchmarkContext& context, const WorkBatch& batch,
+    benchmark_context& context, const work_batch& batch,
     std::string_view reason) noexcept
 {
     progress_mark_batch_aborted_at(context, batch.test_case_index,
                                     batch.group_index, reason);
 }
 
-// ----------------- Diagnostic emit helper (V12) -----------------
 
-/// Push one ValidationDiag into `*context.diagnostics` under
+/// Push one validation_diagnostic into `*context.diagnostics` under
 /// `*context.diagnostics_mu`. nullptr-safe so the helper composes with
 /// places where diagnostics aren't wired (none today, but future test
 /// fixtures might construct a bare context).
 inline void push_runtime_diagnostic(
-    BenchmarkContext& context,
-    ValidationDiag::Severity severity,
+    benchmark_context& context,
+    validation_diagnostic::diagnostic_severity severity,
     std::string_view code,
     std::string_view location,
     std::string message) noexcept
 {
     if (context.diagnostics == nullptr || context.diagnostics_mu == nullptr) return;
-    ValidationDiag diag;
+    validation_diagnostic diag;
     diag.severity = severity;
     diag.code     = std::string{code};
     diag.location = std::string{location};
@@ -6654,17 +6590,18 @@ inline void push_runtime_diagnostic(
 /// matches the rest of the framework's progress helpers; a bad_alloc
 /// from `fmt::format` would terminate, which is the same contract as
 /// any other framework path.
-template<typename... Args>
+template<typename... p_argument_types>
 inline void emit_runtime_diagnostic(
-    BenchmarkContext& context,
-    ValidationDiag::Severity severity,
+    benchmark_context& context,
+    validation_diagnostic::diagnostic_severity severity,
     std::string_view code,
     std::string_view location,
-    fmt::format_string<Args...> fmt_str,
-    Args&&... args) noexcept
+    fmt::format_string<p_argument_types...> fmt_str,
+    p_argument_types&&... arguments) noexcept
 {
     push_runtime_diagnostic(context, severity, code, location,
-        fmt::format(fmt_str, std::forward<Args>(args)...));
+        fmt::format(fmt_str,
+                    std::forward<p_argument_types>(arguments)...));
 }
 
 /// Build a "<config>:<benchmark>/<test_case>(group N)" location string
@@ -6680,28 +6617,27 @@ inline void emit_runtime_diagnostic(
                        config_path, benchmark_key, test_case_name, group_index);
 }
 
-// ----------------- BatchScheduler out-of-line bodies -----------------
+// ----------------- batch_scheduler out-of-line bodies -----------------
 
-inline void BatchScheduler::emit_idle_timeout_locked(
-    const ScheduledBatch& batch) noexcept
+inline void batch_scheduler::emit_idle_timeout_locked(
+    const scheduled_batch& batch) noexcept
 {
     if (batch.context == nullptr) return;
     auto reason = fmt::format(
         "batch '{}' (group {}) waited {}s for {} B (base+extra) with no "
         "peer batches running — giving up",
         batch.test_case_name, batch.group_index,
-        kMaxIdleWaitingTime.count(),
+        k_max_idle_waiting_time.count(),
         batch.total_bytes);
     push_runtime_diagnostic(*batch.context,
-        ValidationDiag::Severity::Error,
+        validation_diagnostic::diagnostic_severity::error,
         "memory_budget_constraint_timeout", batch.location_str, reason);
     progress_mark_batch_aborted_at(*batch.context,
         batch.test_case_index, batch.group_index, reason);
 }
 
-// ----------------- V12 retry helpers (G2 / G3) -----------------
 
-/// Render `trace` clipped to the first `kMaxStackTraceLines` frames
+/// Render `trace` clipped to the first `k_max_stack_trace_lines` frames
 /// using cpptrace's built-in `to_string(color=false)`. We always
 /// produce uncoloured output because the rendered string is later
 /// embedded inside ftxui `text()` elements, which do NOT interpret
@@ -6711,9 +6647,9 @@ inline void BatchScheduler::emit_idle_timeout_locked(
 [[nodiscard]] inline std::string
 clip_trace(const cpptrace::stacktrace& trace) noexcept {
     cpptrace::stacktrace clipped = trace;            // implicit copy
-    const bool was_truncated = clipped.frames.size() > kMaxStackTraceLines;
+    const bool was_truncated = clipped.frames.size() > k_max_stack_trace_lines;
     if (was_truncated) {
-        clipped.frames.resize(kMaxStackTraceLines);
+        clipped.frames.resize(k_max_stack_trace_lines);
     }
     auto rendered = clipped.to_string(/*color=*/false);
     if (was_truncated) rendered += "\n  … (more frames elided)";
@@ -6722,7 +6658,7 @@ clip_trace(const cpptrace::stacktrace& trace) noexcept {
 
 /// Generic retry helper used by both `on_input` and `on_cleanup` paths.
 ///
-/// Runs `attempt()` up to `kMaxTaskInputHandlerErrorCount` times. Each
+/// Runs `attempt()` up to `k_max_task_input_handler_error_count` times. Each
 /// failure is recorded into the dashboard's per-batch failure slot
 /// (keyed by `kind`). On success, the failure record is cleared and
 /// the function returns `true`; on every-attempt-failure it returns
@@ -6735,18 +6671,18 @@ clip_trace(const cpptrace::stacktrace& trace) noexcept {
 /// `try_catch` helper recursively wraps each catcher in its own
 /// TRY/CATCH expansion so all of them install the unwind interceptor
 /// `from_current_exception()` needs.
-template<RetryKind kind, typename Attempt>
+template<retry_kind p_kind, typename p_attempt>
 [[nodiscard]] inline bool retry_user_callback(
-    BenchmarkContext& context, const WorkBatch& batch,
-    Attempt&& attempt) noexcept
+    benchmark_context& context, const work_batch& batch,
+    p_attempt&& attempt) noexcept
 {
-    for (std::size_t i = 0; i < kMaxTaskInputHandlerErrorCount; ++i) {
+    for (std::size_t i = 0; i < k_max_task_input_handler_error_count; ++i) {
         bool failed = false;
         cpptrace::try_catch(
             [&] { attempt(); },
             [&] (const std::exception& e) {
                 progress_record_retry_failure(
-                    context, batch, kind,
+                    context, batch, p_kind,
                     static_cast<std::uint8_t>(i + 1),
                     e.what(),
                     clip_trace(cpptrace::from_current_exception()));
@@ -6754,88 +6690,87 @@ template<RetryKind kind, typename Attempt>
             },
             [&] {     // void(): cpptrace's idiom for "catch (...)"
                 progress_record_retry_failure(
-                    context, batch, kind,
+                    context, batch, p_kind,
                     static_cast<std::uint8_t>(i + 1),
                     "<non-std exception>", "<no trace>");
                 failed = true;
             }
         );
         if (!failed) {
-            progress_clear_retry_failure(context, batch, kind);
+            progress_clear_retry_failure(context, batch, p_kind);
             return true;
         }
         // Hold the retry-failure row visible for at least one render
-        // cycle — see `kRetryFailureMinDisplayTime`'s comment. Applied
+        // cycle — see `k_retry_failure_min_display_time`'s comment. Applied
         // after every failed attempt (including the last) so the final
         // [retry 5/5] frame survives long enough for the dashboard to
         // paint it before the caller marks the batch aborted (which
         // wipes the retry counter).
-        std::this_thread::sleep_for(kRetryFailureMinDisplayTime);
+        std::this_thread::sleep_for(k_retry_failure_min_display_time);
     }
     return false;
 }
 
-/// Try `on_input` up to `kMaxTaskInputHandlerErrorCount` times. Returns
+/// Try `on_input` up to `k_max_task_input_handler_error_count` times. Returns
 /// `nullopt` on every-attempt-failure; the caller is expected to emit
 /// `input_handler_failed_permanently` and abort the batch.
-template<typename Input, typename Builder>
-[[nodiscard]] inline std::optional<Input>
-build_input_with_retry(BenchmarkContext& context,
-                        const WorkBatch& batch,
-                        Builder&& builder) noexcept
+template<typename p_input, typename p_builder>
+[[nodiscard]] inline std::optional<p_input>
+build_input_with_retry(benchmark_context& context,
+                        const work_batch& batch,
+                        p_builder&& builder) noexcept
 {
-    std::optional<Input> result;
-    const bool ok = retry_user_callback<RetryKind::Input>(
+    std::optional<p_input> result;
+    const bool ok = retry_user_callback<retry_kind::input>(
         context, batch, [&] { result.emplace(builder()); });
     if (!ok) result.reset();
     return result;
 }
 
-/// Try `on_cleanup` up to `kMaxTaskInputHandlerErrorCount` times. On
+/// Try `on_cleanup` up to `k_max_task_input_handler_error_count` times. On
 /// every-attempt-failure emits the `cleanup_function_failing` warning
 /// and resumes — cleanup leaks are accepted because the OS / developer
 /// will reclaim resources externally (per spec).
-template<typename Cleaner>
-inline void cleanup_with_retry(BenchmarkContext& context,
-                                const WorkBatch& batch,
+template<typename p_cleaner>
+inline void cleanup_with_retry(benchmark_context& context,
+                                const work_batch& batch,
                                 std::string_view test_case_name,
                                 std::string_view location,
-                                Cleaner&& cleaner) noexcept
+                                p_cleaner&& cleaner) noexcept
 {
-    if (retry_user_callback<RetryKind::Cleanup>(context, batch,
-                                                  std::forward<Cleaner>(cleaner)))
+    if (retry_user_callback<retry_kind::cleanup>(context, batch,
+                                                  std::forward<p_cleaner>(cleaner)))
     {
         return;
     }
-    emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+    emit_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::warning,
         "cleanup_function_failing", location,
         "batch '{}' (group {}) cleanup gave up after {} attempts — "
         "assuming OS / developer reclaim",
-        test_case_name, batch.group_index, kMaxTaskInputHandlerErrorCount);
-    progress_clear_retry_failure(context, batch, RetryKind::Cleanup);
+        test_case_name, batch.group_index, k_max_task_input_handler_error_count);
+    progress_clear_retry_failure(context, batch, retry_kind::cleanup);
 }
 
 // `prepare_typed_benchmark` was relocated below (just before write_report) so its
-// per-case `--debug` hooks can call DebugReportSink, whose CASE_RESULTS
+// per-case `--debug` hooks can call debug_report_sink, whose CASE_RESULTS
 // serializer reuses emit_execution_tuple_record + the aggregation helpers
 // defined further down. See the run_unit driver section there.
 
-// ----------------- Sample aggregation (V17) -----------------
 
-/// Number of histogram buckets in `AggregatedSamples::histogram`.
+/// Number of histogram buckets in `aggregated_samples::histogram`.
 /// Constant by spec — the schema enforces `minItems == maxItems == 10`,
 /// so changing this requires a coordinated schema bump.
-inline constexpr std::size_t kHistogramBucketCount = 10;
+inline constexpr std::size_t k_histogram_bucket_count = 10;
 
-/// Maximum length of `AggregatedSamples::top10` / `bottom10`.
+/// Maximum length of `aggregated_samples::top10` / `bottom10`.
 /// Shorter when fewer than 10 finite samples were observed.
-inline constexpr std::size_t kKBestSize = 10;
+inline constexpr std::size_t k_k_best_size = 10;
 
 /// Per-cell summary stats. Computed by `aggregate_samples_for_report`
 /// over the *finite subset* of the sample vector (NaN / ±inf are
 /// dropped before sorting). Default-constructed values (all-zero)
 /// are emitted when no finite samples were observed.
-struct AggregateStats {
+struct aggregate_statistics {
     double min     = 0.0;
     double max     = 0.0;
     double mean    = 0.0;
@@ -6854,7 +6789,7 @@ struct AggregateStats {
 /// Five canonical percentile slots reported per cell. Indexed via
 /// the registry below so adding a new percentile is a one-row
 /// edit.
-struct AggregatePercentiles {
+struct aggregate_percentiles {
     double p01 = 0.0;
     double p20 = 0.0;
     double p50 = 0.0;
@@ -6866,7 +6801,7 @@ struct AggregatePercentiles {
 /// (rather than `size_t`) because that is what the JSON schema's
 /// `integer` type maps to — and because non-finite values cannot
 /// poison it the way they could a `double`.
-struct AggregateBucket {
+struct aggregate_bucket {
     double      from  = 0.0;
     double      to    = 0.0;
     std::size_t count = 0;
@@ -6875,8 +6810,8 @@ struct AggregateBucket {
 /// Pre-aggregated view of a sample vector. Replaces raw
 /// `std::vector<double>` everywhere a consumer reads samples for
 /// reporting / UI purposes. The current run still collects raw
-/// samples in `Cell::samples` (so per-rule comparators keep using
-/// `aggregate_samples(Aggregate, vector<double>)` without an
+/// samples in `measurement_cell::samples` (so per-rule comparators keep using
+/// `aggregate_samples(sample_aggregate, vector<double>)` without an
 /// in-memory format change); the writer turns each cell's vector
 /// into one of these at write time, and historical-report
 /// readers parse this shape directly.
@@ -6902,13 +6837,13 @@ struct AggregateBucket {
 /// contained, with default-constructed slots wherever the source
 /// was malformed. Consumers that need the full invariants should
 /// re-aggregate from raw samples instead of trusting parser output.
-struct AggregatedSamples {
+struct aggregated_samples {
     std::size_t                                            samples_count = 0;
-    AggregateStats                                          stats{};
-    AggregatePercentiles                                    percentiles{};
+    aggregate_statistics                                          stats{};
+    aggregate_percentiles                                    percentiles{};
     std::vector<double>                                     top10{};
     std::vector<double>                                     bottom10{};
-    std::array<AggregateBucket, kHistogramBucketCount>      histogram{};
+    std::array<aggregate_bucket, k_histogram_bucket_count>      histogram{};
 };
 
 /// True iff `aggregated` carries at least one *finite* sample.
@@ -6919,55 +6854,55 @@ struct AggregatedSamples {
 /// as data. Used by the renderer, the regression evaluator, and
 /// any other reader that needs "is there real data here?". Single
 /// definition next to the type so all consumers stay aligned.
-[[nodiscard]] inline bool has_finite_samples(const AggregatedSamples& aggregated) noexcept {
+[[nodiscard]] inline bool has_finite_samples(const aggregated_samples& aggregated) noexcept {
     return aggregated.samples_count > 0 && !aggregated.top10.empty();
 }
 
 /// Compile-time table linking each percentile to its
-/// `AggregatePercentiles` field. Single source of truth used by
+/// `aggregate_percentiles` field. Single source of truth used by
 /// the aggregator (writes the field), the writer (emits the JSON
 /// key), the historical-report reader (parses the same key), and
-/// `aggregate_samples(Aggregate, AggregatedSamples)` for the
+/// `aggregate_samples(sample_aggregate, aggregated_samples)` for the
 /// rule-eval percentile lookups (P01 / P50 / P99 only — the
 /// table also drives `aggregated_from_report`).
-struct AggregatedPercentileEntry {
+struct aggregated_percentile_entry {
     std::string_view  name;          // "P01" / "P20" / "P50" / "P80" / "P99"
     double            fraction;      // 0.01 / 0.20 / 0.50 / 0.80 / 0.99
-    double AggregatePercentiles::* slot;  // pointer-to-member into the struct
+    double aggregate_percentiles::* slot;  // pointer-to-member into the struct
 };
 
-inline constexpr std::array<AggregatedPercentileEntry, 5>
-kAggregatedPercentileRegistry{ {
-    { "P01", 0.01, &AggregatePercentiles::p01 },
-    { "P20", 0.20, &AggregatePercentiles::p20 },
-    { "P50", 0.50, &AggregatePercentiles::p50 },
-    { "P80", 0.80, &AggregatePercentiles::p80 },
-    { "P99", 0.99, &AggregatePercentiles::p99 },
+inline constexpr std::array<aggregated_percentile_entry, 5>
+k_aggregated_percentile_registry{ {
+    { "P01", 0.01, &aggregate_percentiles::p01 },
+    { "P20", 0.20, &aggregate_percentiles::p20 },
+    { "P50", 0.50, &aggregate_percentiles::p50 },
+    { "P80", 0.80, &aggregate_percentiles::p80 },
+    { "P99", 0.99, &aggregate_percentiles::p99 },
 } };
 
 /// Compile-time table linking each `stats` field to its JSON
 /// spelling. Drives both the writer (serialises in this order)
 /// and the reader (looks each field up by name). Adding a new
 /// per-cell statistic is a one-row edit (plus a slot in
-/// `AggregateStats`) that propagates to both sides automatically.
-struct AggregatedStatsEntry {
+/// `aggregate_statistics`) that propagates to both sides automatically.
+struct aggregated_statistics_entry {
     std::string_view  name;
-    double AggregateStats::* slot;
+    double aggregate_statistics::* slot;
 };
 
-inline constexpr std::array<AggregatedStatsEntry, 6>
-kAggregatedStatsRegistry{ {
-    { "min",    &AggregateStats::min    },
-    { "max",    &AggregateStats::max    },
-    { "mean",   &AggregateStats::mean   },
-    { "mean90", &AggregateStats::mean90 },
-    { "sum",    &AggregateStats::sum    },
-    { "stddev", &AggregateStats::stddev },
+inline constexpr std::array<aggregated_statistics_entry, 6>
+k_aggregated_stats_registry{ {
+    { "min",    &aggregate_statistics::min    },
+    { "max",    &aggregate_statistics::max    },
+    { "mean",   &aggregate_statistics::mean   },
+    { "mean90", &aggregate_statistics::mean90 },
+    { "sum",    &aggregate_statistics::sum    },
+    { "stddev", &aggregate_statistics::stddev },
 } };
 
 /// Compile-time reverse lookup `slot → JSON key`. Lets every
 /// reader path (sanity detector, future stats consumers) refer
-/// to a stat field by its `&AggregateStats::min` pointer-to-member
+/// to a stat field by its `&aggregate_statistics::min` pointer-to-member
 /// and resolve the spelling through the same registry the writer
 /// uses, so a renamed field flows everywhere automatically.
 /// DEBUG_ASSERTs on registry miss so a future rename that drops a
@@ -6975,18 +6910,17 @@ kAggregatedStatsRegistry{ {
 /// `json_double_or(*stats_obj, "?", 0.0)` lookup into a
 /// constant-zero false-positive.
 [[nodiscard]] inline std::string_view aggregated_stat_name(
-    double AggregateStats::* slot) noexcept
+    double aggregate_statistics::* slot) noexcept
 {
-    for (const auto& entry : kAggregatedStatsRegistry) {
+    for (const auto& entry : k_aggregated_stats_registry) {
         if (entry.slot == slot) return entry.name;
     }
     DEBUG_ASSERT(false,
-        "aggregated_stat_name: slot is not registered in kAggregatedStatsRegistry");
+        "aggregated_stat_name: slot is not registered in k_aggregated_stats_registry");
     return std::string_view{};
 }
 
 /// Copy of `samples` containing only finite entries (NaN / ±inf
-/// dropped). Single source of truth for the V17 finite-only
 /// invariant: any path that reduces a raw sample vector — the
 /// per-rule comparator overload of `aggregate_samples`, the
 /// report-time aggregator `aggregate_samples_for_report` — funnels
@@ -7054,48 +6988,48 @@ kAggregatedStatsRegistry{ {
 /// Used by:
 ///   * per-rule comparators inside one run (LHS / RHS aggregates);
 ///   * the regression evaluator's *current-run* side (the
-///     historical side reads via the AggregatedSamples overload).
+///     historical side reads via the aggregated_samples overload).
 ///
 /// Returns 0.0 when no finite samples remain. Sum/Min/Max take a
 /// fast path that skips the filter copy when every element is
 /// already finite (the common case); the percentile path always
 /// needs a mutable copy for `nth_element`.
 [[nodiscard]] inline double aggregate_samples(
-    Aggregate aggregate, const std::vector<double>& samples) noexcept
+    sample_aggregate aggregate, const std::vector<double>& samples) noexcept
 {
     if (samples.empty()) return 0.0;
     const bool all_finite = std::all_of(samples.begin(), samples.end(),
         [](double value) { return std::isfinite(value); });
-    if (all_finite && (aggregate == Aggregate::Sum
-                        || aggregate == Aggregate::Min
-                        || aggregate == Aggregate::Max))
+    if (all_finite && (aggregate == sample_aggregate::sum
+                        || aggregate == sample_aggregate::min
+                        || aggregate == sample_aggregate::max))
     {
         switch (aggregate) {
-            case Aggregate::Sum: {
+            case sample_aggregate::sum: {
                 double total = 0.0;
                 for (const double value : samples) total += value;
                 return total;
             }
-            case Aggregate::Min: return *std::min_element(samples.begin(), samples.end());
-            case Aggregate::Max: return *std::max_element(samples.begin(), samples.end());
+            case sample_aggregate::min: return *std::min_element(samples.begin(), samples.end());
+            case sample_aggregate::max: return *std::max_element(samples.begin(), samples.end());
             default: break;     // unreachable (gated above)
         }
     }
     std::vector<double> finite = all_finite ? samples : filter_finite(samples);
     if (finite.empty()) return 0.0;
     switch (aggregate) {
-        case Aggregate::Sum: {
+        case sample_aggregate::sum: {
             double total = 0.0;
             for (const double value : finite) total += value;
             return total;
         }
-        case Aggregate::Min:
+        case sample_aggregate::min:
             return *std::min_element(finite.begin(), finite.end());
-        case Aggregate::Max:
+        case sample_aggregate::max:
             return *std::max_element(finite.begin(), finite.end());
-        case Aggregate::P01:
-        case Aggregate::P50:
-        case Aggregate::P99: {
+        case sample_aggregate::p01:
+        case sample_aggregate::p50:
+        case sample_aggregate::p99: {
             // Discrete-index percentile: pick the sample at
             // `floor(p * (n - 1))` after a partial sort via
             // std::nth_element. Matches NumPy's "lower"
@@ -7126,21 +7060,21 @@ kAggregatedStatsRegistry{ {
 /// "no real data" from "an aggregate that genuinely equals 0"
 /// should gate on `has_finite_samples` first.
 [[nodiscard]] inline double aggregate_samples(
-    Aggregate aggregate, const AggregatedSamples& aggregated) noexcept
+    sample_aggregate aggregate, const aggregated_samples& aggregated) noexcept
 {
     if (aggregated.samples_count == 0) return 0.0;
     switch (aggregate) {
-        case Aggregate::Sum: return aggregated.stats.sum;
-        case Aggregate::Min: return aggregated.stats.min;
-        case Aggregate::Max: return aggregated.stats.max;
-        case Aggregate::P01: return aggregated.percentiles.p01;
-        case Aggregate::P50: return aggregated.percentiles.p50;
-        case Aggregate::P99: return aggregated.percentiles.p99;
+        case sample_aggregate::sum: return aggregated.stats.sum;
+        case sample_aggregate::min: return aggregated.stats.min;
+        case sample_aggregate::max: return aggregated.stats.max;
+        case sample_aggregate::p01: return aggregated.percentiles.p01;
+        case sample_aggregate::p50: return aggregated.percentiles.p50;
+        case sample_aggregate::p99: return aggregated.percentiles.p99;
     }
     return 0.0;
 }
 
-/// Build the `AggregatedSamples` view of a raw sample vector.
+/// Build the `aggregated_samples` view of a raw sample vector.
 /// Filters non-finite samples (NaN / ±inf) before any
 /// arithmetic. `samples_count` is the original (pre-filter) size
 /// — downstream consumers use it for the user-visible iteration
@@ -7150,10 +7084,10 @@ kAggregatedStatsRegistry{ {
 /// over/underflow `mean` to ±inf) are still possible. The writer
 /// pipes every emitted double through `sanitize_for_json`
 /// downstream so the on-disk form remains JSON-legal.
-[[nodiscard]] inline AggregatedSamples aggregate_samples_for_report(
+[[nodiscard]] inline aggregated_samples aggregate_samples_for_report(
     const std::vector<double>& samples) noexcept
 {
-    AggregatedSamples out{};
+    aggregated_samples out{};
     out.samples_count = samples.size();
     if (samples.empty()) return out;
 
@@ -7203,14 +7137,14 @@ kAggregatedStatsRegistry{ {
             std::sqrt(sq / static_cast<double>(finite.size() - 1));
     }
 
-    for (const auto& entry : kAggregatedPercentileRegistry) {
+    for (const auto& entry : k_aggregated_percentile_registry) {
         const auto idx = static_cast<std::size_t>(
             std::floor(entry.fraction
                        * static_cast<double>(finite.size() - 1)));
         out.percentiles.*(entry.slot) = finite[idx];
     }
 
-    const auto kbest = std::min(kKBestSize, finite.size());
+    const auto kbest = std::min(k_k_best_size, finite.size());
     out.top10.reserve(kbest);
     out.bottom10.reserve(kbest);
     for (std::size_t i = 0; i < kbest; ++i) {
@@ -7226,10 +7160,10 @@ kAggregatedStatsRegistry{ {
     // a non-finite width would produce `(value - min) / inf == NaN`,
     // and `static_cast<size_t>(NaN)` is UB.
     const double width = (out.stats.max - out.stats.min)
-                         / static_cast<double>(kHistogramBucketCount);
-    for (std::size_t i = 0; i < kHistogramBucketCount; ++i) {
+                         / static_cast<double>(k_histogram_bucket_count);
+    for (std::size_t i = 0; i < k_histogram_bucket_count; ++i) {
         out.histogram[i].from = out.stats.min + width * static_cast<double>(i);
-        out.histogram[i].to   = (i + 1 == kHistogramBucketCount)
+        out.histogram[i].to   = (i + 1 == k_histogram_bucket_count)
             ? out.stats.max
             : (out.stats.min + width * static_cast<double>(i + 1));
     }
@@ -7237,7 +7171,7 @@ kAggregatedStatsRegistry{ {
         for (const double value : finite) {
             auto bucket = static_cast<std::size_t>(
                 std::floor((value - out.stats.min) / width));
-            if (bucket >= kHistogramBucketCount) bucket = kHistogramBucketCount - 1;
+            if (bucket >= k_histogram_bucket_count) bucket = k_histogram_bucket_count - 1;
             out.histogram[bucket].count += 1;
         }
     } else {
@@ -7341,14 +7275,14 @@ static_assert(raw_schedule_shuffle_seed(
     return order;
 }
 
-// ----------------- Rule evaluation -----------------
+// ----------------- benchmark_rule evaluation -----------------
 
 /// True iff `tuple` satisfies the algorithm/parameter portion of `selector`.
 /// Source coordinates (`test_case`, `region`) are applied by the rule
 /// evaluator after it selects the corresponding report cell.
 [[nodiscard]] inline bool selector_matches(
-    const RuleSelector& selector,
-    const ExecutionTuple& tuple) noexcept
+    const rule_selector& selector,
+    const execution_tuple& tuple) noexcept
 {
     if (selector.algorithm_key != tuple.algorithm_name) return false;
     for (const auto& [required_key, required_value] : selector.match) {
@@ -7368,21 +7302,21 @@ static_assert(raw_schedule_shuffle_seed(
 ///         baseline reference, matching the spec example).
 ///
 /// Used by both per-rule comparisons (with both knobs from
-/// `RuleComparator`) and regression rules (which always pass
+/// `rule_comparator`) and regression rules (which always pass
 /// `threshold_pct = 0` because the schema forbids the field).
 [[nodiscard]] inline bool comparator_passes(
-    CompareOp op,
+    comparison_operator op,
     double lhs_aggregate, double rhs_aggregate,
     double threshold_pct, double tolerance_pct) noexcept
 {
     const double threshold = threshold_pct / 100.0;
     const double tolerance = tolerance_pct / 100.0;
     switch (op) {
-        case CompareOp::LessThan:
+        case comparison_operator::less_than:
             return lhs_aggregate < rhs_aggregate * (1.0 - threshold + tolerance);
-        case CompareOp::GreaterThan:
+        case comparison_operator::greater_than:
             return lhs_aggregate > rhs_aggregate * (1.0 + threshold - tolerance);
-        case CompareOp::Equal:
+        case comparison_operator::equal:
             return std::abs(lhs_aggregate - rhs_aggregate)
                    <= std::abs(rhs_aggregate) * tolerance;
     }
@@ -7390,10 +7324,10 @@ static_assert(raw_schedule_shuffle_seed(
 }
 
 /// Convenience overload for the per-rule comparator path. Forwards into
-/// the explicit-args overload so `RuleComparator` and `RegressionOperator`
+/// the explicit-args overload so `rule_comparator` and `regression_operator`
 /// share one implementation.
 [[nodiscard]] inline bool comparator_passes(
-    const RuleComparator& cmp,
+    const rule_comparator& cmp,
     double lhs_aggregate,
     double rhs_aggregate) noexcept
 {
@@ -7405,14 +7339,14 @@ static_assert(raw_schedule_shuffle_seed(
 /// implicitly zero — the regression schema rejects an explicit
 /// `threshold%` field, so there's no value to forward.
 [[nodiscard]] inline bool comparator_passes(
-    const RegressionOperator& op,
+    const regression_operator& op,
     double now_value,
     double previously_value) noexcept
 {
     // Ordered regression operators express a direction of change, but an
     // exactly unchanged zero (including either sign of IEEE zero) is not a
     // change at all.  Keep this exception local to regression rules: the
-    // within-run RuleComparator path intentionally retains strict `<` / `>`
+    // within-run rule_comparator path intentionally retains strict `<` / `>`
     // semantics, as do every non-zero ordered boundary below.
     if (now_value == 0.0 && previously_value == 0.0) return true;
     return comparator_passes(op.op, now_value, previously_value,
@@ -7421,15 +7355,15 @@ static_assert(raw_schedule_shuffle_seed(
 
 /// Per-cell map shape: `region -> metric -> samples`. Reused by the
 /// writer and rule evaluator to expose group-merged samples.
-using SampleMap = std::map<std::string, std::map<std::string, std::vector<double>>>;
+using sample_map = std::map<std::string, std::map<std::string, std::vector<double>>>;
 
-/// Concatenate every group cell's `samples` map into one `SampleMap`.
+/// Concatenate every group cell's `samples` map into one `sample_map`.
 /// Sample arrays append in cell-declaration order (= group_index order),
 /// so the result is deterministic. Empty input yields an empty map.
-[[nodiscard]] inline SampleMap merge_group_samples(
-    std::span<const Cell* const> group_cells)
+[[nodiscard]] inline sample_map merge_group_samples(
+    std::span<const measurement_cell* const> group_cells)
 {
-    SampleMap merged;
+    sample_map merged;
     for (const auto* cell_ptr : group_cells) {
         if (cell_ptr == nullptr) continue;
         for (const auto& [region_name, metric_map] : cell_ptr->samples) {
@@ -7449,28 +7383,28 @@ using SampleMap = std::map<std::string, std::map<std::string, std::vector<double
 /// `evaluate_regressions`, and the report writer so all three see the
 /// same group-merged numbers (reading multiple group cells separately
 /// would skew aggregates and Cartesian-product rule evaluations).
-using MergedSamplesByPair =
-    std::map<std::pair<const ExecutionTuple*, std::string>, SampleMap>;
+using merged_samples_by_pair =
+    std::map<std::pair<const execution_tuple*, std::string>, sample_map>;
 
-using NamedRegionIterationCoverage =
+using named_region_iteration_coverage =
     std::map<std::string, std::map<std::string, std::size_t>>;
-using MergedNamedRegionCoverageByPair =
-    std::map<std::pair<const ExecutionTuple*, std::string>,
-             NamedRegionIterationCoverage>;
+using merged_named_region_coverage_by_pair =
+    std::map<std::pair<const execution_tuple*, std::string>,
+             named_region_iteration_coverage>;
 
-[[nodiscard]] inline MergedSamplesByPair merged_samples_for_state(
-    const BenchmarkExecutionState& state)
+[[nodiscard]] inline merged_samples_by_pair merged_samples_for_state(
+    const benchmark_execution_state& state)
 {
-    std::map<std::pair<const ExecutionTuple*, std::string>,
-             std::vector<const Cell*>> by_pair;
+    std::map<std::pair<const execution_tuple*, std::string>,
+             std::vector<const measurement_cell*>> by_pair;
     for (const auto& cell_ptr : state.cells) {
         by_pair[{cell_ptr->tuple, cell_ptr->test_case->name}]
             .push_back(cell_ptr.get());
     }
-    MergedSamplesByPair merged;
+    merged_samples_by_pair merged;
     for (auto& [pair_key, cells_for_pair] : by_pair) {
         merged[pair_key] = merge_group_samples(
-            std::span<const Cell* const>(
+            std::span<const measurement_cell* const>(
                 cells_for_pair.data(), cells_for_pair.size()));
     }
     return merged;
@@ -7479,11 +7413,11 @@ using MergedNamedRegionCoverageByPair =
 /// Sum the per-cell, per-iteration named-region contribution markers across
 /// groups. Duplicate descriptors with the same name contribute one marker per
 /// iteration, so the final value can be compared directly with matrix.for.
-[[nodiscard]] inline MergedNamedRegionCoverageByPair
+[[nodiscard]] inline merged_named_region_coverage_by_pair
 merged_named_region_coverage_for_state(
-    const BenchmarkExecutionState& state)
+    const benchmark_execution_state& state)
 {
-    MergedNamedRegionCoverageByPair merged;
+    merged_named_region_coverage_by_pair merged;
     for (const auto& cell_ptr : state.cells) {
         auto& target = merged[{cell_ptr->tuple, cell_ptr->test_case->name}];
         for (const auto& [region_name, metric_counts] :
@@ -7497,8 +7431,8 @@ merged_named_region_coverage_for_state(
 }
 
 [[nodiscard]] inline std::size_t fetch_merged_named_region_coverage(
-    const MergedNamedRegionCoverageByPair& merged,
-    const ExecutionTuple* tuple,
+    const merged_named_region_coverage_by_pair& merged,
+    const execution_tuple* tuple,
     const std::string& test_case_name,
     const std::string& region_name,
     const std::string& metric_name) noexcept
@@ -7512,29 +7446,29 @@ merged_named_region_coverage_for_state(
     return metric_it->second;
 }
 
-/// Merge only the cells belonging to `case_name` (== ExecutionTuple::
-/// algorithm_name) into a (tuple,test_case)->SampleMap index. Used by the
+/// Merge only the cells belonging to `case_name` (== execution_tuple::
+/// algorithm_name) into a (tuple,test_case)->sample_map index. Used by the
 /// `--debug` sink to serialize one completed case. Safe because the case's
 /// cells are all finished and immutable when this runs (§4.5).
-[[nodiscard]] inline MergedSamplesByPair merge_case_samples(
-    const BenchmarkExecutionState& state, std::string_view case_name) {
-    std::map<std::pair<const ExecutionTuple*, std::string>,
-             std::vector<const Cell*>> by_pair;
+[[nodiscard]] inline merged_samples_by_pair merge_case_samples(
+    const benchmark_execution_state& state, std::string_view case_name) {
+    std::map<std::pair<const execution_tuple*, std::string>,
+             std::vector<const measurement_cell*>> by_pair;
     for (const auto& cell_ptr : state.cells)
         if (cell_ptr->tuple->algorithm_name == case_name)
             by_pair[{cell_ptr->tuple, cell_ptr->test_case->name}].push_back(cell_ptr.get());
-    MergedSamplesByPair merged;
+    merged_samples_by_pair merged;
     for (auto& [pair_key, cells_for_pair] : by_pair)
         merged[pair_key] = merge_group_samples(
-            std::span<const Cell* const>(cells_for_pair.data(), cells_for_pair.size()));
+            std::span<const measurement_cell* const>(cells_for_pair.data(), cells_for_pair.size()));
     return merged;
 }
 
 /// Look up `region_name -> metric_name -> samples` inside a merged
 /// view. Returns nullptr when any link in the chain is missing.
 [[nodiscard]] inline const std::vector<double>* fetch_merged_samples(
-    const MergedSamplesByPair& merged,
-    const ExecutionTuple* tuple,
+    const merged_samples_by_pair& merged,
+    const execution_tuple* tuple,
     const std::string& test_case_name,
     const std::string& region_name,
     const std::string& metric_name) noexcept
@@ -7555,10 +7489,10 @@ merged_named_region_coverage_for_state(
 /// vector and each partition is reduced with the rule's configured aggregate
 /// into one repeat value. This retains the historical descriptor semantics
 /// without pairing unrelated run-level percentiles.
-struct LogicalIterationSeries {
+struct logical_iteration_series {
     std::vector<double> values{};
     std::vector<std::vector<double>> descriptor_samples{};
-    std::vector<IterationScheduleSample> schedule_samples{};
+    std::vector<iteration_schedule_sample> schedule_samples{};
     std::size_t tuple_index = 0;
     std::size_t test_case_index = 0;
     std::size_t group_index = 0;
@@ -7566,16 +7500,16 @@ struct LogicalIterationSeries {
     bool complete = false;
 };
 
-[[nodiscard]] inline LogicalIterationSeries logical_iteration_series(
-    const BenchmarkExecutionState& state,
-    const ExecutionTuple* tuple,
+[[nodiscard]] inline logical_iteration_series logical_iteration_series(
+    const benchmark_execution_state& state,
+    const execution_tuple* tuple,
     const std::string& test_case_name,
     const std::string& region_name,
     const std::string& metric_name,
-    const Aggregate descriptor_aggregate)
+    const sample_aggregate descriptor_aggregate)
 {
-    LogicalIterationSeries result;
-    const Cell* selected_cell = nullptr;
+    logical_iteration_series result;
+    const measurement_cell* selected_cell = nullptr;
     for (const auto& cell_ptr : state.cells) {
         if (cell_ptr->tuple != tuple
             || cell_ptr->test_case->name != test_case_name) {
@@ -7657,9 +7591,9 @@ struct LogicalIterationSeries {
 }
 
 [[nodiscard]] inline std::optional<double> aggregate_paired_ratios(
-    const RuleComparator& comparator,
-    const LogicalIterationSeries& lhs,
-    const LogicalIterationSeries& rhs)
+    const rule_comparator& comparator,
+    const logical_iteration_series& lhs,
+    const logical_iteration_series& rhs)
 {
     if (!lhs.complete || !rhs.complete
         || lhs.values.size() != rhs.values.size()
@@ -7688,22 +7622,22 @@ struct LogicalIterationSeries {
 /// Schedule matching is part of acceptance: a numerical ratio cannot be
 /// accepted when the two source cells lack the actual interleaved coordinates
 /// needed to prove that repeat N was compared with repeat N.
-[[nodiscard]] inline PairedRuleEvidence make_paired_rule_evidence(
-    const BenchmarkExecutionState& state,
-    const Rule& rule,
+[[nodiscard]] inline paired_rule_evidence make_paired_rule_evidence(
+    const benchmark_execution_state& state,
+    const benchmark_rule& rule,
     const std::string& test_case_name,
     const std::string& lhs_region,
     const std::string& rhs_region,
-    const ExecutionTuple* lhs_tuple,
-    const ExecutionTuple* rhs_tuple,
+    const execution_tuple* lhs_tuple,
+    const execution_tuple* rhs_tuple,
     const std::size_t iterations,
     const bool lhs_source_present,
     const bool rhs_source_present,
-    const LogicalIterationSeries& lhs,
-    const LogicalIterationSeries& rhs,
+    const logical_iteration_series& lhs,
+    const logical_iteration_series& rhs,
     const std::optional<double> observed_paired_ratio)
 {
-    PairedRuleEvidence evidence;
+    paired_rule_evidence evidence;
     evidence.config_path = state.config.config_path;
     evidence.benchmark_key = state.config.benchmark_key;
     evidence.rule_name = rule.name;
@@ -7713,7 +7647,7 @@ struct LogicalIterationSeries {
     evidence.benchmark_index = state.driver_benchmark_index;
     evidence.group_index = 0;
     evidence.schedule_mode = state.config.iteration_order
-            == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+            == benchmark_configuration::iteration_order_mode::interleaved_seeded
         ? "interleaved_seeded" : "item_major";
     evidence.configured_schedule_seed = state.config.iteration_order_seed;
 
@@ -7721,7 +7655,7 @@ struct LogicalIterationSeries {
         lhs_tuple - state.execution_tuples.data());
     const auto rhs_tuple_index = static_cast<std::size_t>(
         rhs_tuple - state.execution_tuples.data());
-    evidence.numerator_route = PairedRuleRouteEvidence{
+    evidence.numerator_route = paired_rule_route_evidence{
         .algorithm = lhs_tuple->algorithm_name,
         .params = lhs_tuple->params,
         .tuple_index = lhs_tuple_index,
@@ -7729,7 +7663,7 @@ struct LogicalIterationSeries {
         .region = lhs_region,
         .metric = rule.metric_name,
     };
-    evidence.denominator_route = PairedRuleRouteEvidence{
+    evidence.denominator_route = paired_rule_route_evidence{
         .algorithm = rhs_tuple->algorithm_name,
         .params = rhs_tuple->params,
         .tuple_index = rhs_tuple_index,
@@ -7751,7 +7685,7 @@ struct LogicalIterationSeries {
     std::vector<std::size_t> scheduled_tuple_indices;
     bool schedule_topology_matches = test_case_found
         && state.config.iteration_order
-            == BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+            == benchmark_configuration::iteration_order_mode::interleaved_seeded;
     for (const auto& cell : state.cells) {
         if (cell->test_case->name != test_case_name) continue;
         if (cell->group_count != 1 || cell->group_index != 0
@@ -7786,7 +7720,7 @@ struct LogicalIterationSeries {
         && lhs.schedule_samples.size() == iterations
         && rhs.schedule_samples.size() == iterations;
     for (std::size_t repeat = 0; repeat < iterations; ++repeat) {
-        PairedRuleRepeatEvidence repeat_evidence;
+        paired_rule_repeat_evidence repeat_evidence;
         repeat_evidence.repeat = repeat;
         repeat_evidence.included_after_warmup =
             repeat >= rule.cmp.warmup_repetitions;
@@ -7898,13 +7832,12 @@ struct LogicalIterationSeries {
 }
 
 /// Apply every rule against every test case and collect failures. With
-/// V11's per-group cells, samples are merged once per `(tuple,
 /// test_case)` *before* the rule loop so LHS/RHS aggregates are computed
 /// from the same merged sample arrays the report writer will emit.
 inline void evaluate_rules(
-    const BenchmarkExecutionState& state,
-    std::vector<Violation>& violations,
-    std::vector<PairedRuleEvidence>& paired_rule_evidence)
+    const benchmark_execution_state& state,
+    std::vector<violation>& violations,
+    std::vector<paired_rule_evidence>& paired_rule_evidence)
 {
     const auto merged = merged_samples_for_state(state);
     const auto named_region_coverage =
@@ -7923,8 +7856,8 @@ inline void evaluate_rules(
                 // Collect tuple* on each side so we evaluate the rule
                 // exactly once per (LHS_tuple, RHS_tuple) pair, never
                 // duplicated across groups.
-                std::vector<const ExecutionTuple*> lhs_tuples;
-                std::vector<const ExecutionTuple*> rhs_tuples;
+                std::vector<const execution_tuple*> lhs_tuples;
+                std::vector<const execution_tuple*> rhs_tuples;
                 for (const auto& tuple : state.execution_tuples) {
                     if (selector_matches(rule.lhs, tuple)) lhs_tuples.push_back(&tuple);
                     if (selector_matches(rule.rhs, tuple)) rhs_tuples.push_back(&tuple);
@@ -7945,7 +7878,7 @@ inline void evaluate_rules(
                             rhs_region, rule.metric_name);
                         const auto source_is_measured =
                             [&merged, &test_case_name](
-                                const ExecutionTuple* tuple) noexcept {
+                                const execution_tuple* tuple) noexcept {
                                 const auto source_it = merged.find(
                                     {tuple, test_case_name});
                                 if (source_it == merged.end()) return false;
@@ -7961,7 +7894,7 @@ inline void evaluate_rules(
                             rhs_region == "all_regions" ? iterations : 0;
                         const auto named_region_is_complete =
                             [&state, &named_region_coverage, &test_case_name,
-                             iterations](const ExecutionTuple* tuple,
+                             iterations](const execution_tuple* tuple,
                                          const std::string& region,
                                          const std::string& metric_name) noexcept {
                                 return region == "all_regions"
@@ -7993,7 +7926,7 @@ inline void evaluate_rules(
                         std::optional<bool> paired_evidence_accepted;
                         std::optional<bool> exact_iteration_accepted;
                         if (rule.cmp.pairing
-                            == RuleComparator::PairingMode::by_iteration_ratio) {
+                            == rule_comparator::pairing_mode::by_iteration_ratio) {
                             const bool lhs_source_present = lhs_present;
                             const bool rhs_source_present = rhs_present;
                             const auto lhs_logical = logical_iteration_series(
@@ -8029,7 +7962,7 @@ inline void evaluate_rules(
                             rhs_aggregate = paired_present
                                 ? rule.cmp.paired_baseline : 0.0;
                         } else if (rule.cmp.pairing
-                                   == RuleComparator::PairingMode::
+                                   == rule_comparator::pairing_mode::
                                        by_iteration_exact) {
                             exact_iteration_accepted = false;
                             if (lhs_present && rhs_present
@@ -8069,7 +8002,7 @@ inline void evaluate_rules(
                             continue;
                         }
 
-                        Violation violation;
+                        violation violation;
                         violation.config_path     = state.config.config_path;
                         violation.benchmark_key   = state.config.benchmark_key;
                         violation.rule_name       = rule.name;
@@ -8141,7 +8074,7 @@ inline void evaluate_rules(
 /// Wall-clock Unix epoch in milliseconds. The single wall-clock-epoch helper
 /// in the framework: the debug event log uses it directly (ms granularity for
 /// sub-second ordering within a run), and `capture_run_meta` sources its
-/// epoch-seconds `meta.timestamp` from it (`/ 1000`). (`bioseq::instr::clock::
+/// epoch-seconds `meta.timestamp` from it (`/ 1000`). (`bioseq::instrumentation::clock::
 /// now_ns` is a *monotonic* steady clock, unsuitable for wall-clock event
 /// timestamps, so it is not reused here.)
 [[nodiscard]] inline std::int64_t now_unix_millis() noexcept {
@@ -8150,12 +8083,12 @@ inline void evaluate_rules(
 }
 
 /// Capture this run's identity in a single struct. Called once from
-/// `run_impl`; the resulting `ReportMeta` is forwarded to both the
+/// `run_impl`; the resulting `report_metadata` is forwarded to both the
 /// report writer (for the `meta` block) and the regression evaluator
 /// (which doesn't need most fields, but takes the whole struct for
 /// future-proofing).
-[[nodiscard]] inline ReportMeta capture_run_meta(bool fast_filter) noexcept {
-    ReportMeta meta;
+[[nodiscard]] inline report_metadata capture_run_meta(bool fast_filter) noexcept {
+    report_metadata meta;
     meta.commit = git_head_commit();
     meta.dirty  = git_working_tree_dirty();
     meta.fast   = fast_filter;
@@ -8182,17 +8115,17 @@ inline void evaluate_rules(
 /// regardless of how the wrapper is moved (it isn't — see deleted move
 /// ctors). Heap allocation via `std::unique_ptr` (in the cache below)
 /// gives stable pointers.
-struct ParsedHistoricalReport {
+struct parsed_historical_report {
     std::string                body;
     simdjson::dom::parser      parser;
     simdjson::dom::element     root;
     std::size_t                index = 0;
 
-    ParsedHistoricalReport() = default;
-    ParsedHistoricalReport(const ParsedHistoricalReport&) = delete;
-    ParsedHistoricalReport& operator=(const ParsedHistoricalReport&) = delete;
-    ParsedHistoricalReport(ParsedHistoricalReport&&) = delete;
-    ParsedHistoricalReport& operator=(ParsedHistoricalReport&&) = delete;
+    parsed_historical_report() = default;
+    parsed_historical_report(const parsed_historical_report&) = delete;
+    parsed_historical_report& operator=(const parsed_historical_report&) = delete;
+    parsed_historical_report(parsed_historical_report&&) = delete;
+    parsed_historical_report& operator=(parsed_historical_report&&) = delete;
 };
 
 /// Resolve the path of `report_<index>.json` inside `report_dir`.
@@ -8215,16 +8148,16 @@ struct ParsedHistoricalReport {
         if (ec) break;
         if (!entry.is_regular_file(ec) || ec) continue;
         const auto filename = entry.path().filename().string();
-        constexpr std::string_view kPrefix = "report_";
-        constexpr std::string_view kSuffix = ".json";
-        if (filename.size() <= kPrefix.size() + kSuffix.size()) continue;
-        if (filename.compare(0, kPrefix.size(), kPrefix.data(), kPrefix.size()) != 0) continue;
-        if (filename.compare(filename.size() - kSuffix.size(),
-                              kSuffix.size(),
-                              kSuffix.data(), kSuffix.size()) != 0) continue;
+        constexpr std::string_view k_prefix = "report_";
+        constexpr std::string_view k_suffix = ".json";
+        if (filename.size() <= k_prefix.size() + k_suffix.size()) continue;
+        if (filename.compare(0, k_prefix.size(), k_prefix.data(), k_prefix.size()) != 0) continue;
+        if (filename.compare(filename.size() - k_suffix.size(),
+                              k_suffix.size(),
+                              k_suffix.data(), k_suffix.size()) != 0) continue;
         const auto digits = filename.substr(
-            kPrefix.size(),
-            filename.size() - kPrefix.size() - kSuffix.size());
+            k_prefix.size(),
+            filename.size() - k_prefix.size() - k_suffix.size());
         if (digits.empty()) continue;
         bool digits_only = true;
         for (const char ch : digits) {
@@ -8296,13 +8229,13 @@ struct ParsedHistoricalReport {
 /// Load and parse `report_<index>.json` from disk. Returns nullptr when
 /// the file is missing or the JSON body fails to parse — both of which
 /// are downgraded to "history gap" by the regression evaluator.
-[[nodiscard]] inline std::unique_ptr<ParsedHistoricalReport> load_report_at_index(
+[[nodiscard]] inline std::unique_ptr<parsed_historical_report> load_report_at_index(
     const std::filesystem::path& report_dir, std::size_t index) noexcept
 {
     const auto path = report_path_for_index(report_dir, index);
     auto body = slurp_file(path);
     if (body.empty()) return nullptr;
-    auto holder = std::make_unique<ParsedHistoricalReport>();
+    auto holder = std::make_unique<parsed_historical_report>();
     holder->index = index;
     holder->body  = std::move(body);
     if (holder->parser.parse(holder->body).get(holder->root) != simdjson::SUCCESS) {
@@ -8312,18 +8245,18 @@ struct ParsedHistoricalReport {
 }
 
 /// Compare a JSON value (from a parsed historical report) against a
-/// `ConfigValue` (from the current run's tuple). Numbers are matched
+/// `config_value` (from the current run's tuple). Numbers are matched
 /// across the integer/double divide so a round-trip like 10 → 10.0 → 10
 /// still compares equal.
 [[nodiscard]] inline bool simdjson_equals_config_value(
-    simdjson::dom::element json_value, const ConfigValue& cv) noexcept
+    simdjson::dom::element json_value, const config_value& cv) noexcept
 {
     switch (cv.kind) {
-        case ConfigValue::Kind::String: {
+        case config_value::value_kind::string: {
             std::string_view sv;
             return json_value.get(sv) == simdjson::SUCCESS && sv == cv.string_value;
         }
-        case ConfigValue::Kind::Integer: {
+        case config_value::value_kind::integer: {
             std::int64_t i_value = 0;
             if (json_value.get(i_value) == simdjson::SUCCESS) {
                 return i_value == cv.integer_value;
@@ -8338,7 +8271,7 @@ struct ParsedHistoricalReport {
             }
             return false;
         }
-        case ConfigValue::Kind::Double: {
+        case config_value::value_kind::floating_point: {
             double d_value = 0.0;
             if (json_value.get(d_value) == simdjson::SUCCESS) {
                 return d_value == cv.double_value;
@@ -8349,12 +8282,12 @@ struct ParsedHistoricalReport {
             }
             return false;
         }
-        case ConfigValue::Kind::Boolean: {
+        case config_value::value_kind::boolean: {
             bool b_value = false;
             return json_value.get(b_value) == simdjson::SUCCESS
                    && b_value == cv.boolean_value;
         }
-        case ConfigValue::Kind::NonScalar:
+        case config_value::value_kind::non_scalar:
             return false;
     }
     return false;
@@ -8380,7 +8313,6 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
 }
 
 /// Pull the `meta.commit` string from a parsed report's root object.
-/// Returns "" when the report has no `meta` block (pre-V5 format), no
 /// `commit` field inside `meta`, or the field isn't a string. Used by
 /// the regression evaluator to populate `regression_since_commit`.
 [[nodiscard]] inline std::string commit_from_report(
@@ -8455,27 +8387,27 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
 }
 
 /// Parse one `region_block.<metric>` object into an
-/// `AggregatedSamples`. Missing optional sub-objects collapse to
+/// `aggregated_samples`. Missing optional sub-objects collapse to
 /// default-constructed values; consumers that need the full shape
 /// (sanity warnings, regression eval, --ui) check
 /// `samples_count > 0` and `top10.empty()` upfront.
-[[nodiscard]] inline AggregatedSamples parse_aggregated_samples(
+[[nodiscard]] inline aggregated_samples parse_aggregated_samples(
     simdjson::dom::object metric_obj) noexcept
 {
-    AggregatedSamples agg{};
+    aggregated_samples agg{};
     agg.samples_count = static_cast<std::size_t>(std::max<std::int64_t>(
         0, json_int_or(metric_obj, "samples_count", 0)));
     if (const auto stats_obj = try_get_object(metric_obj, "stats");
         stats_obj.has_value())
     {
-        for (const auto& entry : kAggregatedStatsRegistry) {
+        for (const auto& entry : k_aggregated_stats_registry) {
             agg.stats.*(entry.slot) = json_double_or(*stats_obj, entry.name, 0.0);
         }
     }
     if (const auto pct_obj = try_get_object(metric_obj, "percentiles");
         pct_obj.has_value())
     {
-        for (const auto& entry : kAggregatedPercentileRegistry) {
+        for (const auto& entry : k_aggregated_percentile_registry) {
             agg.percentiles.*(entry.slot) =
                 json_double_or(*pct_obj, entry.name, 0.0);
         }
@@ -8484,7 +8416,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     /// (corrupt historical reports) are dropped silently — the
     /// resulting array may shrink below the source length, breaking
     /// the documented `top10[0] == stats.max` invariant of an
-    /// aggregator-built `AggregatedSamples`. Consumers that depend
+    /// aggregator-built `aggregated_samples`. Consumers that depend
     /// on exact alignment with the source must check
     /// `top10.size() == bottom10.size()` themselves; the regression
     /// evaluator and the interactive UI only consult percentile
@@ -8529,7 +8461,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
         // `count == 0`) and later slots stay aligned with the source.
         std::size_t bucket_index = 0;
         for (auto bucket_elem : hist_arr) {
-            if (bucket_index >= kHistogramBucketCount) break;
+            if (bucket_index >= k_histogram_bucket_count) break;
             if (const auto bucket_obj = try_as_object(bucket_elem);
                 bucket_obj.has_value())
             {
@@ -8555,7 +8487,7 @@ aggregated_metric_object_from_report(
     simdjson::dom::element report_root,
     std::string_view benchmark,
     std::string_view algorithm_name,
-    const ParamMap&  params,
+    const parameter_map&  params,
     std::string_view test_case,
     std::string_view region,
     std::string_view metric)
@@ -8612,11 +8544,11 @@ aggregated_metric_object_from_report(
 /// any path miss. The general historical-report UI remains permissive here;
 /// regression candidate selection performs its stricter integrity checks on
 /// `aggregated_metric_object_from_report` before accepting a baseline.
-[[nodiscard]] inline std::optional<AggregatedSamples> aggregated_from_report(
+[[nodiscard]] inline std::optional<aggregated_samples> aggregated_from_report(
     simdjson::dom::element report_root,
     std::string_view benchmark,
     std::string_view algorithm_name,
-    const ParamMap&  params,
+    const parameter_map&  params,
     std::string_view test_case,
     std::string_view region,
     std::string_view metric)
@@ -8631,26 +8563,26 @@ aggregated_metric_object_from_report(
 /// Lazy parser-cache for historical reports. Each `report_<N>.json`
 /// is parsed at most once per cache instance even if multiple
 /// consumers (regressions, sanity warnings) ask for the same index.
-/// `ParsedHistoricalReport` is held via `unique_ptr` because it pins
+/// `parsed_historical_report` is held via `unique_ptr` because it pins
 /// (the inner simdjson parser is non-movable). Stack-allocated;
 /// freed at the end of `run_impl`'s evaluation phase.
-struct HistoricalReportCache {
+struct historical_report_cache {
     std::filesystem::path                                                report_dir;
-    std::map<std::size_t, std::unique_ptr<ParsedHistoricalReport>>      cached{};
+    std::map<std::size_t, std::unique_ptr<parsed_historical_report>>      cached{};
     std::set<std::size_t>                                                known_missing{};
 
-    explicit HistoricalReportCache(std::filesystem::path dir) noexcept
+    explicit historical_report_cache(std::filesystem::path dir) noexcept
         : report_dir(std::move(dir)) {}
 
-    HistoricalReportCache(const HistoricalReportCache&) = delete;
-    HistoricalReportCache& operator=(const HistoricalReportCache&) = delete;
-    HistoricalReportCache(HistoricalReportCache&&) = delete;
-    HistoricalReportCache& operator=(HistoricalReportCache&&) = delete;
+    historical_report_cache(const historical_report_cache&) = delete;
+    historical_report_cache& operator=(const historical_report_cache&) = delete;
+    historical_report_cache(historical_report_cache&&) = delete;
+    historical_report_cache& operator=(historical_report_cache&&) = delete;
 
     /// Fetch (loading on demand) the report at `index`. Returns nullptr
     /// once for a missing report and remembers that miss so subsequent
     /// fetches don't re-touch the filesystem.
-    [[nodiscard]] ParsedHistoricalReport* fetch(std::size_t index) noexcept {
+    [[nodiscard]] parsed_historical_report* fetch(std::size_t index) noexcept {
         if (known_missing.count(index) > 0) return nullptr;
         if (auto it = cached.find(index); it != cached.end()) {
             return it->second.get();
@@ -8819,19 +8751,19 @@ historical_run_outcome_ineligibility_reason(
 /// selected field is mandatory and finite on this authoritative path.
 [[nodiscard]] inline std::optional<double>
 strict_historical_aggregate_value(
-    simdjson::dom::object metric_obj, Aggregate aggregate) noexcept
+    simdjson::dom::object metric_obj, sample_aggregate aggregate) noexcept
 {
-    if (aggregate == Aggregate::P01
-        || aggregate == Aggregate::P50
-        || aggregate == Aggregate::P99) {
+    if (aggregate == sample_aggregate::p01
+        || aggregate == sample_aggregate::p50
+        || aggregate == sample_aggregate::p99) {
         const auto percentiles = try_get_object(metric_obj, "percentiles");
         if (!percentiles.has_value()) return std::nullopt;
         switch (aggregate) {
-            case Aggregate::P01:
+            case sample_aggregate::p01:
                 return strict_finite_json_number_field(*percentiles, "P01");
-            case Aggregate::P50:
+            case sample_aggregate::p50:
                 return strict_finite_json_number_field(*percentiles, "P50");
-            case Aggregate::P99:
+            case sample_aggregate::p99:
                 return strict_finite_json_number_field(*percentiles, "P99");
             default:
                 return std::nullopt;
@@ -8841,15 +8773,15 @@ strict_historical_aggregate_value(
     const auto stats = try_get_object(metric_obj, "stats");
     if (!stats.has_value()) return std::nullopt;
     switch (aggregate) {
-        case Aggregate::Sum:
+        case sample_aggregate::sum:
             return strict_finite_json_number_field(*stats, "sum");
-        case Aggregate::Min:
+        case sample_aggregate::min:
             return strict_finite_json_number_field(*stats, "min");
-        case Aggregate::Max:
+        case sample_aggregate::max:
             return strict_finite_json_number_field(*stats, "max");
-        case Aggregate::P01:
-        case Aggregate::P50:
-        case Aggregate::P99:
+        case sample_aggregate::p01:
+        case sample_aggregate::p50:
+        case sample_aggregate::p99:
             return std::nullopt;
     }
     return std::nullopt;
@@ -8864,7 +8796,7 @@ strict_historical_finite_sample_count(
 {
     simdjson::dom::array histogram;
     if (metric_obj.at_key("histogram").get(histogram) != simdjson::SUCCESS
-        || histogram.size() != kHistogramBucketCount) {
+        || histogram.size() != k_histogram_bucket_count) {
         return std::nullopt;
     }
     std::size_t total = 0;
@@ -8882,18 +8814,18 @@ strict_historical_finite_sample_count(
 }
 
 /// One accepted historical comparison point. The report pointer is pinned by
-/// `HistoricalReportCache`; `aggregate_value` is the strictly parsed statistic
+/// `historical_report_cache`; `aggregate_value` is the strictly parsed statistic
 /// selected by the active regression rule.
-struct HistoricalRegressionCandidate {
-    ParsedHistoricalReport* report = nullptr;
+struct historical_regression_candidate {
+    parsed_historical_report* report = nullptr;
     double aggregate_value = 0.0;
 };
 
 /// Cached result for one report index. `candidate` is populated only when all
 /// eligibility gates pass; otherwise `reason` is suitable for the required
 /// non-blocking skipped-candidate diagnostic.
-struct HistoricalRegressionCandidateAssessment {
-    std::optional<HistoricalRegressionCandidate> candidate{};
+struct historical_regression_candidate_assessment {
+    std::optional<historical_regression_candidate> candidate{};
     std::string reason{};
 };
 
@@ -8901,29 +8833,29 @@ struct HistoricalRegressionCandidateAssessment {
 /// `regression_since` walk share this exact instance, so they cannot disagree
 /// about completeness, mode, tuple identity, or sample topology. Assessments
 /// are cached by report index to avoid re-walking DOM trees.
-struct HistoricalRegressionCandidateSelector {
-    HistoricalReportCache& reports;
+struct historical_regression_candidate_selector {
+    historical_report_cache& reports;
     bool current_fast = false;
     std::string_view benchmark;
     std::string_view algorithm_name;
-    const ParamMap& params;
+    const parameter_map& params;
     std::string_view test_case;
     std::string_view region;
     std::string_view metric;
-    Aggregate aggregate = Aggregate::Sum;
+    sample_aggregate aggregate = sample_aggregate::sum;
     std::size_t expected_sample_count = 0;
     std::size_t expected_finite_count = 0;
-    std::map<std::size_t, HistoricalRegressionCandidateAssessment> cached{};
+    std::map<std::size_t, historical_regression_candidate_assessment> cached{};
 
     /// Assess `report_index` once and return the cached result thereafter.
-    [[nodiscard]] const HistoricalRegressionCandidateAssessment& assess(
+    [[nodiscard]] const historical_regression_candidate_assessment& assess(
         std::size_t report_index) noexcept
     {
         if (const auto found = cached.find(report_index); found != cached.end()) {
             return found->second;
         }
 
-        HistoricalRegressionCandidateAssessment assessment;
+        historical_regression_candidate_assessment assessment;
         auto* report = reports.fetch(report_index);
         if (report == nullptr) {
             assessment.reason = "report is missing or malformed";
@@ -8973,7 +8905,7 @@ struct HistoricalRegressionCandidateSelector {
                         "selected {} aggregate is missing, malformed, or non-finite",
                         aggregate_name(aggregate));
                 } else {
-                    assessment.candidate = HistoricalRegressionCandidate{
+                    assessment.candidate = historical_regression_candidate{
                         .report = report,
                         .aggregate_value = *selected_value,
                     };
@@ -8999,7 +8931,6 @@ struct HistoricalRegressionCandidateSelector {
 /// Walk an entire historical report's
 /// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric_name>`
 /// tree and collect a distinct-value set capturing every sample
-/// seen for `metric_name`, *as observed through the V17 aggregate
 /// shape*. Returns an empty set when the metric was absent in that
 /// report (or when the report's structure is unparseable). Linear
 /// in the report size; called at most once per `(metric,
@@ -9008,14 +8939,12 @@ struct HistoricalRegressionCandidateSelector {
 ///
 /// The aggregate per cell carries `min` and `max` (over the finite
 /// subset) plus an empty-vs-non-empty `top10`. From these we can
-/// drive the existing detector identically to the pre-V17 raw-
 /// vector walk:
 ///
 ///   * `samples_count == 0` → cell is empty, contributes nothing.
 ///   * `top10` empty (`samples_count > 0`) → every emitted sample
 ///     was non-finite. Insert a NaN sentinel so an all-NaN run
 ///     reports as `metric_looks_constant` with a NaN-flavoured
-///     message — matching pre-V17 semantics where every NaN bit
 ///     pattern collapsed into one set entry.
 ///   * `min == max` → every finite sample in this cell shares one
 ///     value `V`; insert `bit_cast<u64>(V)`.
@@ -9070,9 +8999,9 @@ struct HistoricalRegressionCandidateSelector {
                     const auto stats_obj = try_get_object(metric_obj, "stats");
                     if (!stats_obj.has_value()) continue;
                     const double min_value = json_double_or(*stats_obj,
-                        aggregated_stat_name(&AggregateStats::min), 0.0);
+                        aggregated_stat_name(&aggregate_statistics::min), 0.0);
                     const double max_value = json_double_or(*stats_obj,
-                        aggregated_stat_name(&AggregateStats::max), 0.0);
+                        aggregated_stat_name(&aggregate_statistics::max), 0.0);
                     result.insert(double_bits(min_value));
                     if (max_value != min_value) {
                         result.insert(double_bits(max_value));
@@ -9130,16 +9059,15 @@ struct HistoricalRegressionCandidateSelector {
 /// **Non-blocking.** Sanity warnings are surfaced but never affect
 /// the framework's exit code. The list is sorted alphabetically by
 /// metric name for diff-friendly output.
-[[nodiscard]] inline std::vector<SanityWarning> evaluate_sanity_warnings(
-    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
-    const ReportMeta&            current_meta,
+[[nodiscard]] inline std::vector<sanity_warning> evaluate_sanity_warnings(
+    const std::map<std::string, std::shared_ptr<benchmark_execution_state>>& reports,
+    const report_metadata&            current_meta,
     std::size_t                  current_index,
-    HistoricalReportCache&       history_cache) noexcept
+    historical_report_cache&       history_cache) noexcept
 {
     // 1. Collect distinct bit-patterns per metric name across every
     //    cell of the current run. We funnel through
     //    `aggregate_samples_for_report` so the constancy lens
-    //    (min/max + NaN-stuck sentinel) matches the V17 historical-
     //    side reader (`distinct_sample_bits_for_metric`) exactly.
     std::map<std::string, std::set<std::uint64_t>> distinct_bits_by_metric;
     for (const auto& [_bench_key, state_ptr] : reports) {
@@ -9167,7 +9095,7 @@ struct HistoricalRegressionCandidateSelector {
         }
     }
 
-    std::vector<SanityWarning> warnings;
+    std::vector<sanity_warning> warnings;
     warnings.reserve(distinct_bits_by_metric.size());
 
     for (const auto& [metric_name, distinct_bits] : distinct_bits_by_metric) {
@@ -9244,7 +9172,7 @@ struct HistoricalRegressionCandidateSelector {
             }
         }
 
-        SanityWarning warning;
+        sanity_warning warning;
         warning.type   = "metric_looks_constant";
         warning.metric = metric_name;
         warning.message = fmt::format(
@@ -9270,26 +9198,26 @@ struct HistoricalRegressionCandidateSelector {
 /// invoked once from `run_impl` after the parallel benchmark loop has
 /// joined. Pushes diagnostics (warnings + matched-nothing errors) into
 /// `diagnostics_out`; returns the list of detected regressions. The
-/// shared `HistoricalReportCache` is owned by the caller so the
+/// shared `historical_report_cache` is owned by the caller so the
 /// sanity-warning pass can reuse the parsed report bodies.
-[[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
-    const RegressionRulesByConfig& regression_rules_by_config,
-    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
-    const ReportMeta&              current_meta,
+[[nodiscard]] inline std::vector<regression_entry> evaluate_regressions(
+    const regression_rules_by_configuration& regression_rules_by_config,
+    const std::map<std::string, std::shared_ptr<benchmark_execution_state>>& reports,
+    const report_metadata&              current_meta,
     std::size_t                    current_index,
-    HistoricalReportCache&         history_cache,
-    std::vector<ValidationDiag>&   diagnostics_out,
+    historical_report_cache&         history_cache,
+    std::vector<validation_diagnostic>&   diagnostics_out,
     bool                           selection_is_partial) noexcept
 {
-    std::vector<RegressionEntry> entries;
+    std::vector<regression_entry> entries;
 
     // Per-state merged-samples cache built once per `(config_path,
     // benchmark)` and reused across every rule that touches the same
     // state. Earlier versions rebuilt this map per-rule, which scaled
     // O(N_rules × N_cells).
-    std::map<const BenchmarkExecutionState*, MergedSamplesByPair> merged_cache;
-    auto merged_for = [&](const BenchmarkExecutionState* state)
-        -> const MergedSamplesByPair&
+    std::map<const benchmark_execution_state*, merged_samples_by_pair> merged_cache;
+    auto merged_for = [&](const benchmark_execution_state* state)
+        -> const merged_samples_by_pair&
     {
         auto found = merged_cache.find(state);
         if (found != merged_cache.end()) return found->second;
@@ -9302,7 +9230,7 @@ struct HistoricalRegressionCandidateSelector {
         for (const auto& rule : rules) {
             std::size_t matched_count = 0;
 
-            std::vector<const BenchmarkExecutionState*> matching_states;
+            std::vector<const benchmark_execution_state*> matching_states;
             const std::set<std::string> excluded_benchmarks(
                 rule.exclude_benchmarks.begin(), rule.exclude_benchmarks.end());
             for (const auto& [_bench_key, state_ptr] : reports) {
@@ -9339,16 +9267,16 @@ struct HistoricalRegressionCandidateSelector {
                 &rule,
                 &excluded_test_cases,
                 &excluded_algorithms
-            ](const BenchmarkExecutionState* state) noexcept {
+            ](const benchmark_execution_state* state) noexcept {
                 const bool metric_declared = std::any_of(
                     state->config.metrics.begin(), state->config.metrics.end(),
-                    [&rule](const MetricSpec& metric) {
+                    [&rule](const metric_specification& metric) {
                         return metric.name == rule.metric;
                     });
                 const bool algorithm_remains = std::any_of(
                     state->execution_tuples.begin(),
                     state->execution_tuples.end(),
-                    [&excluded_algorithms](const ExecutionTuple& tuple) {
+                    [&excluded_algorithms](const execution_tuple& tuple) {
                         return !excluded_algorithms.contains(
                             tuple.algorithm_name);
                     });
@@ -9390,7 +9318,7 @@ struct HistoricalRegressionCandidateSelector {
                             if (metric_it == region_it->second.end()
                                 || metric_it->second.empty()) continue;
 
-                            // Cell has data → counts toward matched_count
+                            // measurement_cell has data → counts toward matched_count
                             // regardless of baseline presence. All-non-finite
                             // current samples mean "not measured" (for example,
                             // explicit Vulkan rows on a software ICD), so the
@@ -9405,7 +9333,7 @@ struct HistoricalRegressionCandidateSelector {
 
                             if (current_index <= 1) {
                                 diagnostics_out.push_back({
-                                    ValidationDiag::Severity::Warning,
+                                    validation_diagnostic::diagnostic_severity::warning,
                                     "regression_baseline_missing",
                                     rule_location,
                                     fmt::format("no historical baseline available for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' (current run is index {}); rule treated as satisfied",
@@ -9424,7 +9352,7 @@ struct HistoricalRegressionCandidateSelector {
                                     [](double sample) noexcept {
                                         return std::isfinite(sample);
                                     }));
-                            HistoricalRegressionCandidateSelector candidates{
+                            historical_regression_candidate_selector candidates{
                                 .reports = history_cache,
                                 .current_fast = current_meta.fast,
                                 .benchmark = state->config.benchmark_key,
@@ -9447,7 +9375,7 @@ struct HistoricalRegressionCandidateSelector {
                                 &rule](std::size_t report_index,
                                       std::string_view reason) {
                                 diagnostics_out.push_back({
-                                    ValidationDiag::Severity::Warning,
+                                    validation_diagnostic::diagnostic_severity::warning,
                                     "regression_history_candidate_skipped",
                                     rule_location,
                                     fmt::format(
@@ -9460,7 +9388,7 @@ struct HistoricalRegressionCandidateSelector {
                                 });
                             };
 
-                            const HistoricalRegressionCandidate* baseline = nullptr;
+                            const historical_regression_candidate* baseline = nullptr;
                             std::size_t baseline_index = 0;
                             for (std::size_t historical_index = current_index - 1;;
                                  --historical_index) {
@@ -9477,7 +9405,7 @@ struct HistoricalRegressionCandidateSelector {
                             }
                             if (baseline == nullptr) {
                                 diagnostics_out.push_back({
-                                    ValidationDiag::Severity::Warning,
+                                    validation_diagnostic::diagnostic_severity::warning,
                                     "regression_baseline_missing",
                                     rule_location,
                                     fmt::format("no eligible historical baseline exists before report_{}.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
@@ -9532,7 +9460,7 @@ struct HistoricalRegressionCandidateSelector {
                             }
                             if (oldest_failing == 1) {
                                 diagnostics_out.push_back({
-                                    ValidationDiag::Severity::Warning,
+                                    validation_diagnostic::diagnostic_severity::warning,
                                     "regression_pre_existing",
                                     rule_location,
                                     fmt::format("regression has been present in every eligible report on disk back to report_1.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' — almost certainly not introduced by recent changes",
@@ -9543,7 +9471,7 @@ struct HistoricalRegressionCandidateSelector {
                                 });
                             }
 
-                            RegressionEntry entry;
+                            regression_entry entry;
                             entry.config_path     = config_path;
                             entry.benchmark       = state->config.benchmark_key;
                             entry.rule_name       = rule.name;
@@ -9566,7 +9494,7 @@ struct HistoricalRegressionCandidateSelector {
 
             if (matched_count == 0) {
                 diagnostics_out.push_back({
-                    ValidationDiag::Severity::Error,
+                    validation_diagnostic::diagnostic_severity::error,
                     "regression_rule_matched_nothing",
                     rule_location,
                     fmt::format("regression rule '{}' did not match any (benchmark, tuple, test_case, region) combination with current samples; check benchmark/algorithm filters, 'regions', 'metric', and 'exclude_cases'",
@@ -9585,25 +9513,25 @@ struct HistoricalRegressionCandidateSelector {
 // We deliberately track comma placement by hand because the builder leaves
 // that to the caller (see SIMDJSON_REF.md §"Overview: string_builder").
 
-/// Emit one ConfigValue scalar — switches on the runtime kind. Caller is
+/// Emit one config_value scalar — switches on the runtime kind. Caller is
 /// expected to have written the key + colon already.
 inline void emit_value_scalar(simdjson::builder::string_builder& builder,
-                                const ConfigValue& value)
+                                const config_value& value)
 {
     switch (value.kind) {
-        case ConfigValue::Kind::String:
+        case config_value::value_kind::string:
             builder.escape_and_append_with_quotes(std::string_view{value.string_value});
             return;
-        case ConfigValue::Kind::Integer:
+        case config_value::value_kind::integer:
             builder.append(value.integer_value);
             return;
-        case ConfigValue::Kind::Double:
+        case config_value::value_kind::floating_point:
             builder.append(value.double_value);
             return;
-        case ConfigValue::Kind::Boolean:
+        case config_value::value_kind::boolean:
             builder.append(value.boolean_value);
             return;
-        case ConfigValue::Kind::NonScalar:
+        case config_value::value_kind::non_scalar:
             // NonScalar values should have been rejected by semantic
             // validation long before we reach the report writer. If we're
             // here, validation was bypassed — emit JSON null so the report
@@ -9630,18 +9558,18 @@ inline void emit_kv_string(simdjson::builder::string_builder& builder,
 }
 
 /// Emit `"<key>": <body>` where `body` is a callable that writes the value.
-template<typename BodyFn>
+template<typename p_body_function>
 inline void emit_kv_with_body(simdjson::builder::string_builder& builder,
-                                std::string_view key, BodyFn&& body_fn)
+                                std::string_view key, p_body_function&& body_fn)
 {
     emit_key(builder, key);
     body_fn(builder);
 }
 
 /// Emit a `{...}` object whose contents come from `body`.
-template<typename BodyFn>
+template<typename p_body_function>
 inline void emit_object_with_body(simdjson::builder::string_builder& builder,
-                                    BodyFn&& body_fn)
+                                    p_body_function&& body_fn)
 {
     builder.start_object();
     body_fn(builder);
@@ -9651,9 +9579,10 @@ inline void emit_object_with_body(simdjson::builder::string_builder& builder,
 /// Iterate a range and call `each(builder, item, is_first)` once per element,
 /// writing commas between siblings. The element body is responsible for
 /// emitting its own key + value (or whole object).
-template<typename Range, typename EachFn>
+template<typename p_range, typename p_each_function>
 inline void emit_range_with_commas(simdjson::builder::string_builder& builder,
-                                    Range&& range, EachFn&& each_fn)
+                                    p_range&& range,
+                                    p_each_function&& each_fn)
 {
     bool first = true;
     for (const auto& element : range) {
@@ -9665,7 +9594,7 @@ inline void emit_range_with_commas(simdjson::builder::string_builder& builder,
 
 /// Emit a JSON object whose keys are algorithm parameters.
 inline void emit_param_object(simdjson::builder::string_builder& builder,
-                               const ParamMap& params)
+                               const parameter_map& params)
 {
     emit_object_with_body(builder, [&](auto& inner) {
         emit_range_with_commas(inner, params, [](auto& b, const auto& kv_pair) {
@@ -9702,12 +9631,11 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
     builder.end_array();
 }
 
-/// Emit one `(metric -> AggregatedSamples)` leaf. Replaces the
-/// pre-V17 raw array emit; the in-memory representation is still
+/// Emit one `(metric -> aggregated_samples)` leaf. Replaces the
 /// `std::vector<double>` (so the rule evaluator and the rest of
 /// the framework keep working unchanged), but the on-disk shape
 /// is the fixed-size aggregate documented under
-/// `kBenchReportSchema#/definitions/aggregated_samples`.
+/// `k_bench_report_schema#/definitions/aggregated_samples`.
 ///
 /// **Precondition**: `samples` must be non-empty. The schema's
 /// `samples_count: minimum: 1` enforces "no empty cells in the
@@ -9732,7 +9660,7 @@ inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
         emit_kv_with_body(root_inner, "stats", [&](auto& stats_builder) {
             emit_object_with_body(stats_builder, [&](auto& stats_inner) {
                 bool first = true;
-                for (const auto& entry : kAggregatedStatsRegistry) {
+                for (const auto& entry : k_aggregated_stats_registry) {
                     if (!first) stats_inner.append_comma();
                     first = false;
                     emit_key(stats_inner, entry.name);
@@ -9745,7 +9673,7 @@ inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
         emit_kv_with_body(root_inner, "percentiles", [&](auto& pct_builder) {
             emit_object_with_body(pct_builder, [&](auto& pct_inner) {
                 bool first = true;
-                for (const auto& entry : kAggregatedPercentileRegistry) {
+                for (const auto& entry : k_aggregated_percentile_registry) {
                     if (!first) pct_inner.append_comma();
                     first = false;
                     emit_key(pct_inner, entry.name);
@@ -9771,7 +9699,7 @@ inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
         emit_kv_with_body(root_inner, "histogram", [&](auto& hist_builder) {
             hist_builder.start_array();
             emit_range_with_commas(hist_builder, aggregated.histogram,
-                [](auto& bucket_builder, const AggregateBucket& bucket) {
+                [](auto& bucket_builder, const aggregate_bucket& bucket) {
                     emit_object_with_body(bucket_builder, [&](auto& bucket_inner) {
                         emit_key(bucket_inner, "from");
                         emit_finite_double(bucket_inner, bucket.from);
@@ -9807,12 +9735,12 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
 
 /// Emit the per-test-case object from a group-merged sample map: every region
 /// (or just "all_regions" when by_regions=false) and the per-metric
-/// AggregatedSamples object inside it. Empty sample vectors are pruned (the
+/// aggregated_samples object inside it. Empty sample vectors are pruned (the
 /// schema requires `samples_count >= 1`). Lifted out of `write_report`'s local
 /// lambda so the report writer and the `--debug` CASE_RESULTS sink emit
 /// byte-identical per-test-case blocks (one copy, no duplicated emit logic).
 inline void emit_test_case_block(simdjson::builder::string_builder& region_block_builder,
-                                 const SampleMap& merged) {
+                                 const sample_map& merged) {
     emit_object_with_body(region_block_builder, [&merged](auto& region_outer) {
         emit_range_with_commas(region_outer, merged,
             [](auto& region_builder, const auto& region_kv) {
@@ -9839,13 +9767,13 @@ inline void emit_test_case_block(simdjson::builder::string_builder& region_block
 }
 
 /// Emit one execution_tuple_record: `{ "tuple": {...}, "test_cases": {...} }`.
-/// `merged` is the (tuple,test_case)->SampleMap index. Lifted out of
+/// `merged` is the (tuple,test_case)->sample_map index. Lifted out of
 /// `write_report`'s local lambda (merged-index parameterised) so the report
 /// writer and the `--debug` CASE_RESULTS sink share one serializer.
 inline void emit_execution_tuple_record(simdjson::builder::string_builder& builder,
-                                        const BenchmarkExecutionState& state,
-                                        const ExecutionTuple& tuple,
-                                        const MergedSamplesByPair& merged) {
+                                        const benchmark_execution_state& state,
+                                        const execution_tuple& tuple,
+                                        const merged_samples_by_pair& merged) {
     emit_object_with_body(builder, [&state, &tuple, &merged](auto& outer) {
         emit_kv_with_body(outer, "tuple", [&tuple](auto& tuple_b) {
             emit_object_with_body(tuple_b, [&tuple](auto& alg_b) {
@@ -9911,7 +9839,7 @@ inline void emit_paired_descriptor_samples(
 /// Emit one resolved numerator/denominator route identity.
 inline void emit_paired_rule_route(
     simdjson::builder::string_builder& builder,
-    const PairedRuleRouteEvidence& route)
+    const paired_rule_route_evidence& route)
 {
     emit_object_with_body(builder, [&route](auto& inner) {
         emit_kv_string(inner, "algorithm", route.algorithm);
@@ -9937,7 +9865,7 @@ inline void emit_paired_rule_route(
 inline void emit_paired_schedule_sample(
     simdjson::builder::string_builder& builder,
     const bool present,
-    const IterationScheduleSample& schedule)
+    const iteration_schedule_sample& schedule)
 {
     if (!present) {
         builder.append_null();
@@ -9960,13 +9888,13 @@ inline void emit_paired_schedule_sample(
 /// final report and by each PAIRED_RULE_EVIDENCE debug event.
 inline void emit_paired_rule_evidence_record(
     simdjson::builder::string_builder& builder,
-    const PairedRuleEvidence& evidence)
+    const paired_rule_evidence& evidence)
 {
     std::string_view comparison_operator = "=";
     switch (evidence.comparator.op) {
-        case CompareOp::LessThan: comparison_operator = "<"; break;
-        case CompareOp::GreaterThan: comparison_operator = ">"; break;
-        case CompareOp::Equal: comparison_operator = "="; break;
+        case comparison_operator::less_than: comparison_operator = "<"; break;
+        case comparison_operator::greater_than: comparison_operator = ">"; break;
+        case comparison_operator::equal: comparison_operator = "="; break;
     }
     emit_object_with_body(builder,
         [&evidence, comparison_operator](auto& inner) {
@@ -10142,17 +10070,17 @@ inline void emit_paired_rule_evidence_record(
 
 /// Append-only, crash-resilient JSONL event sink for `--debug`. One instance
 /// per run, owned by run_impl; a non-owning pointer is threaded through
-/// BenchmarkContext::debug_sink. Every emit_* builds one line with the existing
+/// benchmark_context::debug_sink. Every emit_* builds one line with the existing
 /// simdjson string_builder helpers and appends it under `mu_` + flush, so a
 /// process crash preserves all already-emitted events. `timestamp` is Unix
 /// epoch milliseconds (sub-second ordering within a run).
-class DebugReportSink {
+class debug_report_sink {
 public:
-    explicit DebugReportSink(std::filesystem::path path) : path_(std::move(path)) {
+    explicit debug_report_sink(std::filesystem::path path) : path_(std::move(path)) {
         if (path_.has_parent_path())
             std::filesystem::create_directories(path_.parent_path());
         out_.open(path_, std::ios::app | std::ios::binary);
-        if (!out_) bioseq_log<ERR>("[bench_framework] --debug: cannot open '{}'", path_.string());
+        if (!out_) bioseq_log<logging_level::error>("[bench_framework] --debug: cannot open '{}'", path_.string());
     }
     [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
     [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
@@ -10179,7 +10107,7 @@ public:
     }
 
     void emit_case_results(std::string_view benchmark, std::string_view case_name,
-                           const BenchmarkExecutionState& state) {
+                           const benchmark_execution_state& state) {
         const auto merged = merge_case_samples(state, case_name);   // §4.5 (immutable cells)
         simdjson::builder::string_builder b;
         emit_object_with_body(b, [&benchmark, &case_name, &state, &merged](auto& o){
@@ -10209,7 +10137,7 @@ public:
     /// Persist one complete ratio-paired evaluation immediately after
     /// the benchmark finishes. write_line_ flushes the independent JSON object
     /// before the final report is assembled, preserving the evidence on crash.
-    void emit_paired_rule_evidence(const PairedRuleEvidence& evidence) {
+    void emit_paired_rule_evidence(const paired_rule_evidence& evidence) {
         simdjson::builder::string_builder builder;
         emit_object_with_body(builder, [&evidence](auto& object) {
             emit_kv_string(
@@ -10241,7 +10169,7 @@ private:
     void write_line_(simdjson::builder::string_builder& b) {
         std::string_view payload;
         if (b.view().get(payload) != simdjson::SUCCESS) {
-            bioseq_log<ERR>("[bench_framework] --debug: string_builder allocation failure");
+            bioseq_log<logging_level::error>("[bench_framework] --debug: string_builder allocation failure");
             return;
         }
         std::lock_guard<std::mutex> guard(mu_);
@@ -10315,11 +10243,11 @@ static_assert(raw_nearest_rank_index(4, 50) == 1);
 static_assert(raw_nearest_rank_index(20, 95) == 18);
 
 /// Power-loss-resilient raw evidence stream.  The mutex establishes the one
-/// authoritative completion order; a Cell is mutated only after the exact
+/// authoritative completion order; a measurement_cell is mutated only after the exact
 /// line and fsync have succeeded.
-class DurableRawEvidenceSink {
+class durable_raw_evidence_sink {
 public:
-    DurableRawEvidenceSink(
+    durable_raw_evidence_sink(
             std::filesystem::path path,
             std::string run_id)
         : path_(std::move(path)), run_id_(std::move(run_id)),
@@ -10334,7 +10262,7 @@ public:
             0600);
         if (fd_ < 0) {
             poisoned_ = true;
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[bench_framework] raw evidence O_EXCL open failed for '{}': {}",
                 path_.string(), std::strerror(errno));
             return;
@@ -10350,12 +10278,12 @@ public:
         }
     }
 
-    ~DurableRawEvidenceSink() noexcept {
+    ~durable_raw_evidence_sink() noexcept {
         if (fd_ >= 0) (void)::close(fd_);
     }
 
-    DurableRawEvidenceSink(const DurableRawEvidenceSink&) = delete;
-    DurableRawEvidenceSink& operator=(const DurableRawEvidenceSink&) = delete;
+    durable_raw_evidence_sink(const durable_raw_evidence_sink&) = delete;
+    durable_raw_evidence_sink& operator=(const durable_raw_evidence_sink&) = delete;
 
     [[nodiscard]] bool ok() const noexcept {
         std::lock_guard<std::mutex> guard(mu_);
@@ -10413,7 +10341,7 @@ public:
 
     [[nodiscard]] bool seal_and_validate(
         const std::map<std::string,
-            std::shared_ptr<BenchmarkExecutionState>>& reports) {
+            std::shared_ptr<benchmark_execution_state>>& reports) {
         std::lock_guard<std::mutex> guard(mu_);
         if (sealed_) return manifest_.value("complete", false);
         bool valid = !poisoned_ && fd_ >= 0;
@@ -10421,18 +10349,18 @@ public:
         std::vector<std::pair<std::string, std::string>> scheduled_checksums;
         std::vector<std::uint64_t> all_durations;
         std::vector<std::uint64_t> all_index_and_map_durations;
-        using RawBatchKey = std::tuple<std::size_t, std::size_t, std::size_t>;
-        using RawOrderEntry =
+        using raw_batch_key = std::tuple<std::size_t, std::size_t, std::size_t>;
+        using raw_order_entry =
             std::tuple<std::uint64_t, std::size_t, std::size_t,
                        std::size_t, std::uint64_t>;
-        std::map<RawBatchKey, std::vector<RawOrderEntry>> actual_order;
+        std::map<raw_batch_key, std::vector<raw_order_entry>> actual_order;
         nlohmann::json cell_summaries = nlohmann::json::array();
 
         for (const auto& [benchmark_key, state_ptr] : reports) {
             const auto& state = *state_ptr;
             if (!state.raw_samples_enabled) continue;
             for (const auto& cell_ptr : state.cells) {
-                const Cell& cell = *cell_ptr;
+                const measurement_cell& cell = *cell_ptr;
                 const auto region = cell.samples.find("all_regions");
                 const bool has_wall = region != cell.samples.end()
                     && region->second.contains("wall_clock_ns");
@@ -10501,7 +10429,7 @@ public:
                             cell.group_index,
                             static_cast<std::size_t>(*repeat));
                     const std::string expected_mode = state.config.iteration_order
-                            == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+                            == benchmark_configuration::iteration_order_mode::interleaved_seeded
                         ? "interleaved_seeded" : "item_major";
                     const bool identity_valid =
                         record.value("benchmark", std::string{}) == benchmark_key
@@ -10544,7 +10472,7 @@ public:
                         && schedule_case.has_value()
                         && schedule_group.has_value()
                         && schedule_order.has_value()) {
-                        actual_order[RawBatchKey{
+                        actual_order[raw_batch_key{
                             static_cast<std::size_t>(*schedule_benchmark),
                             static_cast<std::size_t>(*schedule_case),
                             static_cast<std::size_t>(*schedule_group)}]
@@ -10616,41 +10544,41 @@ public:
             const auto& state = *state_ptr;
             if (!state.raw_samples_enabled) continue;
             std::map<std::pair<std::size_t, std::size_t>,
-                std::vector<const Cell*>> expected_batches;
+                std::vector<const measurement_cell*>> expected_batches;
             for (const auto& cell : state.cells) {
                 expected_batches[{cell->test_case_index, cell->group_index}]
                     .push_back(cell.get());
             }
             for (auto& [case_group, cells] : expected_batches) {
                 std::sort(cells.begin(), cells.end(),
-                    [](const Cell* lhs, const Cell* rhs) {
+                    [](const measurement_cell* lhs, const measurement_cell* rhs) {
                         return lhs->tuple_index < rhs->tuple_index;
                     });
-                auto found = actual_order.find(RawBatchKey{
+                auto found = actual_order.find(raw_batch_key{
                     state.driver_benchmark_index,
                     case_group.first,
                     case_group.second});
                 if (found == actual_order.end()) {
                     if (std::any_of(cells.begin(), cells.end(),
-                            [](const Cell* cell) {
+                            [](const measurement_cell* cell) {
                                 return cell->iterations != 0;
                             })) valid = false;
                     continue;
                 }
                 auto actual = found->second;
                 std::sort(actual.begin(), actual.end());
-                using ObservedOrder = std::tuple<
+                using observed_order = std::tuple<
                     std::size_t, std::size_t, std::size_t, std::uint64_t>;
-                std::vector<ObservedOrder> observed;
+                std::vector<observed_order> observed;
                 for (const auto& [raw_id, repeat, order_position,
                                   tuple_index, shuffle_seed] : actual) {
                     (void)raw_id;
                     observed.emplace_back(
                         repeat, order_position, tuple_index, shuffle_seed);
                 }
-                std::vector<ObservedOrder> expected;
+                std::vector<observed_order> expected;
                 if (state.config.iteration_order
-                    == BenchmarkConfig::IterationOrderMode::interleaved_seeded) {
+                    == benchmark_configuration::iteration_order_mode::interleaved_seeded) {
                     const std::size_t iterations = cells.empty()
                         ? 0 : cells.front()->iterations;
                     for (std::size_t repeat = 0; repeat < iterations; ++repeat) {
@@ -10674,7 +10602,7 @@ public:
                 } else {
                     for (std::size_t position = 0;
                          position < cells.size(); ++position) {
-                        const Cell* cell = cells[position];
+                        const measurement_cell* cell = cells[position];
                         for (std::size_t repeat = 0;
                              repeat < cell->iterations; ++repeat) {
                             const std::uint64_t shuffle_seed =
@@ -10744,7 +10672,6 @@ public:
             fd_ = -1;
         }
 
-        // Phase 1 authority: there is no completion footer yet. Reopen and
         // validate the exact header + record prefix (including byte count and
         // absence of any suffix) while completion remains false everywhere.
         const bool prefix_valid = validate_authoritative_locked(
@@ -11017,10 +10944,10 @@ private:
         while (written < line.size()) {
             std::size_t request = line.size() - written;
             if (io_fault_
-                == RawEvidenceIoFaultForTesting::short_write) {
+                == raw_evidence_io_fault::short_write) {
                 request = std::min<std::size_t>(request, 3);
             } else if (io_fault_
-                           == RawEvidenceIoFaultForTesting::partial_write_failure
+                           == raw_evidence_io_fault::partial_write_failure
                        && append_line_calls_ > 0) {
                 request = std::min<std::size_t>(request, 3);
             }
@@ -11030,13 +10957,13 @@ private:
             if (result <= 0) return false;
             written += static_cast<std::size_t>(result);
             if (io_fault_
-                    == RawEvidenceIoFaultForTesting::partial_write_failure
+                    == raw_evidence_io_fault::partial_write_failure
                 && append_line_calls_ > 0) {
                 errno = EIO;
                 return false;
             }
         }
-        if (io_fault_ == RawEvidenceIoFaultForTesting::sync_failure
+        if (io_fault_ == raw_evidence_io_fault::sync_failure
             && append_line_calls_ > 0) {
             errno = EIO;
             return false;
@@ -11057,8 +10984,8 @@ private:
     bool sealed_ = false;
     std::uint64_t next_record_id_ = 0;
     std::size_t append_line_calls_ = 0;
-    RawEvidenceIoFaultForTesting io_fault_ =
-        RawEvidenceIoFaultForTesting::none;
+    raw_evidence_io_fault io_fault_ =
+        raw_evidence_io_fault::none;
     std::string header_line_{};
     std::vector<std::string> records_{};
     nlohmann::json manifest_ = nlohmann::json::object();
@@ -11070,8 +10997,8 @@ private:
 /// acq_rel fetch_sub gives the to-zero thread a happens-after over every
 /// sibling cell write, so merge_case_samples sees a fully-written, immutable
 /// cell set.
-inline void debug_finish_cell(BenchmarkContext& context,
-                              BenchmarkExecutionState& state,
+inline void debug_finish_cell(benchmark_context& context,
+                              benchmark_execution_state& state,
                               const std::string& case_name) {
     auto& cp = state.case_debug_progress.at(case_name);
     if (cp.remaining_cells.fetch_sub(1, std::memory_order_acq_rel) == 1
@@ -11081,28 +11008,28 @@ inline void debug_finish_cell(BenchmarkContext& context,
 
 // ----------------- run_unit driver -----------------
 //
-// Defined here (after DebugReportSink / debug_finish_cell) rather than next to
+// Defined here (after debug_report_sink / debug_finish_cell) rather than next to
 // the other run-machinery so the per-case `--debug` hooks below can call the
 // sink: the sink's CASE_RESULTS serializer reuses emit_execution_tuple_record
 // + the aggregation helpers, all of which are defined above this point.
 
-[[nodiscard]] inline nlohmann::json raw_param_map_json(const ParamMap& params) {
+[[nodiscard]] inline nlohmann::json raw_param_map_json(const parameter_map& params) {
     nlohmann::json result = nlohmann::json::object();
     for (const auto& [name, value] : params) {
         switch (value.kind) {
-            case ConfigValue::Kind::String:
+            case config_value::value_kind::string:
                 result[name] = value.string_value;
                 break;
-            case ConfigValue::Kind::Integer:
+            case config_value::value_kind::integer:
                 result[name] = value.integer_value;
                 break;
-            case ConfigValue::Kind::Double:
+            case config_value::value_kind::floating_point:
                 result[name] = value.double_value;
                 break;
-            case ConfigValue::Kind::Boolean:
+            case config_value::value_kind::boolean:
                 result[name] = value.boolean_value;
                 break;
-            case ConfigValue::Kind::NonScalar:
+            case config_value::value_kind::non_scalar:
                 result[name] = value.string_value;
                 break;
         }
@@ -11112,8 +11039,8 @@ inline void debug_finish_cell(BenchmarkContext& context,
 
 [[nodiscard]] inline std::optional<std::string> make_raw_sample_record(
         const std::string_view payload,
-        const BenchmarkExecutionState& state,
-        const Cell& cell,
+        const benchmark_execution_state& state,
+        const measurement_cell& cell,
         const std::size_t repeat,
         const std::uint64_t outer_e2e_ns) noexcept {
     auto record = nlohmann::json::parse(payload, nullptr, false);
@@ -11143,19 +11070,19 @@ inline void debug_finish_cell(BenchmarkContext& context,
     return record.dump();
 }
 
-template<typename Input, typename Output>
+template<typename p_input, typename p_output>
 [[nodiscard]] inline std::function<void()> prepare_typed_benchmark(
-    BenchmarkExecutionState& state,
-    BenchmarkContext& context,
-    const std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
-    const std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>& on_input,
-    const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
-    const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
-    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup,
-    const std::function<std::string(std::string_view, const ParamMap&, const Input&, const Output&)>& serialize_raw_sample_payload)
+    benchmark_execution_state& state,
+    benchmark_context& context,
+    const std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
+    const std::function<p_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>& on_input,
+    const std::function<p_output(std::string_view, const parameter_map&, const p_input&)>& on_run,
+    const std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)>& on_evaluate,
+    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)>& on_cleanup,
+    const std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>& serialize_raw_sample_payload)
 {
-    using bioseq::instr::installed_profiler_scope;
-    using bioseq::instr::ProfilerBlock;
+    using bioseq::instrumentation::installed_profiler_scope;
+    using bioseq::instrumentation::profiler_state;
 
     const std::string                 data_dir = context.data_dir;
     const auto counter_handles = resolve_counter_handles(state.config.metrics);
@@ -11168,7 +11095,7 @@ template<typename Input, typename Output>
     for (const auto& metric : state.config.metrics) {
         for (const auto& rule : metric.rules) {
             if (rule.cmp.pairing
-                == RuleComparator::PairingMode::by_iteration_ratio) {
+                == rule_comparator::pairing_mode::by_iteration_ratio) {
                 track_paired_rule_evidence = true;
                 break;
             }
@@ -11195,22 +11122,22 @@ template<typename Input, typename Output>
 
     auto* scheduler = context.scheduler;
     DEBUG_ASSERT(scheduler != nullptr,
-        "BenchmarkContext::scheduler must be set by run_impl");
+        "benchmark_context::scheduler must be set by run_impl");
 
     /// Heap-owned cache of per-batch input/constraint slots. Preparation
     /// returns before the bodies finish, so every object referenced by an
     /// enqueued body lives in this shared run state until finalization joins
     /// the benchmark.
-    struct GroupSlot {
-        std::optional<Input> input{};
-        RunConstraints       constraints{};
+    struct group_slot {
+        std::optional<p_input> input{};
+        run_constraints       constraints{};
     };
-    struct TypedRunState {
-        std::vector<GroupSlot> group_slots{};
-        std::vector<WorkBatch> batches{};
-        std::function<void(WorkBatch&)> run_batch{};
+    struct typed_run_state {
+        std::vector<group_slot> group_slots{};
+        std::vector<work_batch> batches{};
+        std::function<void(work_batch&)> run_batch{};
     };
-    auto run_state = std::make_shared<TypedRunState>();
+    auto run_state = std::make_shared<typed_run_state>();
     run_state->group_slots.resize(batches.size());
     run_state->batches = std::move(batches);
 
@@ -11221,21 +11148,21 @@ template<typename Input, typename Output>
                                 paired_schedule_evidence_fault,
                                 counter_handles,
                                 &on_run, &on_evaluate,
-                                &serialize_raw_sample_payload](Cell& cell,
-                                                               const Input& input,
+                                &serialize_raw_sample_payload](measurement_cell& cell,
+                                                               const p_input& input,
                                                                const std::size_t repeat,
                                                                const std::size_t order_position,
                                                                const std::uint64_t shuffle_seed) -> bool {
         const auto& tuple = *cell.tuple;
 
-        ProfilerBlock<profiler_args_t> profiler_block{};
-        installed_profiler_scope<profiler_args_t> profiler_scope{profiler_block};
+        profiler_state<profiler_configuration> profiler_block{};
+        installed_profiler_scope<profiler_configuration> profiler_scope{profiler_block};
 
         const auto counters_before = snapshot_counters(counter_handles);
 
-        const auto t_begin_ns = bioseq::instr::clock::now_ns();
-        const Output output = on_run(tuple.algorithm_name, tuple.params, input);
-        const auto t_end_ns = bioseq::instr::clock::now_ns();
+        const auto t_begin_ns = bioseq::instrumentation::clock::now_ns();
+        const p_output output = on_run(tuple.algorithm_name, tuple.params, input);
+        const auto t_end_ns = bioseq::instrumentation::clock::now_ns();
         const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
 
         const auto counters_after = snapshot_counters(counter_handles);
@@ -11254,7 +11181,7 @@ template<typename Input, typename Output>
                 payload, state, cell, repeat, elapsed);
             if (!raw_sample.has_value()) {
                 push_runtime_diagnostic(
-                    context, ValidationDiag::Severity::Error,
+                    context, validation_diagnostic::diagnostic_severity::error,
                     "raw_sample_payload_invalid",
                     runtime_location(state.config.config_path,
                         state.config.benchmark_key,
@@ -11265,7 +11192,7 @@ template<typename Input, typename Output>
             }
             if (context.raw_evidence_sink == nullptr) {
                 push_runtime_diagnostic(
-                    context, ValidationDiag::Severity::Error,
+                    context, validation_diagnostic::diagnostic_severity::error,
                     "raw_evidence_sink_missing",
                     state.config.benchmark_key,
                     "raw-enabled benchmark has no durable evidence sink");
@@ -11279,7 +11206,7 @@ template<typename Input, typename Output>
                 cell.group_index,
                 repeat,
                 state.config.iteration_order
-                        == BenchmarkConfig::IterationOrderMode::interleaved_seeded
+                        == benchmark_configuration::iteration_order_mode::interleaved_seeded
                     ? std::string_view{"interleaved_seeded"}
                     : std::string_view{"item_major"},
                 state.config.iteration_order_seed,
@@ -11287,7 +11214,7 @@ template<typename Input, typename Output>
                 order_position);
             if (!raw_sample.has_value()) {
                 push_runtime_diagnostic(
-                    context, ValidationDiag::Severity::Error,
+                    context, validation_diagnostic::diagnostic_severity::error,
                     "raw_evidence_append_failed",
                     context.raw_evidence_sink->path().string(),
                     "durable raw evidence append or fsync failed; sink is "
@@ -11296,7 +11223,7 @@ template<typename Input, typename Output>
             }
         }
 
-        // Cell completion is downstream of durable append.  A crash can leave
+        // measurement_cell completion is downstream of durable append.  A crash can leave
         // a sidecar prefix, never an in-memory/report sample with no durable
         // counterpart.
         append_iteration_samples(
@@ -11309,15 +11236,15 @@ template<typename Input, typename Output>
             std::size_t evidence_order_position = order_position;
             std::uint64_t evidence_shuffle_seed = shuffle_seed;
             if (paired_schedule_evidence_fault
-                    == PairedScheduleEvidenceFaultForTesting::wrong_shuffle_seed) {
+                    == paired_schedule_evidence_fault::wrong_shuffle_seed) {
                 ++evidence_shuffle_seed;
             } else if (paired_schedule_evidence_fault
-                           == PairedScheduleEvidenceFaultForTesting::wrong_first_tuple_order_position
+                           == paired_schedule_evidence_fault::wrong_first_tuple_order_position
                        && cell.tuple_index == 0) {
                 ++evidence_order_position;
             }
             cell.iteration_schedule_samples.push_back(
-                IterationScheduleSample{
+                iteration_schedule_sample{
                     .repeat = repeat,
                     .order_position = evidence_order_position,
                     .shuffle_seed = evidence_shuffle_seed,
@@ -11331,14 +11258,11 @@ template<typename Input, typename Output>
         return true;
     };
 
-    /// Run every iteration of one item. V16: NO LOCKS — bench-lock and
     /// serial-concurrency exclusion are enforced by the scheduler's
     /// admission predicates, so the body never blocks on a process-
     /// global mutex. This is what restores cross-batch parallelism
-    /// (the V12 cross_bench_mu writer-lock was the dominant
-    /// bottleneck on bench_v10 — see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §0.2).
     auto run_item_iterations = [&state, run_one_iteration](
-        const WorkBatchItem& item, const Input& input,
+        const work_batch_item& item, const p_input& input,
         const std::size_t order_position,
         const std::size_t group_index)
     {
@@ -11356,7 +11280,6 @@ template<typename Input, typename Output>
         return true;
     };
 
-    /// V16 batch body — no memory acquire/release, no cross_bench_mu.
     /// Called from TBB worker after the scheduler has admitted the
     /// batch. The reservation lives entirely scheduler-side.
     auto* const run_state_ptr = run_state.get();
@@ -11364,7 +11287,7 @@ template<typename Input, typename Output>
                             &on_input, &on_cleanup,
                             data_dir, run_state_ptr,
                             run_item_iterations,
-                            run_one_iteration](WorkBatch& batch)
+                            run_one_iteration](work_batch& batch)
     {
         const auto& spec = state.test_cases[batch.test_case_index];
         auto& slot = run_state_ptr->group_slots[batch.batch_index];
@@ -11380,7 +11303,7 @@ template<typename Input, typename Output>
 
         // 2. on_input with retries. Permanent failure aborts the
         //    batch (scheduler releases on body return).
-        auto built_input = build_input_with_retry<Input>(
+        auto built_input = build_input_with_retry<p_input>(
             context, batch,
             [&] { return on_input(data_dir, spec.name, spec.data,
                                    slot.constraints); });
@@ -11388,8 +11311,8 @@ template<typename Input, typename Output>
             auto reason = fmt::format(
                 "batch '{}' (group {}) gave up after {} attempts at on_input — "
                 "see UI for last error / trace",
-                spec.name, batch.group_index, kMaxTaskInputHandlerErrorCount);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                spec.name, batch.group_index, k_max_task_input_handler_error_count);
+            push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "input_handler_failed_permanently", location_str, reason);
             progress_mark_batch_aborted(context, batch, reason);
             return;
@@ -11404,20 +11327,20 @@ template<typename Input, typename Output>
         //    backend/cache position from being confounded with algorithm.
         progress_mark_test_case_start(context, batch);
         const bool interleaved = state.config.iteration_order
-            == BenchmarkConfig::IterationOrderMode::interleaved_seeded;
+            == benchmark_configuration::iteration_order_mode::interleaved_seeded;
         if (interleaved
             && (!state.config.concurrency.bench_lock
                 || state.config.concurrency.concurrency
                 || batch.items.empty()
                 || std::any_of(batch.items.begin(), batch.items.end(),
-                    [&batch](const WorkBatchItem& item) {
+                    [&batch](const work_batch_item& item) {
                         return item.cell->iterations
                             != batch.items.front().cell->iterations;
                     }))) {
             const std::string reason =
                 "interleaved_seeded requires bench_lock=true, "
                 "concurrency=false and equal positive item iteration counts";
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+            push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "invalid_interleaved_schedule", location_str, reason);
             progress_mark_batch_aborted(context, batch, reason);
             if (on_cleanup) {
@@ -11502,13 +11425,12 @@ template<typename Input, typename Output>
         }
     };
 
-    // V16 enqueue path — replaces the V12 `tbb::parallel_for_each`
     // batch loop. Each batch is enqueued into the scheduler with its
     // pre-computed memory + lock requirements; bodies are dispatched
     // by the scheduler when admissible.
-    const auto sys_at_enqueue = snapshot_system_memory();
-    const auto cap_at_enqueue = MemoryBudget::cap_for(
-        sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+    const auto sys_at_enqueue = scheduler->current_system_snapshot();
+    const auto cap_at_enqueue = benchmark_memory_budget::cap_for(
+        sys_at_enqueue.system_total_bytes, scheduler->memory_buffer_pct());
 
     for (auto& batch : run_state->batches) {
         const auto& spec = state.test_cases[batch.test_case_index];
@@ -11519,7 +11441,7 @@ template<typename Input, typename Output>
         for (const auto& item : batch.items) {
             DEBUG_ASSERT(item.tuple != nullptr,
                 "work-batch item must retain its expanded execution tuple");
-            constraints.execution_tuples.push_back(ResolvedExecutionTuple{
+            constraints.execution_tuples.push_back(resolved_execution_tuple{
                 .algorithm_name = item.tuple->algorithm_name,
                 .params = item.tuple->params,
             });
@@ -11531,7 +11453,7 @@ template<typename Input, typename Output>
                 - constraints.base_memory;
         // Saturate the diagnostic value on overflow, but reject before the
         // scheduler sees the batch.  This is the sole base+extra computation;
-        // every later scheduler path consumes `ScheduledBatch::total_bytes`.
+        // every later scheduler path consumes `scheduled_batch::total_bytes`.
         const std::size_t total_required = total_overflow
             ? (std::numeric_limits<std::size_t>::max)()
             : constraints.base_memory + constraints.extra_memory;
@@ -11549,37 +11471,37 @@ template<typename Input, typename Output>
                 spec.name, batch.group_index,
                 constraints.base_memory, constraints.extra_memory,
                 total_required);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+            push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "memory_budget_not_satisfiable", location_str, reason);
             progress_mark_batch_aborted(context, batch, reason);
             continue;       // do not enqueue or convert to signed accounting
         }
 
         // G1.d  Hard error: combined requirements exceed total system RAM.
-        if (total_required >= sys_at_enqueue.total_bytes) {
+        if (total_required >= sys_at_enqueue.system_total_bytes) {
             auto reason = fmt::format(
                 "batch '{}' (group {}) requires {} B (base+extra) but the host "
                 "has only {} B total RAM",
                 spec.name, batch.group_index,
-                total_required, sys_at_enqueue.total_bytes);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                total_required, sys_at_enqueue.system_total_bytes);
+            push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "memory_budget_not_satisfiable", location_str, reason);
             progress_mark_batch_aborted(context, batch, reason);
             continue;       // do not enqueue
         }
         // G1.c  Warning: combined requirements exceed buffered cap.
         if (total_required >= cap_at_enqueue) {
-            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+            emit_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::warning,
                 "memory_budget_oversized", location_str,
                 "batch '{}' (group {}) requires {} B but buffered cap is {} B "
                 "(host total {} B, buffer {:.0f}%)",
                 spec.name, batch.group_index,
                 total_required, cap_at_enqueue,
-                sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+                sys_at_enqueue.system_total_bytes, scheduler->memory_buffer_pct());
             // Still enqueue — scheduler will admit once peers free up.
         }
 
-        ScheduledBatch sb{};
+        scheduled_batch sb{};
         sb.benchmark_index    = context.benchmark_index;
         sb.bench_lock         = state.config.concurrency.bench_lock;
         sb.concurrency_serial = !state.config.concurrency.concurrency;
@@ -11593,7 +11515,7 @@ template<typename Input, typename Output>
         sb.test_case_index    = batch.test_case_index;
         sb.group_index        = batch.group_index;
         sb.context            = &context;
-        WorkBatch* const batch_ptr = &batch;
+        work_batch* const batch_ptr = &batch;
         sb.body = [run_state, batch_ptr] {
             run_state->run_batch(*batch_ptr);
         };
@@ -11638,15 +11560,15 @@ template<typename Input, typename Output>
 /// `current_index`.
 [[nodiscard]] inline std::string write_report(
     const std::filesystem::path& output_path,
-    const ReportMeta& meta,
-    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
-    const std::vector<Violation>& violations,
-    const std::vector<RegressionEntry>& regressions,
-    const std::vector<SanityWarning>& sanity_warnings,
+    const report_metadata& meta,
+    const std::map<std::string, std::shared_ptr<benchmark_execution_state>>& reports,
+    const std::vector<violation>& violations,
+    const std::vector<regression_entry>& regressions,
+    const std::vector<sanity_warning>& sanity_warnings,
     const nlohmann::json& raw_evidence_manifest)
 {
-    constexpr std::size_t kInitialCapacity = 1u << 18;  // 256 KiB up front
-    simdjson::builder::string_builder builder{kInitialCapacity};
+    constexpr std::size_t k_initial_capacity = 1u << 18;  // 256 KiB up front
+    simdjson::builder::string_builder builder{k_initial_capacity};
 
     /// Emit the run-identity/history-authority `meta` block.
     auto emit_meta = [&](auto& b) {
@@ -11670,9 +11592,8 @@ template<typename Input, typename Output>
     };
 
     /// Emit one violation as a JSON object — exactly the shape the spec
-    /// shows in main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V2_CODE__DOC0195.md (`location`, `benchmark`, `rule_name`,
     /// `execution_tuple`, `test_case`, `metric`, `args`).
-    auto emit_one_violation = [&](auto& b, const Violation& violation) {
+    auto emit_one_violation = [&](auto& b, const violation& violation) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "location",  violation.config_path);
             inner.append_comma();
@@ -11735,7 +11656,7 @@ template<typename Input, typename Output>
     /// location, benchmark, rule_name, algorithm_name, violating_tuples,
     /// test_cases, region, metric, aggregate, blocking, previously, now,
     /// regression_since.
-    auto emit_one_regression = [&](auto& b, const RegressionEntry& entry) {
+    auto emit_one_regression = [&](auto& b, const regression_entry& entry) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "location",       entry.config_path);
             inner.append_comma();
@@ -11785,9 +11706,9 @@ template<typename Input, typename Output>
     /// benchmarks pay nothing. Two reports share-by-config and the
     /// writer iterates per benchmark, so a one-shot cache is all we
     /// need.
-    std::map<const BenchmarkExecutionState*, MergedSamplesByPair> merged_cache;
-    auto merged_for_writer = [&](const BenchmarkExecutionState& state)
-        -> const MergedSamplesByPair&
+    std::map<const benchmark_execution_state*, merged_samples_by_pair> merged_cache;
+    auto merged_for_writer = [&](const benchmark_execution_state& state)
+        -> const merged_samples_by_pair&
     {
         auto found = merged_cache.find(&state);
         if (found != merged_cache.end()) return found->second;
@@ -11803,7 +11724,7 @@ template<typename Input, typename Output>
     /// test_case_descriptions / execution_tuples).
     auto emit_one_benchmark = [&](auto& b,
                                     std::string_view key,
-                                    const BenchmarkExecutionState& state) {
+                                    const benchmark_execution_state& state) {
         emit_kv_with_body(b, key, [&](auto& body_b) {
             emit_object_with_body(body_b, [&](auto& inner) {
                 emit_kv_string(inner, "title",       state.title);
@@ -11826,7 +11747,7 @@ template<typename Input, typename Output>
                 emit_kv_with_body(inner, "execution_tuples", [&](auto& tuples_b) {
                     tuples_b.start_array();
                     emit_range_with_commas(tuples_b, state.execution_tuples,
-                        [&](auto& tuple_b, const ExecutionTuple& exec_tuple) {
+                        [&](auto& tuple_b, const execution_tuple& exec_tuple) {
                             emit_execution_tuple_record(tuple_b, state, exec_tuple,
                                                         merged_for_writer(state));
                         });
@@ -11875,7 +11796,7 @@ template<typename Input, typename Output>
     /// type, metric, message, warning_since, warning_since_commit.
     /// `warning_since` and `warning_since_commit` use the same
     /// empty-string ⇒ JSON-null convention as regression entries.
-    auto emit_one_sanity_warning = [&](auto& b, const SanityWarning& warning) {
+    auto emit_one_sanity_warning = [&](auto& b, const sanity_warning& warning) {
         emit_object_with_body(b, [&](auto& inner) {
             emit_kv_string(inner, "type",    warning.type);
             inner.append_comma();
@@ -11927,7 +11848,7 @@ template<typename Input, typename Output>
         emit_kv_with_body(root_b, "rule_violations", [&](auto& arr_b) {
             arr_b.start_array();
             emit_range_with_commas(arr_b, violations,
-                [&](auto& vb, const Violation& violation) {
+                [&](auto& vb, const violation& violation) {
                     emit_one_violation(vb, violation);
                 });
             arr_b.end_array();
@@ -11936,7 +11857,7 @@ template<typename Input, typename Output>
         emit_kv_with_body(root_b, "regressions", [&](auto& arr_b) {
             arr_b.start_array();
             emit_range_with_commas(arr_b, regressions,
-                [&](auto& vb, const RegressionEntry& entry) {
+                [&](auto& vb, const regression_entry& entry) {
                     emit_one_regression(vb, entry);
                 });
             arr_b.end_array();
@@ -11945,7 +11866,7 @@ template<typename Input, typename Output>
         emit_kv_with_body(root_b, "sanity_warnings", [&](auto& arr_b) {
             arr_b.start_array();
             emit_range_with_commas(arr_b, sanity_warnings,
-                [&](auto& vb, const SanityWarning& warning) {
+                [&](auto& vb, const sanity_warning& warning) {
                     emit_one_sanity_warning(vb, warning);
                 });
             arr_b.end_array();
@@ -11965,7 +11886,7 @@ template<typename Input, typename Output>
 
     std::string_view payload;
     if (builder.view().get(payload) != simdjson::SUCCESS) {
-        bioseq_log<ERR>("[bench_framework] simdjson string_builder reported allocation failure");
+        bioseq_log<logging_level::error>("[bench_framework] simdjson string_builder reported allocation failure");
         return {};
     }
 
@@ -11974,12 +11895,12 @@ template<typename Input, typename Output>
     }
     std::ofstream output_file(output_path, std::ios::trunc | std::ios::binary);
     if (!output_file) {
-        bioseq_log<ERR>("[bench_framework] failed to open '{}' for writing", output_path.string());
+        bioseq_log<logging_level::error>("[bench_framework] failed to open '{}' for writing", output_path.string());
         return {};
     }
     output_file.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     if (!output_file) {
-        bioseq_log<ERR>(
+        bioseq_log<logging_level::error>(
             "[bench_framework] failed while writing '{}'",
             output_path.string());
         output_file.close();
@@ -11987,7 +11908,7 @@ template<typename Input, typename Output>
     }
     output_file.close();
     if (!output_file) {
-        bioseq_log<ERR>(
+        bioseq_log<logging_level::error>(
             "[bench_framework] failed while closing '{}'",
             output_path.string());
         return {};
@@ -11997,19 +11918,18 @@ template<typename Input, typename Output>
 
 // ----------------- Stderr violations summary -----------------
 
-/// Render a single `ConfigValue` scalar to its plain-text form. Shared
-/// by the stderr pretty-printer and the V8 summary's stable identity
+/// Render a single `config_value` scalar to its plain-text form. Shared
 /// builder — both want the value as a string but with different field
 /// separators around it. Doubles use `{:.17g}` so an int → double
 /// round-trip in a historical report (`5` parsed back as `5.0`)
 /// canonicalises onto the integer form via the `floor(value) == value
 /// && |value| < 2^53` guard, preventing identity-key drift between
 /// reports written by different framework versions.
-inline void append_config_value_text(std::string& out, const ConfigValue& value) noexcept {
+inline void append_config_value_text(std::string& out, const config_value& value) noexcept {
     switch (value.kind) {
-        case ConfigValue::Kind::String:    out += value.string_value; return;
-        case ConfigValue::Kind::Integer:   out += std::to_string(value.integer_value); return;
-        case ConfigValue::Kind::Double: {
+        case config_value::value_kind::string:    out += value.string_value; return;
+        case config_value::value_kind::integer:   out += std::to_string(value.integer_value); return;
+        case config_value::value_kind::floating_point: {
             const double dbl = value.double_value;
             if (std::isfinite(dbl)
                 && dbl == std::floor(dbl)
@@ -12020,15 +11940,15 @@ inline void append_config_value_text(std::string& out, const ConfigValue& value)
             }
             return;
         }
-        case ConfigValue::Kind::Boolean:   out += value.boolean_value ? "true" : "false"; return;
-        case ConfigValue::Kind::NonScalar: out += "<non-scalar>"; return;
+        case config_value::value_kind::boolean:   out += value.boolean_value ? "true" : "false"; return;
+        case config_value::value_kind::non_scalar: out += "<non-scalar>"; return;
     }
 }
 
-/// Render a ParamMap as a human-readable single-line `k=v, k=v, ...` blob
+/// Render a parameter_map as a human-readable single-line `k=v, k=v, ...` blob
 /// for the stderr violations summary. Not meant for re-parsing — use
 /// `emit_param_object` for the JSON report.
-[[nodiscard]] inline std::string format_param_map(const ParamMap& params) noexcept {
+[[nodiscard]] inline std::string format_param_map(const parameter_map& params) noexcept {
     std::string result;
     bool first = true;
     for (const auto& [name, value] : params) {
@@ -12042,11 +11962,11 @@ inline void append_config_value_text(std::string& out, const ConfigValue& value)
 }
 
 /// Pretty-print every violation to stderr at end-of-run. Uses raw stdio
-/// (`std::fprintf`) instead of bioseq_log<DBG> because the violation summary is
+/// (`std::fprintf`) instead of bioseq_log<logging_level::debug> because the violation summary is
 /// final-pass operator output, not part of the asynchronous log queue —
 /// we want it visible even if the fmtlog background thread has already
 /// drained and exited.
-inline void print_violations(const std::vector<Violation>& violations) noexcept {
+inline void print_violations(const std::vector<violation>& violations) noexcept {
     if (violations.empty()) {
         std::fprintf(stderr,
             "============================================================\n"
@@ -12066,9 +11986,9 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
         const std::string_view comparison_mode =
             pairing_mode_report_name(violation.comparison_mode);
         const bool ratio_paired = violation.comparison_mode
-            == RuleComparator::PairingMode::by_iteration_ratio;
+            == rule_comparator::pairing_mode::by_iteration_ratio;
         const bool exact_paired = violation.comparison_mode
-            == RuleComparator::PairingMode::by_iteration_exact;
+            == rule_comparator::pairing_mode::by_iteration_exact;
         const char* lhs_value_label = ratio_paired
             ? "paired-ratio aggregate"
             : exact_paired ? "first unequal iteration" : "aggregate";
@@ -12151,7 +12071,7 @@ inline void print_since_line(const char* label,
 /// Pretty-print every detected regression to stderr. Mirrors
 /// `print_violations` for visual consistency. Uses raw stdio for the
 /// same reason — this is final-pass operator output.
-inline void print_regressions(const std::vector<RegressionEntry>& regressions) noexcept {
+inline void print_regressions(const std::vector<regression_entry>& regressions) noexcept {
     if (regressions.empty()) {
         std::fprintf(stderr,
             "============================================================\n"
@@ -12199,7 +12119,7 @@ inline void print_regressions(const std::vector<RegressionEntry>& regressions) n
 /// `print_regressions` / `print_violations` for visual consistency.
 /// Uses raw stdio for the same reason — final-pass operator output
 /// must remain visible after fmtlog has drained.
-inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) noexcept {
+inline void print_sanity_warnings(const std::vector<sanity_warning>& warnings) noexcept {
     if (warnings.empty()) {
         std::fprintf(stderr,
             "============================================================\n"
@@ -12233,7 +12153,6 @@ inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) no
     std::fflush(stderr);
 }
 
-// ----------------- V8: Cross-report summary dashboard -----------------
 //
 // The `--summary` mode walks every `report_<N>.json` already on disk
 // in `report_dir`, deduplicates rule violations / regressions / sanity
@@ -12247,10 +12166,14 @@ inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) no
 /// All scoring inputs (presence pattern, latest values, latest
 /// samples) live on the struct so `score_summary_issue` is a
 /// pure-arithmetic constexpr-friendly helper.
-struct SummaryIssue {
-    enum class Kind : std::uint8_t { Regression, RuleViolation, SanityWarning };
+struct summary_issue {
+    enum class issue_kind : std::uint8_t {
+        regression,
+        rule_violation,
+        sanity_warning,
+    };
 
-    Kind                          kind = Kind::SanityWarning;
+    issue_kind kind = issue_kind::sanity_warning;
     /// Stable identity string (see `make_*_identity` helpers).
     std::string                   identity{};
     /// Layout groupers — drive the dashboard's two-level aggregation.
@@ -12261,14 +12184,14 @@ struct SummaryIssue {
     std::string                   rule_name{};   // "" for sanity warnings
     /// Latest-report values used by the value-pct factor and shown
     /// in the dashboard's stat blurb.
-    /// Rule:        [lhs_aggregate, rhs_aggregate]
+    /// benchmark_rule:        [lhs_aggregate, rhs_aggregate]
     /// Regression:  [previously, now]
     /// Sanity:      ignored
     std::array<double, 2>         latest_args{0.0, 0.0};
     /// Latest-report aggregated samples used by `amplitude_factor`.
     /// Default-constructed (`samples_count == 0`) for sanity
     /// warnings or when the matching cell wasn't found.
-    AggregatedSamples             latest_samples{};
+    aggregated_samples             latest_samples{};
     /// One byte per report slot (0 = absent, 1 = present). Length =
     /// max_report_index after the walk finishes. We use uint8_t
     /// instead of `vector<bool>` to avoid the bit-packed
@@ -12293,14 +12216,14 @@ struct SummaryIssue {
 /// scanned in declaration order; the first entry whose `min_score`
 /// the issue meets wins. List order is high → low, matching the user
 /// spec.
-struct SeverityBucket {
+struct severity_bucket {
     double            min_score;
     std::string_view  emoji;
     ftxui::Color      color;
     std::string_view  label;
 };
 
-inline const std::array<SeverityBucket, 5> kSeverityBuckets{ {
+inline const std::array<severity_bucket, 5> k_severity_buckets{ {
     { 1500.0, "\xe2\x9b\x94",      ftxui::Color::Red,         "critical"  }, // ⛔
     { 1000.0, "\xf0\x9f\x94\xb4",  ftxui::Color::RedLight,    "high"      }, // 🔴
     {  600.0, "\xe2\xad\x95",      ftxui::Color::Magenta,     "medium-hi" }, // ⭕
@@ -12311,24 +12234,24 @@ inline const std::array<SeverityBucket, 5> kSeverityBuckets{ {
 /// Look up the bucket whose `min_score` is the highest one ≤ `score`.
 /// Sentinel: the last entry has `min_score == 0`, so the loop always
 /// finds a hit for any non-negative score.
-[[nodiscard]] inline const SeverityBucket& bucket_for(double score) noexcept {
-    for (const auto& bucket : kSeverityBuckets) {
+[[nodiscard]] inline const severity_bucket& bucket_for(double score) noexcept {
+    for (const auto& bucket : k_severity_buckets) {
         if (score >= bucket.min_score) return bucket;
     }
-    return kSeverityBuckets.back();
+    return k_severity_buckets.back();
 }
 
 /// Per-slot block glyph for an issue's presence row.
 /// Order of preconditions: missing report (🟦) wins over presence
 /// state because we cannot say anything about an unparseable file.
 [[nodiscard]] inline std::string_view summary_block_for(
-    SummaryIssue::Kind kind,
+    summary_issue::issue_kind kind,
     bool present,
     bool report_data_present) noexcept
 {
     if (!report_data_present) return "\xf0\x9f\x9f\xa6";   // 🟦
     if (!present)             return "\xf0\x9f\x9f\xa9";   // 🟩
-    if (kind == SummaryIssue::Kind::SanityWarning) return "\xf0\x9f\x9f\xa8"; // 🟨
+    if (kind == summary_issue::issue_kind::sanity_warning) return "\xf0\x9f\x9f\xa8"; // 🟨
     return "\xf0\x9f\x9f\xa5";                              // 🟥
 }
 
@@ -12337,12 +12260,12 @@ inline const std::array<SeverityBucket, 5> kSeverityBuckets{ {
 /// same metric (e.g. "490" vs "0") don't collide in the deduplicated
 /// view.
 [[nodiscard]] constexpr std::uint64_t fnv1a64(std::string_view text) noexcept {
-    constexpr std::uint64_t kFnvOffsetBasis = 0xcbf29ce484222325ULL;
-    constexpr std::uint64_t kFnvPrime       = 0x00000100000001B3ULL;
-    std::uint64_t hash = kFnvOffsetBasis;
+    constexpr std::uint64_t k_fnv_offset_basis = 0xcbf29ce484222325ULL;
+    constexpr std::uint64_t k_fnv_prime       = 0x00000100000001B3ULL;
+    std::uint64_t hash = k_fnv_offset_basis;
     for (const char ch : text) {
         hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(ch));
-        hash *= kFnvPrime;
+        hash *= k_fnv_prime;
     }
     return hash;
 }
@@ -12351,17 +12274,16 @@ inline const std::array<SeverityBucket, 5> kSeverityBuckets{ {
 // separator) and 0x1f (unit separator) are reserved control
 // characters in JSON-clean input, so config-supplied identifiers
 // cannot inject ambiguity here.
-inline constexpr char kSummaryIdentityRs = '\x1e';
-inline constexpr char kSummaryIdentityUs = '\x1f';
+inline constexpr char k_summary_identity_rs = '\x1e';
+inline constexpr char k_summary_identity_us = '\x1f';
 
-/// Stable serialisation of a ParamMap into the V8 identity grammar:
-/// `k1=v1\x1fk2=v2\x1f...`. Iteration is alphabetical (`ParamMap` is
+/// `k1=v1\x1fk2=v2\x1f...`. Iteration is alphabetical (`parameter_map` is
 /// `std::map`).
-[[nodiscard]] inline std::string format_param_map_stable(const ParamMap& params) noexcept {
+[[nodiscard]] inline std::string format_param_map_stable(const parameter_map& params) noexcept {
     std::string result;
     bool first = true;
     for (const auto& [name, value] : params) {
-        if (!first) result += kSummaryIdentityUs;
+        if (!first) result += k_summary_identity_us;
         first = false;
         result += name;
         result += '=';
@@ -12376,15 +12298,15 @@ inline constexpr char kSummaryIdentityUs = '\x1f';
 /// Used by the three `make_*_identity` callers below; the fold
 /// expression collapses what was previously a per-kind 20-line
 /// `string += sep` ritual.
-template<typename... Fields>
+template<typename... p_fields>
 [[nodiscard]] inline std::string join_identity(
-    std::string_view kind, const Fields&... fields) noexcept
+    std::string_view kind, const p_fields&... fields) noexcept
 {
     std::string identity{kind};
-    identity += kSummaryIdentityRs;
+    identity += k_summary_identity_rs;
     bool first = true;
     auto append_one = [&](std::string_view field) noexcept {
-        if (!first) identity += kSummaryIdentityUs;
+        if (!first) identity += k_summary_identity_us;
         first = false;
         identity += field;
     };
@@ -12393,9 +12315,7 @@ template<typename... Fields>
 }
 
 /// Identity helpers — one tiny call to `join_identity` each. See
-/// main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V8_IMPL_PLAN__DOC0204.md §2. The `region` and `aggregate` parameters
 /// on `make_violation_identity` reserve slots in the identity tuple
-/// for the eventual per-region / per-aggregate rule extensions; V8
 /// callers pass the constant defaults `"all_regions"` / `"p50"` (no
 /// per-region rules exist yet, but the slots ensure forward
 /// compatibility).
@@ -12404,9 +12324,9 @@ template<typename... Fields>
     std::string_view benchmark,
     std::string_view rule_name,
     std::string_view lhs_algorithm,
-    const ParamMap&  lhs_params,
+    const parameter_map&  lhs_params,
     std::string_view rhs_algorithm,
-    const ParamMap&  rhs_params,
+    const parameter_map&  rhs_params,
     std::string_view test_case,
     std::string_view metric,
     std::string_view region    = "all_regions",
@@ -12424,7 +12344,7 @@ template<typename... Fields>
     std::string_view benchmark,
     std::string_view rule_name,
     std::string_view algorithm,
-    const ParamMap&  params,
+    const parameter_map&  params,
     std::string_view test_case,
     std::string_view region,
     std::string_view metric,
@@ -12451,60 +12371,56 @@ template<typename... Fields>
 // ----------------- Per-report sample-array index -----------------
 
 /// Walk an object whose fields are `(param_name, scalar_value)` pairs
-/// and produce a `ParamMap`. The same shape appears in three V8 walk
 /// sites (rule-violation sides, regression `violating_tuples[0]`,
 /// and `build_sample_index`'s `tuple` block); extracting the loop
 /// keeps the framework's three callers from drifting out of sync.
-[[nodiscard]] inline ParamMap parse_param_map(simdjson::dom::object obj) noexcept {
-    ParamMap params;
+[[nodiscard]] inline parameter_map parse_param_map(simdjson::dom::object obj) noexcept {
+    parameter_map params;
     for (auto field : obj) {
         params.emplace(std::string{field.key},
-                       ConfigValue::from_simdjson(field.value));
+                       config_value::from_simdjson(field.value));
     }
     return params;
 }
 
-/// Path → aggregated-samples map used by the V8 summary's
 /// amplitude lookup. The path is
 /// `benchmark\x1falgorithm\x1fparams\x1ftest_case\x1fregion\x1fmetric`
 /// (a subset of the issue identity, minus the kind/rule_name
 /// fields) and matches what the issue walk produces when it asks
-/// for the AggregatedSamples of "the cell that triggered this
-/// rule violation / regression in this report". V17: stores
+/// for the aggregated_samples of "the cell that triggered this
 /// pre-aggregated records instead of raw vectors.
-using SampleIndex = std::map<std::string, AggregatedSamples>;
+using sample_index = std::map<std::string, aggregated_samples>;
 
 /// Build the per-cell sample-array path key.
 [[nodiscard]] inline std::string make_sample_path(
     std::string_view benchmark,
     std::string_view algorithm,
-    const ParamMap&  params,
+    const parameter_map&  params,
     std::string_view test_case,
     std::string_view region,
     std::string_view metric) noexcept
 {
     std::string path;
-    path += benchmark;   path += kSummaryIdentityUs;
-    path += algorithm;   path += kSummaryIdentityUs;
+    path += benchmark;   path += k_summary_identity_us;
+    path += algorithm;   path += k_summary_identity_us;
     path += format_param_map_stable(params);
-    path += kSummaryIdentityUs;
-    path += test_case;   path += kSummaryIdentityUs;
-    path += region;      path += kSummaryIdentityUs;
+    path += k_summary_identity_us;
+    path += test_case;   path += k_summary_identity_us;
+    path += region;      path += k_summary_identity_us;
     path += metric;
     return path;
 }
 
 /// Walk a parsed report's full `benchmarks.<>.execution_tuples[*].
 /// test_cases.<>.<region>.<metric>` tree once, building a flat
-/// `SampleIndex` keyed by the same path the summary's identity
+/// `sample_index` keyed by the same path the summary's identity
 /// uses. Each leaf is parsed via `parse_aggregated_samples` so
-/// the index carries the V17 fixed-shape aggregate. O(report
 /// size); called at most once per report regardless of how many
 /// issues need amplitude data.
-[[nodiscard]] inline SampleIndex build_sample_index(
+[[nodiscard]] inline sample_index build_sample_index(
     simdjson::dom::element report_root) noexcept
 {
-    SampleIndex index;
+    sample_index index;
     const auto root_obj = try_as_object(report_root);
     if (!root_obj.has_value()) return index;
     const auto benchmarks_obj = try_get_object(*root_obj, "benchmarks");
@@ -12528,7 +12444,7 @@ using SampleIndex = std::map<std::string, AggregatedSamples>;
                 std::string algorithm{algo_field.key};
                 const auto params_obj = try_as_object(algo_field.value);
                 if (!params_obj.has_value()) continue;
-                ParamMap params = parse_param_map(*params_obj);
+                parameter_map params = parse_param_map(*params_obj);
                 const auto test_cases_obj = try_get_object(*record_obj, "test_cases");
                 if (!test_cases_obj.has_value()) continue;
                 for (auto tc_field : *test_cases_obj) {
@@ -12557,15 +12473,15 @@ using SampleIndex = std::map<std::string, AggregatedSamples>;
     return index;
 }
 
-/// Look up an `AggregatedSamples` in a per-report `SampleIndex`.
+/// Look up an `aggregated_samples` in a per-report `sample_index`.
 /// Returns a default-constructed aggregate (`samples_count == 0`)
 /// when the cell is absent — `amplitude_factor` already treats
 /// `samples_count < 2` as "no amplitude info" and falls back to 1.0.
-[[nodiscard]] inline AggregatedSamples samples_from_index(
-    const SampleIndex& index,
+[[nodiscard]] inline aggregated_samples samples_from_index(
+    const sample_index& index,
     std::string_view benchmark,
     std::string_view algorithm,
-    const ParamMap&  params,
+    const parameter_map&  params,
     std::string_view test_case,
     std::string_view region,
     std::string_view metric) noexcept
@@ -12608,17 +12524,17 @@ using SampleIndex = std::map<std::string, AggregatedSamples>;
 /// `update_first` (run once when the issue is brand new) and
 /// `update_latest` (run whenever this report wins the latest-seen
 /// race).
-struct ExtractedIssue {
+struct extracted_issue {
     std::string                          identity;
-    SummaryIssue::Kind                   kind = SummaryIssue::Kind::SanityWarning;
+    summary_issue::issue_kind                   kind = summary_issue::issue_kind::sanity_warning;
     /// Initialiser for fields that are intrinsic to the issue's
     /// identity (metric / rule_name / scope_label / etc.). Run
     /// once on first insertion.
-    std::function<void(SummaryIssue&)>   update_first;
+    std::function<void(summary_issue&)>   update_first;
     /// Updater for fields that may move between reports
     /// (latest_args, latest_samples, sanity_message). Run only when
     /// `report_index > issue.latest_seen_index`.
-    std::function<void(SummaryIssue&)>   update_latest;
+    std::function<void(summary_issue&)>   update_latest;
 };
 
 /// Generic per-report-array walker. The three issue kinds (rule
@@ -12628,14 +12544,14 @@ struct ExtractedIssue {
 /// extraction differs — encoded in the `Extract` callable. This
 /// templated walker collapses ~120 lines of triplicated boilerplate
 /// from the previous three `walk_report_*` functions into one.
-template<typename Extract>
+template<typename p_extract>
 inline void walk_report_array(
     simdjson::dom::element                report_root,
     std::string_view                       array_key,
     std::size_t                            report_index,
     std::size_t                            max_index,
-    std::map<std::string, SummaryIssue>&   aggregation,
-    Extract                                extract) noexcept
+    std::map<std::string, summary_issue>&   aggregation,
+    p_extract                              extract) noexcept
 {
     DEBUG_ASSERT(report_index >= 1, "report_index must be 1-based; 0 underflows the presence-array index");
     const auto root_obj = try_as_object(report_root);
@@ -12648,16 +12564,16 @@ inline void walk_report_array(
         if (!obj.has_value()) continue;
         auto extracted = extract(*obj);
         if (!extracted.has_value()) continue;
-        ExtractedIssue ex = std::move(*extracted);
+        extracted_issue ex = std::move(*extracted);
 
         // `try_emplace` distinguishes "first encounter" from "merge
         // into existing" cleanly. We move the identity string into
         // the map key on insert; on the merge path the identity
         // already lives both as the map key and on the existing
-        // SummaryIssue (set the first time), so the moved-from
+        // summary_issue (set the first time), so the moved-from
         // `ex.identity` is not consulted again.
         auto [it, inserted] = aggregation.try_emplace(std::move(ex.identity));
-        SummaryIssue& issue = it->second;
+        summary_issue& issue = it->second;
         if (inserted) {
             issue.kind     = ex.kind;
             issue.identity = it->first;     // copy back from the stored key
@@ -12673,8 +12589,8 @@ inline void walk_report_array(
 }
 
 /// Pull `violating_tuples[0]` (a single-element param-map array).
-/// Returns an empty `ParamMap` when the array is missing or empty.
-[[nodiscard]] inline ParamMap parse_violating_tuple_first(simdjson::dom::object obj) noexcept {
+/// Returns an empty `parameter_map` when the array is missing or empty.
+[[nodiscard]] inline parameter_map parse_violating_tuple_first(simdjson::dom::object obj) noexcept {
     simdjson::dom::array tuples_array;
     if (obj["violating_tuples"].get(tuples_array) != simdjson::SUCCESS) return {};
     for (auto tuple_elem : tuples_array) {
@@ -12716,13 +12632,13 @@ inline void walk_report_array(
     return args;
 }
 
-/// Pull every `(<algo_name>, <ParamMap>)` side from a
+/// Pull every `(<algo_name>, <parameter_map>)` side from a
 /// `rule_violations[*].execution_tuple`. May return one (self-compare)
 /// or two entries.
-[[nodiscard]] inline std::vector<std::pair<std::string, ParamMap>>
+[[nodiscard]] inline std::vector<std::pair<std::string, parameter_map>>
 parse_violation_sides(simdjson::dom::object obj) noexcept
 {
-    std::vector<std::pair<std::string, ParamMap>> sides;
+    std::vector<std::pair<std::string, parameter_map>> sides;
     const auto exec_obj = try_get_object(obj, "execution_tuple");
     if (!exec_obj.has_value()) return sides;
     for (auto algo_field : *exec_obj) {
@@ -12736,17 +12652,17 @@ parse_violation_sides(simdjson::dom::object obj) noexcept
 
 // ----------------- Scoring -----------------
 
-inline constexpr double kSummaryBaseRegression    = 1000.0;
-inline constexpr double kSummaryBaseRuleViolation =  700.0;
-inline constexpr double kSummaryBaseSanityWarning =  300.0;
+inline constexpr double k_summary_base_regression    = 1000.0;
+inline constexpr double k_summary_base_rule_violation =  700.0;
+inline constexpr double k_summary_base_sanity_warning =  300.0;
 
-[[nodiscard]] constexpr double base_severity(SummaryIssue::Kind kind) noexcept {
+[[nodiscard]] constexpr double base_severity(summary_issue::issue_kind kind) noexcept {
     switch (kind) {
-        case SummaryIssue::Kind::Regression:     return kSummaryBaseRegression;
-        case SummaryIssue::Kind::RuleViolation:  return kSummaryBaseRuleViolation;
-        case SummaryIssue::Kind::SanityWarning:  return kSummaryBaseSanityWarning;
+        case summary_issue::issue_kind::regression:     return k_summary_base_regression;
+        case summary_issue::issue_kind::rule_violation:  return k_summary_base_rule_violation;
+        case summary_issue::issue_kind::sanity_warning:  return k_summary_base_sanity_warning;
     }
-    return kSummaryBaseSanityWarning;
+    return k_summary_base_sanity_warning;
 }
 
 /// Multiplicative time-pattern factor. Inputs are pre-extracted from
@@ -12773,46 +12689,45 @@ inline constexpr double kSummaryBaseSanityWarning =  300.0;
 /// Relative percentage difference
 /// `|current - baseline| / |baseline| * 100`. Used by both
 /// `value_pct_factor` (for scoring) and `format_stat_blurb` (for
-/// dashboard display). The `kEps` clamp on the denominator
+/// dashboard display). The `k_eps` clamp on the denominator
 /// prevents the divide-by-zero when `baseline == 0` while keeping
 /// the displayed percentage stable across consumers.
 [[nodiscard]] inline double relative_diff_pct(double current, double baseline) noexcept {
-    constexpr double kEps = 1e-12;
-    return std::abs(current - baseline) / std::max(std::abs(baseline), kEps) * 100.0;
+    constexpr double k_eps = 1e-12;
+    return std::abs(current - baseline) / std::max(std::abs(baseline), k_eps) * 100.0;
 }
 
 /// Relative amplitude percentage `100 * (max - min) / |min|` of
 /// a pre-aggregated sample set. Used by both `amplitude_factor`
 /// and the dashboard's stat blurb. Returns 0 for fewer than two
-/// finite samples (no amplitude to speak of). The `max(|min|, kEps)`
+/// finite samples (no amplitude to speak of). The `max(|min|, k_eps)`
 /// clamp prevents divide-by-zero when min == 0 (e.g. all-zero
-/// samples). V17: takes `AggregatedSamples` so it works on both
 /// in-memory and historical data uniformly.
 [[nodiscard]] inline double relative_amplitude_pct(
-    const AggregatedSamples& aggregated) noexcept
+    const aggregated_samples& aggregated) noexcept
 {
     if (aggregated.samples_count < 2) return 0.0;
     if (aggregated.top10.empty())     return 0.0;     // all-non-finite cell
-    constexpr double kEps = 1e-12;
+    constexpr double k_eps = 1e-12;
     return 100.0 * (aggregated.stats.max - aggregated.stats.min)
-                 / std::max(std::abs(aggregated.stats.min), kEps);
+                 / std::max(std::abs(aggregated.stats.min), k_eps);
 }
 
 /// Multiplicative value-percentage factor. log-shaped so a 555%
 /// overshoot and a 5550% overshoot don't collapse onto the same
 /// number. A near-zero denominator (`baseline == 0` for a
-/// regression rising to anything) saturates at `kFactorCeil`
+/// regression rising to anything) saturates at `k_factor_ceil`
 /// directly — the log path would clamp there anyway, but the
 /// explicit branch makes intent obvious.
 [[nodiscard]] inline double value_pct_factor(double current, double baseline) noexcept {
-    constexpr double kEps         = 1e-12;
-    constexpr double kSlope       = 0.5;
-    constexpr double kFactorCeil  = 3.0;
-    if (std::abs(baseline) < kEps) return kFactorCeil;
+    constexpr double k_eps         = 1e-12;
+    constexpr double k_slope       = 0.5;
+    constexpr double k_factor_ceil  = 3.0;
+    if (std::abs(baseline) < k_eps) return k_factor_ceil;
     const double pct = relative_diff_pct(current, baseline);
-    const double bonus = kSlope * std::log10(1.0 + pct / 100.0);
+    const double bonus = k_slope * std::log10(1.0 + pct / 100.0);
     const double factor = 1.0 + bonus;
-    return factor < kFactorCeil ? factor : kFactorCeil;
+    return factor < k_factor_ceil ? factor : k_factor_ceil;
 }
 
 /// Multiplicative amplitude factor. High-noise samples reduce
@@ -12820,27 +12735,27 @@ inline constexpr double kSummaryBaseSanityWarning =  300.0;
 /// within natural variability. Curve mirrors the user spec:
 /// factor = 1.0 at amp = 0%, factor = 1/6 at amp = 10000%.
 [[nodiscard]] inline double amplitude_factor(
-    const AggregatedSamples& aggregated) noexcept
+    const aggregated_samples& aggregated) noexcept
 {
     if (aggregated.samples_count < 2) return 1.0;
-    constexpr double kCapPct = 10000.0;
+    constexpr double k_cap_pct = 10000.0;
     const double rel_amp_pct = relative_amplitude_pct(aggregated);
-    const double clipped     = rel_amp_pct < kCapPct ? rel_amp_pct : kCapPct;
+    const double clipped     = rel_amp_pct < k_cap_pct ? rel_amp_pct : k_cap_pct;
     const double normalised  = clipped / 1000.0;
     return (12.0 - normalised) / 12.0;
 }
 
 /// Compute (recent_streak, any_old_gap) from a presence array.
-struct PresencePattern {
+struct presence_pattern {
     bool        present_in_latest = false;
     std::size_t recent_streak     = 0;
     bool        any_old_gap       = false;
 };
 
-[[nodiscard]] inline PresencePattern presence_pattern(
+[[nodiscard]] inline presence_pattern presence_pattern(
     std::span<const std::uint8_t> presence) noexcept
 {
-    PresencePattern result;
+    presence_pattern result;
     if (presence.empty()) return result;
     result.present_in_latest = presence.back() != 0;
     if (!result.present_in_latest) return result;
@@ -12862,7 +12777,7 @@ struct PresencePattern {
 /// Composite scoring pipeline. Sanity warnings skip value-pct and
 /// amplitude (no underlying numeric comparison); rules and
 /// regressions use both.
-[[nodiscard]] inline double score_summary_issue(const SummaryIssue& issue) noexcept {
+[[nodiscard]] inline double score_summary_issue(const summary_issue& issue) noexcept {
     const auto pattern = presence_pattern(issue.presence_per_report);
     const double recurrence = recurrence_factor(
         pattern.present_in_latest,
@@ -12870,7 +12785,7 @@ struct PresencePattern {
         pattern.any_old_gap,
         issue.presence_per_report.size());
     const double base = base_severity(issue.kind);
-    if (issue.kind == SummaryIssue::Kind::SanityWarning) {
+    if (issue.kind == summary_issue::issue_kind::sanity_warning) {
         return base * recurrence;
     }
     const double value_pct = value_pct_factor(issue.latest_args[0], issue.latest_args[1]);
@@ -12883,14 +12798,14 @@ struct PresencePattern {
 /// Issues sorted by `(metric ↑, scope_label ↑, score ↓, identity ↑)`.
 /// The score-descending pass is what drives the user's "most concerning
 /// first" expectation.
-[[nodiscard]] inline std::vector<const SummaryIssue*> sort_summary_issues(
-    const std::map<std::string, SummaryIssue>& aggregation) noexcept
+[[nodiscard]] inline std::vector<const summary_issue*> sort_summary_issues(
+    const std::map<std::string, summary_issue>& aggregation) noexcept
 {
-    std::vector<const SummaryIssue*> sorted;
+    std::vector<const summary_issue*> sorted;
     sorted.reserve(aggregation.size());
     for (const auto& [_identity, issue] : aggregation) sorted.push_back(&issue);
     std::sort(sorted.begin(), sorted.end(),
-        [](const SummaryIssue* lhs, const SummaryIssue* rhs) noexcept {
+        [](const summary_issue* lhs, const summary_issue* rhs) noexcept {
             if (lhs->metric != rhs->metric)         return lhs->metric < rhs->metric;
             if (lhs->scope_label != rhs->scope_label) return lhs->scope_label < rhs->scope_label;
             if (lhs->score != rhs->score)           return lhs->score > rhs->score;
@@ -12908,9 +12823,9 @@ struct PresencePattern {
 /// 3 bytes of overhead per call.
 [[nodiscard]] inline std::string clip_to_width(std::string text, std::size_t max_chars) noexcept {
     if (text.size() <= max_chars) return text;
-    constexpr std::string_view kEllipsis = "\xe2\x80\xa6";   // "…" (3 bytes)
-    if (max_chars <= kEllipsis.size()) return std::string(max_chars, '.');
-    std::size_t cut = max_chars - kEllipsis.size();
+    constexpr std::string_view k_ellipsis = "\xe2\x80\xa6";   // "…" (3 bytes)
+    if (max_chars <= k_ellipsis.size()) return std::string(max_chars, '.');
+    std::size_t cut = max_chars - k_ellipsis.size();
     while (cut > 0
         && (static_cast<unsigned char>(text[cut]) & 0xC0u) == 0x80u) {
         --cut;
@@ -12922,17 +12837,17 @@ struct PresencePattern {
         return std::string(max_chars, '.');
     }
     text.resize(cut);
-    text += kEllipsis;
+    text += k_ellipsis;
     return text;
 }
 
 /// Build the per-issue stat blurb shown on each row. Reuses the
 /// `relative_diff_pct` / `relative_amplitude_pct` helpers so the
 /// numbers in the dashboard align with the numbers in the score.
-[[nodiscard]] inline std::string format_stat_blurb(const SummaryIssue& issue) noexcept {
+[[nodiscard]] inline std::string format_stat_blurb(const summary_issue& issue) noexcept {
     const double amp = relative_amplitude_pct(issue.latest_samples);
     switch (issue.kind) {
-        case SummaryIssue::Kind::RuleViolation: {
+        case summary_issue::issue_kind::rule_violation: {
             const double signed_diff = issue.latest_args[1] == 0.0
                 ? relative_diff_pct(issue.latest_args[0], issue.latest_args[1])
                 : (issue.latest_args[0] - issue.latest_args[1])
@@ -12940,7 +12855,7 @@ struct PresencePattern {
             return fmt::format("rule  lhs={:.6g} vs rhs={:.6g}  (Δ {:+.1f}%, amp ±{:.0f}%)",
                 issue.latest_args[0], issue.latest_args[1], signed_diff, amp);
         }
-        case SummaryIssue::Kind::Regression: {
+        case summary_issue::issue_kind::regression: {
             const double signed_diff = issue.latest_args[0] == 0.0
                 ? relative_diff_pct(issue.latest_args[1], issue.latest_args[0])
                 : (issue.latest_args[1] - issue.latest_args[0])
@@ -12948,28 +12863,28 @@ struct PresencePattern {
             return fmt::format("regr  now={:.6g} vs prev={:.6g}  (Δ {:+.1f}%, amp ±{:.0f}%)",
                 issue.latest_args[1], issue.latest_args[0], signed_diff, amp);
         }
-        case SummaryIssue::Kind::SanityWarning: {
+        case summary_issue::issue_kind::sanity_warning: {
             std::string_view message{issue.sanity_message};
             if (auto dot = message.find('.'); dot != std::string_view::npos) {
                 message = message.substr(0, dot);
             }
-            constexpr std::size_t kSanityBlurbMaxChars = 40;
-            return clip_to_width(fmt::format("sanity  {}", message), kSanityBlurbMaxChars);
+            constexpr std::size_t k_sanity_blurb_max_chars = 40;
+            return clip_to_width(fmt::format("sanity  {}", message), k_sanity_blurb_max_chars);
         }
     }
     return {};
 }
 
 /// Build the per-issue presence-block ftxui Element row. Shows the
-/// last `kBlockWindow` slots, oldest on the left → newest on the
+/// last `k_block_window` slots, oldest on the left → newest on the
 /// right. Glyphs are emitted as one element-per-cell so ftxui sizes
 /// them uniformly.
-inline constexpr std::size_t kSummaryBlockWindow = 8;
+inline constexpr std::size_t k_summary_block_window = 8;
 
-[[nodiscard]] inline ftxui::Elements presence_blocks(const SummaryIssue& issue) noexcept {
+[[nodiscard]] inline ftxui::Elements presence_blocks(const summary_issue& issue) noexcept {
     using namespace ftxui;
     const std::size_t total = issue.presence_per_report.size();
-    const std::size_t take  = total < kSummaryBlockWindow ? total : kSummaryBlockWindow;
+    const std::size_t take  = total < k_summary_block_window ? total : k_summary_block_window;
     const std::size_t start = total - take;
     Elements blocks;
     blocks.reserve(take);
@@ -12990,12 +12905,12 @@ inline constexpr std::size_t kSummaryBlockWindow = 8;
 /// Group ordering helper: a tuple key for the "metric → scope" header
 /// pass. `std::pair<string, string>` would suffice; we keep a tiny
 /// alias for readability.
-using SummaryGroupKey = std::pair<std::string, std::string>;
+using summary_group_key = std::pair<std::string, std::string>;
 
 /// Convert one fully-scored issue into its dashboard row. Severity
 /// emoji + colour, kind label (bold), stat blurb, presence row, dim
 /// rule name on the right.
-[[nodiscard]] inline ftxui::Element render_issue_row(const SummaryIssue& issue) noexcept {
+[[nodiscard]] inline ftxui::Element render_issue_row(const summary_issue& issue) noexcept {
     using namespace ftxui;
     const auto& bucket = bucket_for(issue.score);
     Elements row;
@@ -13012,8 +12927,8 @@ using SummaryGroupKey = std::pair<std::string, std::string>;
     if (!issue.rule_name.empty()) {
         // Cap the rule_name so a long identifier doesn't push the
         // presence blocks past the screen edge in ftxui's auto-fit.
-        constexpr std::size_t kRuleNameMaxChars = 24;
-        row.push_back(text(clip_to_width(issue.rule_name, kRuleNameMaxChars)) | dim);
+        constexpr std::size_t k_rule_name_max_chars = 24;
+        row.push_back(text(clip_to_width(issue.rule_name, k_rule_name_max_chars)) | dim);
     }
     return hbox(std::move(row));
 }
@@ -13023,12 +12938,11 @@ using SummaryGroupKey = std::pair<std::string, std::string>;
 /// issue rows. Trailing legend doubles as the colour key.
 ///
 /// We write the rendered ftxui screen via `std::fputs(stderr)` rather
-/// than `bioseq_log<DBG>` — this matches `print_violations` /
-/// `print_regressions` / `print_sanity_warnings` (the V5–V7 stderr
+/// than `bioseq_log<logging_level::debug>` — this matches `print_violations` /
 /// printers) which already bypass fmtlog so end-of-run operator output
 /// stays visible after the asynchronous log queue drains.
 inline void render_summary(
-    std::span<const SummaryIssue* const> sorted_issues,
+    std::span<const summary_issue* const> sorted_issues,
     std::size_t   max_report_index,
     std::size_t   reports_present_count) noexcept
 {
@@ -13073,7 +12987,7 @@ inline void render_summary(
                                      sorted_issues.size() == 1 ? "" : "s")));
     Elements legend_severity;
     legend_severity.push_back(text("Legend:  "));
-    for (const auto& bucket : kSeverityBuckets) {
+    for (const auto& bucket : k_severity_buckets) {
         legend_severity.push_back(text(fmt::format(" {} {}  ",
                                                     bucket.emoji, bucket.label))
                                    | color(bucket.color));
@@ -13101,9 +13015,9 @@ inline void render_summary(
 /// Build the rule-violation extractor lambda. Returns a lambda
 /// suitable for `walk_report_array<...>`, capturing `sample_index`
 /// by reference (caller-owned, lives for the whole report walk).
-[[nodiscard]] inline auto rule_violation_extractor(const SampleIndex& sample_index) noexcept {
+[[nodiscard]] inline auto rule_violation_extractor(const sample_index& sample_index) noexcept {
     return [&sample_index](simdjson::dom::object obj)
-        -> std::optional<ExtractedIssue>
+        -> std::optional<extracted_issue>
     {
         const auto location  = get_string_field(obj, "location");
         const auto benchmark = get_string_field(obj, "benchmark");
@@ -13117,14 +13031,14 @@ inline void render_summary(
         // writer emits one entry to avoid a duplicate JSON key. We
         // copy the single side into the RHS slot so identity + score
         // see both halves of the rule.
-        std::pair<std::string, ParamMap> lhs = std::move(sides.front());
-        std::pair<std::string, ParamMap> rhs = sides.size() > 1
+        std::pair<std::string, parameter_map> lhs = std::move(sides.front());
+        std::pair<std::string, parameter_map> rhs = sides.size() > 1
             ? std::move(sides[1])
             : lhs;
         const auto args = parse_violation_args(obj);
 
-        ExtractedIssue ex;
-        ex.kind     = SummaryIssue::Kind::RuleViolation;
+        extracted_issue ex;
+        ex.kind     = summary_issue::issue_kind::rule_violation;
         ex.identity = make_violation_identity(
             location, benchmark, rule_name,
             lhs.first, lhs.second, rhs.first, rhs.second,
@@ -13132,7 +13046,7 @@ inline void render_summary(
 
         ex.update_first = [metric, test_case, benchmark, rule_name,
                            lhs_algo = lhs.first, rhs_algo = rhs.first]
-                          (SummaryIssue& issue) noexcept {
+                          (summary_issue& issue) noexcept {
             issue.metric    = metric;
             issue.test_case = test_case;
             issue.benchmark = benchmark;
@@ -13147,10 +13061,9 @@ inline void render_summary(
                             lhs_algo = std::move(lhs.first),
                             lhs_params = std::move(lhs.second),
                             test_case, metric, &sample_index]
-                           (SummaryIssue& issue) noexcept {
+                           (summary_issue& issue) noexcept {
             issue.latest_args = args;
             // Amplitude reads the LHS cell's samples (the side that
-            // exceeded the rule). V8 always evaluates rule violations
             // against `all_regions`; per-region rules would need this
             // hard-coded "all_regions" replaced with the rule's region.
             issue.latest_samples = samples_from_index(
@@ -13164,9 +13077,9 @@ inline void render_summary(
 /// Build the regression extractor lambda. Same shape as the rule
 /// extractor; the regression's stored `region` flows into both the
 /// identity and the sample lookup.
-[[nodiscard]] inline auto regression_extractor(const SampleIndex& sample_index) noexcept {
+[[nodiscard]] inline auto regression_extractor(const sample_index& sample_index) noexcept {
     return [&sample_index](simdjson::dom::object obj)
-        -> std::optional<ExtractedIssue>
+        -> std::optional<extracted_issue>
     {
         const auto location       = get_string_field(obj, "location");
         const auto benchmark      = get_string_field(obj, "benchmark");
@@ -13180,15 +13093,15 @@ inline void render_summary(
         auto params = parse_violating_tuple_first(obj);
         auto test_case = parse_test_case_first(obj);
 
-        ExtractedIssue ex;
-        ex.kind     = SummaryIssue::Kind::Regression;
+        extracted_issue ex;
+        ex.kind     = summary_issue::issue_kind::regression;
         ex.identity = make_regression_identity(
             location, benchmark, rule_name, algorithm_name, params,
             test_case, region, metric, aggregate);
 
         ex.update_first = [metric, test_case, benchmark, rule_name,
                            algorithm_name, region, aggregate]
-                          (SummaryIssue& issue) noexcept {
+                          (summary_issue& issue) noexcept {
             issue.metric    = metric;
             issue.test_case = test_case;
             issue.benchmark = benchmark;
@@ -13211,7 +13124,7 @@ inline void render_summary(
         ex.update_latest = [previously, now_value, benchmark, algorithm_name,
                             params = std::move(params), test_case, region,
                             metric, &sample_index]
-                           (SummaryIssue& issue) noexcept {
+                           (summary_issue& issue) noexcept {
             issue.latest_args = {previously, now_value};
             issue.latest_samples = samples_from_index(
                 sample_index, benchmark, algorithm_name, params,
@@ -13226,43 +13139,41 @@ inline void render_summary(
 /// value so the call site can plug it directly into
 /// `walk_report_array`.
 [[nodiscard]] inline auto sanity_warning_extractor() noexcept {
-    return [](simdjson::dom::object obj) -> std::optional<ExtractedIssue> {
+    return [](simdjson::dom::object obj) -> std::optional<extracted_issue> {
         const auto type    = get_string_field(obj, "type");
         const auto metric  = get_string_field(obj, "metric");
         const auto message = get_string_field(obj, "message");
 
-        ExtractedIssue ex;
-        ex.kind     = SummaryIssue::Kind::SanityWarning;
+        extracted_issue ex;
+        ex.kind     = summary_issue::issue_kind::sanity_warning;
         ex.identity = make_sanity_identity(type, metric, message);
-        ex.update_first = [type, metric, message](SummaryIssue& issue) noexcept {
+        ex.update_first = [type, metric, message](summary_issue& issue) noexcept {
             issue.metric         = metric;
             issue.scope_label    = "(global)";
             issue.rule_name      = type;
             issue.sanity_message = message;
         };
-        ex.update_latest = [message](SummaryIssue& issue) noexcept {
+        ex.update_latest = [message](summary_issue& issue) noexcept {
             issue.sanity_message = message;
         };
         return ex;
     };
 }
 
-/// One-shot V8-style summary printer. Walks every report on disk,
 /// scores issues, and renders the aggregated dashboard to stderr via
 /// `render_summary`. Used as the read-only fallback when `--ui` is
-/// requested but stdin / stderr is not a TTY (per V14 §11.1 / §8.1)
 /// and from `ui_mode_main`'s startup probe when the user explicitly
 /// requested ASCII-only output but no TTY is attached.
 [[nodiscard]] inline int render_summary_to_stderr_once(const std::string& report_dir) noexcept {
     const std::filesystem::path report_dir_path{report_dir};
     const auto max_index = max_existing_report_index(report_dir_path).value_or(0);
     if (max_index == 0) {
-        bioseq_log<INF>("[bench_framework] summary: no reports under '{}'", report_dir);
+        bioseq_log<logging_level::info>("[bench_framework] summary: no reports under '{}'", report_dir);
         return 0;
     }
 
-    HistoricalReportCache cache{report_dir_path};
-    std::map<std::string, SummaryIssue> aggregation;
+    historical_report_cache cache{report_dir_path};
+    std::map<std::string, summary_issue> aggregation;
     std::vector<std::uint8_t> report_data_present(max_index, 0);
     std::size_t reports_present_count = 0;
 
@@ -13284,7 +13195,7 @@ inline void render_summary(
     }
 
     if (reports_present_count == 0) {
-        bioseq_log<INF>("[bench_framework] summary: every report under '{}' failed to parse",
+        bioseq_log<logging_level::info>("[bench_framework] summary: every report under '{}' failed to parse",
              report_dir);
         return 0;
     }
@@ -13299,21 +13210,19 @@ inline void render_summary(
     }
 
     auto sorted_issues = sort_summary_issues(aggregation);
-    render_summary(std::span<const SummaryIssue* const>{
+    render_summary(std::span<const summary_issue* const>{
                        sorted_issues.data(), sorted_issues.size()},
                    max_index, reports_present_count);
     return 0;
 }
 
-// ----------------- V14: --ui interactive entry point -----------------
 
 /// Forward declaration for the interactive ftxui dashboard. Defined in
 /// the sibling implementation unit `interactive.cppm`. Invoked from
 /// `run_impl` when `--ui` is on the command line and stdin / stderr
 /// are interactive TTYs. When the TTY check fails the entry point
 /// itself dispatches `render_summary_to_stderr_once` so a CI-piped
-/// `--ui` invocation still produces V8-style output (per V14 §11.1).
-[[nodiscard]] int ui_mode_main(const std::string& report_dir, const ParsedCli& cli) noexcept;
+[[nodiscard]] int ui_mode_main(const std::string& report_dir, const parsed_cli& cli) noexcept;
 
 // ----------------- CLI parsing -----------------
 
@@ -13321,7 +13230,7 @@ inline void render_summary(
 /// "<code>:<message>" strings into `errors` on any problem. Empty values,
 /// empty items, unknown keys, and repeated dimensions are all errors.
 inline void parse_one_filter_into(std::string_view spec,
-                                  FilterSpec& filter,
+                                  filter_specification& filter,
                                   std::vector<std::string>& errors) noexcept {
     const auto eq = spec.find('=');
     if (eq == std::string_view::npos || eq == 0) {
@@ -13373,8 +13282,8 @@ inline void parse_one_filter_into(std::string_view spec,
 /// silently ignored (the user may layer their own flag parsing on top by
 /// inspecting argv before calling `run`). Runs first inside `run_impl` so a
 /// `--report` override is applied before any directory creation.
-[[nodiscard]] inline ParsedCli parse_cli(int argc, char** argv) noexcept {
-    ParsedCli parsed;
+[[nodiscard]] inline parsed_cli parse_cli(int argc, char** argv) noexcept {
+    parsed_cli parsed;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--fast") {
@@ -13392,7 +13301,7 @@ inline void parse_one_filter_into(std::string_view spec,
             const auto* const end   = text.data() + text.size();
             const auto result = std::from_chars(begin, end, threads);
             if (result.ec != std::errc{} || result.ptr != end || threads <= 0) {
-                bioseq_log<ERR>("[bench_framework] --threads requires a positive integer (got '{}')",
+                bioseq_log<logging_level::error>("[bench_framework] --threads requires a positive integer (got '{}')",
                      text);
             } else {
                 parsed.threads_override = static_cast<unsigned>(threads);
@@ -13402,8 +13311,6 @@ inline void parse_one_filter_into(std::string_view spec,
             parsed.report_override = std::string{argv[i + 1]};
             ++i;
         } else if (arg == "--memory-buffer" && (i + 1) < argc) {
-            // V12: `--memory-buffer N` (0..50, default 10). Use
-            // std::from_chars to honour main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md's "no exceptions
             // in framework code" — the existing --threads parser used
             // try/catch around std::stoi, but we don't extend that
             // pattern.
@@ -13413,10 +13320,10 @@ inline void parse_one_filter_into(std::string_view spec,
             const auto* const end   = text.data() + text.size();
             const auto result = std::from_chars(begin, end, pct);
             if (result.ec != std::errc{} || result.ptr != end) {
-                bioseq_log<ERR>("[bench_framework] --memory-buffer requires an integer (got '{}')",
+                bioseq_log<logging_level::error>("[bench_framework] --memory-buffer requires an integer (got '{}')",
                      text);
             } else if (pct < 0 || pct > 50) {
-                bioseq_log<ERR>("[bench_framework] --memory-buffer must be in [0, 50] "
+                bioseq_log<logging_level::error>("[bench_framework] --memory-buffer must be in [0, 50] "
                      "(got {}); falling back to default 10", pct);
             } else {
                 parsed.memory_buffer_pct = static_cast<double>(pct);
@@ -13443,11 +13350,11 @@ inline void parse_one_filter_into(std::string_view spec,
 /// `palette` is the enumerator (literal type) — converting to
 /// `ftxui::Color` happens at the call site since Color's constructor
 /// is not constexpr.
-struct GaugeBucket {
+struct gauge_bucket {
     float                   min_fraction;
     ftxui::Color::Palette256 palette;
 };
-inline constexpr std::array<GaugeBucket, 4> kGaugeBuckets{ {
+inline constexpr std::array<gauge_bucket, 4> k_gauge_buckets{ {
     { 0.00f, static_cast<ftxui::Color::Palette256>(ftxui::Color::Red)     },
     { 0.25f, ftxui::Color::Orange1                                       },
     { 0.50f, static_cast<ftxui::Color::Palette256>(ftxui::Color::Yellow) },
@@ -13456,8 +13363,8 @@ inline constexpr std::array<GaugeBucket, 4> kGaugeBuckets{ {
 
 [[nodiscard]] inline constexpr ftxui::Color::Palette256
 gauge_palette(float fraction) noexcept {
-    auto picked = kGaugeBuckets.front().palette;
-    for (const auto& bucket : kGaugeBuckets) {
+    auto picked = k_gauge_buckets.front().palette;
+    for (const auto& bucket : k_gauge_buckets) {
         if (fraction >= bucket.min_fraction) picked = bucket.palette;
     }
     return picked;
@@ -13477,8 +13384,8 @@ gauge_palette(float fraction) noexcept {
 [[nodiscard]] inline ftxui::Element coloured_gauge(
     float fraction, int total_cells) noexcept
 {
-    constexpr std::string_view kFull  = "\xe2\x96\x88";   // █
-    constexpr std::string_view kEmpty = "\xe2\x96\x91";   // ░
+    constexpr std::string_view k_full  = "\xe2\x96\x88";   // █
+    constexpr std::string_view k_empty = "\xe2\x96\x91";   // ░
     if (total_cells <= 0) return ftxui::text("[]");
     const float clamped = std::clamp(fraction, 0.0f, 1.0f);
     const int filled_cells = std::clamp(
@@ -13486,9 +13393,9 @@ gauge_palette(float fraction) noexcept {
             static_cast<double>(clamped) * static_cast<double>(total_cells))),
         0, total_cells);
     std::string bar;
-    bar.reserve(static_cast<std::size_t>(total_cells) * kFull.size() + 2);
+    bar.reserve(static_cast<std::size_t>(total_cells) * k_full.size() + 2);
     bar.push_back('[');
-    for (int i = 0; i < total_cells; ++i) bar += (i < filled_cells ? kFull : kEmpty);
+    for (int i = 0; i < total_cells; ++i) bar += (i < filled_cells ? k_full : k_empty);
     bar.push_back(']');
     return ftxui::text(bar) | ftxui::color(gauge_color(clamped));
 }
@@ -13496,27 +13403,26 @@ gauge_palette(float fraction) noexcept {
 /// Convert raw bytes to a `double` in GiB. Inlined as a `constexpr`
 /// helper so callers don't repeat the `1024^3` divisor.
 [[nodiscard]] inline constexpr double bytes_to_gib(std::uint64_t bytes) noexcept {
-    constexpr double kGib = 1024.0 * 1024.0 * 1024.0;
-    return static_cast<double>(bytes) / kGib;
+    constexpr double k_gib = 1024.0 * 1024.0 * 1024.0;
+    return static_cast<double>(bytes) / k_gib;
 }
 
 /// Background thread body for the progress dashboard. Two paths:
 /// 1. **TTY**: render an ftxui document to stderr every 200 ms with
 ///    one row per test_case (active groups underneath), a colour-
 ///    shifting gauge per row, and a `[memory X / Y GiB]` header.
-/// 2. **Non-TTY (CI / pipes)**: emit a bioseq_log<DBG> info line every 5 s
+/// 2. **Non-TTY (CI / pipes)**: emit a bioseq_log<logging_level::debug> info line every 5 s
 ///    with one line per test_case still in flight.
-// ----------------- V12 row classification + glyph table -----------------
 
 /// Possible states of a test_case row in the dashboard. Renderer picks
 /// the most-urgent state across the test case's groups.
-enum class TestCaseRowState : std::uint8_t {
-    Done,           // tc->finish_ns set, no failure flags ⇒ ✅
-    Aborted,        // some group has aborted == true        ⇒ ❌
-    InputRetry,     // some group has input_retry > 0        ⇒ ▶ ⛔
-    CleanupRetry,   // some group has cleanup_retry > 0      ⇒ ▶ 🧹
-    IdleWait,       // some group has been idle > kMaxIdle/2 ⇒ ▶ 🕑
-    Running,        // default running                       ⇒ ▶ 🔄
+enum class test_case_row_state : std::uint8_t {
+    done,
+    aborted,
+    input_retry,
+    cleanup_retry,
+    idle_wait,
+    running,
 };
 
 /// Walk every group of `tc` and pick the most-urgent state. The order
@@ -13524,8 +13430,8 @@ enum class TestCaseRowState : std::uint8_t {
 /// mirrors the user spec — failures and aborts surface first; an
 /// already-finished test case stays "Done" even if its idle clock
 /// briefly armed before it completed.
-[[nodiscard]] inline TestCaseRowState classify_test_case(
-    const ProgressTestCase& tc) noexcept
+[[nodiscard]] inline test_case_row_state classify_test_case(
+    const progress_test_case& tc) noexcept
 {
     bool any_aborted = false, any_input_retry = false;
     bool any_cleanup_retry = false, any_idle_long = false;
@@ -13539,60 +13445,60 @@ enum class TestCaseRowState : std::uint8_t {
         const auto idle_start = group_ptr->idle_start_ns.load(std::memory_order_acquire);
         if (idle_start != 0) {
             const auto elapsed_ns = static_cast<std::int64_t>(
-                                        bioseq::instr::clock::now_ns()) - idle_start;
+                                        bioseq::instrumentation::clock::now_ns()) - idle_start;
             const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    BatchScheduler::kMaxIdleWaitingTime).count() / 2;
+                                    batch_scheduler::k_max_idle_waiting_time).count() / 2;
             if (elapsed_ns > half_ns) any_idle_long = true;
         }
     }
-    if (any_aborted)         return TestCaseRowState::Aborted;
-    if (any_input_retry)     return TestCaseRowState::InputRetry;
-    if (any_cleanup_retry)   return TestCaseRowState::CleanupRetry;
+    if (any_aborted)         return test_case_row_state::aborted;
+    if (any_input_retry)     return test_case_row_state::input_retry;
+    if (any_cleanup_retry)   return test_case_row_state::cleanup_retry;
     if (tc.finish_ns.load(std::memory_order_acquire) != 0)
-                             return TestCaseRowState::Done;
-    if (any_idle_long)       return TestCaseRowState::IdleWait;
-    return TestCaseRowState::Running;
+                             return test_case_row_state::done;
+    if (any_idle_long)       return test_case_row_state::idle_wait;
+    return test_case_row_state::running;
 }
 
 /// Header glyph + colour per row state. Table-driven so adding a new
 /// state means adding a row, not editing branch ladders.
-struct RowGlyph {
-    TestCaseRowState  state;
+struct row_glyph {
+    test_case_row_state  state;
     std::string_view  glyph;        // UTF-8 (may include emoji)
     ftxui::Color      tint;
 };
 
-inline const std::array<RowGlyph, 6> kRowGlyphs{ {
-    { TestCaseRowState::Aborted,
+inline const std::array<row_glyph, 6> k_row_glyphs{ {
+    { test_case_row_state::aborted,
       "\xe2\x9d\x8c",                      ftxui::Color::RedLight   },  // ❌
-    { TestCaseRowState::InputRetry,
+    { test_case_row_state::input_retry,
       "\xe2\x96\xb6 \xe2\x9b\x94",         ftxui::Color::Red        },  // ▶ ⛔
-    { TestCaseRowState::CleanupRetry,
+    { test_case_row_state::cleanup_retry,
       "\xe2\x96\xb6 \xf0\x9f\xa7\xb9",     ftxui::Color::Magenta    },  // ▶ 🧹
-    { TestCaseRowState::IdleWait,
+    { test_case_row_state::idle_wait,
       "\xe2\x96\xb6 \xf0\x9f\x95\x91",     ftxui::Color::Yellow     },  // ▶ 🕑
-    { TestCaseRowState::Running,
+    { test_case_row_state::running,
       "\xe2\x96\xb6 \xf0\x9f\x94\x84",     ftxui::Color::Yellow     },  // ▶ 🔄
-    { TestCaseRowState::Done,
+    { test_case_row_state::done,
       "\xe2\x9c\x85",                      ftxui::Color::Green      },  // ✅
 } };
 
-[[nodiscard]] inline const RowGlyph& glyph_for(TestCaseRowState state) noexcept {
-    for (const auto& entry : kRowGlyphs) {
+[[nodiscard]] inline const row_glyph& glyph_for(test_case_row_state state) noexcept {
+    for (const auto& entry : k_row_glyphs) {
         if (entry.state == state) return entry;
     }
-    return kRowGlyphs.front();
+    return k_row_glyphs.front();
 }
 
 /// Build the detail-rows that hang off a failing/idle row. Returned as
 /// a list of ftxui Elements ready to be flattened into the renderer's
 /// `rows` vector.
 [[nodiscard]] inline ftxui::Elements build_detail_rows(
-    const ProgressTestCase& tc, TestCaseRowState state) noexcept
+    const progress_test_case& tc, test_case_row_state state) noexcept
 {
     using namespace ftxui;
     Elements detail;
-    if (state == TestCaseRowState::Running || state == TestCaseRowState::Done) {
+    if (state == test_case_row_state::running || state == test_case_row_state::done) {
         return detail;
     }
     for (const auto& group_ptr : tc.groups) {
@@ -13612,14 +13518,14 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
         // protocol is "store(0, release) BEFORE clearing strings under
         // the lock"; revalidating under the lock means we never paint
         // a stale N when the strings are already empty.
-        if (state == TestCaseRowState::Aborted && aborted) {
+        if (state == test_case_row_state::aborted && aborted) {
             std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
             message = group_ptr->aborted_reason;
             header_line = fmt::format(
                 "group {} aborted",
                 group_ptr->group_index + 1);
             tint = Color::RedLight;
-        } else if (state == TestCaseRowState::InputRetry && input_n > 0) {
+        } else if (state == test_case_row_state::input_retry && input_n > 0) {
             std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
             const auto fresh_n = group_ptr->input_retry_attempt
                                     .load(std::memory_order_relaxed);
@@ -13630,9 +13536,9 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
                 "group {} on_input failure [retry {}/{}]",
                 group_ptr->group_index + 1,
                 static_cast<int>(fresh_n),
-                kMaxTaskInputHandlerErrorCount);
+                k_max_task_input_handler_error_count);
             tint = Color::Red;
-        } else if (state == TestCaseRowState::CleanupRetry && cleanup_n > 0) {
+        } else if (state == test_case_row_state::cleanup_retry && cleanup_n > 0) {
             std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
             const auto fresh_n = group_ptr->cleanup_retry_attempt
                                     .load(std::memory_order_relaxed);
@@ -13643,17 +13549,17 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
                 "group {} on_cleanup failure [retry {}/{}]",
                 group_ptr->group_index + 1,
                 static_cast<int>(fresh_n),
-                kMaxTaskInputHandlerErrorCount);
+                k_max_task_input_handler_error_count);
             tint = Color::Magenta;
-        } else if (state == TestCaseRowState::IdleWait && idle_start != 0) {
+        } else if (state == test_case_row_state::idle_wait && idle_start != 0) {
             const auto elapsed_ns = static_cast<std::int64_t>(
-                                        bioseq::instr::clock::now_ns()) - idle_start;
+                                        bioseq::instrumentation::clock::now_ns()) - idle_start;
             const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    BatchScheduler::kMaxIdleWaitingTime).count() / 2;
+                                    batch_scheduler::k_max_idle_waiting_time).count() / 2;
             if (elapsed_ns <= half_ns) continue;
             const auto elapsed_s = elapsed_ns / 1'000'000'000;
             const auto budget_s  = std::chrono::duration_cast<std::chrono::seconds>(
-                                       BatchScheduler::kMaxIdleWaitingTime).count();
+                                       batch_scheduler::k_max_idle_waiting_time).count();
             header_line = fmt::format(
                 "group {} waiting {}s / {}s — no peers running, system memory unavailable",
                 group_ptr->group_index + 1, elapsed_s, budget_s);
@@ -13709,41 +13615,40 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
     return detail;
 }
 
-/// V16 grace period: a Done row stays visible for this long after
 /// `finish_ns` is stamped, then disappears. Failures (Aborted /
 /// InputRetry / CleanupRetry) are *never* hidden — the operator must
 /// see them.
-inline constexpr std::chrono::seconds kCompletedRowGracePeriod{5};
+inline constexpr std::chrono::seconds k_completed_row_grace_period{5};
 
 /// Free helper — the auto-hide predicate. Used by both the per-row
 /// loop (skip rendering this row) and the all-hidden collapse loop
 /// (collapse the entire benchmark when every row is past the grace).
-[[nodiscard]] inline bool row_is_hideable(TestCaseRowState state,
+[[nodiscard]] inline bool row_is_hideable(test_case_row_state state,
                                             std::int64_t finish_ns,
                                             std::int64_t now_ns) noexcept
 {
-    if (state != TestCaseRowState::Done) return false;
+    if (state != test_case_row_state::done) return false;
     if (finish_ns == 0) return false;
     constexpr auto grace_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kCompletedRowGracePeriod).count();
+            k_completed_row_grace_period).count();
     return (now_ns - finish_ns) > grace_ns;
 }
 
-inline void render_progress_loop(ProgressState& progress) noexcept {
+inline void render_progress_loop(progress_state& progress) noexcept {
     using namespace std::chrono_literals;
     using namespace ftxui;
-    constexpr int kBarCells = 16;
+    constexpr int k_bar_cells = 16;
 
     const bool tty = progress.tty_render.load(std::memory_order_relaxed);
     if (!tty) {
-        constexpr auto kPollInterval = std::chrono::milliseconds{200};
-        constexpr int  kTicksPerLog  = 25;     // 25 × 200 ms == 5 s
-        int ticks_until_next_log = kTicksPerLog;
+        constexpr auto k_poll_interval = std::chrono::milliseconds{200};
+        constexpr int  k_ticks_per_log  = 25;     // 25 × 200 ms == 5 s
+        int ticks_until_next_log = k_ticks_per_log;
         while (progress.running.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(kPollInterval);
+            std::this_thread::sleep_for(k_poll_interval);
             if (--ticks_until_next_log > 0) continue;
-            ticks_until_next_log = kTicksPerLog;
+            ticks_until_next_log = k_ticks_per_log;
             for (const auto& per : progress.per_benchmark) {
                 if (!per->setup_done.load(std::memory_order_acquire)) continue;
                 for (const auto& tc : per->test_cases) {
@@ -13751,7 +13656,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                     const auto total = tc->tuple_total.load(std::memory_order_relaxed);
                     if (tc->finish_ns.load(std::memory_order_relaxed) != 0) continue;
                     if (tc->start_ns.load(std::memory_order_relaxed) == 0) continue;
-                    bioseq_log<INF>("[bench_framework] [{}/{}] tuples {}/{}",
+                    bioseq_log<logging_level::info>("[bench_framework] [{}/{}] tuples {}/{}",
                          per->benchmark_key, tc->test_case_name,
                          done, total);
                 }
@@ -13765,11 +13670,10 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     auto render_once = [&] {
         Elements rows;
         const auto now_ns_value = static_cast<std::int64_t>(
-                                       bioseq::instr::clock::now_ns());
+                                       bioseq::instrumentation::clock::now_ns());
 
-        // Header line + budget readout. V16: read pending/running +
         // reservation totals from the scheduler when present, falling
-        // back to MemoryBudget for the system-wide numbers.
+        // back to benchmark_memory_budget for the system-wide numbers.
         rows.push_back(text("bench_framework — live progress") | bold);
         if (progress.scheduler != nullptr) {
             const auto snap = progress.scheduler->live_snapshot();
@@ -13803,7 +13707,6 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                 | color(Color::Cyan));
                 continue;
             }
-            // V16 G2.b — collapse the benchmark when every test case is
             // past the grace period. Empty test_cases vectors stay as
             // "all done" too (degenerate but consistent).
             bool all_hidden = !per->test_cases.empty();
@@ -13832,7 +13735,6 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 const auto finish_ns    = tc->finish_ns.load(std::memory_order_relaxed);
                 const auto state = classify_test_case(*tc);
 
-                // V16 G2.a — auto-hide Done rows past the grace period.
                 if (row_is_hideable(state, finish_ns, now_ns_value)) continue;
 
                 const float fraction    = tuple_total == 0
@@ -13850,23 +13752,23 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                     | color(glyph.tint));
                 headline.push_back(text(tc->test_case_name) | size(WIDTH, EQUAL, 24));
 
-                if (state == TestCaseRowState::Done) {
+                if (state == test_case_row_state::done) {
                     headline.push_back(text(fmt::format("tuples {}/{}",
                         tuple_done, tuple_total)));
                     headline.push_back(text(fmt::format("  done in {} s", elapsed_s))
                                        | color(Color::GrayLight));
-                } else if (state == TestCaseRowState::Aborted) {
+                } else if (state == test_case_row_state::aborted) {
                     headline.push_back(text(fmt::format("aborted at {}/{}",
                         tuple_done, tuple_total)) | color(Color::RedLight));
-                } else if (state == TestCaseRowState::InputRetry
-                        || state == TestCaseRowState::CleanupRetry
-                        || state == TestCaseRowState::IdleWait) {
+                } else if (state == test_case_row_state::input_retry
+                        || state == test_case_row_state::cleanup_retry
+                        || state == test_case_row_state::idle_wait) {
                     headline.push_back(text(fmt::format("tuples {}/{}",
                         tuple_done, tuple_total)));
                 } else {
                     headline.push_back(text(fmt::format("tuples {}/{}  ",
                         tuple_done, tuple_total)));
-                    headline.push_back(coloured_gauge(fraction, kBarCells));
+                    headline.push_back(coloured_gauge(fraction, k_bar_cells));
                     headline.push_back(text(fmt::format("  {:>3.0f}%  Running... {}s",
                         static_cast<double>(fraction) * 100.0, elapsed_s))
                         | color(Color::GrayLight));
@@ -13878,7 +13780,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 for (auto& row : details) rows.push_back(std::move(row));
 
                 // Per-group gauge rows still appear for normal Running.
-                if (state == TestCaseRowState::Running) {
+                if (state == test_case_row_state::running) {
                     for (const auto& group_ptr : tc->groups) {
                         if (!group_ptr->active.load(std::memory_order_relaxed)) continue;
                         const auto done  = group_ptr->done.load(std::memory_order_relaxed);
@@ -13893,7 +13795,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                             text("    \xe2\x94\x94 "),                       // └
                             text(fmt::format("group {}", group_ptr->group_index + 1))
                                 | size(WIDTH, EQUAL, 10),
-                            coloured_gauge(gfrac, kBarCells),
+                            coloured_gauge(gfrac, k_bar_cells),
                             text(fmt::format("  {:>3.0f}%  ",
                                 static_cast<double>(gfrac) * 100.0))
                                 | color(Color::GrayLight),
@@ -13909,7 +13811,6 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         Render(screen, document);
         const int current_height = screen.dimy();
 
-        // V16 G2.b — when the dashboard shrinks (a row hid), explicit
         // cursor-up + clear-to-end-of-screen prevents stale rows from
         // lingering below the new top. ResetPosition(clear=true) on
         // its own only clears the new screen's footprint.
@@ -13939,7 +13840,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 /// Lightweight declaration view of one benchmark block. The `--filter`
 /// pre-pass uses tags/over-keys for selection; regression-rule validation
 /// uses the remaining fields as its unfiltered registered universe.
-struct BenchmarkFilterMetadata {
+struct benchmark_filter_metadata {
     std::string              benchmark_key;
     std::vector<std::string> tags;               // <key>.tags
     std::vector<std::string> case_names;          // <key>.matrix.over keys
@@ -13959,9 +13860,9 @@ struct BenchmarkFilterMetadata {
 /// acceptance contract, and the declaration names needed for regression-rule
 /// validation; keep these reads in sync with parse_config_file and
 /// parse_benchmark_block.
-[[nodiscard]] inline BenchmarkFilterMetadata extract_filter_metadata(
+[[nodiscard]] inline benchmark_filter_metadata extract_filter_metadata(
     const std::string& config_path, const std::string& benchmark_key) noexcept {
-    BenchmarkFilterMetadata meta;
+    benchmark_filter_metadata meta;
     meta.benchmark_key = benchmark_key;
     const std::string body = slurp_file(std::filesystem::path{config_path});
     if (body.empty()) return meta;
@@ -14024,14 +13925,14 @@ struct BenchmarkFilterMetadata {
 }
 
 /// Top-level orchestrator. Owns: CLI parsing, TBB arena setup, scheduler,
-/// the ProgressState lifetime, the violations + reports maps,
+/// the progress_state lifetime, the violations + reports maps,
 /// and the final report write + violations print. Returns 0 if every rule
 /// passed and every config parsed; returns 1 otherwise (duplicate
 /// benchmark_key, parse failure, or any rule violation).
 [[nodiscard]] inline int run_impl(int argc, char** argv,
                                    std::string report_dir,
                                    std::string data_dir,
-                                   std::vector<ErasedBenchmark> benchmarks)
+                                   std::vector<erased_benchmark> benchmarks)
 {
     const auto cli = parse_cli(argc, argv);
     if (cli.report_override.has_value()) {
@@ -14040,16 +13941,16 @@ struct BenchmarkFilterMetadata {
 
     if (cli.ui_mode) {
         if (cli.fast_filter) {
-            bioseq_log<WRN>("[bench_framework] --ui ignores --fast (no benchmarks run)");
+            bioseq_log<logging_level::warning>("[bench_framework] --ui ignores --fast (no benchmarks run)");
         }
         if (cli.threads_override.has_value()) {
-            bioseq_log<WRN>("[bench_framework] --ui ignores --threads (no benchmarks run)");
+            bioseq_log<logging_level::warning>("[bench_framework] --ui ignores --threads (no benchmarks run)");
         }
         if (!cli.filter.empty()) {
-            bioseq_log<WRN>("[bench_framework] --ui ignores --filter (no benchmarks run)");
+            bioseq_log<logging_level::warning>("[bench_framework] --ui ignores --filter (no benchmarks run)");
         }
         if (cli.debug) {
-            bioseq_log<WRN>("[bench_framework] --ui ignores --debug (no benchmarks run)");
+            bioseq_log<logging_level::warning>("[bench_framework] --ui ignores --debug (no benchmarks run)");
         }
         return ui_mode_main(report_dir, cli);
     }
@@ -14065,7 +13966,7 @@ struct BenchmarkFilterMetadata {
     const std::size_t current_index =
         max_existing_run_artifact_index(report_dir_path).value_or(0) + 1;
 
-    bioseq_log<INF>("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
+    bioseq_log<logging_level::info>("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
                  report_dir, data_dir, benchmarks.size());
 
     const auto thread_count = cli.threads_override.has_value()
@@ -14073,29 +13974,29 @@ struct BenchmarkFilterMetadata {
         : std::max<unsigned>(1u, std::thread::hardware_concurrency() == 0
                                   ? 1u
                                   : std::thread::hardware_concurrency() - 1u);
-    bioseq_log<INF>("[bench_framework] thread_count={}", thread_count);
+    bioseq_log<logging_level::info>("[bench_framework] thread_count={}", thread_count);
 
     // Capture the run's identity once, up front. Used both by the
     // report writer (the `meta` block) and surfaced in stderr logs so
     // the operator can correlate a run with a commit.
     const auto run_meta = capture_run_meta(cli.fast_filter);
-    bioseq_log<INF>("[bench_framework] commit={} dirty={} created={} fast={}",
+    bioseq_log<logging_level::info>("[bench_framework] commit={} dirty={} created={} fast={}",
          run_meta.commit.empty() ? std::string_view{"<no-git>"}
                                  : std::string_view{run_meta.commit},
          run_meta.dirty, run_meta.created, run_meta.fast);
 
     // Filter benchmarks by --fast. The `--fast` field lives on the per-
-    // benchmark config, not on `ErasedBenchmark`, so the filter actually
+    // benchmark config, not on `erased_benchmark`, so the filter actually
     // runs inside each closure after parse. `selected` therefore mirrors
     // `benchmarks` 1:1 — we just take ownership.
-    std::vector<ErasedBenchmark> selected = std::move(benchmarks);
+    std::vector<erased_benchmark> selected = std::move(benchmarks);
 
     // Uniqueness check on benchmark_key.
     std::set<std::string> seen_keys;
     for (const auto& erased : selected) {
         const auto inserted = seen_keys.insert(erased.benchmark_key);
         if (!inserted.second) {
-            bioseq_log<ERR>("[bench_framework] duplicate benchmark_key '{}' across create_benchmark calls",
+            bioseq_log<logging_level::error>("[bench_framework] duplicate benchmark_key '{}' across create_benchmark calls",
                          erased.benchmark_key);
             return 1;
         }
@@ -14106,14 +14007,14 @@ struct BenchmarkFilterMetadata {
     // against all registered benchmarks, including rows omitted by
     // --filter/--fast. The full closure parse remains authoritative for
     // schema/semantic errors.
-    std::vector<BenchmarkFilterMetadata> registered_metadata;
+    std::vector<benchmark_filter_metadata> registered_metadata;
     registered_metadata.reserve(selected.size());
-    RegressionValidationUniverse regression_validation_universe;
+    regression_validation_universe regression_validation_universe;
     for (const auto& erased : selected) {
         registered_metadata.push_back(extract_filter_metadata(
             erased.config_path, erased.benchmark_key));
         const auto& metadata = registered_metadata.back();
-        RegressionBenchmarkDeclaration declaration;
+        regression_benchmark_declaration declaration;
         declaration.benchmark_key = metadata.benchmark_key;
         declaration.config_algorithms = metadata.config_algorithms;
         declaration.config_test_cases = metadata.config_test_cases;
@@ -14132,27 +14033,27 @@ struct BenchmarkFilterMetadata {
     std::mutex        reports_mu;
     std::mutex        diagnostics_mu;
     std::mutex        regression_rules_mu;
-    std::vector<Violation> violations;
-    std::vector<ValidationDiag> diagnostics;
-    std::map<std::string, std::shared_ptr<BenchmarkExecutionState>> reports;
-    RegressionRulesByConfig regression_rules_by_config;
+    std::vector<violation> violations;
+    std::vector<validation_diagnostic> diagnostics;
+    std::map<std::string, std::shared_ptr<benchmark_execution_state>> reports;
+    regression_rules_by_configuration regression_rules_by_config;
 
     // ---- --filter / --debug pre-pass: validate, select, prune. ----
     // Runs single-threaded before progress/scheduler are wired, so a
     // filtered-out benchmark never appears on the dashboard or in the report.
-    const FilterSpec& f = cli.filter;
-    std::vector<ValidationDiag> filter_diags;
+    const filter_specification& f = cli.filter;
+    std::vector<validation_diagnostic> filter_diags;
 
     // (1) CLI-level launch errors — ALWAYS checked, even with no filter.
     for (const auto& raw : cli.cli_errors) {
         const auto colon = raw.find(':');
-        filter_diags.push_back({ ValidationDiag::Severity::Error,
+        filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
             std::string{raw.substr(0, colon)}, "cli:--filter",
             std::string{raw.substr(colon + 1)} });
     }
     // --debug requires a non-empty filter (§4.2).
     if (cli.debug && f.empty()) {
-        filter_diags.push_back({ ValidationDiag::Severity::Error,
+        filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
             "debug_requires_filter", "cli:--debug",
             "--debug needs a non-empty --filter: it is for targeted runs, not for "
             "instrumenting an entire benchmark sweep. Add e.g. --filter benchmark=<key>." });
@@ -14196,14 +14097,14 @@ struct BenchmarkFilterMetadata {
         if (f.tags) for (const auto& t : *f.tags) {
             const bool known = std::any_of(meta.begin(), meta.end(), [&t](const auto& m){
                 return std::find(m.tags.begin(), m.tags.end(), t) != m.tags.end(); });
-            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+            if (!known) filter_diags.push_back({ validation_diagnostic::diagnostic_severity::warning,
                 "filter_unknown_tag", "cli:--filter tags",
                 fmt::format("tag '{}' is declared by no benchmark", t) });
         }
         if (f.benchmark) for (const auto& k : *f.benchmark) {
             const bool known = std::any_of(selected.begin(), selected.end(),
                 [&k](const auto& e){ return e.benchmark_key == k; });
-            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+            if (!known) filter_diags.push_back({ validation_diagnostic::diagnostic_severity::warning,
                 "filter_unknown_benchmark", "cli:--filter benchmark",
                 fmt::format("benchmark key '{}' matches no registered benchmark", k) });
         }
@@ -14219,7 +14120,7 @@ struct BenchmarkFilterMetadata {
                     selected[i].benchmark_key) != f.benchmark->end();
                 if (explicitly_selected) {
                     filter_diags.push_back({
-                        ValidationDiag::Severity::Error,
+                        validation_diagnostic::diagnostic_severity::error,
                         "explicit_benchmark_excluded_by_fast",
                         "cli:--fast",
                         fmt::format("benchmark '{}' was explicitly selected but declares fast=false; rerun without --fast",
@@ -14243,7 +14144,7 @@ struct BenchmarkFilterMetadata {
                     });
                 if (!keeps_every_row) {
                     filter_diags.push_back({
-                        ValidationDiag::Severity::Error,
+                        validation_diagnostic::diagnostic_severity::error,
                         "complete_matrix_case_filter_prunes_rows",
                         "cli:--filter cases",
                         fmt::format("benchmark '{}' declares complete-matrix acceptance; cases= must retain all {} algorithm rows",
@@ -14259,14 +14160,14 @@ struct BenchmarkFilterMetadata {
             for (std::size_t i = 0; i < selected.size() && !known; ++i)
                 if (keep[i]) known = std::find(meta[i].case_names.begin(),
                                                meta[i].case_names.end(), c) != meta[i].case_names.end();
-            if (!known) filter_diags.push_back({ ValidationDiag::Severity::Warning,
+            if (!known) filter_diags.push_back({ validation_diagnostic::diagnostic_severity::warning,
                 "filter_unknown_case", "cli:--filter cases",
                 fmt::format("case '{}' is an over-key of no tag/benchmark-selected benchmark", c) });
         }
 
         // Hard error: nothing left to run.
         if (std::count(runnable.begin(), runnable.end(), 1) == 0)
-            filter_diags.push_back({ ValidationDiag::Severity::Error,
+            filter_diags.push_back({ validation_diagnostic::diagnostic_severity::error,
                 "filter_selected_nothing", "cli:--filter",
                 "the supplied --filter matched no runnable (benchmark, case) combination" });
     }
@@ -14274,19 +14175,19 @@ struct BenchmarkFilterMetadata {
     // (3) Drain + abort. Compute had_error BEFORE the move (a moved-from
     //     vector is empty, so checking it post-drain would always pass).
     const bool filter_had_error = std::any_of(filter_diags.begin(), filter_diags.end(),
-        [](const auto& d){ return d.severity == ValidationDiag::Severity::Error; });
+        [](const auto& d){ return d.severity == validation_diagnostic::diagnostic_severity::error; });
     {
         std::lock_guard<std::mutex> guard(diagnostics_mu);
         for (auto& d : filter_diags) diagnostics.push_back(std::move(d));
     }
     if (filter_had_error) {
-        report_diagnostics(std::span<const ValidationDiag>{diagnostics}, "filter");
+        report_diagnostics(std::span<const validation_diagnostic>{diagnostics}, "filter");
         return 1;     // early exit BEFORE spawning progress thread / scheduler work
     }
 
     // (4) Prune `selected` to the runnable set (no-op when no filter).
     if (!f.empty()) {
-        std::vector<ErasedBenchmark> pruned;
+        std::vector<erased_benchmark> pruned;
         for (std::size_t i = 0; i < selected.size(); ++i)
             if (runnable[i]) pruned.push_back(std::move(selected[i]));
         selected = std::move(pruned);
@@ -14294,23 +14195,23 @@ struct BenchmarkFilterMetadata {
 
     // ---- Construct the --debug sink (only when requested), before the
     //      progress thread. A non-owning pointer is threaded into each
-    //      BenchmarkContext (§3.7). ----
-    std::unique_ptr<DebugReportSink> debug_sink;
-    DebugReportSink* debug_sink_ptr = nullptr;
+    //      benchmark_context (§3.7). ----
+    std::unique_ptr<debug_report_sink> debug_sink;
+    debug_report_sink* debug_sink_ptr = nullptr;
     if (cli.debug) {
         const auto debug_path =
             report_dir_path / fmt::format("report_debug_{}.jsonl", current_index);
-        debug_sink = std::make_unique<DebugReportSink>(debug_path);
+        debug_sink = std::make_unique<debug_report_sink>(debug_path);
         if (debug_sink->ok()) debug_sink_ptr = debug_sink.get();
-        bioseq_log<INF>("[bench_framework] --debug: streaming events to {}",
+        bioseq_log<logging_level::info>("[bench_framework] --debug: streaming events to {}",
                         debug_path.string());
     }
 
-    std::unique_ptr<DurableRawEvidenceSink> raw_evidence_sink;
-    DurableRawEvidenceSink* raw_evidence_sink_ptr = nullptr;
+    std::unique_ptr<durable_raw_evidence_sink> raw_evidence_sink;
+    durable_raw_evidence_sink* raw_evidence_sink_ptr = nullptr;
     const bool raw_evidence_requested = std::any_of(
         selected.begin(), selected.end(),
-        [](const ErasedBenchmark& benchmark) {
+        [](const erased_benchmark& benchmark) {
             return benchmark.raw_samples_enabled;
         });
     if (raw_evidence_requested) {
@@ -14318,7 +14219,7 @@ struct BenchmarkFilterMetadata {
             / fmt::format("report_{}.raw.jsonl", current_index);
         const std::string run_id = fmt::format(
             "{}:{}:{}", current_index, run_meta.created, ::getpid());
-        raw_evidence_sink = std::make_unique<DurableRawEvidenceSink>(
+        raw_evidence_sink = std::make_unique<durable_raw_evidence_sink>(
             raw_path, run_id);
         if (!raw_evidence_sink->ok()) {
             std::fprintf(stderr,
@@ -14331,37 +14232,35 @@ struct BenchmarkFilterMetadata {
     }
 
     // Process-wide memory budget shared by every benchmark closure.
-    // V12: budget recomputed dynamically from hwinfo on every check;
-    // the only knob is the safety buffer percentage.
-    MemoryBudget memory_budget(cli.memory_buffer_pct);
+    benchmark_memory_budget memory_budget(cli.memory_buffer_pct);
     {
-        const auto sys = snapshot_system_memory();
-        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+        const auto sys = memory_budget.current_system_snapshot();
+        const auto cap = benchmark_memory_budget::cap_for(sys.system_total_bytes,
                                                 cli.memory_buffer_pct);
-        bioseq_log<INF>("[bench_framework] memory budget: sysinfo total={:.2f} GiB available={:.2f} GiB "
+        bioseq_log<logging_level::info>("[bench_framework] memory budget: total={:.2f} GiB available={:.2f} GiB "
              "process={:.2f} GiB buffer={:.0f}% cap={:.2f} GiB",
-             bytes_to_gib(sys.total_bytes),
-             bytes_to_gib(sys.free_bytes),
-             bytes_to_gib(sys.process_bytes),
+             bytes_to_gib(sys.system_total_bytes),
+             bytes_to_gib(sys.system_available_bytes),
+             bytes_to_gib(sys.process_footprint_bytes),
              cli.memory_buffer_pct,
              bytes_to_gib(cap));
-        if (sys.total_bytes == std::numeric_limits<std::uint64_t>::max()) {
-            bioseq_log<WRN>("[bench_framework] sysinfo/hwinfo returned 0 for total RAM — budget "
+        if (sys.system_total_bytes == std::numeric_limits<std::uint64_t>::max()) {
+            bioseq_log<logging_level::warning>("[bench_framework] memory probe returned 0 for total RAM — budget "
                  "checks are effectively disabled (treated as infinite memory)");
         }
     }
 
-    // V16: process-wide scheduler. Owns batch admission + the TBB
+    // Process-wide scheduler owns batch admission and the TBB
     // task pool that runs the bodies. Constructed BEFORE the progress
     // thread so the renderer can read `scheduler.live_snapshot()`.
-    BatchScheduler scheduler(memory_budget, bench_arena);
+    batch_scheduler scheduler(memory_budget, bench_arena);
 
-    ProgressState progress;
+    progress_state progress;
     progress.tty_render.store(::isatty(STDERR_FILENO) != 0, std::memory_order_relaxed);
     progress.scheduler     = &scheduler;
     progress.per_benchmark.reserve(selected.size());
     for (const auto& erased : selected) {
-        auto entry = std::make_unique<ProgressState::Per>();
+        auto entry = std::make_unique<progress_state::per_benchmark_state>();
         entry->title = erased.title;
         entry->benchmark_key = erased.benchmark_key;
         progress.per_benchmark.push_back(std::move(entry));
@@ -14375,14 +14274,14 @@ struct BenchmarkFilterMetadata {
     // finalizers join and publish results. This retains cross-benchmark
     // admission while preventing a TBB driver from blocking a worker that a
     // nested process-wide global_control may leave as the sole worker slot.
-    std::vector<std::unique_ptr<BenchmarkContext>> benchmark_contexts;
+    std::vector<std::unique_ptr<benchmark_context>> benchmark_contexts;
     benchmark_contexts.reserve(selected.size());
     std::vector<std::function<void()>> benchmark_finalizers;
     benchmark_finalizers.reserve(selected.size());
 
     for (std::size_t benchmark_index = 0;
          benchmark_index < selected.size(); ++benchmark_index) {
-        benchmark_contexts.push_back(std::make_unique<BenchmarkContext>());
+        benchmark_contexts.push_back(std::make_unique<benchmark_context>());
         auto& context = *benchmark_contexts.back();
         context.data_dir                  = data_dir;
         context.report_dir                = report_dir;
@@ -14415,7 +14314,7 @@ struct BenchmarkFilterMetadata {
     // is also the ownership boundary for exceptions captured from TBB worker
     // bodies. Keep the exception until after the progress thread joins, then
     // turn it into a blocking diagnostic so completed samples still produce a
-    // useful partial report instead of terminating in ~BatchScheduler().
+    // useful partial report instead of terminating in ~batch_scheduler().
     std::exception_ptr worker_exception;
     try {
         scheduler.wait_for_completion();
@@ -14431,20 +14330,20 @@ struct BenchmarkFilterMetadata {
         try {
             std::rethrow_exception(worker_exception);
         } catch (const std::exception& error) {
-            diagnostics.push_back(ValidationDiag{
-                ValidationDiag::Severity::Error,
+            diagnostics.push_back(validation_diagnostic{
+                validation_diagnostic::diagnostic_severity::error,
                 "batch_worker_exception",
-                "BatchScheduler::wait_for_completion",
+                "batch_scheduler::wait_for_completion",
                 fmt::format(
                     "captured {} worker-task exception(s); first failure: {}. "
                     "Completed samples are retained in this partial report",
                     failure_count, error.what()),
             });
         } catch (...) {
-            diagnostics.push_back(ValidationDiag{
-                ValidationDiag::Severity::Error,
+            diagnostics.push_back(validation_diagnostic{
+                validation_diagnostic::diagnostic_severity::error,
                 "batch_worker_exception",
-                "BatchScheduler::wait_for_completion",
+                "batch_scheduler::wait_for_completion",
                 fmt::format(
                     "captured {} worker-task exception(s); first failure was "
                     "non-std. Completed samples are retained in this partial "
@@ -14472,11 +14371,11 @@ struct BenchmarkFilterMetadata {
             raw_evidence_sink_ptr->seal_and_validate(reports);
         raw_evidence_manifest = raw_evidence_sink_ptr->manifest();
         if (!raw_evidence_valid) {
-            diagnostics.push_back(ValidationDiag{
-                ValidationDiag::Severity::Error,
+            diagnostics.push_back(validation_diagnostic{
+                validation_diagnostic::diagnostic_severity::error,
                 "raw_evidence_validation_failed",
                 raw_evidence_sink_ptr->path().string(),
-                "durable raw evidence did not match every Cell, schedule, "
+                "durable raw evidence did not match every measurement_cell, schedule, "
                 "checksum, record id and wall-clock sample",
             });
         }
@@ -14486,37 +14385,37 @@ struct BenchmarkFilterMetadata {
     // post-run + regression-rule). Errors here force a non-zero exit code
     // regardless of whether any rules failed.
     const bool diagnostics_had_errors = report_diagnostics(
-        std::span<const ValidationDiag>{diagnostics}, "configuration");
+        std::span<const validation_diagnostic>{diagnostics}, "configuration");
 
     // `report_dir_path` / `current_index` were computed up front (hoisted so
     // the --debug file name report_debug_<N>.jsonl matches report_<N>.json).
-    bioseq_log<INF>("[bench_framework] writing run as report_{}.json", current_index);
+    bioseq_log<logging_level::info>("[bench_framework] writing run as report_{}.json", current_index);
 
     // Single shared parser-cache for every consumer that wants to walk
     // historical reports (regressions + sanity warnings). Each
     // `report_<N>.json` is parsed at most once per run.
-    HistoricalReportCache history_cache{report_dir_path};
+    historical_report_cache history_cache{report_dir_path};
 
     // Evaluate regression rules against the newest eligible historical
     // candidate (walking backward over ineligible reports), then reuse that
     // exact predicate for `regression_since`. The evaluator never writes
     // anything; we collect entries and flush them to the report below
     // alongside any diagnostics it produced.
-    std::vector<ValidationDiag> regression_eval_diagnostics;
+    std::vector<validation_diagnostic> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
         run_meta, current_index, history_cache, regression_eval_diagnostics,
         !cli.filter.empty() || cli.fast_filter);
     const bool regression_eval_had_errors = report_diagnostics(
-        std::span<const ValidationDiag>{regression_eval_diagnostics},
+        std::span<const validation_diagnostic>{regression_eval_diagnostics},
         "regression");
 
     const bool blocking_rule_violation = std::any_of(
         violations.begin(), violations.end(),
-        [](const Violation& violation) { return violation.blocking; });
+        [](const violation& violation) { return violation.blocking; });
     const bool blocking_regression = std::any_of(
         regressions.begin(), regressions.end(),
-        [](const RegressionEntry& regression) {
+        [](const regression_entry& regression) {
             return regression.blocking;
         });
     const bool evaluation_history_eligible =
@@ -14524,7 +14423,7 @@ struct BenchmarkFilterMetadata {
         && !blocking_regression
         && !diagnostics_had_errors
         && !regression_eval_had_errors;
-    ReportMeta final_run_meta = run_meta;
+    report_metadata final_run_meta = run_meta;
     // Fail closed on disk. The report is first persisted with a false seal,
     // self-validated, and only then rewritten with a true seal when every
     // evaluation gate above passed. A crash or write/schema failure can
@@ -14538,7 +14437,7 @@ struct BenchmarkFilterMetadata {
     auto sanity_warnings = evaluate_sanity_warnings(
         reports, run_meta, current_index, history_cache);
 
-    bioseq_log<INF>("[bench_framework] all benchmarks finished, writing report...");
+    bioseq_log<logging_level::info>("[bench_framework] all benchmarks finished, writing report...");
     const auto output_path = report_path_for_index(report_dir_path, current_index);
     std::string report_path = write_report(
         output_path, final_run_meta, reports, violations, regressions,
@@ -14552,15 +14451,15 @@ struct BenchmarkFilterMetadata {
     if (!report_write_failed) {
         const auto report_text = slurp_file(std::filesystem::path{report_path});
         if (report_text.empty()) {
-            bioseq_log<ERR>(
+            bioseq_log<logging_level::error>(
                 "[bench_framework] wrote an empty or unreadable report '{}'",
                 report_path);
             report_schema_failed = true;
         } else {
             const auto report_check_diagnostics =
-                validate_against_schema(report_text, kBenchReportSchema, report_path);
+                validate_against_schema(report_text, k_bench_report_schema, report_path);
             report_schema_failed = report_diagnostics(
-                std::span<const ValidationDiag>{report_check_diagnostics}, "report");
+                std::span<const validation_diagnostic>{report_check_diagnostics}, "report");
         }
     }
 
@@ -14586,17 +14485,17 @@ struct BenchmarkFilterMetadata {
             bool promotion_schema_failed = false;
             const auto promoted_text = slurp_file(promotion_path);
             if (promoted_text.empty()) {
-                bioseq_log<ERR>(
+                bioseq_log<logging_level::error>(
                     "[bench_framework] wrote an empty or unreadable report "
                     "promotion '{}'",
                     promotion_path.string());
                 promotion_schema_failed = true;
             } else {
                 const auto promotion_diagnostics = validate_against_schema(
-                    promoted_text, kBenchReportSchema,
+                    promoted_text, k_bench_report_schema,
                     promotion_path.string());
                 promotion_schema_failed = report_diagnostics(
-                    std::span<const ValidationDiag>{promotion_diagnostics},
+                    std::span<const validation_diagnostic>{promotion_diagnostics},
                     "report promotion");
             }
 
@@ -14605,7 +14504,7 @@ struct BenchmarkFilterMetadata {
             } else if (std::rename(
                            promotion_path.c_str(), output_path.c_str()) != 0) {
                 const int rename_errno = errno;
-                bioseq_log<ERR>(
+                bioseq_log<logging_level::error>(
                     "[bench_framework] failed to atomically promote '{}' to "
                     "'{}': {}",
                     promotion_path.string(), output_path.string(),
@@ -14623,7 +14522,7 @@ struct BenchmarkFilterMetadata {
     }
 
     if (!report_path.empty()) {
-        bioseq_log<INF>("[bench_framework] wrote {}", report_path);
+        bioseq_log<logging_level::info>("[bench_framework] wrote {}", report_path);
     }
 
     // --debug: final event. `report_path` is the absolute report path, or ""
@@ -14652,20 +14551,20 @@ struct BenchmarkFilterMetadata {
 
 // ----------------- create_benchmark template body -----------------
 
-template<typename Input, typename Output>
-[[nodiscard]] ErasedBenchmark create_benchmark(
+template<typename p_input, typename p_output>
+[[nodiscard]] erased_benchmark create_benchmark(
     std::string title,
     std::string benchmark_key,
     std::string config_path,
-    std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)> on_estimate_resources,
-    std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)> on_input,
-    std::function<Output(std::string_view, const ParamMap&, const Input&)> on_run,
-    std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)> on_evaluate,
-    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)> on_cleanup,
-    std::function<std::string(std::string_view, const ParamMap&, const Input&, const Output&)>
+    std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)> on_estimate_resources,
+    std::function<p_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)> on_input,
+    std::function<p_output(std::string_view, const parameter_map&, const p_input&)> on_run,
+    std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)> on_evaluate,
+    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)> on_cleanup,
+    std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>
         serialize_raw_sample_payload)
 {
-    ErasedBenchmark erased;
+    erased_benchmark erased;
     erased.title         = std::move(title);
     erased.benchmark_key = std::move(benchmark_key);
     erased.config_path   = std::move(config_path);
@@ -14680,11 +14579,11 @@ template<typename Input, typename Output>
                        captured_on_evaluate      = std::move(on_evaluate),
                        captured_on_cleanup       = std::move(on_cleanup),
                        captured_raw_serializer   = std::move(serialize_raw_sample_payload)
-                      ](BenchmarkContext& context) -> std::function<void()> {
+                      ](benchmark_context& context) -> std::function<void()> {
         const auto no_op_finalizer = [] {
             return std::function<void()>{[] {}};
         };
-        auto state_holder = std::make_shared<detail::BenchmarkExecutionState>();
+        auto state_holder = std::make_shared<detail::benchmark_execution_state>();
         auto& state = *state_holder;
         state.title = erased_title;
         state.raw_samples_enabled = static_cast<bool>(captured_raw_serializer);
@@ -14697,15 +14596,15 @@ template<typename Input, typename Output>
         // flips false. The renderer treats `setup_done == true` plus
         // an empty `test_cases` as "this benchmark is silent" and
         // simply omits the inner walk.
-        struct PublishOnExit {
-            detail::ProgressState::Per* slot = nullptr;
-            ~PublishOnExit() noexcept {
+        struct publish_on_exit {
+            detail::progress_state::per_benchmark_state* slot = nullptr;
+            ~publish_on_exit() noexcept {
                 if (slot != nullptr) {
                     slot->setup_done.store(true, std::memory_order_release);
                 }
             }
         };
-        PublishOnExit publish_on_exit{
+        publish_on_exit publish_on_exit{
             (context.progress != nullptr
              && context.benchmark_index < context.progress->per_benchmark.size())
                 ? context.progress->per_benchmark[context.benchmark_index].get()
@@ -14718,7 +14617,7 @@ template<typename Input, typename Output>
         const bool parse_failed = !parse_outcome.ok;
         detail::drain_diagnostics_to_context(context, parse_outcome.diagnostics);
         if (parse_failed) {
-            bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
+            bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
                  erased_benchmark_key);
             return no_op_finalizer();
         }
@@ -14743,11 +14642,11 @@ template<typename Input, typename Output>
         const bool semantic_failed = std::any_of(
             semantic_diagnostics.begin(), semantic_diagnostics.end(),
             [](const auto& diag) {
-                return diag.severity == detail::ValidationDiag::Severity::Error;
+                return diag.severity == detail::validation_diagnostic::diagnostic_severity::error;
             });
         detail::drain_diagnostics_to_context(context, semantic_diagnostics);
         if (semantic_failed) {
-            bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
+            bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
                  erased_benchmark_key);
             return no_op_finalizer();
         }
@@ -14755,7 +14654,7 @@ template<typename Input, typename Output>
         // 3. --fast filter: skip if the user requested fast mode but this
         //    benchmark is not flagged fast. Without --fast we run everything.
         if (context.fast_filter && !state.config.fast) {
-            bioseq_log<INF>("[bench_framework] skipping '{}' under --fast (fast=false)",
+            bioseq_log<logging_level::info>("[bench_framework] skipping '{}' under --fast (fast=false)",
                  erased_benchmark_key);
             return no_op_finalizer();
         }
@@ -14763,44 +14662,43 @@ template<typename Input, typename Output>
         bool expansion_ok = true;
         state.execution_tuples = detail::expand_matrix(state.config, expansion_ok);
         if (!expansion_ok) {
-            bioseq_log<ERR>("[bench_framework] benchmark '{}' matrix expansion failed",
+            bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' matrix expansion failed",
                  erased_benchmark_key);
             return no_op_finalizer();
         }
         // Apply `--filter cases=`: keep only allow-listed over-keys (algorithm names).
         if (context.filter_cases != nullptr) {
             std::erase_if(state.execution_tuples,
-                [&context](const detail::ExecutionTuple& t){
+                [&context](const detail::execution_tuple& t){
                     return !context.filter_cases->contains(t.algorithm_name);
                 });
             if (state.execution_tuples.empty()) {
                 // Benign: the pre-pass already proved >=1 case matches, but a
                 // config edited between pre-pass and parse could differ. Skip.
-                bioseq_log<INF>("[bench_framework] '{}' has no cases matching --filter cases=; skipping",
+                bioseq_log<logging_level::info>("[bench_framework] '{}' has no cases matching --filter cases=; skipping",
                                 erased_benchmark_key);
                 return no_op_finalizer();
             }
         } else if (state.execution_tuples.empty()) {
-            bioseq_log<ERR>("[bench_framework] benchmark '{}' produced no execution tuples",
+            bioseq_log<logging_level::error>("[bench_framework] benchmark '{}' produced no execution tuples",
                  erased_benchmark_key);
             return no_op_finalizer();
         }
         state.cells = detail::build_cells(state);
 
-        // V11: per-test-case mutexes deleted — the new batched scheduler
         // runs at most one tuple at a time per (test_case, group), so
         // there is no Input contention left to protect against.
 
         // Populate the progress dashboard's structure for this benchmark.
-        // One ProgressTestCase per test_case in declared order, one
-        // ProgressGroup per group of that test_case.
+        // One progress_test_case per test_case in declared order, one
+        // progress_group per group of that test_case.
         if (context.progress != nullptr
             && context.benchmark_index < context.progress->per_benchmark.size()) {
             auto& per = *context.progress->per_benchmark[context.benchmark_index];
             per.test_cases.clear();
             per.test_cases.reserve(state.test_cases.size());
             for (std::size_t tc_index = 0; tc_index < state.test_cases.size(); ++tc_index) {
-                auto tc = std::make_unique<detail::ProgressTestCase>();
+                auto tc = std::make_unique<detail::progress_test_case>();
                 tc->test_case_name = state.test_cases[tc_index].name;
                 // Walk every cell that targets this test_case to gather
                 // group count + per-group iteration totals + total tuple
@@ -14821,24 +14719,22 @@ template<typename Input, typename Output>
                     // or undeclared in matrix.for). Stamp finish_ns
                     // immediately so the renderer treats the row as
                     // collapsed instead of showing "Running... 0s".
-                    tc->finish_ns.store(bioseq::instr::clock::now_ns(),
+                    tc->finish_ns.store(bioseq::instrumentation::clock::now_ns(),
                                         std::memory_order_relaxed);
                 }
                 tc->groups.reserve(max_group_count);
                 for (std::size_t group_index = 0; group_index < max_group_count;
                      ++group_index) {
-                    auto group_ptr = std::make_unique<detail::ProgressGroup>();
+                    auto group_ptr = std::make_unique<detail::progress_group>();
                     group_ptr->group_index = group_index;
                     group_ptr->total = per_group_iters[group_index];
                     tc->groups.push_back(std::move(group_ptr));
                 }
                 per.test_cases.push_back(std::move(tc));
             }
-            // V13: publish setup_done IMMEDIATELY after the writes so the
             // `progress_*` helpers (and the renderer) start observing
             // tuple/group counters as `prepare_typed_benchmark` progresses.
-            // PublishOnExit still fires on every closure exit and is
-            // idempotent — its second store is a no-op. (V12 left
+            // publish_on_exit still fires on every closure exit and is
             // setup_done false until the closure returned, so every
             // progress_tick_* call returned early via the
             // `progress_test_case_for` setup_done check, leaving every
@@ -14847,7 +14743,7 @@ template<typename Input, typename Output>
         }
 
         // Bench-lock + serial-concurrency exclusion are enforced by the
-        // BatchScheduler's admission predicates. Preparation enqueues this
+        // batch_scheduler's admission predicates. Preparation enqueues this
         // benchmark and returns a caller-thread finalizer; no oneTBB driver
         // worker blocks while the scheduler still needs workers for bodies.
 
@@ -14858,7 +14754,7 @@ template<typename Input, typename Output>
         }
 
         auto typed_finalizer =
-            detail::prepare_typed_benchmark<Input, Output>(
+            detail::prepare_typed_benchmark<p_input, p_output>(
                 state, context,
                 captured_on_estimate,
                 captured_on_input,
@@ -14883,7 +14779,7 @@ template<typename Input, typename Output>
                 final_context, post_run_diagnostics);
 
             // 5. Evaluate rules and stash this benchmark's report data.
-            std::vector<detail::Violation> local_violations;
+            std::vector<detail::violation> local_violations;
             detail::evaluate_rules(
                 final_state, local_violations,
                 final_state.paired_rule_evidence);
@@ -14913,4 +14809,4 @@ template<typename Input, typename Output>
     return erased;
 }
 
-}  // namespace bioseq::bench_framework
+}  // namespace bioseq::bench::framework

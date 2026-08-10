@@ -25,11 +25,11 @@ import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.rank_pack_core;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 import bioseq.storage.scanner;
 
 TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
-          "[external][lazy-view][rank-pack][admission][unit]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     using instance = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using sink = bioseq::sequences::fixed_rank_pack_unit_sink<std::uint32_t>;
     using writer_type = bioseq::sequences::checked_rank_pack_sink<
@@ -54,7 +54,7 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
         letters[index].assign_rank(ranks[index]);
     }
     compact_sequence_range<instance> range{letters};
-    const auto source = bioseq::storage::as_lazy_sequence_view(range);
+    const auto source = bioseq::storage::make_lazy_sequence_view(range);
     const auto access = bioseq::storage::plan_sequence_access(
         source,
         bioseq::storage::sequence_access_requirement::bounded_random_window,
@@ -65,10 +65,10 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
             == bioseq::storage::sequence_access_route::materialize_admitted);
 
     auto& admission =
-        bioseq::parallelism::MemoryAdmissionController::instance();
+        bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
     struct restore_cap {
-        bioseq::parallelism::MemoryAdmissionController* admission;
+        bioseq::parallelism::memory_admission_controller* admission;
         std::uint64_t cap;
         ~restore_cap() { admission->set_index_memory_cap_bytes(cap); }
     } restore{std::addressof(admission), previous_cap};
@@ -77,7 +77,7 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
     auto permit = admission.try_reserve(access.admission_bytes);
     REQUIRE(permit.has_value());
     {
-        auto owner = bioseq::storage::materialize_packed_region(
+        auto owner = bioseq::storage::materialize_packed_sequence(
             source,
             access.from,
             access.to,
@@ -85,7 +85,7 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
             std::move(*permit));
         REQUIRE(admission.reserved_bytes()
                 == baseline + access.admission_bytes);
-        REQUIRE(owner.descriptor().storage_unit_byte_width
+        REQUIRE(owner.descriptor().storage_unit_width
                 == sizeof(std::uint32_t));
         REQUIRE(owner.descriptor().unit_count == fixed_units.size());
         REQUIRE(*static_cast<const std::uint32_t*>(owner.descriptor().units)

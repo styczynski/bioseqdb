@@ -14,11 +14,12 @@ set(BENCH_V10_DIR       "${CMAKE_CURRENT_LIST_DIR}")
 # is delivered via `bioseq_modules_nopg` (DOC0269 Phase A).
 set(BENCH_V10_MOD_FILES
   "${BENCH_FRAMEWORK_DIR}/index.cppm"
+  "${BENCH_V10_DIR}/aligners/index.cppm"
+  "${BENCH_V10_DIR}/prefilters/index.cppm"
   # DOC0264 §10.1 — sequence_generator moved to
   # main/bioseq/backend/sequences/generation/sequence_generator.cppm and
   # is delivered via bioseq_modules_nopg below.
   "${BENCH_V10_DIR}/tool_minimap2/tool_minimap2.cppm"
-  "${BENCH_V10_DIR}/tool_minimap2/alignment.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/instr_shim.cppm")
 
 # minimap2 C reference sources are linked alongside the bench TU.
@@ -38,7 +39,7 @@ AddCommonTargetX(
   COMPONENT  ${PROJECT_NAME}
   INCLUDE_DIRS
     "${BIOSEQ_DIR}/../config"
-    "${BIOSEQ_DIR}/include2"
+    "${BIOSEQ_DIR}" "${BIOSEQ_DIR}/backend/pg/include" "${BIOSEQ_DIR}/include2"
     "${BIOSEQ_DIR}/backend"
     "${BENCH_V10_DIR}/tool_minimap2"
     "${BENCH_V10_DIR}/tool_sneakysnake/SneakySnake"
@@ -71,7 +72,6 @@ AddCommonTargetX(
     bioseq_modules_nopg
   SOURCES
     "${BENCH_V10_DIR}/bench_v10_main.cpp"
-    "${BENCH_V10_DIR}/bench_prefilters.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
     # Keep the upstream reference linkage deliberately narrow. The complete
     # worktree is vendored for provenance/data, but no driver, kthread, CUDA,
@@ -113,24 +113,6 @@ target_sources(bioseq_bench
       "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
       "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
       ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
-
-# DOC0399: the grouped32 W1/W2/W4 adapter is one ordinary implementation unit
-# of the existing static-target primary.  It is benchmark-private and must
-# never join the production/test/E2E generated implementation closures.
-list(LENGTH BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
-  _bioseq_highway_bench_probe_count)
-if(NOT _bioseq_highway_bench_probe_count EQUAL 1)
-  message(FATAL_ERROR
-    "DOC0399 requires exactly one generated Highway benchmark probe; got "
-    "${_bioseq_highway_bench_probe_count}")
-endif()
-set_source_files_properties(
-  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS}
-  PROPERTIES
-    GENERATED TRUE
-    COMPILE_OPTIONS "-x;c++")
-target_sources(bioseq_bench PRIVATE
-  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS})
 
 target_link_libraries(bioseq_bench PRIVATE bioseq_highway_target_policy)
 add_dependencies(bioseq_bench bioseq_highway_target_modules)

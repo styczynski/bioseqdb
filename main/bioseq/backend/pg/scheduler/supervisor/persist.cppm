@@ -3,7 +3,7 @@
  * @brief PostgreSQL asynchronous persistence staging and worker implementation.
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "access/xact.h"
@@ -20,53 +20,49 @@ extern "C" {
 
 module bioseq.postgres.scheduler.supervisor;
 import :persist_queue_publish;
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.type;
 
-namespace bioseq::parallelism::pg {
+namespace bioseq::postgres::scheduler {
 
-struct PendingPersistJob {
+struct pending_persist_job {
     // `target.index_name` is deliberately empty after staging. The owned name
     // below is the only variable-length identity and is serialized into the
     // metadata-only DSM; no biological/index bytes enter this queue.
-    PersistTarget target{};
+    persist_target target{};
     std::string index_name{};
     std::string temp_file_path{};
     dsm_handle dsm = DSM_HANDLE_INVALID;
     std::uint64_t payload_bytes = 0;
     bool published = false;
     bool file_backed = false;
-    PersistPayloadKind payload_kind = PersistPayloadKind::none;
-    IndexPayloadStorageBackend requested_provider =
-        IndexPayloadStorageBackend::postgres_relation;
-    bioseq::parallelism::MemoryPermit permit{};
+    persist_payload_kind payload_kind = persist_payload_kind::none;
+    bioseq::parallelism::memory_permit permit{};
 };
 
-[[nodiscard]] std::vector<PendingPersistJob>& pending_persist_jobs() {
-    static std::vector<PendingPersistJob> jobs;
+[[nodiscard]] std::vector<pending_persist_job>& pending_persist_jobs() {
+    static std::vector<pending_persist_job> jobs;
     return jobs;
 }
 
 void enqueue_pending_mps_build(
-        const PersistTarget& target,
+        const persist_target& target,
         dsm_handle handle,
-        std::uint64_t payload_bytes,
-        IndexPayloadStorageBackend requested_provider) {
-    PendingPersistJob job{};
+        std::uint64_t payload_bytes) {
+    pending_persist_job job{};
     job.target = target;
     job.target.index_name = {};
     job.index_name.assign(
         target.index_name.begin(), target.index_name.end());
     job.dsm = handle;
     job.payload_bytes = payload_bytes;
-    job.payload_kind = PersistPayloadKind::mps_build_identity;
-    job.requested_provider = requested_provider;
+    job.payload_kind = persist_payload_kind::direct_minimizer_build_identity;
     pending_persist_jobs().push_back(std::move(job));
 }
 
 void bioseq_persist_xact_callback(XactEvent event, void*) {
-    std::vector<PendingPersistJob>& jobs = pending_persist_jobs();
+    std::vector<pending_persist_job>& jobs = pending_persist_jobs();
     const bool commit =
         event == XACT_EVENT_COMMIT
         || event == XACT_EVENT_PARALLEL_COMMIT;
@@ -78,22 +74,21 @@ void bioseq_persist_xact_callback(XactEvent event, void*) {
         return;
     }
     if (commit) {
-        for (PendingPersistJob& job : jobs) {
-            const std::span<PgPersistQueueSlot> persist_queue =
+        for (pending_persist_job& job : jobs) {
+            const std::span<pg_persist_queue_slot> persist_queue =
                 g_shared == nullptr
-                    ? std::span<PgPersistQueueSlot>{}
-                    : std::span<PgPersistQueueSlot>{g_shared->persist_queue};
+                    ? std::span<pg_persist_queue_slot>{}
+                    : std::span<pg_persist_queue_slot>{g_shared->persist_queue};
             if (publish_persist_job_to_shared_queue(
                     persist_queue,
                     job.target,
                     job.index_name,
                     job.dsm,
                     job.payload_bytes,
-                    job.payload_kind,
-                    job.requested_provider)) {
+                    job.payload_kind)) {
                 job.published = true;
             } else {
-                bioseq_log<DBG>("[bioseq] index: async persist publish failed row={} index={} dsm={} shared_queue_available={}",
+                bioseq_log<logging_level::debug>("[bioseq] index: async persist publish failed row={} index={} dsm={} shared_queue_available={}",
                         static_cast<unsigned long long>(job.target.sequence_rowno),
                         job.index_name,
                         static_cast<unsigned>(job.dsm),
@@ -107,7 +102,7 @@ void bioseq_persist_xact_callback(XactEvent event, void*) {
             job.permit.release();
         }
     } else {
-        for (PendingPersistJob& job : jobs) {
+        for (pending_persist_job& job : jobs) {
             if (!job.published) {
                 if (job.file_backed) {
                     remove_temp_file_noexcept(job.temp_file_path);
@@ -125,4 +120,4 @@ void register_persist_xact_callback_pg_leaf() {
     RegisterXactCallback(bioseq_persist_xact_callback, nullptr);
 }
 
-} // namespace bioseq::parallelism::pg
+} // namespace bioseq::postgres::scheduler

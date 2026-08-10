@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -18,18 +18,19 @@ import :alignment_hook_contract;
 
 namespace bioseq::pg::detail {
 
-void retire_escaped_nested_bindings(AlignmentExecutorFrame* root) noexcept
+void retire_escaped_nested_bindings(alignment_executor_frame* root) noexcept
 {
-	if (root == nullptr || root->collector.root != &root->collector) {
+	if (root == nullptr
+		|| root->collector.root_collector != &root->collector) {
 		return;
 	}
-	for (AlignmentExecutorFrame* candidate : alignment_frames) {
+	for (alignment_executor_frame* candidate : alignment_frames) {
 		if (candidate == nullptr || candidate == root) {
 			continue;
 		}
-		if (candidate->collector_binding.root == &root->collector) {
-			candidate->collector_binding.root = nullptr;
-			candidate->collector_binding.retired = true;
+		if (candidate->collector_binding.root_collector == &root->collector) {
+			candidate->collector_binding.root_collector = nullptr;
+			candidate->collector_binding.is_retired = true;
 		}
 	}
 }

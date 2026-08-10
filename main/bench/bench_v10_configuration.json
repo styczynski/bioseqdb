@@ -37,22 +37,16 @@
     "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate": {"_": {"type": "integer", "default": 0, "description": "Explicit bounded_batch_approximate SIMD chaining promotion candidate with two-stack ntHash SIMD sketch and KSW2"}},
     "simd_chaining_endpoint_qualification":     {"_": {"type": "integer", "default": 0, "description": "Single callback runs bounded SIMD, exact SIMD, and bundled minimap2 sequentially on every fixed endpoint fixture"}},
     "simd_chaining_endpoint_zero_reference":    {"_": {"type": "integer", "default": 0, "description": "Framework-literal substitute: returns zero metrics and performs no biological work; used only as the comparator for endpoint qualification rules"}},
-    "bioseq_ksw2_simd_dp_paper_nthash":         {"_": {"type": "integer", "default": 0, "description": "Bounded Paper u32/R7/sum ntHash SIMD sketch, SIMD chaining, KSW2 extension; native fail-closed prototype route"}},
-    "bioseq_block_simd_dp_paper_nthash":        {"_": {"type": "integer", "default": 0, "description": "Bounded Paper u32/R7/sum ntHash SIMD sketch, SIMD chaining, Block Aligner SIMD extension; native fail-closed prototype route"}},
-    "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "Historical partial-GPU probe: CPU ExactSimd minimizers, Vulkan tiled-DP score generation, CPU backtracking, CPU KSW2; fails without hardware Vulkan and is not all-GPU acceptance evidence"}},
-    "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "DOC0254 §11 inter-region batched KSW2"}},
+    "bioseq_ksw2_simd_dp_bounded_nthash":         {"_": {"type": "integer", "default": 0, "description": "Bounded u32/R7/sum ntHash SIMD sketch, SIMD chaining, KSW2 extension; native fail-closed route"}},
+    "bioseq_block_simd_dp_bounded_nthash":        {"_": {"type": "integer", "default": 0, "description": "Bounded u32/R7/sum ntHash SIMD sketch, SIMD chaining, Block Aligner SIMD extension; native fail-closed route"}},
+    "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU route: CPU ExactSimd minimizers, Vulkan tiled-DP score generation, CPU backtracking, CPU KSW2; fails without hardware Vulkan and is not all-GPU acceptance evidence"}},
+    "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {"_": {"type": "integer", "default": 0, "description": "Inter-region batched KSW2"}},
     "bioseq_ksw2_simd_dp_simd_minimap2_slow":   {"_": {"type": "integer", "default": 0}},
     "bioseq_block_simd_dp_scalar_mm":           {"_": {"type": "integer", "default": 0}},
     "bioseq_block_simd_dp_two_stack_nthash":    {"_": {"type": "integer", "default": 0}},
-    "bioseq_block_vulkan_dp_vulkan_minimap_int": {"_": {"type": "integer", "default": 0, "description": "Historical partial-GPU probe: Vulkan minimizers, source-direct mapped sorted-dense resident target index, seed lookup and tiled-DP score generation, but CPU mapped-prefix authority reads, backtracking and Block Aligner; not all-GPU acceptance evidence"}},
-    "bioseq_block_vulkan_phase_c_frontend":     {"_": {"type": "integer", "default": 0, "description": "Historical partial-GPU Phase-C frontend probe: Vulkan sketch/index/seed/sort and tiled-DP score generation, but CPU backtracking and Block Aligner; not all-GPU acceptance evidence"}},
-    "bioseq_ksw2_rmq_scalar_mm":                {"_": {"type": "integer", "default": 0}},
-    "grouped32_local32_scalar_exact":           {"_": {"type": "integer", "default": 0, "description": "Current per-word little-endian decode and checked-globalization semantics; exact failure-order reference"}},
-    "grouped32_local32_scalar_optimized":       {"_": {"type": "integer", "default": 0, "description": "Hoisted span admission plus alias-safe native scalar loads; compiler auto-vectorization remains enabled"}},
-    "grouped32_local32_scalar_unrolled":        {"_": {"type": "integer", "default": 0, "description": "Four-word unrolled alias-safe scalar validation with exact scalar replay on failure"}},
-    "grouped32_local32_vec_stream_1":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using one Highway vector stream; no gather/global-position materialization"}},
-    "grouped32_local32_vec_stream_2":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using two Highway vector streams for NEON issue-width saturation; no gather"}},
-    "grouped32_local32_vec_stream_4":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using four Highway vector streams to expose register-pressure tradeoffs; no gather"}}
+    "bioseq_block_vulkan_dp_vulkan_minimap_int": {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU route: Vulkan minimizers, source-direct mapped sorted-dense resident target index, seed lookup and tiled-DP score generation, but CPU mapped-prefix authority reads, backtracking and Block Aligner; not all-GPU acceptance evidence"}},
+    "bioseq_block_vulkan_resident_gpu_index_frontend":     {"_": {"type": "integer", "default": 0, "description": "Mixed GPU/CPU resident GPU-index frontend: Vulkan sketch/index/seed/sort and tiled-DP score generation, but CPU backtracking and Block Aligner; not all-GPU acceptance evidence"}},
+    "bioseq_ksw2_rmq_scalar_mm":                {"_": {"type": "integer", "default": 0}}
   },
 
   "test_cases": {
@@ -139,62 +133,7 @@
 
     "CURATED_UNIQUE_FRAGMENT": { "data": { "fragment_count": 1, "fragment_length_mean": 300, "fragment_length_stddev": 0, "reference_length": 2000, "substitution_rate": 0.0, "insertion_rate": 0.0, "deletion_rate": 0.0, "insertion_length_mean": 0.0, "deletion_length_mean": 0.0, "reverse_complement_rate": 0.0, "seed": 424242 }, "description": "Single error-free fragment from a 2 kbp random reference — trivial alignment" },
     "CURATED_SEAL_BATCH":      { "data": { "fragment_count": 8, "fragment_length_mean": 200, "fragment_length_stddev": 10, "reference_length": 4000, "substitution_rate": 0.01, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234 }, "description": "SEAL-style 8-fragment batch with mild error and reverse-complement" },
-    "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS": { "concurrency": 1, "data": {}, "description": "One source-fixed corpus callback spanning nearby short exact-read sizes, reverse-strand and nonzero-penalty fixed seeds, a structurally constructed cutoff/rescue case, generated error profiles, constructed repetitive decoys, and SHORT through report-76 XXL_HIFI endpoint sizes; generic fixed-seed cases make no unverified anchor-shape claim, and all targets fit bundled minimap2's signed-32-bit ABI" },
-
-    "GROUPED32_LOCAL32_ONE_70K":      { "concurrency": 1, "data": { "span_count": 1, "words_per_span": 70000, "total_words": 70000 }, "description": "One long 70k-word scatter-false span; primary contiguous-throughput case" },
-    "GROUPED32_LOCAL32_256_X_256":    { "concurrency": 1, "data": { "span_count": 256, "words_per_span": 256, "total_words": 65536 }, "description": "256 medium controls with 256 contiguous local32 words each" },
-    "GROUPED32_LOCAL32_4096_X_16":    { "concurrency": 1, "data": { "span_count": 4096, "words_per_span": 16, "total_words": 65536 }, "description": "4096 short controls; exposes the SIMD cutoff and per-span reduction cost" },
-    "GROUPED32_LOCAL32_65536_X_1":    { "concurrency": 1, "data": { "span_count": 65536, "words_per_span": 1, "total_words": 65536 }, "description": "Singleton negative control; vector candidates should naturally remain on scalar boundaries" },
-    "GROUPED32_LOCAL32_ZIPF_64K":     { "concurrency": 1, "data": { "span_count": 1024, "words_per_span": 1, "total_words": 65536 }, "description": "Deterministic skewed control lengths summing to 65536 local32 words" }
-  },
-  "bench_grouped32_local32_validation": {
-    "tags": ["grouped32-local32", "index-loading", "simd"],
-    "description": "Benchmark-only contiguous grouped32 scatter-false validation experiment. Compares exact and optimized scalar loops with the production grouped32 Highway core instantiated at W=1/2/4, reports operation-originated route counters, and runs untimed adversarial parity probes. Vector-labelled rows fail rather than silently switching algorithms. It never gathers u64 positions and does not alter production reader routing.",
-    "fast": false,
-    "concurrency": { "bench_lock": true, "concurrency": false },
-    "iteration_order": { "mode": "interleaved_seeded", "seed": 370032 },
-    "matrix": {
-      "for": {
-        "GROUPED32_LOCAL32_ONE_70K": 400,
-        "GROUPED32_LOCAL32_256_X_256": 400,
-        "GROUPED32_LOCAL32_4096_X_16": 300,
-        "GROUPED32_LOCAL32_65536_X_1": 100,
-        "GROUPED32_LOCAL32_ZIPF_64K": 300
-      },
-      "over": {
-        "grouped32_local32_scalar_exact": {},
-        "grouped32_local32_scalar_optimized": {},
-        "grouped32_local32_scalar_unrolled": {},
-        "grouped32_local32_vec_stream_1": {},
-        "grouped32_local32_vec_stream_2": {},
-        "grouped32_local32_vec_stream_4": {}
-      },
-      "by_regions": true,
-      "metrics": {
-        "wall_clock_ns": { "rules": [] },
-        "region_total_ns": {
-          "type": "region",
-          "region": "grouped32_local32_validation",
-          "rules": []
-        },
-        "validation_parity": { "type": "evaluation" },
-        "adversarial_parity": { "type": "evaluation" },
-        "primary_correct_fraction": { "type": "evaluation", "rules": [] },
-        "route_proof_accepted": { "type": "evaluation" },
-        "selected_route": { "type": "evaluation" },
-        "selected_vector_stream_width": { "type": "evaluation" },
-        "vectorized_words": { "type": "evaluation" },
-        "scalar_boundary_words": { "type": "evaluation" },
-        "scalar_tail_words": { "type": "evaluation" },
-        "failure_replay_count": { "type": "evaluation" },
-        "adversarial_probe_count": { "type": "evaluation" },
-        "adversarial_vectorized_words": { "type": "evaluation" },
-        "adversarial_replay_count": { "type": "evaluation" },
-        "valid_result": { "type": "evaluation" },
-        "validated_words": { "type": "evaluation" },
-        "terminal_word_witness": { "type": "evaluation" }
-      }
-    }
+    "SIMD_CHAINING_ENDPOINT_FIXED_CORPUS": { "concurrency": 1, "data": {}, "description": "One source-fixed corpus callback spanning nearby short exact-read sizes, reverse-strand and nonzero-penalty fixed seeds, a structurally constructed cutoff/rescue case, generated error profiles, constructed repetitive decoys, and SHORT through report-76 XXL_HIFI endpoint sizes; generic fixed-seed cases make no unverified anchor-shape claim, and all targets fit bundled minimap2's signed-32-bit ABI" }
   },
   "bench_prefilter_kernels": {
     "tags": ["prefilter", "sneakysnake", "simd", "vulkan"],
@@ -314,7 +253,7 @@
   },
   "bench_prefilter_pipeline": {
     "tags": ["aligner", "prefilter", "sneakysnake", "pipeline"],
-    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes prefilter and mm_align_skeleton. Operation-originated proof reports actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless proof is present with non-empty work from the selected backend, while the off row requires proof absence. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
+    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes prefilter and mm_align_skeleton. Operation-originated stats report actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless stats are available and report non-empty work from the selected backend, while the off row requires stats to be absent. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
     "fast": true,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "iteration_order": {"mode": "interleaved_seeded", "seed": 5124040},
@@ -342,8 +281,8 @@
         "prefilter_backend_scalar": {"type": "evaluation", "rules": []},
         "prefilter_backend_simd": {"type": "evaluation", "rules": []},
         "prefilter_backend_vulkan": {"type": "evaluation", "rules": []},
-        "prefilter_execution_proof_present": {"type": "evaluation", "rules": []},
-        "prefilter_execution_proof_accepted": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_available": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_consistent": {"type": "evaluation", "rules": []},
         "prefilter_dispatches": {"type": "evaluation", "rules": []},
         "prefilter_sneaky_snake_dispatches": {"type": "evaluation", "rules": []},
         "prefilter_gatekeeper_dispatches": {"type": "evaluation", "rules": []},
@@ -361,8 +300,8 @@
         "prefilter_exact_guard_activations": {"type": "evaluation", "rules": []},
         "prefilter_guard_confirmed_rejections": {"type": "evaluation", "rules": []},
         "prefilter_hamming_exact_rejections": {"type": "evaluation", "rules": []},
-        "prefilter_execution_proof_saturated": {"type": "evaluation", "rules": []},
-        "selected_route_execution_proof_accepted": {"type": "evaluation", "rules": []},
+        "prefilter_execution_stats_saturated": {"type": "evaluation", "rules": []},
+        "selected_route_execution_stats_consistent": {"type": "evaluation", "rules": []},
         "ksw2_left_calls": {"type": "evaluation", "rules": []},
         "ksw2_gap_calls": {"type": "evaluation", "rules": []},
         "ksw2_right_calls": {"type": "evaluation", "rules": []},
@@ -429,7 +368,7 @@
   },
   "bench_aligners_curated": {
     "tags": ["aligner", "curated"],
-    "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Exact eight-row/four-case acceptance and blocking all-sample biological bounds preserve every unique-fragment, SEAL-style batch, FAST_LONG, and FAST_VERY_LONG observation. Report163 is the first biologically correct Phase-C FAST_LONG row after the Shape-V5 strand radix repair (one match, primary correctness 1, zero offset); every earlier compatible Phase-C baseline returned 14 matches, primary correctness 0, and about 388606 bp mean offset. Wall timing is diagnostic only: five concurrent groups share a process-wide Vulkan queue mutex, so wall samples include unequal queue waiting and independent row P50/P99 estimates are not acceptance-grade. Reports164, 170, and 171 exposed that scheduling variance without any biological or index-construction regression. The 10M/100M targets are also below the 256 Mi-bp source-direct threshold, so the named small-target sibling comparisons are not direct-resident evidence. Blocking GPU speed acceptance lives in the serial, route-proven XXL relative and paired gates; a row-pruning filter remains a hard configuration error here, so no biological comparison side can disappear vacuously.",
+    "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Exact eight-row/four-case acceptance and blocking all-sample biological bounds preserve every unique-fragment, SEAL-style batch, FAST_LONG, and FAST_VERY_LONG observation. Report163 is the first biologically correct resident GPU-index frontend FAST_LONG row after the Shape-V5 strand radix repair (one match, primary correctness 1, zero offset); every earlier compatible resident GPU-index frontend baseline returned 14 matches, primary correctness 0, and about 388606 bp mean offset. Wall timing is diagnostic only: five concurrent groups share a process-wide Vulkan queue mutex, so wall samples include unequal queue waiting and independent row P50/P99 estimates are not acceptance-grade. Reports164, 170, and 171 exposed that scheduling variance without any biological or index-construction regression. The 10M/100M targets are also below the 256 Mi-bp source-direct threshold, so the named small-target sibling comparisons are not direct-resident evidence. Blocking GPU speed acceptance lives in the serial, route-proven XXL relative and paired gates; a row-pruning filter remains a hard configuration error here, so no biological comparison side can disappear vacuously.",
     "fast": true,
     "concurrency": { "bench_lock": false, "concurrency": true },
     "matrix": {
@@ -442,7 +381,7 @@
         "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
         "bioseq_block_simd_dp_two_stack_nthash": {},
         "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
-        "bioseq_block_vulkan_phase_c_frontend": {}
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
       },
       "by_regions": true,
       "acceptance": {
@@ -454,7 +393,7 @@
           "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
           "bioseq_block_simd_dp_two_stack_nthash",
           "bioseq_block_vulkan_dp_vulkan_minimap_int",
-          "bioseq_block_vulkan_phase_c_frontend"
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
         ],
         "exact_test_case_iterations": {
           "CURATED_UNIQUE_FRAGMENT": 5000,
@@ -468,12 +407,12 @@
       "metrics": {
         "wall_clock_ns": {
           "rules": [
-            [ "phase_c_fast_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_LONG" },
+            [ "resident_gpu_frontend_fast_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
               { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50", "blocking": false },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "FAST_LONG" } ],
-            [ "phase_c_fast_very_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_VERY_LONG" },
+            [ "resident_gpu_frontend_fast_very_long_wall_no_slower_than_small_target_vulkan_minimap_int_sibling",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
               { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50", "blocking": false },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "FAST_VERY_LONG" } ]
           ]
@@ -494,20 +433,20 @@
         "match_count": {
           "type": "evaluation",
           "rules": [
-            [ "phase_c_fast_long_match_count_min_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_LONG" },
+            [ "resident_gpu_frontend_fast_long_match_count_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
-            [ "phase_c_fast_long_match_count_max_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_LONG" },
+            [ "resident_gpu_frontend_fast_long_match_count_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
-            [ "phase_c_fast_very_long_match_count_min_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_VERY_LONG" },
+            [ "resident_gpu_frontend_fast_very_long_match_count_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ],
-            [ "phase_c_fast_very_long_match_count_max_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_VERY_LONG" },
+            [ "resident_gpu_frontend_fast_very_long_match_count_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
           ]
@@ -527,12 +466,12 @@
               { "key": "bioseq_block_simd_dp_two_stack_nthash" },
               { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
               { "key": "minimap2_dp" } ],
-            [ "phase_c_fast_long_correct_fraction_min_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_LONG" },
+            [ "resident_gpu_frontend_fast_long_correct_fraction_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
-            [ "phase_c_fast_very_long_correct_fraction_min_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_VERY_LONG" },
+            [ "resident_gpu_frontend_fast_very_long_correct_fraction_min_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
           ]
@@ -540,12 +479,12 @@
         "mean_position_offset_bp": {
           "type": "evaluation",
           "rules": [
-            [ "phase_c_fast_long_position_offset_max_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_LONG" },
+            [ "resident_gpu_frontend_fast_long_position_offset_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "FAST_LONG" } ],
-            [ "phase_c_fast_very_long_position_offset_max_equals_minimap2",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "FAST_VERY_LONG" },
+            [ "resident_gpu_frontend_fast_very_long_position_offset_max_equals_minimap2",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "FAST_VERY_LONG" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "FAST_VERY_LONG" } ]
           ]
@@ -556,7 +495,7 @@
 
   "bench_aligners_xxl_hifi_relative": {
     "tags": ["aligner", "xxl-hifi", "relative-regression"],
-    "description": "XXL_HIFI-only non-E2E algorithm comparison. Four samples and nine controlled rows apply independent within-run P50 wall/stage ceilings without requiring historical absolute wall times. The 500M target is above the 256 Mi-bp production threshold: strict execution receipts prove both the direct resident and Phase-C routes, and a blocking same-report P50 rule requires route-proven Phase C to beat route-proven source-direct Vulkan. Complete reports 120/148/151/153 bound batched-KSW2 wall at 1.005x; recent complete paired medians bound SIMD/scalar sketch and chain at 0.214x and 0.600x. The historical partial-GPU Vulkan wall ceiling remains visible at 1.011221x only as a nonblocking diagnostic because complete-run ratios are 1.024878-1.032098; it is not faster or all-GPU acceptance evidence. Every SIMD_MM2 row explicitly selects bounded_batch_approximate as a promotion candidate and must prove requested/observed policy identity, positive accelerated cutoff work, and zero scalar fallback. Every Vulkan-labelled row is a historical partial-GPU probe (CPU work remains) and is explicitly ineligible for all-GPU acceptance.",
+    "description": "XXL_HIFI-only non-E2E algorithm comparison. Four samples and nine controlled rows apply independent within-run P50 wall/stage ceilings without requiring historical absolute wall times. The 500M target is above the 256 Mi-bp production threshold: strict execution receipts prove both the direct resident and resident GPU-index frontend routes, and a blocking same-report P50 rule requires route-proven resident GPU-index frontend to beat route-proven source-direct Vulkan. Complete reports 120/148/151/153 bound batched-KSW2 wall at 1.005x; recent complete paired medians bound SIMD/scalar sketch and chain at 0.214x and 0.600x. The mixed GPU/CPU Vulkan wall ceiling remains visible at 1.011221x only as a nonblocking diagnostic because complete-run ratios are 1.024878-1.032098; it is not faster or all-GPU acceptance evidence. Every SIMD_MM2 row explicitly selects bounded_batch_approximate as a promotion candidate and must prove requested/observed policy identity, positive accelerated cutoff work, and zero scalar fallback. Every Vulkan-labelled row is a mixed GPU/CPU route (CPU work remains) and is explicitly ineligible for all-GPU acceptance.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
@@ -570,7 +509,7 @@
         "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
         "bioseq_block_simd_dp_two_stack_nthash": {},
         "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
-        "bioseq_block_vulkan_phase_c_frontend": {}
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
       },
       "by_regions": true,
       "acceptance": {
@@ -583,7 +522,7 @@
           "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
           "bioseq_block_simd_dp_two_stack_nthash",
           "bioseq_block_vulkan_dp_vulkan_minimap_int",
-          "bioseq_block_vulkan_phase_c_frontend"
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
         ],
         "exact_test_case_iterations": { "XXL_HIFI": 4 },
         "require_named_region_iteration_coverage": true,
@@ -625,12 +564,12 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "<", "threshold%": 0, "tolerance%": 71.4040, "aggregate": "p50" },
               { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
-            [ "report76_xxl_hifi_phase_c_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "report76_xxl_hifi_resident_gpu_frontend_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "<", "threshold%": 0, "tolerance%": 72.2027, "aggregate": "p50" },
               { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" } ],
-            [ "doc0384_xxl_phase_c_wall_less_than_route_proven_source_direct",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "xxl_resident_gpu_frontend_wall_less_than_route_proven_source_direct",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "p50" },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ]
           ]
@@ -658,115 +597,115 @@
         },
         "region_visits": { "type": "region", "rules": [] },
         "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
-        "selected_route_execution_proof_accepted": { "type": "evaluation", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
         "biological_fingerprint_computed": { "type": "evaluation", "rules": [] },
         "biological_fingerprint_saturated": { "type": "evaluation", "rules": [] },
         "biological_collection_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_collection_count_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_collection_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_match_result_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_match_result_count_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_result_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_result_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_result_count_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_result_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_operation_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_operation_count_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_operation_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_match_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_match_digest_lane0_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_match_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_match_digest_lane0_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_match_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_match_digest_lane1_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_match_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_match_digest_lane1_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_digest_lane0_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_digest_lane0_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_digest_lane1_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "biological_cigar_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_biological_cigar_digest_lane1_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
@@ -776,7 +715,7 @@
         "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
-        "simd_chaining_execution_proof_accepted": {
+        "simd_chaining_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "strict_xxl_block_simd_chain_operation_proof_accepted",
@@ -835,7 +774,7 @@
             [ "strict_xxl_block_all_simd_bounded_policy_selected", { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "simd_chaining_selected_policy_matches_proof": {
+        "simd_chaining_selected_policy_matches_stats": {
           "type": "evaluation",
           "rules": [
             [ "strict_xxl_all_simd_requested_observed_policy_match", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
@@ -911,7 +850,7 @@
             [ "strict_xxl_all_simd_chain_shared_scalar_backtrack_forbidden", { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" }, { "compare": "=", "tolerance%": 0, "aggregate": "max" }, { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "ksw2_batched_execution_proof_accepted": { "type": "evaluation", "rules": [] },
+        "ksw2_batched_execution_stats_consistent": { "type": "evaluation", "rules": [] },
         "match_count": {
           "type": "evaluation",
           "rules": [
@@ -943,8 +882,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_partial_gpu_one_match_per_sample",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_partial_gpu_one_match_per_sample",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -980,14 +919,14 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_partial_gpu_primary_correct_per_sample",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_partial_gpu_primary_correct_per_sample",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
         },
         "mean_position_offset_bp": { "type": "evaluation" },
-        "historical_partial_gpu_probe": {
+        "mixed_gpu_pipeline_selected": {
           "type": "evaluation",
           "rules": [
             [ "strict_xxl_vulkan_tiled_is_partial_gpu",
@@ -998,8 +937,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_is_partial_gpu",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_is_partial_gpu",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
             [ "strict_xxl_minimap2_not_partial_gpu",
@@ -1039,8 +978,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_disqualified_from_all_gpu",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_disqualified_from_all_gpu",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1052,8 +991,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_query_sketch_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_query_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1065,8 +1004,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_target_sketch_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_target_sketch_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1074,8 +1013,8 @@
         "vulkan_target_index_build_dispatches": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_block_vulkan_target_index_build_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_target_index_build_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1087,8 +1026,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_seed_lookup_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_seed_lookup_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1106,8 +1045,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_block_vulkan_chain_score_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_block_vulkan_chain_score_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1124,46 +1063,46 @@
         "vulkan_seed_canonical_anchor_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_vulkan_seed_canonical_anchor_count_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_canonical_anchor_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_vulkan_seed_anchor_digest_lane0_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_vulkan_seed_anchor_digest_lane0_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_vulkan_seed_anchor_digest_lane1_hi32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_direct_vs_phase_c_vulkan_seed_anchor_digest_lane1_lo32_exact",
+            [ "strict_xxl_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" } ]
           ]
         },
         "vulkan_seed_canonical_anchor_order_checks": {
@@ -1173,8 +1112,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_vulkan_seed_canonical_anchor_order_checks_positive",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_vulkan_seed_canonical_anchor_order_checks_positive",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1186,8 +1125,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_vulkan_seed_canonical_anchor_order_accepts_positive",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_vulkan_seed_canonical_anchor_order_accepts_positive",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1208,11 +1147,11 @@
         "gpu_index_reflected_footprint_bytes": { "type": "evaluation", "rules": [] },
         "gpu_index_max_load_ppm": { "type": "evaluation", "rules": [] },
         "gpu_index_max_probe": { "type": "evaluation", "rules": [] },
-        "phase_c_gpu_index_ownership_proof_accepted": {
+        "gpu_index_ownership_validation_consistent": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_ownership_proof_accepted",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_gpu_index_ownership_validation_consistent",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1220,8 +1159,8 @@
         "gpu_index_count_phase_admissions": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_count_phase_admitted",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_count_phase_admitted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1229,8 +1168,8 @@
         "gpu_index_main_peak_admissions": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_main_peak_admitted",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_main_peak_admitted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1238,8 +1177,8 @@
         "gpu_index_resident_transfers": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_resident_transferred",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_resident_transferred",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1247,8 +1186,8 @@
         "gpu_index_adoption_rereserve_attempts": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_adoption_never_rereserved",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_adoption_never_rereserved",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1256,8 +1195,8 @@
         "gpu_index_adoption_successes": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_adopted",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_adopted",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1265,8 +1204,8 @@
         "gpu_index_owned_resident_bytes": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_has_owned_resident_bytes",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_has_owned_resident_bytes",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1274,8 +1213,8 @@
         "gpu_index_gate_enabled": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_query_gate_disabled",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_query_gate_disabled",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1283,8 +1222,8 @@
         "gpu_index_gate_word_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_query_gate_has_no_words",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_query_gate_has_no_words",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1292,8 +1231,8 @@
         "gpu_index_gate_mask": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_query_gate_mask_absent",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_query_gate_mask_absent",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1301,8 +1240,8 @@
         "gpu_index_gate_set_bits": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_query_gate_has_no_set_bits",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_query_gate_has_no_set_bits",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1310,8 +1249,8 @@
         "gpu_index_gate_count_dispatches": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_gated_count_forbidden",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_gated_count_forbidden",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1319,8 +1258,8 @@
         "gpu_index_gated_emit_dispatches": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_gated_emit_forbidden",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_gated_emit_forbidden",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "max" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1328,8 +1267,8 @@
         "gpu_index_ungated_emit_dispatches": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_ungated_emit_dispatched",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_ungated_emit_dispatched",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1337,8 +1276,8 @@
         "gpu_index_retained_minimizer_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_retained_minimizers_nonempty",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_retained_minimizers_nonempty",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1346,8 +1285,8 @@
         "gpu_index_distinct_minimizer_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_phase_c_gpu_index_distinct_minimizers_nonempty",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_index_distinct_minimizers_nonempty",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -1396,8 +1335,8 @@
               { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI" },
               { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ],
-            [ "strict_xxl_phase_c_source_direct_neutral",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI" },
+            [ "strict_xxl_resident_gpu_frontend_source_direct_neutral",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI" },
               { "compare": "<", "threshold%": 0, "tolerance%": 0, "aggregate": "max" },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI" } ]
           ]
@@ -1448,7 +1387,7 @@
         "gpu_index_source_direct_cache_cleanup_releases": { "type": "evaluation", "rules": [] },
         "gpu_index_source_direct_resident_cleanup_bytes": { "type": "evaluation", "rules": [] },
         "gpu_index_source_direct_pipeline_completions": { "type": "evaluation", "rules": [] },
-        "exact_simd_query_execution_proof_accepted": {
+        "exact_simd_query_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "strict_xxl_exact_query_proof_accepted",
@@ -1457,7 +1396,7 @@
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "exact_simd_target_execution_proof_accepted": {
+        "exact_simd_target_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "strict_xxl_exact_target_proof_accepted",
@@ -1525,7 +1464,7 @@
 
   "bench_aligners_simd_chaining_endpoint_quality": {
     "tags": ["aligner", "simd-chaining", "endpoint-quality", "qualification"],
-    "description": "Two-row absolute qualification gate. The real row owns all biological work: it runs bounded SIMD, exact SIMD, and bundled minimap2 sequentially on each fixed one-target fixture, requires one normalized primary from each backend, and includes a source-constructed prefix/repeat-bank/repeat-wall/suffix default-max-skip=25 fixture whose own proof must show cutoff, skipped candidates, and a winning older-global-best rescue. Its endpoint participates in the same strict <15-bp maxima. The clearly labelled zero-reference row performs no biological work and exists only because framework rules compare rows rather than literals. Ordinary rules reject failures while preserving complete report and raw evidence; wall time and endpoint maxima remain diagnostics. primary_correct_fraction is emitted as 1.0 by both rows only to satisfy the config-global historical-regression metric contract and is not an endpoint acceptance signal.",
+    "description": "Two-row absolute qualification gate. The real row owns all biological work: it runs bounded SIMD, exact SIMD, and bundled minimap2 sequentially on each fixed one-target fixture, requires one normalized primary from each backend, and includes a source-constructed prefix/repeat-bank/repeat-wall/suffix default-max-skip=25 fixture whose own evidence must show cutoff, skipped candidates, and a winning older-global-best rescue. Its endpoint participates in the same strict <15-bp maxima. The clearly labelled zero-reference row performs no biological work and exists only because framework rules compare rows rather than literals. Ordinary rules reject failures while preserving complete report and raw evidence; wall time and endpoint maxima remain diagnostics. primary_correct_fraction is emitted as 1.0 by both rows only to satisfy the config-global historical-regression metric contract and is not an endpoint acceptance signal.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
@@ -1697,7 +1636,7 @@
           ]
         },
         "region_visits": { "type": "region", "rules": [] },
-        "selected_route_execution_proof_accepted": {
+        "selected_route_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "chain_focus_exact_selected_route_proven",
@@ -1745,7 +1684,7 @@
               { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "simd_chaining_selected_policy_matches_proof": {
+        "simd_chaining_selected_policy_matches_stats": {
           "type": "evaluation",
           "rules": [
             [ "chain_focus_exact_requested_observed_policy_match",
@@ -1876,7 +1815,7 @@
               { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "simd_chaining_execution_proof_accepted": {
+        "simd_chaining_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "chain_focus_exact_operation_simd_chain_proof_accepted",
@@ -1929,7 +1868,7 @@
               { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "exact_simd_query_execution_proof_accepted": {
+        "exact_simd_query_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "chain_focus_exact_query_proof_accepted",
@@ -1942,7 +1881,7 @@
               { "key": "bioseq_ksw2_scalar_dp_scalar_mm", "test_case": "XXL_HIFI" } ]
           ]
         },
-        "exact_simd_target_execution_proof_accepted": {
+        "exact_simd_target_execution_stats_consistent": {
           "type": "evaluation",
           "rules": [
             [ "chain_focus_exact_target_proof_accepted",
@@ -2000,7 +1939,7 @@
 
   "bench_aligners_xxl_hifi_paired": {
     "tags": ["aligner", "xxl-hifi", "relative-regression", "paired"],
-    "description": "Statistically paired companion to bench_aligners_xxl_hifi_relative. It keeps the same nine rows and strict route/correctness proof, but runs one exclusive single-group batch for 11 seeded repetition-major repeats. It reports P50 repeat-wise ratios after retaining repeat zero as first-repeat evidence and excluding it from the 10 steady-state pairs. The DOC0384 Phase-C/source-direct ratio below 1 is blocking because both routes execute in this exact serial schedule with strict positive receipts; the report_76-derived 10% wall and 15% stage bands remain nonblocking diagnostics because report_76 contains ratios of independent P50s. Raw evidence retains every repeat and reports first-repeat separately; first-repeat is not a globally cold measurement because routes share the process/runtime.",
+    "description": "Statistically paired companion to bench_aligners_xxl_hifi_relative. It keeps the same nine rows and strict route/correctness validation, but runs one exclusive single-group batch for 11 seeded repetition-major repeats. It reports P50 repeat-wise ratios after retaining repeat zero as first-repeat evidence and excluding it from the 10 steady-state pairs. The resident GPU-index frontend/source-direct ratio below 1 is blocking because both routes execute in this exact serial schedule with strict positive receipts; the report_76-derived 10% wall and 15% stage bands remain nonblocking diagnostics because report_76 contains ratios of independent P50s. Raw evidence retains every repeat and reports first-repeat separately; first-repeat is not a globally cold measurement because routes share the process/runtime.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 370076 },
@@ -2015,7 +1954,7 @@
         "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
         "bioseq_block_simd_dp_two_stack_nthash": {},
         "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
-        "bioseq_block_vulkan_phase_c_frontend": {}
+        "bioseq_block_vulkan_resident_gpu_index_frontend": {}
       },
       "by_regions": true,
       "acceptance": {
@@ -2028,7 +1967,7 @@
           "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
           "bioseq_block_simd_dp_two_stack_nthash",
           "bioseq_block_vulkan_dp_vulkan_minimap_int",
-          "bioseq_block_vulkan_phase_c_frontend"
+          "bioseq_block_vulkan_resident_gpu_index_frontend"
         ],
         "exact_test_case_iterations": { "XXL_HIFI_PAIRED": 11 },
         "require_named_region_iteration_coverage": true,
@@ -2046,8 +1985,8 @@
       "metrics": {
         "wall_clock_ns": {
           "rules": [
-            [ "doc0384_paired_phase_c_over_source_direct_wall_ratio_lt_1",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" },
+            [ "paired_resident_gpu_frontend_over_source_direct_wall_ratio_lt_1",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" } ],
             [ "paired_report76_block_simd_over_ksw2_simd_wall_with_10pct_noise",
@@ -2078,8 +2017,8 @@
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.7140396842, "blocking": false, "warmup_repetitions": 1 },
               { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ],
-            [ "paired_report76_phase_c_block_vulkan_over_block_simd_wall_with_15pct_noise",
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" },
+            [ "paired_report76_resident_gpu_frontend_block_vulkan_over_block_simd_wall_with_15pct_noise",
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "<", "tolerance%": 15, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.7220260601, "blocking": false, "warmup_repetitions": 1 },
               { "key": "bioseq_block_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
@@ -2107,115 +2046,115 @@
         },
         "region_visits": { "type": "region", "rules": [] },
         "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
-        "selected_route_execution_proof_accepted": { "type": "evaluation", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
         "biological_fingerprint_computed": { "type": "evaluation", "rules": [] },
         "biological_fingerprint_saturated": { "type": "evaluation", "rules": [] },
         "biological_collection_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_collection_count_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_collection_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_match_result_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_match_result_count_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_result_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_result_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_result_count_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_result_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_operation_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_operation_count_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_operation_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_match_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_match_digest_lane0_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_match_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_match_digest_lane0_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_match_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_match_digest_lane1_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_match_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_match_digest_lane1_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_match_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_digest_lane0_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_digest_lane0_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_digest_lane1_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "biological_cigar_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_biological_cigar_digest_lane1_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_biological_cigar_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
@@ -2226,7 +2165,7 @@
         "simd_chaining_policy_evidence_coherent": { "type": "evaluation", "rules": [] },
         "simd_chaining_selected_policy_exact_visited": { "type": "evaluation", "rules": [] },
         "simd_chaining_selected_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
-        "simd_chaining_selected_policy_matches_proof": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_matches_stats": { "type": "evaluation", "rules": [] },
         "simd_chaining_exact_visited_calls": { "type": "evaluation", "rules": [] },
         "simd_chaining_bounded_batch_approximate_calls": { "type": "evaluation", "rules": [] },
         "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
@@ -2241,11 +2180,11 @@
         "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
-        "ksw2_batched_execution_proof_accepted": { "type": "evaluation", "rules": [] },
+        "ksw2_batched_execution_stats_consistent": { "type": "evaluation", "rules": [] },
         "match_count": { "type": "evaluation", "rules": [] },
         "primary_correct_fraction": { "type": "evaluation", "rules": [] },
         "mean_position_offset_bp": { "type": "evaluation", "rules": [] },
-        "historical_partial_gpu_probe": { "type": "evaluation", "rules": [] },
+        "mixed_gpu_pipeline_selected": { "type": "evaluation", "rules": [] },
         "all_gpu_acceptance_eligible": { "type": "evaluation", "rules": [] },
         "vulkan_query_sketch_dispatches": { "type": "evaluation", "rules": [] },
         "vulkan_target_sketch_dispatches": { "type": "evaluation", "rules": [] },
@@ -2266,10 +2205,10 @@
         "vulkan_seed_canonical_anchor_count": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_vulkan_seed_canonical_anchor_count_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_canonical_anchor_count_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "vulkan_seed_canonical_anchor_order_checks": { "type": "evaluation", "rules": [] },
@@ -2279,37 +2218,37 @@
         "vulkan_seed_anchor_digest_lane0_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_vulkan_seed_anchor_digest_lane0_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane0_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_vulkan_seed_anchor_digest_lane0_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane0_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane1_hi32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_vulkan_seed_anchor_digest_lane1_hi32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_hi32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "vulkan_seed_anchor_digest_lane1_lo32": {
           "type": "evaluation",
           "rules": [
-            [ "strict_xxl_paired_direct_vs_phase_c_vulkan_seed_anchor_digest_lane1_lo32_exact",
+            [ "strict_xxl_paired_direct_vs_resident_gpu_frontend_vulkan_seed_anchor_digest_lane1_lo32_exact",
               { "key": "bioseq_block_vulkan_dp_vulkan_minimap_int", "test_case": "XXL_HIFI_PAIRED" },
               { "compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact" },
-              { "key": "bioseq_block_vulkan_phase_c_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
+              { "key": "bioseq_block_vulkan_resident_gpu_index_frontend", "test_case": "XXL_HIFI_PAIRED" } ]
           ]
         },
         "gpu_index_materializations": { "type": "evaluation", "rules": [] },
@@ -2326,7 +2265,7 @@
         "gpu_index_reflected_footprint_bytes": { "type": "evaluation", "rules": [] },
         "gpu_index_max_load_ppm": { "type": "evaluation", "rules": [] },
         "gpu_index_max_probe": { "type": "evaluation", "rules": [] },
-        "phase_c_gpu_index_ownership_proof_accepted": { "type": "evaluation", "rules": [] },
+        "gpu_index_ownership_validation_consistent": { "type": "evaluation", "rules": [] },
         "gpu_index_count_phase_admissions": { "type": "evaluation", "rules": [] },
         "gpu_index_main_peak_admissions": { "type": "evaluation", "rules": [] },
         "gpu_index_resident_transfers": { "type": "evaluation", "rules": [] },
@@ -2446,9 +2385,9 @@
     }
   },
 
-  "bench_paper_nthash_xxl_hifi_probe": {
-    "tags": ["aligner", "xxl-hifi", "paper-nthash", "simd", "prototype"],
-    "description": "Isolated restart-free XXL_HIFI proof for the bounded paper-u32/R7/sum SIMD sketch. The legacy ExactSimd row remains an oracle/debug comparator. Both Paper rows must execute Paper sketch proof plus SIMD chaining, and the Block row must additionally execute Block Aligner SIMD; the strict runner requires exactly one primary mapping with target offset strictly below 15 bp. The Paper/ExactSimd sketch ratios compare unequal work and are stably 1.46-1.48, so their strict <1.0 faster-than boundary is retained only as a visible nonblocking prototype diagnostic, not acceptance.",
+  "bench_bounded_nthash_xxl_hifi_validation": {
+    "tags": ["aligner", "xxl-hifi", "bounded-nthash", "simd", "validation"],
+    "description": "Isolated restart-free XXL_HIFI validation for the bounded u32/R7/sum SIMD sketch. The legacy ExactSimd row remains an oracle/debug comparator. Both bounded-ntHash rows must execute bounded ntHash sketch execution stats plus SIMD chaining, and the Block row must additionally execute Block Aligner SIMD; the strict runner requires exactly one primary mapping with target offset strictly below 15 bp. The bounded-ntHash/ExactSimd sketch ratios compare unequal work and are stably 1.46-1.48, so their strict <1.0 faster-than boundary is retained only as a visible nonblocking comparison diagnostic, not acceptance.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 370371 },
@@ -2457,34 +2396,34 @@
       "over": {
         "minimap2_dp": {},
         "bioseq_ksw2_simd_dp_two_stack_nthash": {},
-        "bioseq_ksw2_simd_dp_paper_nthash": {},
-        "bioseq_block_simd_dp_paper_nthash": {}
+        "bioseq_ksw2_simd_dp_bounded_nthash": {},
+        "bioseq_block_simd_dp_bounded_nthash": {}
       },
       "by_regions": true,
       "acceptance": {
         "exact_algorithm_rows": [
           "minimap2_dp",
           "bioseq_ksw2_simd_dp_two_stack_nthash",
-          "bioseq_ksw2_simd_dp_paper_nthash",
-          "bioseq_block_simd_dp_paper_nthash"
+          "bioseq_ksw2_simd_dp_bounded_nthash",
+          "bioseq_block_simd_dp_bounded_nthash"
         ],
         "exact_test_case_iterations": { "XXL_HIFI": 4 },
         "require_named_region_iteration_coverage": true,
         "exact_named_region_sample_multiplicities": [
-          { "algorithm": "bioseq_ksw2_simd_dp_paper_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_packed_paper_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
-          { "algorithm": "bioseq_block_simd_dp_paper_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_packed_paper_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
+          { "algorithm": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd", "metric": "region_total_ns", "exact_samples": 4 },
           { "algorithm": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd", "metric": "region_total_ns", "exact_samples": 4 }
         ]
       },
       "metrics": {
         "wall_clock_ns": {
           "rules": [
-            [ "paper_nthash_ksw2_wall_faster_than_minimap2",
-              { "key": "bioseq_ksw2_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_ksw2_wall_faster_than_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "paper_nthash_block_wall_faster_than_minimap2",
-              { "key": "bioseq_block_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_block_wall_faster_than_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "warmup_repetitions": 1 },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -2492,19 +2431,19 @@
         "region_total_ns": {
           "type": "region",
           "rules": [
-            [ "bounded_paper_nthash_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
-              { "key": "bioseq_ksw2_simd_dp_paper_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_packed_paper_nthash_simd" },
+            [ "bounded_nthash_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd" },
               { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "blocking": false, "warmup_repetitions": 1 },
               { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" } ],
-            [ "bounded_paper_nthash_block_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
-              { "key": "bioseq_block_simd_dp_paper_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_packed_paper_nthash_simd" },
+            [ "bounded_nthash_block_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_bounded_nthash_simd" },
               { "compare": "<", "tolerance%": 0, "aggregate": "p50", "pairing": "by_iteration_ratio", "paired_baseline": 1.0, "blocking": false, "warmup_repetitions": 1 },
               { "key": "bioseq_ksw2_simd_dp_two_stack_nthash", "test_case": "XXL_HIFI", "region": "mm_sketch_simd" } ]
           ]
         },
         "region_visits": { "type": "region", "rules": [] },
         "region_max_ns": { "type": "region", "region": "sort_run", "rules": [] },
-        "selected_route_execution_proof_accepted": { "type": "evaluation", "rules": [] },
+        "selected_route_execution_stats_consistent": { "type": "evaluation", "rules": [] },
         "simd_chaining_no_improvement_fast_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_improvement_replay_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_improvement_replay_lanes": { "type": "evaluation", "rules": [] },
@@ -2513,7 +2452,7 @@
         "simd_chaining_policy_evidence_coherent": { "type": "evaluation", "rules": [] },
         "simd_chaining_selected_policy_exact_visited": { "type": "evaluation", "rules": [] },
         "simd_chaining_selected_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
-        "simd_chaining_selected_policy_matches_proof": { "type": "evaluation", "rules": [] },
+        "simd_chaining_selected_policy_matches_stats": { "type": "evaluation", "rules": [] },
         "simd_chaining_exact_visited_calls": { "type": "evaluation", "rules": [] },
         "simd_chaining_bounded_batch_approximate_calls": { "type": "evaluation", "rules": [] },
         "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
@@ -2528,20 +2467,20 @@
         "simd_chaining_contiguous_predecessor_store_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_primary_contiguous_batches": { "type": "evaluation", "rules": [] },
         "simd_chaining_backtrack_all_starts_visited_fast_batches": { "type": "evaluation", "rules": [] },
-        "paper_nthash_query_execution_proof_accepted": { "type": "evaluation", "rules": [] },
-        "paper_nthash_target_execution_proof_accepted": { "type": "evaluation", "rules": [] },
-        "paper_nthash_query_segments_combined": { "type": "evaluation", "rules": [] },
-        "paper_nthash_target_segments_combined": { "type": "evaluation", "rules": [] },
-        "paper_nthash_fallback_calls": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_query_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_target_execution_stats_consistent": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_query_segments_combined": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_target_segments_combined": { "type": "evaluation", "rules": [] },
+        "bounded_nthash_fallback_calls": { "type": "evaluation", "rules": [] },
         "match_count": {
           "type": "evaluation",
           "rules": [
-            [ "paper_nthash_ksw2_match_count_equals_minimap2",
-              { "key": "bioseq_ksw2_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_ksw2_match_count_equals_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "paper_nthash_block_match_count_equals_minimap2",
-              { "key": "bioseq_block_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_block_match_count_equals_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -2549,12 +2488,12 @@
         "primary_correct_fraction": {
           "type": "evaluation",
           "rules": [
-            [ "paper_nthash_ksw2_primary_correct_equals_minimap2",
-              { "key": "bioseq_ksw2_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_ksw2_primary_correct_equals_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ],
-            [ "paper_nthash_block_primary_correct_equals_minimap2",
-              { "key": "bioseq_block_simd_dp_paper_nthash", "test_case": "XXL_HIFI" },
+            [ "bounded_nthash_block_primary_correct_equals_minimap2",
+              { "key": "bioseq_block_simd_dp_bounded_nthash", "test_case": "XXL_HIFI" },
               { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
               { "key": "minimap2_dp", "test_case": "XXL_HIFI" } ]
           ]
@@ -2660,7 +2599,7 @@
       "blocking": false,
       "exclude_algorithms": [
         "bioseq_block_vulkan_dp_vulkan_minimap_int",
-        "bioseq_block_vulkan_phase_c_frontend"
+        "bioseq_block_vulkan_resident_gpu_index_frontend"
       ],
       "exclude_cases": [
         "SHORT_HIFI", "SHORT_CCS", "SHORT_ONT_MODERN",

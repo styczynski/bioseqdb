@@ -6,19 +6,19 @@ module;
 #include <string>
 #include <vector>
 
-export module bioseq.codegen.clang_structural:model;
+export module bioseq.codegen.structural_analysis:model;
 
-export namespace bioseq::codegen::clang_structural {
+export namespace bioseq::codegen::structural_analysis {
 
 /// Wire contract shared by the GCC/Clang host generator and the Clang tooling
 /// implementation. Increment this when a field is removed or changes meaning.
-inline constexpr std::uint32_t model_schema_version = 2;
+inline constexpr std::uint32_t k_model_schema_revision = 2;
 
 /// Identifies how a translation-unit record was collected.  The token-slice
 /// mode is intentionally syntax-only; declaration probes are body-free inputs
 /// whose semantic facts come from Clang.
 enum class collection_mode : std::uint8_t {
-    legacy_lexical,
+    lexical_scan,
     full_translation_unit,
     token_slice,
     declaration_probe,
@@ -46,13 +46,14 @@ enum class declaration_payload_kind : std::uint8_t {
     alias_rhs,
 };
 
+/// Classifies a preprocessor directive without evaluating its condition.
 enum class preprocessor_directive_kind : std::uint8_t {
     other,
-    if_,
+    if_directive,
     ifdef,
     ifndef,
     elif,
-    else_,
+    else_directive,
     endif,
     define,
     undef,
@@ -62,21 +63,23 @@ enum class preprocessor_directive_kind : std::uint8_t {
     line,
 };
 
-enum class declaration_kind {
+/// Classifies a declaration represented by the structural model.
+enum class declaration_kind : std::uint8_t {
     unknown,
-    namespace_,
+    namespace_declaration,
     record,
-    enum_,
+    enumeration,
     enumerator,
     alias,
-    concept_,
+    concept_declaration,
     function,
     parameter,
     field,
     variable,
 };
 
-enum class attribute_placement {
+/// Identifies the source slot occupied by an attribute.
+enum class attribute_placement : std::uint8_t {
     declaration_prefix,
     class_head,
     parameter_prefix,
@@ -84,10 +87,10 @@ enum class attribute_placement {
     namespace_head,
 };
 
-/// The syntactic form of a callable whose definition body has a proven
+/// The syntactic form of a callable whose definition body has a reported
 /// source insertion point.  Consumers use this to apply attributes without
 /// re-parsing C++.
-enum class callable_kind {
+enum class callable_kind : std::uint8_t {
     function,
     member_function,
     constructor,
@@ -97,34 +100,40 @@ enum class callable_kind {
     lambda,
 };
 
-enum class aggregate_kind {
-    struct_,
-    class_,
-    union_,
+/// Distinguishes C++ aggregate declaration forms.
+enum class aggregate_kind : std::uint8_t {
+    structure,
+    class_record,
+    union_record,
 };
 
-enum class member_access {
-    public_,
-    protected_,
-    private_,
+/// Records effective access for an aggregate member.
+enum class member_access : std::uint8_t {
+    public_access,
+    protected_access,
+    private_access,
 };
 
+/// One byte, line, and column coordinate in a source buffer.
 struct source_position {
     std::size_t byte_offset{};
     std::size_t line{1};
     std::size_t column{1};
 };
 
+/// Half-open range within one source buffer.
 struct source_range {
     source_position begin{};
     source_position end{};
 };
 
+/// Raw token spelling and its exact source range.
 struct lexical_token {
     std::string spelling;
     source_range range;
 };
 
+/// Parsed C++ attribute identity, arguments, and source geometry.
 struct attribute_record {
     std::string qualified_name;
     std::string vendor_namespace;
@@ -133,16 +142,17 @@ struct attribute_record {
     std::string target_usr;
     attribute_placement placement{
         attribute_placement::declaration_prefix};
-    source_range range;
+    /// Attribute segment range without surrounding separators.
+    source_range spelling_range;
     source_range argument_range;
-    /// Complete attribute segment range. `range` remains as the legacy alias.
-    source_range complete_range;
+    /// Exact range removed when this attribute is materialized.
+    source_range removal_range;
 };
 
 /// Compiler- and token-derived declaration properties used by generic source
 /// materializers.  Policy components compose this record instead of mirroring
 /// individual booleans.
-struct declaration_specifier_facts {
+struct declaration_specifier_state {
     bool direct_namespace_member{};
     bool is_definition{};
     bool is_using_alias{};
@@ -165,8 +175,8 @@ struct declaration_specifier_facts {
     bool range_contains_macro_expansion{};
 };
 
-/// A callable definition inside a structurally marked namespace.  All ranges
-/// are half-open byte ranges.  hwy_attr_insertion is the compiler-proven
+/// A callable definition inside a structurally marked namespace. All ranges
+/// are half-open byte ranges. `highway_attribute_insertion` is the
 /// declaration-prefix position for functions (after any outer template head)
 /// and the legal GNU-attribute slot after a lambda's parameter list, or after
 /// its complete template head/front attributes when parentheses are omitted.
@@ -177,7 +187,7 @@ struct callable_insertion_record {
     bool templated{};
     source_range declaration_range;
     source_range body_range;
-    source_position hwy_attr_insertion;
+    source_position highway_attribute_insertion;
 };
 
 /// Exact lexical geometry for a namespace selected by a structural marker.
@@ -200,11 +210,13 @@ struct marked_namespace_record {
     bool crosses_preprocessor_region{};
 };
 
+/// Documentation attached to one named parameter.
 struct documented_parameter {
     std::string name;
     std::string text;
 };
 
+/// Normalized Doxygen content associated with one declaration.
 struct documentation_record {
     std::string associated_usr;
     bool has_explicit_brief{};
@@ -218,6 +230,7 @@ struct documentation_record {
     source_range range;
 };
 
+/// Structural and semantic facts for one function parameter.
 struct parameter_record {
     std::string stable_usr;
     std::string name;
@@ -230,6 +243,7 @@ struct parameter_record {
     source_range name_range;
 };
 
+/// Structural and semantic facts for one declaration.
 struct declaration_record {
     std::string stable_usr;
     declaration_kind kind{declaration_kind::unknown};
@@ -247,17 +261,16 @@ struct declaration_record {
     documentation_record documentation;
     source_range range;
     source_range name_range;
-    aggregate_kind record_kind{aggregate_kind::struct_};
+    aggregate_kind record_kind{aggregate_kind::structure};
     bool exported{};
 
-    /// Stable association key emitted into declaration probes.  Unlike a USR,
-    /// it identifies the original source declaration and coordinate.
-    std::string provenance_id;
-    std::string provenance_coordinate;
-    std::string immediate_namespace_provenance_id;
+    /// Stable association key for the source declaration and byte coordinate.
+    std::string source_identity;
+    std::string source_coordinate;
+    std::string immediate_namespace_source_identity;
     std::string immediate_namespace_stable_usr;
     std::string explicit_declared_type;
-    std::vector<std::string> referenced_declaration_provenance_ids;
+    std::vector<std::string> referenced_declaration_source_identities;
     source_range declaration_range;
     source_range declaration_head_range;
     source_range body_or_initializer_range;
@@ -265,9 +278,10 @@ struct declaration_record {
     module_attachment attachment{module_attachment::global_module};
     declaration_payload_kind payload_kind{
         declaration_payload_kind::none};
-    declaration_specifier_facts specifiers;
+    declaration_specifier_state specifiers;
 };
 
+/// Structural and semantic facts for one aggregate field.
 struct aggregate_field_record {
     std::string stable_usr;
     std::string name;
@@ -280,18 +294,19 @@ struct aggregate_field_record {
     documentation_record documentation;
     source_range range;
     source_range name_range;
-    member_access access{member_access::public_};
+    member_access access{member_access::public_access};
     bool has_default_initializer{};
     bool bit_field{};
     bool multiple_declarators{};
 };
 
+/// Aggregate declaration with its fields and policy-relevant properties.
 struct aggregate_record {
     std::string stable_usr;
     std::string name;
     std::string qualified_name;
     std::string enclosing_qualified_name;
-    aggregate_kind kind{aggregate_kind::struct_};
+    aggregate_kind kind{aggregate_kind::structure};
     source_range range;
     source_range name_range;
     documentation_record documentation;
@@ -321,7 +336,7 @@ struct namespace_record {
     source_range name_range;
     source_range open_brace_range;
     source_range close_brace_range;
-    std::string provenance_id;
+    std::string source_identity;
     std::string stable_usr;
     std::string qualified_name;
     std::vector<attribute_record> attributes;
@@ -346,92 +361,101 @@ struct preprocessor_directive_record {
     bool active{};
 };
 
+/// Collected structural model for one physical source unit.
 struct translation_unit {
-    std::uint32_t schema_version{model_schema_version};
+    std::uint32_t schema_revision{k_model_schema_revision};
     std::filesystem::path source_path;
     std::string module_name;
     std::string source_sha256;
     std::string compiler_profile;
-    std::string clang_version;
+    std::string clang_release;
     std::vector<lexical_token> tokens;
     std::vector<declaration_record> declarations;
     std::vector<aggregate_record> aggregate_records;
     std::vector<marked_namespace_record> marked_namespaces;
-    collection_mode mode{collection_mode::legacy_lexical};
+    collection_mode mode{collection_mode::lexical_scan};
     module_record source_module;
     std::vector<namespace_record> namespaces;
     std::vector<preprocessor_directive_record> preprocessor_directives;
 };
 
+/// Provided module and import edges for one canonical source identity.
 struct module_graph_unit {
-    std::string source_path;
+    /// Canonical forward-slash identity relative to the repository source root.
+    std::string source_identity;
     std::string provided_module;
     std::vector<std::string> exported_imports;
     std::vector<std::string> internal_imports;
 };
 
+/// Structural results collected under one compiler configuration.
 struct structural_index {
     std::vector<translation_unit> translation_units;
-    std::string clang_version;
+    std::string clang_release;
     std::string compilation_signature;
 };
 
+/// Module topology collected under one compiler configuration.
 struct module_graph {
     std::vector<module_graph_unit> units;
-    std::string clang_version;
+    std::string clang_release;
     std::string compilation_signature;
 };
 
-/// Stable source identity used to join dependency-only PREPARE observations
-/// to the canonical token authority and the authenticated PCM manifest.
-struct preparation_module_identity {
+/// Stable module identity used to join dependency scans to the PCM manifest.
+struct dependency_module_identity {
     std::string module_name;
     std::filesystem::path source_path;
     std::string source_sha256;
 };
 
-/// The closed set of frontend actions whose execution or validated cache hit
-/// is observed by PREPARE. The canonical source may only produce the first.
-enum class preparation_action_kind : std::uint8_t {
+/// Classifies a frontend action observed while building the scan environment.
+enum class frontend_action_kind : std::uint8_t {
     canonical_token_slice,
     p1689_dependency_discovery,
     make_dependency_scan,
     pcm_compilation,
 };
 
-enum class preparation_input_class : std::uint8_t {
+/// Identifies the role of an input in the dependency compilation closure.
+enum class compilation_input_role : std::uint8_t {
     canonical_scan_only,
     signature_donor,
-    prepared_dependency,
+    dependency_provider,
 };
 
-enum class preparation_action_disposition : std::uint8_t {
+/// Records whether a frontend action ran or reused validated output.
+enum class frontend_action_outcome : std::uint8_t {
     executed,
     validated_cache_hit,
 };
 
-struct preparation_action_record {
-    preparation_action_kind kind{
-        preparation_action_kind::canonical_token_slice};
-    preparation_input_class input_class{
-        preparation_input_class::canonical_scan_only};
-    preparation_action_disposition disposition{
-        preparation_action_disposition::executed};
+/// One observed frontend action and its input role.
+struct frontend_action_record {
+    frontend_action_kind kind{
+        frontend_action_kind::canonical_token_slice};
+    compilation_input_role input_role{
+        compilation_input_role::canonical_scan_only};
+    frontend_action_outcome outcome{
+        frontend_action_outcome::executed};
     std::string module_name;
     std::string source_sha256;
 };
 
-struct preparation_action_summary {
+/// Counts canonical token and semantic frontend actions.
+struct frontend_action_counts {
     std::uint32_t canonical_token_slice_actions{};
     std::uint32_t canonical_semantic_frontend_actions{};
 };
 
-struct preparation_action_trace_validation {
+/// Result of validating a serialized frontend action trace.
+struct frontend_trace_validation {
     std::string trace_identity;
-    preparation_action_summary summary;
+    frontend_action_counts counts;
 };
 
-struct prepared_compilation_environment {
+/// Owned database, PCM closure, and identities used for structural scans.
+struct dependency_compilation_environment {
     std::string compile_database_json;
     std::string pcm_manifest_json;
     std::string depfile_text;
@@ -452,7 +476,7 @@ struct prepared_compilation_environment {
     std::string clang_scan_deps_sha256;
     std::string llvm_config_sha256;
     std::string compiler_module_inventory_sha256;
-    std::vector<preparation_action_record> observed_actions;
+    std::vector<frontend_action_record> observed_actions;
 };
 
 /// Canonical raw-token authority for dependency-only preparation. Root paths
@@ -460,12 +484,13 @@ struct prepared_compilation_environment {
 /// canonical body-bearing sources themselves are never roots.
 struct dependency_compilation_authority {
     std::vector<std::filesystem::path> root_source_paths;
-    preparation_module_identity signature_donor;
-    std::vector<preparation_module_identity> canonical_inputs;
+    dependency_module_identity signature_donor;
+    std::vector<dependency_module_identity> canonical_inputs;
     std::string canonical_token_import_sha256;
 };
 
-struct prepared_compilation_validation {
+/// Validated identity of an owned dependency compilation environment.
+struct dependency_compilation_validation {
     std::string manifest_sha256;
     std::string owned_compile_database_sha256;
     std::string compilation_signature;
@@ -476,18 +501,21 @@ struct prepared_compilation_validation {
     std::string clang_scan_deps_sha256;
     std::string llvm_config_sha256;
     std::string compiler_module_inventory_sha256;
-    std::vector<preparation_module_identity> modules;
+    std::vector<dependency_module_identity> modules;
 };
 
-[[nodiscard]] inline constexpr const char* kind_name(
+/// @brief Returns the stable spelling for a declaration category.
+/// @return The canonical lower-case spelling, or `"unknown"` for an invalid
+/// value.
+[[nodiscard]] inline constexpr const char* spell_declaration_kind(
     declaration_kind kind) noexcept {
     switch (kind) {
-        case declaration_kind::namespace_: return "namespace";
+        case declaration_kind::namespace_declaration: return "namespace";
         case declaration_kind::record: return "record";
-        case declaration_kind::enum_: return "enum";
+        case declaration_kind::enumeration: return "enum";
         case declaration_kind::enumerator: return "enumerator";
         case declaration_kind::alias: return "alias";
-        case declaration_kind::concept_: return "concept";
+        case declaration_kind::concept_declaration: return "concept";
         case declaration_kind::function: return "function";
         case declaration_kind::parameter: return "parameter";
         case declaration_kind::field: return "field";
@@ -497,4 +525,4 @@ struct prepared_compilation_validation {
     return "unknown";
 }
 
-}  // namespace bioseq::codegen::clang_structural
+}  // namespace bioseq::codegen::structural_analysis

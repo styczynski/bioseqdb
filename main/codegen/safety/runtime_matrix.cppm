@@ -18,12 +18,16 @@ import :validation;
 
 export namespace bioseq::codegen::safety {
 
-struct runtime_policy {
+/// Reviewed runtime coverage obligations beyond ledger-derived coverage.
+struct runtime_coverage_policy {
     std::uint32_t schema_version{2};
-    std::vector<coverage_key> explicitly_required;
+    std::vector<coverage_key> reviewed_coverage;
 };
 
-namespace detail {
+namespace runtime_matrix_detail {
+
+using coverage_map =
+    std::map<std::string, coverage_key, std::less<>>;
 
 inline constexpr std::string_view
     backend_scoped_vacuum_fault_key{
@@ -37,12 +41,13 @@ inline constexpr std::string_view
 }
 
 inline void add_coverage(
-    std::map<std::string, coverage_key, std::less<>>& result,
+    coverage_map& result,
     compilation_profile profile,
     coverage_dimension dimension,
     std::string_view value) {
     if (value.empty()) {
-        safety_failure("runtime-matrix", "coverage value is empty");
+        detail::safety_failure(
+            "runtime-matrix", "coverage value is empty");
     }
     coverage_key key{
         .profile = profile,
@@ -53,7 +58,7 @@ inline void add_coverage(
 }
 
 inline void add_site_coverage(
-    std::map<std::string, coverage_key, std::less<>>& result,
+    coverage_map& result,
     compilation_profile profile,
     const error_site& site) {
     add_coverage(
@@ -91,8 +96,7 @@ inline void add_site_coverage(
     }
 }
 
-[[nodiscard]] inline std::set<std::string, std::less<>>
-runtime_event_set(
+[[nodiscard]] inline std::set<std::string, std::less<>> parse_event_set(
     const std::vector<std::string>& events,
     std::string_view event_kind) {
     std::set<std::string, std::less<>> result;
@@ -111,7 +115,7 @@ runtime_event_set(
                         || character == '.';
                 });
         if (!valid_name || !result.insert(event).second) {
-            safety_failure(
+            detail::safety_failure(
                 "runtime-matrix",
                 std::string{event_kind}
                     + " is invalid or duplicated");
@@ -120,41 +124,43 @@ runtime_event_set(
     return result;
 }
 
-}  // namespace detail
+}  // namespace runtime_matrix_detail
 
+/// Derives every runtime coverage key supported by one static ERROR site.
 [[nodiscard]] inline std::vector<coverage_key>
 derive_runtime_site_coverage(
     compilation_profile profile,
     const error_site& site) {
-    std::map<std::string, coverage_key, std::less<>> coverage;
-    detail::add_site_coverage(coverage, profile, site);
+    runtime_matrix_detail::coverage_map coverage;
+    runtime_matrix_detail::add_site_coverage(
+        coverage, profile, site);
     std::vector<coverage_key> result;
     result.reserve(coverage.size());
-    for (auto& [canonical, key] : coverage) {
-        static_cast<void>(canonical);
-        result.push_back(std::move(key));
+    for (std::pair<const std::string, coverage_key>& entry : coverage) {
+        result.push_back(std::move(entry.second));
     }
     return result;
 }
 
+/// Derives the exact two-profile runtime coverage contract.
 [[nodiscard]] inline std::vector<coverage_key>
 derive_required_runtime_coverage(
     const safety_ledger& production,
     const safety_ledger& test_indexes,
-    const runtime_policy& policy) {
-    std::map<std::string, coverage_key, std::less<>> required;
+    const runtime_coverage_policy& policy) {
+    runtime_matrix_detail::coverage_map required;
     for (const safety_ledger* ledger :
         {&production, &test_indexes}) {
         for (const safety_parent_row& parent : ledger->parents) {
             for (const error_site& site : parent.sites) {
-                detail::add_site_coverage(
+                runtime_matrix_detail::add_site_coverage(
                     required, ledger->profile, site);
             }
         }
     }
-    for (const coverage_key& key : policy.explicitly_required) {
+    for (const coverage_key& key : policy.reviewed_coverage) {
         const std::string canonical =
-            detail::canonical_coverage_key(key);
+            runtime_matrix_detail::canonical_coverage_key(key);
         if (!required.contains(canonical)) {
             detail::safety_failure(
                 "runtime-policy",
@@ -163,18 +169,18 @@ derive_required_runtime_coverage(
     }
     std::vector<coverage_key> result;
     result.reserve(required.size());
-    for (auto& [canonical, key] : required) {
-        static_cast<void>(canonical);
-        result.push_back(std::move(key));
+    for (std::pair<const std::string, coverage_key>& entry : required) {
+        result.push_back(std::move(entry.second));
     }
     return result;
 }
 
+/// Validates deterministic runtime ERROR evidence against both exact ledgers.
 inline void validate_runtime_matrix(
     const runtime_matrix& matrix,
     const safety_ledger& production,
     const safety_ledger& test_indexes,
-    const runtime_policy& policy,
+    const runtime_coverage_policy& policy,
     std::string_view production_ledger_sha256,
     std::string_view test_indexes_ledger_sha256,
     std::string_view production_sql_manifest_sha256,
@@ -248,12 +254,13 @@ inline void validate_runtime_matrix(
             production, test_indexes, policy);
     std::set<std::string, std::less<>> required;
     for (const coverage_key& key : derived) {
-        required.insert(detail::canonical_coverage_key(key));
+        required.insert(
+            runtime_matrix_detail::canonical_coverage_key(key));
     }
     std::set<std::string, std::less<>> declared;
     for (const coverage_key& key : matrix.required_coverage) {
         const std::string canonical =
-            detail::canonical_coverage_key(key);
+            runtime_matrix_detail::canonical_coverage_key(key);
         if (key.value.empty() || !declared.insert(canonical).second) {
             detail::safety_failure(
                 "runtime-matrix",
@@ -291,16 +298,18 @@ inline void validate_runtime_matrix(
                 matrix.production_test_executable_sha256}
             : std::string_view{
                 matrix.test_indexes_test_executable_sha256};
-        const auto parent = std::ranges::find(
-            active_ledger.parents,
-            test_case.sql_identity,
-            &safety_parent_row::sql_identity);
+        const std::vector<safety_parent_row>::const_iterator parent =
+            std::ranges::find(
+                active_ledger.parents,
+                test_case.sql_identity,
+                &safety_parent_row::sql_identity);
         const error_site* active_site = nullptr;
         if (parent != active_ledger.parents.end()) {
-            const auto site = std::ranges::find(
-                parent->sites,
-                test_case.site_id,
-                &error_site::site_id);
+            const std::vector<error_site>::const_iterator site =
+                std::ranges::find(
+                    parent->sites,
+                    test_case.site_id,
+                    &error_site::site_id);
             if (site != parent->sites.end()) {
                 active_site = &*site;
             }
@@ -366,12 +375,12 @@ inline void validate_runtime_matrix(
                 context,
                 "runtime tests must not exercise FATAL or PANIC");
         }
-        const auto expected_sentinels =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>> expected_sentinels =
+            runtime_matrix_detail::parse_event_set(
                 test_case.expected_destructor_sentinels,
                 "destructor sentinel");
-        const auto observed_sentinels =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>> observed_sentinels =
+            runtime_matrix_detail::parse_event_set(
                 test_case.observed_destructor_sentinels,
                 "destructor sentinel");
         const bool lifetime_free_direct =
@@ -386,25 +395,27 @@ inline void validate_runtime_matrix(
                 context,
                 "destructor sentinels did not unwind exactly once");
         }
-        const auto expected_cleanup =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>> expected_cleanup =
+            runtime_matrix_detail::parse_event_set(
                 test_case.expected_cleanup_events,
                 "cleanup event");
-        const auto observed_cleanup =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>> observed_cleanup =
+            runtime_matrix_detail::parse_event_set(
                 test_case.observed_cleanup_events,
                 "cleanup event");
-        const auto expected_postgres_cleanup =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>>
+            expected_postgres_cleanup =
+            runtime_matrix_detail::parse_event_set(
                 test_case.expected_postgres_cleanup_events,
                 "PostgreSQL cleanup event");
-        const auto observed_postgres_cleanup =
-            detail::runtime_event_set(
+        const std::set<std::string, std::less<>>
+            observed_postgres_cleanup =
+            runtime_matrix_detail::parse_event_set(
                 test_case.observed_postgres_cleanup_events,
                 "PostgreSQL cleanup event");
         const bool backend_scoped_vacuum =
             test_case.fault_key
-            == detail::backend_scoped_vacuum_fault_key;
+            == runtime_matrix_detail::backend_scoped_vacuum_fault_key;
         const bool exact_postgres_cleanup =
             backend_scoped_vacuum
             ? (expected_postgres_cleanup.empty()
@@ -450,14 +461,14 @@ inline void validate_runtime_matrix(
         std::set<std::string, std::less<>> case_coverage;
         std::set<std::string, std::less<>> active_site_coverage;
         for (const coverage_key& key :
-             derive_runtime_site_coverage(
+            derive_runtime_site_coverage(
                  test_case.profile, *active_site)) {
             active_site_coverage.insert(
-                detail::canonical_coverage_key(key));
+                runtime_matrix_detail::canonical_coverage_key(key));
         }
         for (const coverage_key& key : test_case.coverage) {
             const std::string canonical =
-                detail::canonical_coverage_key(key);
+                runtime_matrix_detail::canonical_coverage_key(key);
             if (key.profile != test_case.profile
                 || !required.contains(canonical)
                 || !active_site_coverage.contains(canonical)

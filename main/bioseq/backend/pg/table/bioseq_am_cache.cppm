@@ -1,147 +1,112 @@
-/*-------------------------------------------------------------------------
- *
- * table/bioseq_am_cache.cppm
- *
- * Per-Relation cache (DOC0260 §8.3) installed on rd_amcache. Captures the
- * 1-based attno of every bioseq.seq column on a relation so the TAM hot
- * paths can iterate over SEQ columns in O(1) per row instead of walking
- * the tuple descriptor by atttypid each time.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Relation-local metadata for sequence columns used by table hot paths.
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "access/relation.h"
-#include "access/table.h"
-#include "catalog/namespace.h"
 #include "catalog/pg_attribute.h"
-#include "catalog/pg_type.h"
 #include "utils/inval.h"
-#include "utils/syscache.h"
 }
 
 #include <cstdint>
+#include <new>
 #include <vector>
 
-export module bioseq.table.am_cache;
+export module bioseq.postgres.table.am_cache;
 
-import bioseq.common.mlogging;
-import bioseq.pg_utils;
-import bioseq.pg_support;
+import bioseq.postgres.support;
+import bioseq.postgres.types.compact_sequence;
 
 export namespace bioseq::storage {
 
-/*
- * Per-Relation cache slot. Populated lazily by bioseq_am_cache_for() and
- * stored on Relation::rd_amcache for the lifetime of the relcache entry.
- * The struct is placement-new'd into CacheMemoryContext, and the
- * destructor is invoked from the relcache invalidation callback.
+/**
+ * @brief Metadata cached in `Relation::rd_amcache` for a Bioseq table.
+ *
+ * Attribute numbers are PostgreSQL's one-based `AttrNumber` values. The
+ * vector is populated once per relation-cache instance so row hot paths do
+ * not repeatedly inspect the tuple descriptor.
  */
-struct BioseqAmCache {
-    std::vector<std::int16_t> seq_attnos;
-    bool initialised = false;
+struct table_access_cache {
+    std::vector<std::int16_t> sequence_attribute_numbers{};
+    bool is_initialized = false;
 };
 
-[[nodiscard]] const BioseqAmCache& bioseq_am_cache_for(Relation rel);
+/**
+ * @brief Return the lazily populated table-access cache for `relation`.
+ * @param relation Open PostgreSQL relation whose descriptor remains valid.
+ * @return Cache owned by `CacheMemoryContext` and the relation-cache entry.
+ */
+[[nodiscard]] const table_access_cache& get_table_access_cache(Relation relation);
 
-void bioseq_am_cache_invalidate(Datum arg, Oid relid);
+/**
+ * @brief PostgreSQL relcache callback for Bioseq table-access metadata.
+ *
+ * PostgreSQL clears `rd_amcache` during invalidation. Re-opening a relation
+ * from this callback would recursively enter relcache invalidation, so cache
+ * recreation is intentionally deferred to `get_table_access_cache()`.
+ */
+void invalidate_table_access_cache(Datum callback_argument, Oid relation_id);
 
 }  // namespace bioseq::storage
 
-// ============================================================================
-// Implementation
-// ============================================================================
-
 namespace bioseq::storage {
+namespace {
 
-[[nodiscard]] static Oid resolve_bioseq_seq_type_oid() {
-    const Oid namespace_oid =
-        get_namespace_oid("bioseq", /* missing_ok = */ true);
-    if (!OidIsValid(namespace_oid)) {
-        return InvalidOid;
-    }
-    return GetSysCacheOid2(
-        TYPENAMENSP,
-        Anum_pg_type_oid,
-        PointerGetDatum("seq"),
-        ObjectIdGetDatum(namespace_oid));
-}
+/** Populate sequence attribute numbers from the current tuple descriptor. */
+void populate_sequence_attributes(table_access_cache& cache, Relation relation) {
+    cache.sequence_attribute_numbers.clear();
 
-[[nodiscard]] static Oid current_bioseq_seq_type_oid() {
-    /*
-     * Resolve on each relation-cache population. Extension reset workflows
-     * used by integration tests run DROP EXTENSION; CREATE EXTENSION in one
-     * backend, which assigns a fresh pg_type OID without unloading this dylib.
-     * A process-lifetime static OID would then make every new bioseq.seq
-     * column invisible to the table-AM hydration/rewrite paths.
-     */
-    return resolve_bioseq_seq_type_oid();
-}
-
-static void populate_seq_attnos(BioseqAmCache& cache, Relation rel) {
-    cache.seq_attnos.clear();
-    const Oid seq_type_oid = current_bioseq_seq_type_oid();
-    if (!OidIsValid(seq_type_oid)) {
-        cache.initialised = true;
+    const Oid sequence_type_oid = bioseq_seq_type_oid_missing_ok();
+    if (!OidIsValid(sequence_type_oid)) {
+        cache.is_initialized = true;
         return;
     }
-    TupleDesc td = RelationGetDescr(rel);
-    cache.seq_attnos.reserve(static_cast<std::size_t>(td->natts));
-    for (int i = 0; i < td->natts; ++i) {
-        Form_pg_attribute attr = TupleDescAttr(td, i);
-        if (attr->attisdropped) continue;
-        if (attr->atttypid == seq_type_oid) {
-            cache.seq_attnos.push_back(static_cast<std::int16_t>(i + 1));
+
+    TupleDesc tuple_descriptor = RelationGetDescr(relation);
+    cache.sequence_attribute_numbers.reserve(
+        static_cast<std::size_t>(tuple_descriptor->natts));
+    for (int attribute_index = 0;
+         attribute_index < tuple_descriptor->natts;
+         ++attribute_index) {
+        Form_pg_attribute attribute =
+            TupleDescAttr(tuple_descriptor, attribute_index);
+        if (!attribute->attisdropped && attribute->atttypid == sequence_type_oid) {
+            cache.sequence_attribute_numbers.push_back(
+                static_cast<std::int16_t>(attribute_index + 1));
         }
     }
-    cache.initialised = true;
+    cache.is_initialized = true;
 }
 
-const BioseqAmCache& bioseq_am_cache_for(Relation rel) {
-    if (rel->rd_amcache != nullptr) {
-        auto* existing = static_cast<BioseqAmCache*>(rel->rd_amcache);
-        if (existing->initialised) {
-            return *existing;
+}  // namespace
+
+const table_access_cache& get_table_access_cache(Relation relation) {
+    if (relation->rd_amcache != nullptr) {
+        auto* cache = static_cast<table_access_cache*>(relation->rd_amcache);
+        if (!cache->is_initialized) {
+            populate_sequence_attributes(*cache, relation);
         }
-        populate_seq_attnos(*existing, rel);
-        return *existing;
+        return *cache;
     }
-    bioseq::pg_support::MemoryContextScope ctx{CacheMemoryContext};
-    void* raw = palloc0(sizeof(BioseqAmCache));
-    auto* fresh = ::new (raw) BioseqAmCache{};
-    populate_seq_attnos(*fresh, rel);
-    rel->rd_amcache = fresh;
-    return *fresh;
+
+    bioseq::postgres::support::memory_context_scope cache_context{CacheMemoryContext};
+    void* storage = palloc0(sizeof(table_access_cache));
+    auto* cache = ::new (storage) table_access_cache{};
+    populate_sequence_attributes(*cache, relation);
+    relation->rd_amcache = cache;
+    return *cache;
 }
 
-static void invalidate_one(Relation rel) {
-    if (rel == nullptr || rel->rd_amcache == nullptr) {
-        return;
-    }
-    auto* cache = static_cast<BioseqAmCache*>(rel->rd_amcache);
-    cache->~BioseqAmCache();
-    pfree(cache);
-    rel->rd_amcache = nullptr;
-}
-
-void bioseq_am_cache_invalidate(Datum /*arg*/, Oid /*relid*/) {
-    // DOC0260 §8.3 — relcache invalidation callback. Postgres itself
-    // sets `rd_amcache = nullptr` on every relcache flush, so the
-    // dominant code path is handled implicitly: the next
-    // `bioseq_am_cache_for(rel)` call sees `rd_amcache == nullptr` and
-    // rebuilds. We deliberately do NOT call `try_safe_relation_open()`
-    // here — that would re-enter the relcache during a flush and corrupt
-    // the surrounding INSERT's ResourceOwner ("tupdesc reference is not
-    // owned by resource owner TopTransaction" → PANIC).
-    //
-    // The leaked `BioseqAmCache` allocation under `CacheMemoryContext`
-    // (one struct holding a `std::vector<int16_t>`) is bounded by the
-    // number of distinct USING bioseq relations a backend sees in its
-    // lifetime — a few hundred at most — and is reclaimed when
-    // CacheMemoryContext itself is reset.
+void invalidate_table_access_cache(
+        Datum /*callback_argument*/, Oid /*relation_id*/) {
+    // PostgreSQL has already detached rd_amcache. Allocations are bounded by
+    // the relations observed by this backend and reclaimed with
+    // CacheMemoryContext; touching the relation here can corrupt the active
+    // ResourceOwner during a relcache flush.
 }
 
 }  // namespace bioseq::storage

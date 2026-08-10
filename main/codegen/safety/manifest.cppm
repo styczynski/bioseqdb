@@ -1,6 +1,5 @@
 module;
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -18,6 +17,7 @@ import :json;
 
 export namespace bioseq::codegen::safety {
 
+/// Generated wrapper metadata for one SQL overload.
 struct safety_manifest_overload {
     std::string sql_identity;
     std::string cpp_declaration;
@@ -28,6 +28,7 @@ struct safety_manifest_overload {
     bool injected_call_context{};
 };
 
+/// Complete generated-wrapper ownership for one public FMGR symbol.
 struct safety_manifest_owner {
     std::string public_symbol;
     std::string finfo_symbol;
@@ -37,6 +38,7 @@ struct safety_manifest_owner {
     std::vector<safety_manifest_overload> overloads;
 };
 
+/// Parsed SQL code-generation authority consumed by safety analysis.
 struct safety_manifest {
     std::uint32_t manifest_version{1};
     std::string authority_mode;
@@ -46,19 +48,31 @@ struct safety_manifest {
     std::vector<safety_manifest_owner> owners;
 };
 
-struct manifest_closure_policy {
+/// Exact live ownership cardinalities expected from the SQL manifest.
+struct manifest_contract {
     std::size_t expected_parent_count{272};
     std::size_t expected_symbol_count{270};
     std::set<std::string, std::less<>> shared_symbols{
         "from_array",
         "mmsearch",
     };
-    bool require_complete_codegen{true};
 };
 
 namespace manifest_detail {
 
-[[nodiscard]] inline std::size_t nonnegative_size(
+using overload_map = std::map<
+    std::string,
+    std::vector<safety_manifest_overload>,
+    std::less<>>;
+using module_map =
+    std::map<std::string, std::string, std::less<>>;
+
+struct string_array_contract {
+    bool allow_empty{true};
+    bool require_unique{true};
+};
+
+[[nodiscard]] inline std::size_t parse_nonnegative_size(
     const json_value& input,
     std::string_view context) {
     const std::int64_t value = json_integer(input, context);
@@ -69,15 +83,14 @@ namespace manifest_detail {
     return static_cast<std::size_t>(value);
 }
 
-[[nodiscard]] inline std::vector<std::string> string_array(
+[[nodiscard]] inline std::vector<std::string> parse_string_array(
     const json_value& input,
     std::string_view context,
-    bool allow_empty = true,
-    bool require_unique = true) {
+    string_array_contract contract = {}) {
     std::vector<std::string> result;
     std::set<std::string, std::less<>> seen;
     const json_value::array& values = json_array(input, context);
-    if (!allow_empty && values.empty()) {
+    if (!contract.allow_empty && values.empty()) {
         throw std::runtime_error(
             std::string{context} + " cannot be empty");
     }
@@ -93,7 +106,7 @@ namespace manifest_detail {
                 std::string{context}
                 + " contains an empty string");
         }
-        if (require_unique && !seen.insert(item).second) {
+        if (contract.require_unique && !seen.insert(item).second) {
             throw std::runtime_error(
                 std::string{context}
                 + " contains a duplicate string");
@@ -136,16 +149,7 @@ inline void validate_runtime_sql_identity(
     }
 }
 
-[[nodiscard]] inline const json_value::object& field_object(
-    const json_value::object& parent,
-    std::string_view field,
-    std::string_view context) {
-    return json_object(
-        json_field(parent, field, context),
-        std::string{context} + "." + std::string{field});
-}
-
-[[nodiscard]] inline std::string field_string(
+[[nodiscard]] inline std::string required_string(
     const json_value::object& parent,
     std::string_view field,
     std::string_view context) {
@@ -161,7 +165,7 @@ inline void validate_runtime_sql_identity(
     return result;
 }
 
-[[nodiscard]] inline bool field_boolean(
+[[nodiscard]] inline bool required_boolean(
     const json_value::object& parent,
     std::string_view field,
     std::string_view context) {
@@ -172,36 +176,39 @@ inline void validate_runtime_sql_identity(
 
 }  // namespace manifest_detail
 
+/// Parses and closes a generated SQL manifest over current wrapper ownership.
 [[nodiscard]] inline safety_manifest parse_safety_manifest(
     std::string_view text,
-    const manifest_closure_policy& policy = {}) {
+    const manifest_contract& contract = {}) {
     const json_value document = parse_json(text);
     const json_value::object& root =
         json_object(document, "SQL manifest");
-    const std::size_t version = manifest_detail::nonnegative_size(
-        json_field(root, "manifest_version", "SQL manifest"),
-        "SQL manifest.manifest_version");
+    const std::size_t version =
+        manifest_detail::parse_nonnegative_size(
+            json_field(
+                root, "manifest_version", "SQL manifest"),
+            "SQL manifest.manifest_version");
     if (version != 1) {
         throw std::runtime_error(
             "SQL manifest has an unsupported version");
     }
     safety_manifest result{
         .manifest_version = static_cast<std::uint32_t>(version),
-        .authority_mode = manifest_detail::field_string(
+        .authority_mode = manifest_detail::required_string(
             root, "authority_mode", "SQL manifest"),
-        .c_routine_identities = manifest_detail::string_array(
+        .c_routine_identities = manifest_detail::parse_string_array(
             json_field(
                 root, "c_routine_identities", "SQL manifest"),
             "SQL manifest.c_routine_identities",
-            false),
-        .c_link_symbols = manifest_detail::string_array(
+            {.allow_empty = false}),
+        .c_link_symbols = manifest_detail::parse_string_array(
             json_field(root, "c_link_symbols", "SQL manifest"),
             "SQL manifest.c_link_symbols",
-            false),
-        .c_finfo_symbols = manifest_detail::string_array(
+            {.allow_empty = false}),
+        .c_finfo_symbols = manifest_detail::parse_string_array(
             json_field(root, "c_finfo_symbols", "SQL manifest"),
             "SQL manifest.c_finfo_symbols",
-            false),
+            {.allow_empty = false}),
     };
     if (result.authority_mode != "annotated_cpp") {
         throw std::runtime_error(
@@ -216,41 +223,41 @@ inline void validate_runtime_sql_identity(
                 + std::to_string(index) + "]");
     }
     const std::size_t declared_parent_count =
-        manifest_detail::nonnegative_size(
+        manifest_detail::parse_nonnegative_size(
             json_field(
                 root, "c_routine_identity_count", "SQL manifest"),
             "SQL manifest.c_routine_identity_count");
     const std::size_t declared_symbol_count =
-        manifest_detail::nonnegative_size(
+        manifest_detail::parse_nonnegative_size(
             json_field(
                 root,
                 "c_link_symbol_inventory_count",
                 "SQL manifest"),
             "SQL manifest.c_link_symbol_inventory_count");
     const std::size_t declared_finfo_count =
-        manifest_detail::nonnegative_size(
+        manifest_detail::parse_nonnegative_size(
             json_field(
                 root,
                 "c_finfo_symbol_inventory_count",
                 "SQL manifest"),
             "SQL manifest.c_finfo_symbol_inventory_count");
-    if (declared_parent_count != policy.expected_parent_count
+    if (declared_parent_count != contract.expected_parent_count
         || result.c_routine_identities.size()
-            != policy.expected_parent_count) {
+            != contract.expected_parent_count) {
         throw std::runtime_error(
             "SQL manifest does not contain exactly "
-            + std::to_string(policy.expected_parent_count)
+            + std::to_string(contract.expected_parent_count)
             + " LANGUAGE C parent identities");
     }
-    if (declared_symbol_count != policy.expected_symbol_count
+    if (declared_symbol_count != contract.expected_symbol_count
         || result.c_link_symbols.size()
-            != policy.expected_symbol_count
-        || declared_finfo_count != policy.expected_symbol_count
+            != contract.expected_symbol_count
+        || declared_finfo_count != contract.expected_symbol_count
         || result.c_finfo_symbols.size()
-            != policy.expected_symbol_count) {
+            != contract.expected_symbol_count) {
         throw std::runtime_error(
             "SQL manifest does not contain exactly "
-            + std::to_string(policy.expected_symbol_count)
+            + std::to_string(contract.expected_symbol_count)
             + " C/finfo symbol owners");
     }
 
@@ -266,13 +273,8 @@ inline void validate_runtime_sql_identity(
             "SQL manifest finfo inventory differs from public symbols");
     }
 
-    std::map<
-        std::string,
-        std::vector<safety_manifest_overload>,
-        std::less<>>
-        overloads_by_symbol;
-    std::map<std::string, std::string, std::less<>>
-        module_by_symbol;
+    manifest_detail::overload_map overloads_by_symbol;
+    manifest_detail::module_map module_by_symbol;
     std::set<std::string, std::less<>> overload_identities;
     const json_value::array& modules = json_array(
         json_field(
@@ -287,7 +289,7 @@ inline void validate_runtime_sql_identity(
         const json_value::object& module =
             json_object(modules[module_index], module_context);
         const std::string generated_module =
-            manifest_detail::field_string(
+            manifest_detail::required_string(
                 module, "module_name", module_context);
         const json_value::array& wrappers = json_array(
             json_field(module, "wrappers", module_context),
@@ -301,19 +303,23 @@ inline void validate_runtime_sql_identity(
             const json_value::object& wrapper =
                 json_object(wrappers[wrapper_index], wrapper_context);
             const std::string symbol =
-                manifest_detail::field_string(
+                manifest_detail::required_string(
                     wrapper, "symbol", wrapper_context);
             const std::string finfo =
-                manifest_detail::field_string(
+                manifest_detail::required_string(
                     wrapper, "finfo_symbol", wrapper_context);
             if (finfo != "pg_finfo_" + symbol) {
                 throw std::runtime_error(
                     wrapper_context
                     + " has an inconsistent finfo symbol");
             }
-            const auto [module, inserted] =
+            const std::pair<
+                manifest_detail::module_map::iterator,
+                bool>
+                insertion =
                 module_by_symbol.emplace(symbol, generated_module);
-            if (!inserted && module->second != generated_module) {
+            if (!insertion.second
+                && insertion.first->second != generated_module) {
                 throw std::runtime_error(
                     wrapper_context
                     + " assigns one public symbol to multiple "
@@ -331,39 +337,38 @@ inline void validate_runtime_sql_identity(
                 const json_value::object& overload = json_object(
                     overloads[overload_index], overload_context);
                 safety_manifest_overload parsed{
-                    .sql_identity = manifest_detail::field_string(
+                    .sql_identity = manifest_detail::required_string(
                         overload, "sql_identity", overload_context),
                     .cpp_declaration =
-                        manifest_detail::field_string(
+                        manifest_detail::required_string(
                             overload,
                             "cpp_declaration",
                             overload_context),
-                    .source_path = manifest_detail::field_string(
+                    .source_path = manifest_detail::required_string(
                         overload, "source_path", overload_context),
                     .source_line =
-                        manifest_detail::nonnegative_size(
+                        manifest_detail::parse_nonnegative_size(
                             json_field(
                                 overload,
                                 "source_line",
                                 overload_context),
                             overload_context + ".source_line"),
                     .argument_converter_keys =
-                        manifest_detail::string_array(
+                        manifest_detail::parse_string_array(
                             json_field(
                                 overload,
                                 "argument_converter_keys",
                                 overload_context),
                             overload_context
                                 + ".argument_converter_keys",
-                            true,
-                            false),
+                            {.require_unique = false}),
                     .result_converter_key =
-                        manifest_detail::field_string(
+                        manifest_detail::required_string(
                             overload,
                             "result_converter_key",
                             overload_context),
                     .injected_call_context =
-                        manifest_detail::field_boolean(
+                        manifest_detail::required_boolean(
                             overload,
                             "injected_call_context",
                             overload_context),
@@ -381,7 +386,8 @@ inline void validate_runtime_sql_identity(
                 overloads_by_symbol[symbol].push_back(
                     std::move(parsed));
             }
-            auto& symbol_overloads = overloads_by_symbol[symbol];
+            std::vector<safety_manifest_overload>& symbol_overloads =
+                overloads_by_symbol[symbol];
             if (symbol_overloads.empty()) {
                 throw std::runtime_error(
                     wrapper_context + " has no SQL overloads");
@@ -392,7 +398,7 @@ inline void validate_runtime_sql_identity(
     const json_value::array& owners = json_array(
         json_field(root, "c_symbol_owners", "SQL manifest"),
         "SQL manifest.c_symbol_owners");
-    if (owners.size() != policy.expected_symbol_count) {
+    if (owners.size() != contract.expected_symbol_count) {
         throw std::runtime_error(
             "SQL manifest C symbol owners are incomplete");
     }
@@ -407,22 +413,22 @@ inline void validate_runtime_sql_identity(
         const json_value::object& owner =
             json_object(owners[index], context);
         safety_manifest_owner parsed{
-            .public_symbol = manifest_detail::field_string(
+            .public_symbol = manifest_detail::required_string(
                 owner, "symbol", context),
-            .finfo_symbol = manifest_detail::field_string(
+            .finfo_symbol = manifest_detail::required_string(
                 owner, "finfo_symbol", context),
-            .sql_identities = manifest_detail::string_array(
+            .sql_identities = manifest_detail::parse_string_array(
                 json_field(owner, "routine_identities", context),
                 context + ".routine_identities",
-                false),
+                {.allow_empty = false}),
             .implementation_declarations =
-                manifest_detail::string_array(
+                manifest_detail::parse_string_array(
                     json_field(
                         owner,
                         "implementation_declarations",
                         context),
                     context + ".implementation_declarations",
-                    false),
+                    {.allow_empty = false}),
         };
         for (std::size_t identity_index = 0;
              identity_index < parsed.sql_identities.size();
@@ -432,7 +438,7 @@ inline void validate_runtime_sql_identity(
                 context + ".routine_identities["
                     + std::to_string(identity_index) + "]");
         }
-        const auto generated_module =
+        const manifest_detail::module_map::const_iterator generated_module =
             module_by_symbol.find(parsed.public_symbol);
         if (generated_module == module_by_symbol.end()) {
             throw std::runtime_error(
@@ -446,13 +452,13 @@ inline void validate_runtime_sql_identity(
             throw std::runtime_error(
                 context + " is duplicated or has the wrong finfo");
         }
-        const bool generated = manifest_detail::field_boolean(
+        const bool generated = manifest_detail::required_boolean(
             owner, "generated_wrapper", context);
-        if (policy.require_complete_codegen && !generated) {
+        if (!generated) {
             throw std::runtime_error(
                 context + " is not owned by generated boundary code");
         }
-        const auto overloads =
+        const manifest_detail::overload_map::const_iterator overloads =
             overloads_by_symbol.find(parsed.public_symbol);
         if (overloads == overloads_by_symbol.end()) {
             throw std::runtime_error(
@@ -513,7 +519,7 @@ inline void validate_runtime_sql_identity(
                 result.c_routine_identities.begin(),
                 result.c_routine_identities.end()}
         || overload_identities != owner_identities
-        || shared_symbols != policy.shared_symbols) {
+        || shared_symbols != contract.shared_symbols) {
         throw std::runtime_error(
             "SQL manifest does not close exactly over the reviewed "
             "identity/symbol ownership groups");

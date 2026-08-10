@@ -1,6 +1,6 @@
 /**
- * @file highway_dispatch_contract_impl.cppm
- * @brief Cold-path Highway target inventory for the neutral dispatch contract.
+ * @file
+ * @brief Highway target inventory implementation for the neutral contract.
  */
 module;
 
@@ -14,7 +14,7 @@ module bioseq.highway.dispatch_contract;
 
 namespace bioseq::simd_dispatch {
 
-HighwayDispatchInfo highway_dispatch_info(
+highway_dispatch_plan make_highway_dispatch_plan(
     const std::int64_t compiled_targets) noexcept
 {
     const std::int64_t cpu_supported_targets = hwy::SupportedTargets();
@@ -22,14 +22,12 @@ HighwayDispatchInfo highway_dispatch_info(
         compiled_targets & cpu_supported_targets;
     const std::uint64_t runnable_bits =
         static_cast<std::uint64_t>(runnable_targets);
-    // Highway assigns higher-priority targets to lower bits. Isolating the
-    // least-significant runnable bit is therefore equivalent to taking the
-    // first SupportedAndGeneratedTargets() entry, without allocating in this
-    // noexcept cold-path contract.
+    // Highway assigns higher priority to lower target bits. Isolating the
+    // least-significant runnable bit selects that target without allocating.
     const std::int64_t planned_target = static_cast<std::int64_t>(
         runnable_bits & (~runnable_bits + std::uint64_t{1}));
 
-    return HighwayDispatchInfo{
+    return highway_dispatch_plan{
         .compiled_targets = compiled_targets,
         .cpu_supported_targets = cpu_supported_targets,
         .runnable_targets = runnable_targets,
@@ -51,4 +49,4 @@ std::vector<std::string_view> highway_target_names(const std::int64_t mask) {
     return names;
 }
 
-}  // namespace bioseq::simd_dispatch
+} // namespace bioseq::simd_dispatch

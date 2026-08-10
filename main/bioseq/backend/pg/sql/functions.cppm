@@ -4,12 +4,12 @@ module;
 #include <optional>
 #include <tuple>
 
-export module bioseq.sql.functions;
+export module bioseq.postgres.sql.functions;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_utils.sql_boundary;
-import bioseq.sql.functions.sql_rows;
-import bioseq.table.sql_rows;
+import bioseq.postgres.support.sql_boundary;
+import bioseq.postgres.sql.functions.sql_rows;
+import bioseq.postgres.table.sql_rows;
 
 export namespace bioseq::sql_functions {
 
@@ -22,7 +22,7 @@ export namespace bioseq::sql_functions {
 [[bioseq_sql::grant({})]]
 [[nodiscard]]
 bioseq::sql::sql_function_body<
-    bioseq::pg_utils::returns_table<
+    bioseq::postgres::support::table_rows<
         bioseq::sql_functions::result_rows::list_seq_storage_shard>>
 list_seq_storage_shards(
         [[bioseq_sql::param({

@@ -44,9 +44,9 @@ import :supervision;
 
 export namespace bioseq::postgres_test {
 
-inline constexpr std::uint64_t qualification_gibibyte =
+inline constexpr std::uint64_t k_qualification_gibibyte =
     1024ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t qualification_mebibyte =
+inline constexpr std::uint64_t k_qualification_mebibyte =
     1024ULL * 1024ULL;
 
 /// @brief One finite cgroup memory limit and the usage charged to it.
@@ -82,6 +82,7 @@ struct linux_memory_node_scope {
     bool restricted{};
 };
 
+/// @brief Cgroup controller generation used for one capacity observation.
 enum class cgroup_controller_version {
     none,
     v1,
@@ -133,26 +134,26 @@ parse_cgroup_cpuset_count(std::string_view text);
     bool v1_interface_observed) noexcept;
 
 /// @brief Rejects unresolved namespace-relative cgroup coordinates.
-[[nodiscard]] bool cgroup_namespace_path_is_safe(
+[[nodiscard]] bool is_safe_cgroup_namespace_path(
     std::string_view text) noexcept;
 
 /// @brief Tests whether a membership can be located below a mount root.
-[[nodiscard]] bool cgroup_membership_is_resolvable(
+[[nodiscard]] bool is_resolvable_cgroup_membership(
     std::string_view membership,
     std::string_view mount_root) noexcept;
 
 /// @brief True only for the Linux affinity error that requests a larger mask.
-[[nodiscard]] bool scheduler_affinity_error_requires_resize(
+[[nodiscard]] bool is_scheduler_affinity_resize_required(
     int error_number) noexcept;
 
 /// @brief Unsuccessful acceptance result caused by host infrastructure.
-class infrastructure_inconclusive : public std::runtime_error {
+class host_qualification_inconclusive : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
 /// @brief Capacity evidence for one exact resolved filesystem path.
-struct filesystem_qualification_report {
+struct filesystem_qualification_result {
     std::string role;
     std::filesystem::path path;
     std::uint64_t capacity_bytes{};
@@ -163,11 +164,11 @@ struct filesystem_qualification_report {
     bool passed{};
 
     bool operator==(
-        const filesystem_qualification_report&) const = default;
+        const filesystem_qualification_result&) const = default;
 };
 
 /// @brief Uncached sequential write/read evidence from the target filesystem.
-struct io_qualification_report {
+struct io_qualification_result {
     std::filesystem::path path;
     std::uint64_t bytes{};
     std::chrono::milliseconds write_duration{};
@@ -178,25 +179,22 @@ struct io_qualification_report {
     bool cache_eviction_succeeded{};
     bool passed{};
 
-    bool operator==(const io_qualification_report&) const = default;
+    bool operator==(const io_qualification_result&) const = default;
 };
 
+/// @brief Acceptance state of one pre-initdb host qualification.
 enum class host_qualification_status {
     passed,
-    infrastructure_inconclusive,
+    inconclusive,
 };
 
 /// @brief Structured pre-initdb host qualification result.
-struct host_qualification_report {
+struct host_qualification_result {
     std::uint64_t ordinal{};
     std::string test_case;
     host_qualification_status status{
-        host_qualification_status::infrastructure_inconclusive};
+        host_qualification_status::inconclusive};
     std::string detail;
-    /// Effective aliases retained for the original report schema.
-    std::uint64_t total_ram_bytes{};
-    std::uint64_t available_ram_bytes{};
-    unsigned int logical_cores{};
     std::uint64_t host_total_ram_bytes{};
     std::uint64_t host_available_ram_bytes{};
     std::uint64_t effective_total_ram_bytes{};
@@ -221,26 +219,26 @@ struct host_qualification_report {
     std::uint64_t required_available_ram_bytes{};
     unsigned int required_logical_cores{};
     double required_io_mib_per_second{};
-    std::vector<filesystem_qualification_report> filesystems;
-    io_qualification_report io;
+    std::vector<filesystem_qualification_result> filesystems;
+    io_qualification_result io;
     std::chrono::milliseconds duration{};
 
-    bool operator==(const host_qualification_report&) const = default;
+    bool operator==(const host_qualification_result&) const = default;
 };
 
 /// @brief Acceptance thresholds and an optional distinct cache/temp path.
 struct host_qualification_requirements {
     std::string test_case;
     std::uint64_t minimum_total_ram_bytes{
-        16ULL * qualification_gibibyte};
+        16ULL * k_qualification_gibibyte};
     std::uint64_t minimum_available_ram_bytes{
-        8ULL * qualification_gibibyte};
+        8ULL * k_qualification_gibibyte};
     std::uint64_t minimum_data_available_bytes{
-        32ULL * qualification_gibibyte};
+        32ULL * k_qualification_gibibyte};
     std::uint64_t minimum_distinct_cache_temp_available_bytes{
-        8ULL * qualification_gibibyte};
+        8ULL * k_qualification_gibibyte};
     unsigned int minimum_logical_cores{8};
-    std::uint64_t io_probe_bytes{qualification_gibibyte};
+    std::uint64_t io_probe_bytes{k_qualification_gibibyte};
     double minimum_io_mib_per_second{150.0};
     std::optional<std::filesystem::path> cache_temp_directory;
 };
@@ -380,7 +378,7 @@ using index_range = std::pair<std::uint64_t, std::uint64_t>;
     return static_cast<unsigned int>(count);
 }
 
-[[nodiscard]] bool ranges_include(
+[[nodiscard]] bool has_all_ranges(
     std::span<const index_range> superset,
     std::span<const index_range> subset) {
     std::size_t superset_index{};
@@ -468,7 +466,7 @@ classify_linux_memory_node_scope(
         throw std::invalid_argument(
             "Linux memory-node evidence is empty");
     }
-    if (!qualification_parse_detail::ranges_include(
+    if (!qualification_parse_detail::has_all_ranges(
             online, allowed)) {
         throw std::invalid_argument(
             "allowed Linux memory nodes are not online");
@@ -487,20 +485,20 @@ classify_linux_memory_node_scope(
 
 [[nodiscard]] inline std::string parse_linux_mems_allowed_list(
     std::string_view task_status) {
-    constexpr std::string_view key{"Mems_allowed_list:"};
+    constexpr std::string_view k_key{"Mems_allowed_list:"};
     std::optional<std::string> result;
     while (!task_status.empty()) {
         const std::size_t newline = task_status.find('\n');
         const std::string_view line =
             task_status.substr(0, newline);
-        if (line.starts_with(key)) {
+        if (line.starts_with(k_key)) {
             if (result) {
                 throw std::invalid_argument(
                     "duplicate Mems_allowed_list task evidence");
             }
             const std::string_view value =
                 qualification_parse_detail::trim_ascii(
-                    line.substr(key.size()));
+                    line.substr(k_key.size()));
             if (value.empty()) {
                 throw std::invalid_argument(
                     "empty Mems_allowed_list task evidence");
@@ -617,7 +615,7 @@ select_cgroup_controller_version(
     return cgroup_controller_version::none;
 }
 
-[[nodiscard]] inline bool cgroup_namespace_path_is_safe(
+[[nodiscard]] inline bool is_safe_cgroup_namespace_path(
     std::string_view text) noexcept {
     try {
         const std::filesystem::path path{std::string(text)};
@@ -635,7 +633,7 @@ select_cgroup_controller_version(
     }
 }
 
-[[nodiscard]] inline bool scheduler_affinity_error_requires_resize(
+[[nodiscard]] inline bool is_scheduler_affinity_resize_required(
     int error_number) noexcept {
 #if defined(__linux__)
     return error_number == EINVAL;
@@ -645,12 +643,12 @@ select_cgroup_controller_version(
 #endif
 }
 
-[[nodiscard]] inline bool cgroup_membership_is_resolvable(
+[[nodiscard]] inline bool is_resolvable_cgroup_membership(
     std::string_view membership,
     std::string_view mount_root) noexcept {
     try {
-        if (!cgroup_namespace_path_is_safe(membership)
-            || !cgroup_namespace_path_is_safe(mount_root)) {
+        if (!is_safe_cgroup_namespace_path(membership)
+            || !is_safe_cgroup_namespace_path(mount_root)) {
             return false;
         }
         const std::filesystem::path normalized_membership =
@@ -692,10 +690,10 @@ namespace bioseq::postgres_test::qualification_snapshot_detail {
     return result;
 }
 
-template <class Integer>
-[[nodiscard]] std::optional<Integer> integer(
+template <class p_integer>
+[[nodiscard]] std::optional<p_integer> integer(
     std::string_view text) {
-    Integer value{};
+    p_integer value{};
     const auto [end, error] = std::from_chars(
         text.data(), text.data() + text.size(), value);
     if (text.empty() || error != std::errc{}
@@ -706,8 +704,8 @@ template <class Integer>
 }
 
 [[nodiscard]] std::optional<double> real(std::string_view text) {
-    constexpr std::size_t max_real_text_size = 128;
-    if (text.empty() || text.size() > max_real_text_size) {
+    constexpr std::size_t k_max_real_text_size = 128;
+    if (text.empty() || text.size() > k_max_real_text_size) {
         return std::nullopt;
     }
     double value{};
@@ -721,7 +719,7 @@ template <class Integer>
     return value;
 }
 
-[[nodiscard]] std::optional<bool> boolean(std::string_view text) {
+[[nodiscard]] std::optional<bool> parse_boolean(std::string_view text) {
     if (text == "0") {
         return false;
     }
@@ -731,7 +729,7 @@ template <class Integer>
     return std::nullopt;
 }
 
-[[nodiscard]] bool header(
+[[nodiscard]] bool parse_header(
     std::istringstream& input, std::size_t& count) {
     std::string line;
     if (!std::getline(input, line)) {
@@ -762,10 +760,10 @@ parse_finite_real(std::string_view text) {
 
 /// @brief Publishes the complete current host-qualification registry.
 [[nodiscard]] inline bool
-publish_supervision_host_qualification_reports(
-    std::span<const host_qualification_report> reports) noexcept {
+publish_supervision_host_qualifications(
+    std::span<const host_qualification_result> results) noexcept {
     try {
-        if (reports.size() > 10'000U) {
+        if (results.size() > 10'000U) {
             return false;
         }
         std::ostringstream output;
@@ -773,50 +771,47 @@ publish_supervision_host_qualification_reports(
         output << std::setprecision(
             std::numeric_limits<double>::max_digits10);
         output << "bioseq-watchdog-v1\tqualifications\t"
-               << reports.size() << '\n';
-        for (const host_qualification_report& report : reports) {
+               << results.size() << '\n';
+        for (const host_qualification_result& result : results) {
             output << "Q\t"
-                   << report.ordinal << '\t'
-                   << supervision_hex_encode(report.test_case) << '\t'
-                   << (report.status == host_qualification_status::passed
+                   << result.ordinal << '\t'
+                   << supervision_hex_encode(result.test_case) << '\t'
+                   << (result.status == host_qualification_status::passed
                        ? 0 : 1) << '\t'
-                   << supervision_hex_encode(report.detail) << '\t'
-                   << report.total_ram_bytes << '\t'
-                   << report.available_ram_bytes << '\t'
-                   << report.logical_cores << '\t'
-                   << report.host_total_ram_bytes << '\t'
-                   << report.host_available_ram_bytes << '\t'
-                   << report.effective_total_ram_bytes << '\t'
-                   << report.effective_available_ram_bytes << '\t'
-                   << report.cgroup_memory_total_limit_bytes << '\t'
-                   << report.cgroup_memory_headroom_limit_bytes << '\t'
-                   << report.cgroup_memory_current_bytes << '\t'
-                   << report.cgroup_memory_headroom_bytes << '\t'
+                   << supervision_hex_encode(result.detail) << '\t'
+                   << result.host_total_ram_bytes << '\t'
+                   << result.host_available_ram_bytes << '\t'
+                   << result.effective_total_ram_bytes << '\t'
+                   << result.effective_available_ram_bytes << '\t'
+                   << result.cgroup_memory_total_limit_bytes << '\t'
+                   << result.cgroup_memory_headroom_limit_bytes << '\t'
+                   << result.cgroup_memory_current_bytes << '\t'
+                   << result.cgroup_memory_headroom_bytes << '\t'
                    << supervision_hex_encode(
-                          report.cgroup_memory_version) << '\t'
+                          result.cgroup_memory_version) << '\t'
                    << supervision_hex_encode(
-                          report.cgroup_memory_total_source) << '\t'
+                          result.cgroup_memory_total_source) << '\t'
                    << supervision_hex_encode(
-                          report.cgroup_memory_headroom_source) << '\t'
-                   << report.host_logical_cores << '\t'
-                   << report.affinity_logical_cores << '\t'
-                   << report.cpuset_logical_cores << '\t'
-                   << report.cgroup_cpu_quota_microseconds << '\t'
-                   << report.cgroup_cpu_period_microseconds << '\t'
-                   << report.cgroup_cpu_quota_cores << '\t'
-                   << report.effective_cpu_cores << '\t'
+                          result.cgroup_memory_headroom_source) << '\t'
+                   << result.host_logical_cores << '\t'
+                   << result.affinity_logical_cores << '\t'
+                   << result.cpuset_logical_cores << '\t'
+                   << result.cgroup_cpu_quota_microseconds << '\t'
+                   << result.cgroup_cpu_period_microseconds << '\t'
+                   << result.cgroup_cpu_quota_cores << '\t'
+                   << result.effective_cpu_cores << '\t'
                    << supervision_hex_encode(
-                          report.cgroup_cpu_version) << '\t'
+                          result.cgroup_cpu_version) << '\t'
                    << supervision_hex_encode(
-                          report.cgroup_cpu_source) << '\t'
-                   << report.required_total_ram_bytes << '\t'
-                   << report.required_available_ram_bytes << '\t'
-                   << report.required_logical_cores << '\t'
-                   << report.required_io_mib_per_second << '\t'
-                   << report.duration.count() << '\t'
-                   << report.filesystems.size() << '\n';
-            for (const filesystem_qualification_report& filesystem :
-                 report.filesystems) {
+                          result.cgroup_cpu_source) << '\t'
+                   << result.required_total_ram_bytes << '\t'
+                   << result.required_available_ram_bytes << '\t'
+                   << result.required_logical_cores << '\t'
+                   << result.required_io_mib_per_second << '\t'
+                   << result.duration.count() << '\t'
+                   << result.filesystems.size() << '\n';
+            for (const filesystem_qualification_result& filesystem :
+                 result.filesystems) {
                 output << "F\t"
                        << supervision_hex_encode(filesystem.role) << '\t'
                        << supervision_hex_encode(
@@ -830,16 +825,16 @@ publish_supervision_host_qualification_reports(
             }
             output << "I\t"
                    << supervision_hex_encode(
-                          report.io.path.string()) << '\t'
-                   << report.io.bytes << '\t'
-                   << report.io.write_duration.count() << '\t'
-                   << report.io.read_duration.count() << '\t'
-                   << report.io.write_mib_per_second << '\t'
-                   << report.io.read_mib_per_second << '\t'
+                          result.io.path.string()) << '\t'
+                   << result.io.bytes << '\t'
+                   << result.io.write_duration.count() << '\t'
+                   << result.io.read_duration.count() << '\t'
+                   << result.io.write_mib_per_second << '\t'
+                   << result.io.read_mib_per_second << '\t'
                    << supervision_hex_encode(
-                          report.io.cache_eviction_method) << '\t'
-                   << (report.io.cache_eviction_succeeded ? 1 : 0) << '\t'
-                   << (report.io.passed ? 1 : 0) << '\n';
+                          result.io.cache_eviction_method) << '\t'
+                   << (result.io.cache_eviction_succeeded ? 1 : 0) << '\t'
+                   << (result.io.passed ? 1 : 0) << '\n';
         }
         return publish_supervision_snapshot(
             "qualifications.snapshot.tsv", output.str());
@@ -850,8 +845,8 @@ publish_supervision_host_qualification_reports(
 
 /// @brief Loads one complete, strictly bounded qualification snapshot.
 [[nodiscard]] inline
-std::optional<std::vector<host_qualification_report>>
-load_supervision_host_qualification_reports(
+std::optional<std::vector<host_qualification_result>>
+load_supervision_host_qualifications(
     const std::filesystem::path& directory) noexcept {
     try {
         const auto payload = load_supervision_snapshot(
@@ -862,11 +857,11 @@ load_supervision_host_qualification_reports(
         std::istringstream input(*payload);
         input.imbue(std::locale::classic());
         std::size_t count{};
-        if (!qualification_snapshot_detail::header(input, count)) {
+        if (!qualification_snapshot_detail::parse_header(input, count)) {
             return std::nullopt;
         }
-        std::vector<host_qualification_report> reports;
-        reports.reserve(count);
+        std::vector<host_qualification_result> results;
+        results.reserve(count);
         std::string line;
         for (std::size_t report_index = 0;
              report_index < count; ++report_index) {
@@ -875,7 +870,7 @@ load_supervision_host_qualification_reports(
             }
             const auto values =
                 qualification_snapshot_detail::fields(line);
-            if (values.size() != 34 || values[0] != "Q") {
+            if (values.size() != 31 || values[0] != "Q") {
                 return std::nullopt;
             }
             const auto ordinal =
@@ -888,88 +883,78 @@ load_supervision_host_qualification_reports(
                     unsigned int>(values[3]);
             const auto detail =
                 supervision_hex_decode(values[4]);
-            const auto total_ram =
-                qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[5]);
-            const auto available_ram =
-                qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[6]);
-            const auto logical_cores =
-                qualification_snapshot_detail::integer<
-                    unsigned int>(values[7]);
             const auto host_total =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[8]);
+                    std::uint64_t>(values[5]);
             const auto host_available =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[9]);
+                    std::uint64_t>(values[6]);
             const auto effective_total =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[10]);
+                    std::uint64_t>(values[7]);
             const auto effective_available =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[11]);
+                    std::uint64_t>(values[8]);
             const auto memory_total_limit =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[12]);
+                    std::uint64_t>(values[9]);
             const auto memory_headroom_limit =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[13]);
+                    std::uint64_t>(values[10]);
             const auto memory_current =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[14]);
+                    std::uint64_t>(values[11]);
             const auto memory_headroom =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[15]);
+                    std::uint64_t>(values[12]);
             const auto memory_version =
-                supervision_hex_decode(values[16]);
+                supervision_hex_decode(values[13]);
             const auto memory_total_source =
-                supervision_hex_decode(values[17]);
+                supervision_hex_decode(values[14]);
             const auto memory_headroom_source =
-                supervision_hex_decode(values[18]);
+                supervision_hex_decode(values[15]);
             const auto host_cores =
                 qualification_snapshot_detail::integer<
-                    unsigned int>(values[19]);
+                    unsigned int>(values[16]);
             const auto affinity_cores =
                 qualification_snapshot_detail::integer<
-                    unsigned int>(values[20]);
+                    unsigned int>(values[17]);
             const auto cpuset_cores =
                 qualification_snapshot_detail::integer<
-                    unsigned int>(values[21]);
+                    unsigned int>(values[18]);
             const auto cpu_quota =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[22]);
+                    std::uint64_t>(values[19]);
             const auto cpu_period =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[23]);
+                    std::uint64_t>(values[20]);
             const auto cpu_quota_cores =
-                qualification_snapshot_detail::real(values[24]);
+                qualification_snapshot_detail::real(values[21]);
             const auto effective_cpu_cores =
-                qualification_snapshot_detail::real(values[25]);
+                qualification_snapshot_detail::real(values[22]);
             const auto cpu_version =
-                supervision_hex_decode(values[26]);
+                supervision_hex_decode(values[23]);
             const auto cpu_source =
-                supervision_hex_decode(values[27]);
+                supervision_hex_decode(values[24]);
             const auto required_total =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[28]);
+                    std::uint64_t>(values[25]);
             const auto required_available =
                 qualification_snapshot_detail::integer<
-                    std::uint64_t>(values[29]);
+                    std::uint64_t>(values[26]);
             const auto required_cores =
                 qualification_snapshot_detail::integer<
-                    unsigned int>(values[30]);
+                    unsigned int>(values[27]);
             const auto required_io =
-                qualification_snapshot_detail::real(values[31]);
+                qualification_snapshot_detail::real(values[28]);
             const auto duration =
                 qualification_snapshot_detail::integer<
-                    std::int64_t>(values[32]);
+                    std::int64_t>(values[29]);
             const auto filesystem_count =
                 qualification_snapshot_detail::integer<
-                    std::size_t>(values[33]);
+                    std::size_t>(values[30]);
             if (!ordinal || !test_case || !status || *status > 1
-                || !detail || !total_ram || !available_ram
-                || !logical_cores || !host_total || !host_available
+                || !detail || !host_total || !host_available
                 || !effective_total || !effective_available
                 || !memory_total_limit || !memory_headroom_limit
                 || !memory_current || !memory_headroom
@@ -985,49 +970,45 @@ load_supervision_host_qualification_reports(
                 return std::nullopt;
             }
 
-            host_qualification_report report;
-            report.ordinal = *ordinal;
-            report.test_case = std::move(*test_case);
-            report.status = *status == 0
+            host_qualification_result result;
+            result.ordinal = *ordinal;
+            result.test_case = std::move(*test_case);
+            result.status = *status == 0
                 ? host_qualification_status::passed
-                : host_qualification_status::
-                    infrastructure_inconclusive;
-            report.detail = std::move(*detail);
-            report.total_ram_bytes = *total_ram;
-            report.available_ram_bytes = *available_ram;
-            report.logical_cores = *logical_cores;
-            report.host_total_ram_bytes = *host_total;
-            report.host_available_ram_bytes = *host_available;
-            report.effective_total_ram_bytes = *effective_total;
-            report.effective_available_ram_bytes =
+                : host_qualification_status::inconclusive;
+            result.detail = std::move(*detail);
+            result.host_total_ram_bytes = *host_total;
+            result.host_available_ram_bytes = *host_available;
+            result.effective_total_ram_bytes = *effective_total;
+            result.effective_available_ram_bytes =
                 *effective_available;
-            report.cgroup_memory_total_limit_bytes =
+            result.cgroup_memory_total_limit_bytes =
                 *memory_total_limit;
-            report.cgroup_memory_headroom_limit_bytes =
+            result.cgroup_memory_headroom_limit_bytes =
                 *memory_headroom_limit;
-            report.cgroup_memory_current_bytes = *memory_current;
-            report.cgroup_memory_headroom_bytes = *memory_headroom;
-            report.cgroup_memory_version = std::move(*memory_version);
-            report.cgroup_memory_total_source =
+            result.cgroup_memory_current_bytes = *memory_current;
+            result.cgroup_memory_headroom_bytes = *memory_headroom;
+            result.cgroup_memory_version = std::move(*memory_version);
+            result.cgroup_memory_total_source =
                 std::move(*memory_total_source);
-            report.cgroup_memory_headroom_source =
+            result.cgroup_memory_headroom_source =
                 std::move(*memory_headroom_source);
-            report.host_logical_cores = *host_cores;
-            report.affinity_logical_cores = *affinity_cores;
-            report.cpuset_logical_cores = *cpuset_cores;
-            report.cgroup_cpu_quota_microseconds = *cpu_quota;
-            report.cgroup_cpu_period_microseconds = *cpu_period;
-            report.cgroup_cpu_quota_cores = *cpu_quota_cores;
-            report.effective_cpu_cores = *effective_cpu_cores;
-            report.cgroup_cpu_version = std::move(*cpu_version);
-            report.cgroup_cpu_source = std::move(*cpu_source);
-            report.required_total_ram_bytes = *required_total;
-            report.required_available_ram_bytes =
+            result.host_logical_cores = *host_cores;
+            result.affinity_logical_cores = *affinity_cores;
+            result.cpuset_logical_cores = *cpuset_cores;
+            result.cgroup_cpu_quota_microseconds = *cpu_quota;
+            result.cgroup_cpu_period_microseconds = *cpu_period;
+            result.cgroup_cpu_quota_cores = *cpu_quota_cores;
+            result.effective_cpu_cores = *effective_cpu_cores;
+            result.cgroup_cpu_version = std::move(*cpu_version);
+            result.cgroup_cpu_source = std::move(*cpu_source);
+            result.required_total_ram_bytes = *required_total;
+            result.required_available_ram_bytes =
                 *required_available;
-            report.required_logical_cores = *required_cores;
-            report.required_io_mib_per_second = *required_io;
-            report.duration = std::chrono::milliseconds(*duration);
-            report.filesystems.reserve(*filesystem_count);
+            result.required_logical_cores = *required_cores;
+            result.required_io_mib_per_second = *required_io;
+            result.duration = std::chrono::milliseconds(*duration);
+            result.filesystems.reserve(*filesystem_count);
 
             for (std::size_t filesystem_index = 0;
                  filesystem_index < *filesystem_count;
@@ -1058,17 +1039,17 @@ load_supervision_host_qualification_reports(
                     qualification_snapshot_detail::integer<
                         std::uint64_t>(filesystem_values[6]);
                 const auto distinct =
-                    qualification_snapshot_detail::boolean(
+                    qualification_snapshot_detail::parse_boolean(
                         filesystem_values[7]);
                 const auto passed =
-                    qualification_snapshot_detail::boolean(
+                    qualification_snapshot_detail::parse_boolean(
                         filesystem_values[8]);
                 if (!role || !path || !capacity || !available
                     || !required || !device || !distinct || !passed) {
                     return std::nullopt;
                 }
-                report.filesystems.push_back(
-                    filesystem_qualification_report{
+                result.filesystems.push_back(
+                    filesystem_qualification_result{
                         .role = std::move(*role),
                         .path =
                             std::filesystem::path{
@@ -1107,9 +1088,9 @@ load_supervision_host_qualification_reports(
             const auto eviction_method =
                 supervision_hex_decode(io_values[7]);
             const auto eviction_succeeded =
-                qualification_snapshot_detail::boolean(io_values[8]);
+                qualification_snapshot_detail::parse_boolean(io_values[8]);
             const auto io_passed =
-                qualification_snapshot_detail::boolean(io_values[9]);
+                qualification_snapshot_detail::parse_boolean(io_values[9]);
             if (!io_path || !io_bytes || !write_duration
                 || *write_duration < 0 || !read_duration
                 || *read_duration < 0 || !write_speed || !read_speed
@@ -1117,7 +1098,7 @@ load_supervision_host_qualification_reports(
                 || !io_passed) {
                 return std::nullopt;
             }
-            report.io = io_qualification_report{
+            result.io = io_qualification_result{
                 .path =
                     std::filesystem::path{
                         std::move(*io_path)},
@@ -1132,12 +1113,12 @@ load_supervision_host_qualification_reports(
                     std::move(*eviction_method),
                 .cache_eviction_succeeded = *eviction_succeeded,
                 .passed = *io_passed};
-            reports.push_back(std::move(report));
+            results.push_back(std::move(result));
         }
         if (std::getline(input, line)) {
             return std::nullopt;
         }
-        return reports;
+        return results;
     } catch (...) {
         return std::nullopt;
     }
@@ -1149,7 +1130,7 @@ namespace bioseq::postgres_test::qualification_detail {
 
 struct qualification_state {
     std::mutex mutex;
-    std::vector<host_qualification_report> reports;
+    std::vector<host_qualification_result> results;
     std::uint64_t next_ordinal{};
 };
 
@@ -1365,7 +1346,7 @@ void enforce_linux_memory_node_scope() {
     return decoded;
 }
 
-[[nodiscard]] bool comma_field_contains(
+[[nodiscard]] bool has_comma_separated_field_value(
     std::string_view fields, std::string_view expected) {
     while (!fields.empty()) {
         const std::size_t separator = fields.find(',');
@@ -1473,9 +1454,9 @@ void enforce_linux_memory_node_scope() {
 resolve_cgroup_directory(
     const std::filesystem::path& membership,
     const cgroup_mount& mount) {
-    if (!cgroup_namespace_path_is_safe(membership.string())
-        || !cgroup_namespace_path_is_safe(mount.root.string())
-        || !cgroup_namespace_path_is_safe(
+    if (!is_safe_cgroup_namespace_path(membership.string())
+        || !is_safe_cgroup_namespace_path(mount.root.string())
+        || !is_safe_cgroup_namespace_path(
             mount.mount_point.string())) {
         throw std::runtime_error(
             "unsafe namespace-relative cgroup path");
@@ -1484,7 +1465,7 @@ resolve_cgroup_directory(
         membership.lexically_normal();
     const std::filesystem::path normalized_root =
         mount.root.lexically_normal();
-    if (!cgroup_membership_is_resolvable(
+    if (!is_resolvable_cgroup_membership(
             membership.string(), mount.root.string())) {
         return std::nullopt;
     }
@@ -1556,19 +1537,19 @@ resolve_cgroup_directory(
                         mount_point = mount.mount_point;
                     }
                 };
-            if (comma_field_contains(
+            if (has_comma_separated_field_value(
                     mount.super_options, "memory")) {
                 assign(
                     memberships.memory, layout.memory,
                     layout.memory_mount);
             }
-            if (comma_field_contains(
+            if (has_comma_separated_field_value(
                     mount.super_options, "cpu")) {
                 assign(
                     memberships.cpu, layout.cpu,
                     layout.cpu_mount);
             }
-            if (comma_field_contains(
+            if (has_comma_separated_field_value(
                     mount.super_options, "cpuset")) {
                 assign(
                     memberships.cpuset, layout.cpuset,
@@ -1728,7 +1709,7 @@ cgroup_ancestors(
 [[nodiscard]] std::optional<unsigned int> scheduler_affinity_cores() {
 #if defined(__linux__)
     std::size_t cpu_capacity = CPU_SETSIZE;
-    constexpr std::size_t maximum_cpu_capacity = 1U << 20U;
+    constexpr std::size_t k_maximum_cpu_capacity = 1U << 20U;
     for (;;) {
         cpu_set_t* const affinity = CPU_ALLOC(cpu_capacity);
         if (affinity == nullptr) {
@@ -1750,13 +1731,13 @@ cgroup_ancestors(
             return static_cast<unsigned int>(count);
         }
         CPU_FREE(affinity);
-        if (!scheduler_affinity_error_requires_resize(
+        if (!is_scheduler_affinity_resize_required(
                 error_number)) {
             throw std::system_error(
                 error_number, std::generic_category(),
                 "sched_getaffinity");
         }
-        if (cpu_capacity > maximum_cpu_capacity / 2U) {
+        if (cpu_capacity > k_maximum_cpu_capacity / 2U) {
             throw std::runtime_error(
                 "scheduler affinity mask exceeds safety bound");
         }
@@ -1984,10 +1965,10 @@ void read_all(int input, std::byte* data, std::size_t size) {
         return 0.0;
     }
     return static_cast<double>(bytes)
-        / static_cast<double>(qualification_mebibyte) / seconds;
+        / static_cast<double>(k_qualification_mebibyte) / seconds;
 }
 
-[[nodiscard]] io_qualification_report probe_io(
+[[nodiscard]] io_qualification_result probe_io(
     const std::filesystem::path& directory,
     std::uint64_t probe_bytes,
     double minimum_mib_per_second) {
@@ -2000,8 +1981,8 @@ void read_all(int input, std::byte* data, std::size_t size) {
         throw std::runtime_error(
             "cannot create host qualification I/O probe");
     }
-    constexpr std::size_t block_bytes = 8U * 1024U * 1024U;
-    std::vector<std::byte> block(block_bytes, std::byte{0xa5});
+    constexpr std::size_t k_block_bytes = 8U * 1024U * 1024U;
+    std::vector<std::byte> block(k_block_bytes, std::byte{0xa5});
     std::uint64_t remaining = probe_bytes;
     const auto write_started = std::chrono::steady_clock::now();
     while (remaining != 0) {
@@ -2095,13 +2076,13 @@ void append_failure(std::string& detail, std::string_view failure) {
     detail += failure;
 }
 
-void record(host_qualification_report& report) {
+void record(host_qualification_result& result) {
     auto& state = process_state();
     std::scoped_lock lock(state.mutex);
-    report.ordinal = state.next_ordinal++;
-    state.reports.push_back(report);
+    result.ordinal = state.next_ordinal++;
+    state.results.push_back(result);
     static_cast<void>(
-        publish_supervision_host_qualification_reports(state.reports));
+        publish_supervision_host_qualifications(state.results));
 }
 
 }  // namespace bioseq::postgres_test::qualification_detail
@@ -2109,44 +2090,43 @@ void record(host_qualification_report& report) {
 export namespace bioseq::postgres_test {
 
 /// @brief Clears structured host evidence before one native test session.
-inline void clear_host_qualification_reports() noexcept {
+inline void clear_host_qualifications() noexcept {
     try {
         auto& state = qualification_detail::process_state();
         std::scoped_lock lock(state.mutex);
-        state.reports.clear();
+        state.results.clear();
         state.next_ordinal = 0;
     } catch (...) {
     }
 }
 
 /// @brief Returns all pre-initdb host qualification observations.
-[[nodiscard]] inline std::vector<host_qualification_report>
-host_qualification_reports() {
+[[nodiscard]] inline std::vector<host_qualification_result>
+host_qualification_results() {
     auto& state = qualification_detail::process_state();
     std::scoped_lock lock(state.mutex);
-    return state.reports;
+    return state.results;
 }
 
 /// @brief True when a case has an unsuccessful infrastructure observation.
-[[nodiscard]] inline bool infrastructure_inconclusive_for_case(
+[[nodiscard]] inline bool has_inconclusive_host_qualification(
     std::string_view test_case) {
-    const auto reports = host_qualification_reports();
+    const auto results = host_qualification_results();
     return std::any_of(
-        reports.begin(), reports.end(),
-        [test_case](const host_qualification_report& report) {
-            return report.test_case == test_case
-                && report.status
-                    == host_qualification_status::
-                        infrastructure_inconclusive;
+        results.begin(), results.end(),
+        [test_case](const host_qualification_result& result) {
+            return result.test_case == test_case
+                && result.status
+                    == host_qualification_status::inconclusive;
         });
 }
 
 /// @brief Qualifies exact host paths before initdb creates the cluster.
-[[nodiscard]] inline host_qualification_report qualify_host_before_initdb(
+[[nodiscard]] inline host_qualification_result qualify_host_before_initdb(
     const std::filesystem::path& data_directory,
     host_qualification_requirements requirements = {}) {
     const auto started = std::chrono::steady_clock::now();
-    host_qualification_report report{
+    host_qualification_result result{
         .test_case = requirements.test_case,
         .required_total_ram_bytes =
             requirements.minimum_total_ram_bytes,
@@ -2165,24 +2145,20 @@ host_qualification_reports() {
         const qualification_detail::qualified_memory_capacity memory =
             qualification_detail::qualified_memory(cgroups);
 
-        report.host_total_ram_bytes = memory.host.total;
-        report.host_available_ram_bytes = memory.host.available;
-        report.effective_total_ram_bytes =
+        result.host_total_ram_bytes = memory.host.total;
+        result.host_available_ram_bytes = memory.host.available;
+        result.effective_total_ram_bytes =
             memory.effective.total_bytes;
-        report.effective_available_ram_bytes =
+        result.effective_available_ram_bytes =
             memory.effective.available_bytes;
-        report.total_ram_bytes =
-            report.effective_total_ram_bytes;
-        report.available_ram_bytes =
-            report.effective_available_ram_bytes;
-        report.cgroup_memory_version =
+        result.cgroup_memory_version =
             memory.cgroup.version;
         if (memory.effective.total_limit_sample) {
             const std::size_t index =
                 *memory.effective.total_limit_sample;
-            report.cgroup_memory_total_limit_bytes =
+            result.cgroup_memory_total_limit_bytes =
                 memory.cgroup.samples[index].limit_bytes;
-            report.cgroup_memory_total_source =
+            result.cgroup_memory_total_source =
                 memory.cgroup.sources[index].string();
         }
         if (memory.effective.available_limit_sample) {
@@ -2190,66 +2166,60 @@ host_qualification_reports() {
                 *memory.effective.available_limit_sample;
             const cgroup_memory_limit_sample& sample =
                 memory.cgroup.samples[index];
-            report.cgroup_memory_headroom_limit_bytes =
+            result.cgroup_memory_headroom_limit_bytes =
                 sample.limit_bytes;
-            report.cgroup_memory_current_bytes =
+            result.cgroup_memory_current_bytes =
                 sample.current_bytes;
-            report.cgroup_memory_headroom_bytes =
+            result.cgroup_memory_headroom_bytes =
                 sample.current_bytes >= sample.limit_bytes
                 ? 0 : sample.limit_bytes - sample.current_bytes;
-            report.cgroup_memory_headroom_source =
+            result.cgroup_memory_headroom_source =
                 memory.cgroup.sources[index].string();
         }
 
         qualification_detail::enforce_linux_memory_node_scope();
         const qualification_detail::qualified_cpu_capacity cpu =
             qualification_detail::qualified_cpu(cgroups);
-        report.host_logical_cores = cpu.host_cores;
-        report.affinity_logical_cores =
+        result.host_logical_cores = cpu.host_cores;
+        result.affinity_logical_cores =
             cpu.affinity_cores.value_or(0);
-        report.cpuset_logical_cores =
+        result.cpuset_logical_cores =
             cpu.cgroup.cpuset_cores.value_or(0);
-        report.effective_cpu_cores = cpu.effective.cores;
-        report.logical_cores =
-            cpu.effective.cores
-                >= static_cast<double>(
-                    std::numeric_limits<unsigned int>::max())
-            ? std::numeric_limits<unsigned int>::max()
-            : static_cast<unsigned int>(cpu.effective.cores);
-        report.cgroup_cpu_version = cpu.cgroup.version;
+        result.effective_cpu_cores = cpu.effective.cores;
+        result.cgroup_cpu_version = cpu.cgroup.version;
         if (cpu.effective.quota_sample) {
             const std::size_t index =
                 *cpu.effective.quota_sample;
             const cgroup_cpu_quota_sample& sample =
                 cpu.cgroup.samples[index];
-            report.cgroup_cpu_quota_microseconds =
+            result.cgroup_cpu_quota_microseconds =
                 sample.quota_microseconds;
-            report.cgroup_cpu_period_microseconds =
+            result.cgroup_cpu_period_microseconds =
                 sample.period_microseconds;
-            report.cgroup_cpu_quota_cores =
+            result.cgroup_cpu_quota_cores =
                 static_cast<double>(sample.quota_microseconds)
                 / static_cast<double>(sample.period_microseconds);
-            report.cgroup_cpu_source =
+            result.cgroup_cpu_source =
                 cpu.cgroup.sources[index].string();
         }
 
-        if (report.effective_total_ram_bytes
+        if (result.effective_total_ram_bytes
             < requirements.minimum_total_ram_bytes) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "effective total RAM is below the required minimum");
         }
-        if (report.effective_available_ram_bytes
+        if (result.effective_available_ram_bytes
             < requirements.minimum_available_ram_bytes) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "effective available RAM is below the required minimum");
         }
-        if (report.effective_cpu_cores
+        if (result.effective_cpu_cores
             < static_cast<double>(
                 requirements.minimum_logical_cores)) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "effective CPU capacity is below the required minimum");
         }
 
@@ -2260,7 +2230,7 @@ host_qualification_reports() {
         const bool data_passed =
             data_space.available
             >= requirements.minimum_data_available_bytes;
-        report.filesystems.push_back(filesystem_qualification_report{
+        result.filesystems.push_back(filesystem_qualification_result{
             .role = "data",
             .path = resolved_data,
             .capacity_bytes = data_space.capacity,
@@ -2272,7 +2242,7 @@ host_qualification_reports() {
             .passed = data_passed});
         if (!data_passed) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "data filesystem has insufficient available capacity");
         }
 
@@ -2291,8 +2261,8 @@ host_qualification_reports() {
                 cache_temp_space.available
                 >= requirements
                     .minimum_distinct_cache_temp_available_bytes;
-            report.filesystems.push_back(
-                filesystem_qualification_report{
+            result.filesystems.push_back(
+                filesystem_qualification_result{
                     .role = "cache-temp",
                     .path = resolved_cache_temp,
                     .capacity_bytes = cache_temp_space.capacity,
@@ -2305,63 +2275,63 @@ host_qualification_reports() {
                     .passed = distinct && capacity_passed});
             if (!distinct) {
                 qualification_detail::append_failure(
-                    report.detail,
+                    result.detail,
                     "configured cache/temp path is not on a distinct "
                     "filesystem");
             }
             if (!capacity_passed) {
                 qualification_detail::append_failure(
-                    report.detail,
+                    result.detail,
                     "cache/temp filesystem has insufficient available "
                     "capacity");
             }
         }
 
-        report.io = qualification_detail::probe_io(
+        result.io = qualification_detail::probe_io(
             resolved_data,
             requirements.io_probe_bytes,
             requirements.minimum_io_mib_per_second);
-        if (!report.io.cache_eviction_succeeded) {
+        if (!result.io.cache_eviction_succeeded) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "the uncached read eviction/bypass operation failed");
         }
-        if (report.io.write_mib_per_second
+        if (result.io.write_mib_per_second
             < requirements.minimum_io_mib_per_second) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "sequential write throughput is below the minimum");
         }
-        if (report.io.read_mib_per_second
+        if (result.io.read_mib_per_second
             < requirements.minimum_io_mib_per_second) {
             qualification_detail::append_failure(
-                report.detail,
+                result.detail,
                 "uncached sequential read throughput is below the minimum");
         }
     } catch (const std::exception& error) {
-        qualification_detail::append_failure(report.detail, error.what());
+        qualification_detail::append_failure(result.detail, error.what());
     } catch (...) {
         qualification_detail::append_failure(
-            report.detail, "unknown host qualification failure");
+            result.detail, "unknown host qualification failure");
     }
 
-    report.duration =
+    result.duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
-    report.status = report.detail.empty()
+    result.status = result.detail.empty()
         ? host_qualification_status::passed
-        : host_qualification_status::infrastructure_inconclusive;
-    if (report.detail.empty()) {
-        report.detail = "host qualification passed";
+        : host_qualification_status::inconclusive;
+    if (result.detail.empty()) {
+        result.detail = "host qualification passed";
     }
     const bool passed =
-        report.status == host_qualification_status::passed;
-    const std::string detail = report.detail;
-    qualification_detail::record(report);
+        result.status == host_qualification_status::passed;
+    const std::string detail = result.detail;
+    qualification_detail::record(result);
     if (!passed) {
-        throw infrastructure_inconclusive(detail);
+        throw host_qualification_inconclusive(detail);
     }
-    return report;
+    return result;
 }
 
 }  // namespace bioseq::postgres_test

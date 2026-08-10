@@ -1,224 +1,212 @@
 /*-------------------------------------------------------------------------
  *
- * vectorization/columnar_vector_types.cppm
+ * vectorization/vector_types.cppm
  *
  * Owns the vectorised data model used by the columnar custom scan and the
- * exported helpers that build/populate it. A VectorTupleTableSlot stores one
- * VectorColumn per attribute, each of which packs up to
- * BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE values for batched evaluation. The structs are
- * ABI-shared (reinterpret_cast across modules), so their field order/types
- * are guarded with file-local reference replicas. The helpers here allocate slots, write incoming
- * tuples into them, extract scalar tuples out of them and reset them between
- * batches.
+ * exported helpers that build/populate it. A vector_tuple_table_slot_storage stores one
+ * vector_column_storage per attribute, each of which packs up to
+ * `vector_column_capacity` values for batched evaluation. The storage records
+ * are shared directly across modules, so their field order and types are part
+ * of the private vector-function boundary. The helpers allocate slots,
+ * write incoming tuples, extract scalar tuples, and reset batches.
  *
  *-------------------------------------------------------------------------
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <type_traits>
 
-export module bioseq.vector.types;
+export module bioseq.postgres.vectorization.types;
 
-import bioseq.pg_utils.datums;
-import bioseq.pg_utils.error_bridge;
-import bioseq.pg_utils.runtime_test_counters;
+import bioseq.postgres.support.datums;
+import bioseq.postgres.support;
+import bioseq.postgres.support.runtime_test_counters;
 import bioseq.parallelism.memory_admission;
 
-/*
- * Batch width: how many scalar rows a single VectorColumn / VectorTupleTableSlot
- * can hold. (Kept as BIOSEQ_COLUMN_* here; the columnar -> bioseq_column rename is a
- * later step.)
- */
-export constexpr uint32_t BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE = 10000;
+/** Maximum scalar rows stored in one vector batch. */
+export constexpr std::uint32_t vector_column_capacity = 10'000;
 
 /*
  * Varlena values need ownership that is independent of the input slot. Keep
- * that distinction explicit instead of inferring it from columnIsVal: a
+ * that distinction explicit instead of inferring it from stored_by_value: a
  * varlena lane contains an owned Datum pointer, while fixed-width values are
  * stored inline (using PostgreSQL's by-value flag when extracted).
  */
-export enum class VectorStorageKind : uint8_t
+export enum class vector_storage_kind : std::uint8_t
 {
 	inline_fixed,
 	owned_varlena_datum
 };
 
-export struct VectorColumn
+/** Raw storage passed through the private vector-function boundary. */
+export struct vector_column_storage
 {
-	uint32	dimension;
-	uint16	columnTypeLen;
-	bool	columnIsVal;
-	VectorStorageKind storageKind;
-	MemoryContext storageContext;
-	Datum	*value;
-	bool	isnull[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
-	uint64	*rowNumber;
+	/** Number of populated lanes. */
+	std::uint32_t lane_count;
+	/** Bytes reserved for each lane in data. */
+	std::uint16_t element_width;
+	/** Whether fetch_att reads each lane as an inline Datum value. */
+	bool stored_by_value;
+	/** Ownership policy for lane payloads. */
+	vector_storage_kind storage_kind;
+	/** Context that owns copied varlena payloads. */
+	MemoryContext storage_context;
+	/** Aligned fixed-stride lane buffer. */
+	Datum* data;
+	/** PostgreSQL NULL flag for each possible lane. */
+	bool is_null[vector_column_capacity];
+	/** Optional batch-level source-row mapping. */
+	std::uint64_t* source_row_numbers;
 
-	/* Layout-neutral accessors (methods do not change the layout). */
-	[[nodiscard]] std::span<bool> null_mask() noexcept { return {isnull, dimension}; }
-	template <class T>
-	[[nodiscard]] std::span<T> values() noexcept
+	[[nodiscard]] std::span<bool> nulls() noexcept
 	{
-		return {reinterpret_cast<T*>(value), dimension};
+		return {is_null, lane_count};
+	}
+
+	[[nodiscard]] std::span<const bool> nulls() const noexcept
+	{
+		return {is_null, lane_count};
+	}
+
+	template <class p_value>
+	[[nodiscard]] std::span<p_value> values() noexcept
+	{
+		return {reinterpret_cast<p_value*>(data), lane_count};
+	}
+
+	template <class p_value>
+	[[nodiscard]] std::span<const p_value> values() const noexcept
+	{
+		return {reinterpret_cast<const p_value*>(data), lane_count};
 	}
 };
 
-export struct VectorTupleTableSlot
+/** TupleTableSlot extension that owns one vector batch. */
+export struct vector_tuple_table_slot_storage
 {
-	/* TupleTableSlot structure */
-	TupleTableSlot tts;
-	/* Storage used by inherited virtual-slot callbacks. */
-	char* virtualData;
-	/* How many tuples does this slot contain */
-	uint32 dimension;
-	/* Keep array to represent filtered tuples */
-	bool keep[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
-	/* Row Number */
-	uint64 rowNumber[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
+	/** PostgreSQL virtual-slot prefix consumed by TTSOpsVirtual. */
+	VirtualTupleTableSlot virtual_slot;
+	/** Number of populated rows. */
+	std::uint32_t row_count;
+	/** Rows that remain after vector predicate evaluation. */
+	bool row_is_active[vector_column_capacity];
+	/** Source row number for each batch row. */
+	std::uint64_t source_row_numbers[vector_column_capacity];
 };
 
 /*
- * The two enums are plain (untyped) C enums in the original header, i.e. of
- * width `int`. They are the first member of reinterpret_cast'd structs, so the
- * `: int` underlying type MUST be preserved (narrowing to uint8 would change
- * member offsets/size). They stay unscoped so the bare enumerator names the
- * call sites use remain valid. (The columnar -> bioseq_column rename is later.)
+ * These enum values are the first members of reinterpret-cast structures.
+ * Their explicit `int` representation therefore remains part of the ABI.
  */
-export enum VectorArgType : int
+export enum class vector_operand_storage_kind : int
 {
-	VECTOR_FN_ARG_CONSTANT,
-	VECTOR_FN_ARG_VAR
+	constant,
+	column
 };
 
-export enum VectorQualType : int
+export struct vector_operand_storage
 {
-	VECTOR_QUAL_BOOL_EXPR,
-	VECTOR_QUAL_EXPR
+	vector_operand_storage_kind kind;
+	Datum datum;
 };
 
-export struct VectorFnArgument
+/** Serialized storage used by PostgreSQL's int8 aggregate state. */
+export struct int128_aggregate_state_storage
 {
-	VectorArgType type;
-	Datum arg;
+	bool calculate_sum_of_squares;
+	int64 count;
+	int128 sum;
+	int128 sum_of_squares;
 };
 
-export struct VectorQual
+export struct int64_aggregate_state_storage
 {
-	VectorQualType vectorQualType;
-	union
-	{
-		struct
-		{
-			FmgrInfo *fmgrInfo;
-			FunctionCallInfo fcInfo;
-			VectorFnArgument *vectorFnArguments;
-		} expr;
-		struct
-		{
-			BoolExprType boolExprType;
-			List *vectorQualExprList;
-		} boolExpr;
-	} u;
+	int64 count;
+	int64 sum;
 };
 
-/*
- * Aggregate transition states (moved from the deleted types/types.h). They are
- * reinterpret_cast from ARR_DATA_PTR / PG_GETARG_POINTER, so layout matters.
- */
-export struct Int128AggState
-{
-	bool		calcSumX2;		/* if true, calculate sumX2 */
-	int64		N;				/* count of processed numbers */
-	int128		sumX;			/* sum of processed numbers */
-	int128		sumX2;			/* sum of squares of processed numbers */
-};
-
-export struct Int64AggState
-{
-	int64		N;				/* count of processed numbers */
-	int64		sumX;			/* sum of processed numbers */
-};
-
-/*
- * ABI guards: each reinterpret_cast'd struct is compared against a file-local
- * replica of the ORIGINAL C layout (same field order/types), so any accidental
- * layout drift (size or cross-cast offset) is a hard compile error without
- * needing a numeric baseline.
- */
+/* Direct assertions protect the storage boundaries without shadow layouts. */
 namespace {
 
-struct _vfa_ref { int type; Datum arg; };
-static_assert(std::is_standard_layout_v<VectorFnArgument>);
-static_assert(sizeof(VectorFnArgument) == sizeof(_vfa_ref));
-static_assert(offsetof(VectorFnArgument, arg) == offsetof(_vfa_ref, arg));
-
-struct _vc_ref
+[[nodiscard]] consteval std::size_t
+aligned_offset(std::size_t offset, std::size_t alignment) noexcept
 {
-	uint32	dimension;
-	uint16	columnTypeLen;
-	bool	columnIsVal;
-	VectorStorageKind storageKind;
-	MemoryContext storageContext;
-	Datum	*value;
-	bool	isnull[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
-	uint64	*rowNumber;
-};
-static_assert(std::is_standard_layout_v<VectorColumn>);
-static_assert(sizeof(VectorColumn) == sizeof(_vc_ref));
-static_assert(offsetof(VectorColumn, value) == offsetof(_vc_ref, value));
-static_assert(offsetof(VectorColumn, isnull) == offsetof(_vc_ref, isnull));
-static_assert(offsetof(VectorColumn, rowNumber) == offsetof(_vc_ref, rowNumber));
+	return (offset + alignment - 1) / alignment * alignment;
+}
 
-struct _vtts_ref
-{
-	TupleTableSlot tts;
-	char* virtualData;
-	uint32 dimension;
-	bool keep[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
-	uint64 rowNumber[BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE];
-};
-static_assert(std::is_standard_layout_v<VectorTupleTableSlot>);
-static_assert(sizeof(VectorTupleTableSlot) == sizeof(_vtts_ref));
+static_assert(std::is_standard_layout_v<vector_operand_storage>);
+static_assert(offsetof(vector_operand_storage, kind) == 0);
 static_assert(
-	offsetof(VectorTupleTableSlot, virtualData) ==
-	offsetof(VirtualTupleTableSlot, data));
-static_assert(offsetof(VectorTupleTableSlot, dimension) == offsetof(_vtts_ref, dimension));
-static_assert(offsetof(VectorTupleTableSlot, keep) == offsetof(_vtts_ref, keep));
-static_assert(offsetof(VectorTupleTableSlot, rowNumber) == offsetof(_vtts_ref, rowNumber));
+	std::is_same_v<
+		std::underlying_type_t<vector_operand_storage_kind>, int>);
+static_assert(
+	offsetof(vector_operand_storage, datum)
+	== aligned_offset(
+		sizeof(vector_operand_storage_kind), alignof(Datum)));
+static_assert(std::is_standard_layout_v<vector_column_storage>);
+static_assert(offsetof(vector_column_storage, lane_count) == 0);
+static_assert(std::is_standard_layout_v<vector_tuple_table_slot_storage>);
+static_assert(
+	offsetof(vector_tuple_table_slot_storage, virtual_slot) == 0);
+static_assert(
+	offsetof(VirtualTupleTableSlot, base) == 0);
+static_assert(std::is_standard_layout_v<int128_aggregate_state_storage>);
+static_assert(offsetof(int128_aggregate_state_storage,
+	calculate_sum_of_squares) == 0);
+static_assert(
+	offsetof(int128_aggregate_state_storage, count)
+	== aligned_offset(sizeof(bool), alignof(int64)));
+static_assert(
+	offsetof(int128_aggregate_state_storage, sum)
+	== aligned_offset(
+		offsetof(int128_aggregate_state_storage, count) + sizeof(int64),
+		alignof(int128)));
+static_assert(
+	offsetof(int128_aggregate_state_storage, sum_of_squares)
+	== offsetof(int128_aggregate_state_storage, sum) + sizeof(int128));
+static_assert(
+	sizeof(int128_aggregate_state_storage)
+	== offsetof(int128_aggregate_state_storage, sum_of_squares)
+		+ sizeof(int128));
+static_assert(std::is_standard_layout_v<int64_aggregate_state_storage>);
+static_assert(offsetof(int64_aggregate_state_storage, count) == 0);
+static_assert(
+	offsetof(int64_aggregate_state_storage, sum) == sizeof(int64));
+static_assert(sizeof(int64_aggregate_state_storage) == 2 * sizeof(int64));
 
 }  // namespace
 
-/*
- * BuildVectorColumn allocates a single VectorColumn with value storage for
- * BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE elements of the given type.
- */
-export VectorColumn*
-BuildVectorColumn(int16 column_dimension, int16 column_type_length,
-				  bool column_is_val, uint64* row_number,
-				  VectorStorageKind storage_kind = VectorStorageKind::inline_fixed,
-				  MemoryContext storage_context = CurrentMemoryContext)
+/** Allocate an empty vector column with fixed batch-capacity storage. */
+export [[nodiscard]] vector_column_storage*
+allocate_vector_column(
+	std::int16_t element_width,
+	bool stored_by_value,
+	std::uint64_t* source_row_numbers,
+	vector_storage_kind storage_kind = vector_storage_kind::inline_fixed,
+	MemoryContext storage_context = CurrentMemoryContext)
 {
-	VectorColumn* vector_column =
-		static_cast<VectorColumn*>(palloc0(sizeof(VectorColumn)));
+	vector_column_storage* column =
+		static_cast<vector_column_storage*>(palloc0(sizeof(vector_column_storage)));
 
-	vector_column->dimension = 0;
-	vector_column->value = static_cast<Datum*>(palloc0(
+	column->lane_count = 0;
+	column->data = static_cast<Datum*>(palloc0(
 		bioseq::parallelism::saturating_mul(
-			static_cast<std::uint64_t>(column_type_length),
-			BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE)));
-	vector_column->columnTypeLen = column_type_length;
-	vector_column->columnIsVal = column_is_val;
-	vector_column->storageKind = storage_kind;
-	vector_column->storageContext = storage_context;
-	vector_column->rowNumber = row_number;
+			static_cast<std::uint64_t>(element_width),
+			vector_column_capacity)));
+	column->element_width = static_cast<uint16>(element_width);
+	column->stored_by_value = stored_by_value;
+	column->storage_kind = storage_kind;
+	column->storage_context = storage_context;
+	column->source_row_numbers = source_row_numbers;
 
-	return vector_column;
+	return column;
 }
 
 namespace {
@@ -226,12 +214,12 @@ namespace {
 void
 note_owned_varlena_source_form(Datum source) noexcept
 {
-	if (!bioseq::pg_utils::runtime_test_counters::
+	if (!bioseq::postgres::support::runtime_test_counters::
 			bpchar_source_observation_active())
 		return;
 
 	const Pointer raw = DatumGetPointer(source);
-	using enum bioseq::pg_utils::runtime_test_counters::
+	using enum bioseq::postgres::support::runtime_test_counters::
 		bpchar_source_form;
 	auto form = unknown;
 	if (raw != nullptr)
@@ -245,63 +233,65 @@ note_owned_varlena_source_form(Datum source) noexcept
 		else if (VARATT_IS_SHORT(raw))
 			form = short_header;
 	}
-	bioseq::pg_utils::runtime_test_counters::
+	bioseq::postgres::support::runtime_test_counters::
 		note_bpchar_source_form(
 			form,
-			bioseq::pg_utils::runtime_test_counters::
+			bioseq::postgres::support::runtime_test_counters::
 				bpchar_source_site::vector_copy);
 }
 
 void
 cleanup_vector_slot_contents(
-	VectorTupleTableSlot* vector_slot,
-	bioseq::pg_utils::runtime_test_counters::
+	vector_tuple_table_slot_storage* vector_slot,
+	bioseq::postgres::support::runtime_test_counters::
 		vector_payload_cleanup_kind cleanup_kind)
 {
-	bioseq::pg_utils::runtime_test_counters::
+	bioseq::postgres::support::runtime_test_counters::
 		note_vector_cleanup_call(cleanup_kind);
-	TupleDesc tuple_desc = vector_slot->tts.tts_tupleDescriptor;
+	TupleDesc tuple_desc = vector_slot->virtual_slot.base.tts_tupleDescriptor;
 	if (tuple_desc == nullptr)
 		return;
 
 	for (int attribute_index = 0; attribute_index < tuple_desc->natts;
 		 ++attribute_index)
 	{
-		VectorColumn* column =
-			reinterpret_cast<VectorColumn*>(
-				DatumGetPointer(vector_slot->tts.tts_values[attribute_index]));
+		vector_column_storage* column =
+			reinterpret_cast<vector_column_storage*>(
+				DatumGetPointer(
+					vector_slot->virtual_slot.base.tts_values[attribute_index]));
 		if (column == nullptr)
 			continue;
 
-		if (column->storageKind == VectorStorageKind::owned_varlena_datum)
+		if (column->storage_kind == vector_storage_kind::owned_varlena_datum)
 		{
-			for (uint32 row_index = 0; row_index < column->dimension; ++row_index)
+			for (uint32 row_index = 0; row_index < column->lane_count; ++row_index)
 			{
-				Datum& datum = column->value[row_index];
-				if (!column->isnull[row_index] &&
+				Datum& datum = column->data[row_index];
+				if (!column->is_null[row_index] &&
 					DatumGetPointer(datum) != nullptr)
 				{
-					bioseq::pg_utils::runtime_test_counters::
+					bioseq::postgres::support::runtime_test_counters::
 						note_vector_payload_cleanup_free(cleanup_kind);
 					pfree(DatumGetPointer(datum));
 				}
 				datum = static_cast<Datum>(0);
 			}
 		}
-		memset(column->isnull, true, BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE);
-		column->dimension = 0;
+		std::fill_n(column->is_null, vector_column_capacity, true);
+		column->lane_count = 0;
 	}
 
-	memset(vector_slot->keep, true, BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE);
-	vector_slot->dimension = 0;
+	std::fill_n(
+		vector_slot->row_is_active, vector_column_capacity, true);
+	vector_slot->row_count = 0;
 }
 
 void
 clear_vector_tuple_slot(TupleTableSlot* slot)
 {
 	cleanup_vector_slot_contents(
-		reinterpret_cast<VectorTupleTableSlot*>(slot),
-		bioseq::pg_utils::runtime_test_counters::
+		reinterpret_cast<vector_tuple_table_slot_storage*>(slot),
+		bioseq::postgres::support::runtime_test_counters::
 			vector_payload_cleanup_kind::slot_clear);
 	TTSOpsVirtual.clear(slot);
 }
@@ -309,10 +299,10 @@ clear_vector_tuple_slot(TupleTableSlot* slot)
 void
 release_vector_tuple_slot(TupleTableSlot* slot)
 {
-	auto* vector_slot = reinterpret_cast<VectorTupleTableSlot*>(slot);
+	auto* vector_slot = reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 	cleanup_vector_slot_contents(
 		vector_slot,
-		bioseq::pg_utils::runtime_test_counters::
+		bioseq::postgres::support::runtime_test_counters::
 			vector_payload_cleanup_kind::slot_release);
 	TTSOpsVirtual.clear(slot);
 
@@ -324,12 +314,12 @@ release_vector_tuple_slot(TupleTableSlot* slot)
 	for (int attribute_index = 0; attribute_index < tuple_desc->natts;
 		 ++attribute_index)
 	{
-		VectorColumn* column =
-			reinterpret_cast<VectorColumn*>(
+		vector_column_storage* column =
+			reinterpret_cast<vector_column_storage*>(
 				DatumGetPointer(slot->tts_values[attribute_index]));
 		if (column == nullptr)
 			continue;
-		pfree(column->value);
+		pfree(column->data);
 		pfree(column);
 		slot->tts_values[attribute_index] = static_cast<Datum>(0);
 		slot->tts_isnull[attribute_index] = true;
@@ -374,7 +364,7 @@ vector_tuple_slot_ops()
 {
 	static const TupleTableSlotOps operations = [] {
 		TupleTableSlotOps result = TTSOpsVirtual;
-		result.base_slot_size = sizeof(VectorTupleTableSlot);
+		result.base_slot_size = sizeof(vector_tuple_table_slot_storage);
 		result.clear = clear_vector_tuple_slot;
 		result.release = release_vector_tuple_slot;
 		result.materialize = materialize_vector_tuple_slot;
@@ -389,18 +379,14 @@ vector_tuple_slot_ops()
 }  // namespace
 
 export [[nodiscard]] bool
-IsVectorTupleTableSlot(const TupleTableSlot* slot) noexcept
+is_vector_tuple_table_slot(const TupleTableSlot* slot) noexcept
 {
 	return slot != nullptr && slot->tts_ops == vector_tuple_slot_ops();
 }
 
-/*
- * CreateVectorTupleTableSlot allocates a TupleTableSlot whose body is a
- * VectorTupleTableSlot. One VectorColumn is created per attribute; columns
- * with typlen == -1 (varlena) are stored as owned Datum pointers.
- */
+/** Allocate a vector slot with one owned column per tuple attribute. */
 export TupleTableSlot*
-CreateVectorTupleTableSlot(TupleDesc tuple_desc)
+create_vector_tuple_table_slot(TupleDesc tuple_desc)
 {
 	TupleTableSlot* slot =
 		MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc),
@@ -408,80 +394,96 @@ CreateVectorTupleTableSlot(TupleDesc tuple_desc)
 
 	TupleDesc slot_tuple_desc = slot->tts_tupleDescriptor;
 
-	VectorTupleTableSlot* vector_slot = reinterpret_cast<VectorTupleTableSlot*>(slot);
+	vector_tuple_table_slot_storage* vector_slot =
+		reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 
-	/* All tuples should be skipped in initialization */
-	memset(vector_slot->keep, false, BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE);
+	/* No rows are active before the first batch is populated. */
+	std::fill_n(
+		vector_slot->row_is_active, vector_column_capacity, false);
 
 	for (int attribute_index = 0; attribute_index < slot_tuple_desc->natts; attribute_index++)
 	{
-		Oid column_type_oid = TupleDescAttr(slot_tuple_desc, attribute_index)->atttypid;
+		const Oid column_type_oid =
+			TupleDescAttr(slot_tuple_desc, attribute_index)->atttypid;
 
-		int16_t column_type_length = 0;
-		bool column_type_by_value = false;
-		get_typlenbyval(column_type_oid, &column_type_length, &column_type_by_value);
+		int16_t declared_type_width = 0;
+		bool declared_stored_by_value = false;
+		get_typlenbyval(
+			column_type_oid,
+			&declared_type_width,
+			&declared_stored_by_value);
 
-		int16_t vector_column_type_length =
-			column_type_length == -1 ? sizeof(Datum) : column_type_length;
-		const VectorStorageKind storage_kind =
-			column_type_length == -1
-				? VectorStorageKind::owned_varlena_datum
-				: VectorStorageKind::inline_fixed;
+		const std::int16_t element_width = declared_type_width == -1
+			? static_cast<std::int16_t>(sizeof(Datum))
+			: declared_type_width;
+		const vector_storage_kind storage_kind =
+			declared_type_width == -1
+				? vector_storage_kind::owned_varlena_datum
+				: vector_storage_kind::inline_fixed;
 
-		VectorColumn* vector_column = BuildVectorColumn(BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE,
-														vector_column_type_length,
-														column_type_length == -1 ||
-															column_type_by_value,
-														vector_slot->rowNumber,
-														storage_kind,
-														slot->tts_mcxt);
+		vector_column_storage* column = allocate_vector_column(
+			element_width,
+			declared_type_width == -1 || declared_stored_by_value,
+			vector_slot->source_row_numbers,
+			storage_kind,
+			slot->tts_mcxt);
 
-		vector_slot->tts.tts_values[attribute_index] = PointerGetDatum(vector_column);
-		vector_slot->tts.tts_isnull[attribute_index] = false;
+		vector_slot->virtual_slot.base.tts_values[attribute_index] =
+			PointerGetDatum(column);
+		vector_slot->virtual_slot.base.tts_isnull[attribute_index] = false;
 	}
 
-	vector_slot->tts.tts_nvalid = tuple_desc->natts;
+	vector_slot->virtual_slot.base.tts_nvalid = tuple_desc->natts;
 
 	return slot;
 }
 
 
-/*
- * ExtractTupleFromVectorSlot materialises a single scalar tuple (at the
- * given index) from a vector slot into the supplied output slot. Only
- * attributes in attrNeededList are touched.
- */
+/** Materialize selected attributes from one vector row into a scalar slot. */
 export void
-ExtractTupleFromVectorSlot(TupleTableSlot* output_slot, VectorTupleTableSlot* vector_slot,
-						   int32_t row_index, List* attr_needed_list)
+extract_tuple_from_vector_slot(
+	TupleTableSlot* output_slot,
+	vector_tuple_table_slot_storage* vector_slot,
+	std::int32_t row_index,
+	List* attr_needed_list)
 {
-	/* Only attrNeededList is materialized below, but ExecStoreVirtualTuple
+	/* Only attributes_needed is materialized below, but ExecStoreVirtualTuple
 	 * publishes every descriptor attribute as valid.  Establish canonical
 	 * virtual-slot contents first so omitted columns are NULL rather than stale
 	 * Datums left behind by an earlier row. */
-	bioseq::pg_utils::pg_slot_datums_view{output_slot}.clear_all_to_null();
+	bioseq::postgres::support::pg_slot_datums_view{output_slot}.clear_all_to_null();
 	output_slot->tts_nvalid = 0;
 	foreach_int(attribute_number, attr_needed_list)
 	{
 		if (!TupleDescAttr(output_slot->tts_tupleDescriptor, attribute_number)->attisdropped)
 		{
-			VectorColumn* column = reinterpret_cast<VectorColumn*>(vector_slot->tts.tts_values[attribute_number]);
-			int8_t* raw_column_data = reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index;
-			output_slot->tts_values[attribute_number] = fetch_att(raw_column_data, column->columnIsVal, column->columnTypeLen);
-			output_slot->tts_isnull[attribute_number] = column->isnull[row_index];
+			vector_column_storage* column =
+				reinterpret_cast<vector_column_storage*>(
+					vector_slot->virtual_slot.base.tts_values[attribute_number]);
+			std::int8_t* raw_column_data =
+				reinterpret_cast<std::int8_t*>(column->data)
+				+ column->element_width * row_index;
+			output_slot->tts_values[attribute_number] = fetch_att(
+				raw_column_data,
+				column->stored_by_value,
+				column->element_width);
+			output_slot->tts_isnull[attribute_number] = column->is_null[row_index];
 		}
 	}
 
 	ExecStoreVirtualTuple(output_slot);
 }
 
-export void
-WriteDatumToVectorColumn(VectorColumn* column, Datum input_datum,
-						 bool is_null, int32_t row_index)
+/** Store one PostgreSQL datum in a vector column, copying owned varlena bytes. */
+export void write_datum_to_vector_column(
+	vector_column_storage* column,
+	Datum input_datum,
+	bool is_null,
+	std::int32_t row_index)
 {
 	if (row_index < 0 ||
-		static_cast<uint32>(row_index) >= BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE)
-		bioseq::pg_utils::invoke_pg_as_cpp(
+		static_cast<uint32>(row_index) >= vector_column_capacity)
+		bioseq::postgres::support::invoke_pg_as_cpp(
 			[row_index] {
 				ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -489,88 +491,84 @@ WriteDatumToVectorColumn(VectorColumn* column, Datum input_datum,
 							row_index)));
 			});
 
-	if (column->storageKind == VectorStorageKind::owned_varlena_datum &&
-		static_cast<uint32>(row_index) < column->dimension &&
-		!column->isnull[row_index] &&
-		DatumGetPointer(column->value[row_index]) != nullptr)
+	if (column->storage_kind == vector_storage_kind::owned_varlena_datum &&
+		static_cast<uint32>(row_index) < column->lane_count &&
+		!column->is_null[row_index] &&
+		DatumGetPointer(column->data[row_index]) != nullptr)
 	{
-		bioseq::pg_utils::runtime_test_counters::
+		bioseq::postgres::support::runtime_test_counters::
 			note_vector_payload_overwrite_free();
-		pfree(DatumGetPointer(column->value[row_index]));
-		column->value[row_index] = static_cast<Datum>(0);
+		pfree(DatumGetPointer(column->data[row_index]));
+		column->data[row_index] = static_cast<Datum>(0);
 	}
-	column->isnull[row_index] = is_null;
+	column->is_null[row_index] = is_null;
 	auto* write_position =
-		reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index;
+		reinterpret_cast<int8_t*>(column->data) + column->element_width * row_index;
 
 	if (!is_null)
 	{
-		if (column->storageKind == VectorStorageKind::owned_varlena_datum)
+		if (column->storage_kind == vector_storage_kind::owned_varlena_datum)
 		{
 			note_owned_varlena_source_form(input_datum);
 			Pointer original_pointer = DatumGetPointer(input_datum);
 			auto* varlena_source =
-				bioseq::pg_utils::invoke_pg_as_cpp(
+				bioseq::postgres::support::invoke_pg_as_cpp(
 					[input_datum] {
 						return PG_DETOAST_DATUM_PACKED(input_datum);
 					});
 			Size data_length = VARSIZE_ANY(varlena_source);
 			void* owned_copy =
-				bioseq::pg_utils::invoke_pg_as_cpp(
+				bioseq::postgres::support::invoke_pg_as_cpp(
 					[column, data_length] {
 						return MemoryContextAlloc(
-							column->storageContext,
+							column->storage_context,
 							data_length);
 			});
-			memcpy(owned_copy, varlena_source, data_length);
-			bioseq::pg_utils::runtime_test_counters::
+			std::memcpy(owned_copy, varlena_source, data_length);
+			bioseq::postgres::support::runtime_test_counters::
 				note_vector_payload_allocation();
 			if (reinterpret_cast<Pointer>(varlena_source) != original_pointer)
 			{
-				bioseq::pg_utils::runtime_test_counters::
+				bioseq::postgres::support::runtime_test_counters::
 					note_detoast_temporary_free();
 				pfree(varlena_source);
 			}
 			*reinterpret_cast<Datum*>(write_position) =
 				PointerGetDatum(owned_copy);
 		}
-		else if (column->columnIsVal)
+		else if (column->stored_by_value)
 		{
-			store_att_byval(write_position, input_datum, column->columnTypeLen);
+			store_att_byval(write_position, input_datum, column->element_width);
 		}
 		else
 		{
-			memcpy(write_position, DatumGetPointer(input_datum),
-				   column->columnTypeLen);
+			std::memcpy(write_position, DatumGetPointer(input_datum),
+				   column->element_width);
 		}
 	}
 	else
 	{
-		memset(write_position, 0, column->columnTypeLen);
+		std::memset(write_position, 0, column->element_width);
 	}
 
-	column->dimension =
-		std::max(column->dimension, static_cast<uint32>(row_index + 1));
+	column->lane_count =
+		std::max(column->lane_count, static_cast<uint32>(row_index + 1));
 }
 
-/*
- * WriteTupleToVectorSlot appends a single scalar tuple (from the input
- * slot) into the vector slot at the given index, writing each attribute
- * into its VectorColumn. Varlena attributes are copied into freshly
- * palloc'd buffers so the vector slot owns their storage.
- */
-export void
-WriteTupleToVectorSlot(TupleTableSlot* input_slot, VectorTupleTableSlot* vector_slot,
-					   int32_t row_index)
+/** Append one scalar tuple to a vector batch at the requested row index. */
+export void write_tuple_to_vector_slot(
+	TupleTableSlot* input_slot,
+	vector_tuple_table_slot_storage* vector_slot,
+	std::int32_t row_index)
 {
 	TupleDesc tuple_desc = input_slot->tts_tupleDescriptor;
 
 	for (int attribute_index = 0; attribute_index < tuple_desc->natts; attribute_index++)
 	{
-		VectorColumn* column =
-			reinterpret_cast<VectorColumn*>(
-				vector_slot->tts.tts_values[attribute_index]);
-		WriteDatumToVectorColumn(
+		vector_column_storage* column =
+			reinterpret_cast<vector_column_storage*>(
+				vector_slot->virtual_slot.base.tts_values[attribute_index]);
+		write_datum_to_vector_column(
 			column,
 			input_slot->tts_values[attribute_index],
 			input_slot->tts_isnull[attribute_index],
@@ -578,17 +576,12 @@ WriteTupleToVectorSlot(TupleTableSlot* input_slot, VectorTupleTableSlot* vector_
 	}
 }
 
-/*
- * CleanupVectorSlot resets a vector slot between batches: every column is
- * marked all-null and dimension is zeroed so the next write sequence
- * starts at index 0. The keep[] mask is initialised to true so downstream
- * qual evaluation starts from a fresh "all rows alive" state.
- */
-export void
-CleanupVectorSlot(VectorTupleTableSlot* vector_slot)
+/** Release owned lane payloads and reset a vector slot for the next batch. */
+export void reset_vector_tuple_table_slot(
+	vector_tuple_table_slot_storage* vector_slot)
 {
 	cleanup_vector_slot_contents(
 		vector_slot,
-		bioseq::pg_utils::runtime_test_counters::
+		bioseq::postgres::support::runtime_test_counters::
 			vector_payload_cleanup_kind::explicit_cleanup);
 }

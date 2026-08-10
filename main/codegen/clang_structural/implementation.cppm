@@ -73,12 +73,12 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.codegen.clang_structural;
+module bioseq.codegen.structural_analysis;
 
 import :model;
 import bioseq.codegen.support;
 
-namespace bioseq::codegen::clang_structural {
+namespace bioseq::codegen::structural_analysis {
 
 namespace detail {
 
@@ -106,7 +106,7 @@ struct comment_record {
     std::string_view source) noexcept {
     return source.contains("bioseq_sql")
         || source.contains("bioseq::sql")
-        // The exact spelling is proven after lexical attribute parsing.  Keep
+        // Exact spelling is confirmed after lexical attribute parsing. Keep
         // this cheap front-door tolerant of whitespace/comments between the
         // qualified-name components.
         || (source.contains("bioseq") && source.contains("simd"))
@@ -147,7 +147,7 @@ struct comment_record {
             || attribute.name == "template_flatten_entry");
 }
 
-[[nodiscard]] inline bool is_probe_provenance_attribute(
+[[nodiscard]] inline bool is_probe_source_identity_attribute(
     const attribute_record& attribute) noexcept {
     return attribute.qualified_name
         == "bioseq::template_flatten_provenance";
@@ -562,12 +562,12 @@ struct attribute_block {
             .vendor_namespace = vendor,
             .name = name,
             .argument_text = std::move(argument),
-            .range = {
+            .spelling_range = {
                 .begin = tokens[first].range.begin,
                 .end = tokens[last - 1].range.end,
             },
             .argument_range = argument_range,
-            .complete_range = complete_range,
+            .removal_range = complete_range,
         });
     }
     return result;
@@ -622,14 +622,14 @@ struct attribute_block {
     if (token.size() < 2 || token.front() != '"'
         || token.back() != '"') {
         throw std::runtime_error(
-            "probe provenance arguments must be ordinary narrow string literals");
+            "probe source-identity arguments must be ordinary narrow string literals");
     }
     std::string result;
     for (std::size_t index = 1; index + 1 < token.size(); ++index) {
         const char value = token[index];
         if (value == '\0' || value == '\n' || value == '\r') {
             throw std::runtime_error(
-                "probe provenance string contains a forbidden character");
+                "probe source-identity string contains a forbidden character");
         }
         if (value != '\\') {
             result.push_back(value);
@@ -637,7 +637,7 @@ struct attribute_block {
         }
         if (++index + 1 >= token.size()) {
             throw std::runtime_error(
-                "probe provenance string ends in an escape");
+                "probe source-identity string ends in an escape");
         }
         switch (token[index]) {
             case '\\': result.push_back('\\'); break;
@@ -653,14 +653,14 @@ struct attribute_block {
             case 'v': result.push_back('\v'); break;
             default:
                 throw std::runtime_error(
-                    "probe provenance string uses an unsupported escape");
+                    "probe source-identity string uses an unsupported escape");
         }
     }
     return result;
 }
 
 [[nodiscard]] inline std::pair<std::string, std::string>
-parse_probe_provenance_arguments(std::string_view argument_text) {
+parse_probe_source_identity_arguments(std::string_view argument_text) {
     const auto [tokens, comments] = lex_source(argument_text);
     if (!comments.empty() || tokens.size() != 3
         || tokens[1].spelling != ",") {
@@ -839,7 +839,7 @@ inline void adjust_angle_depth(
             return {};
         }
         return {
-            .kind = declaration_kind::namespace_,
+            .kind = declaration_kind::namespace_declaration,
             .name = tokens[name].spelling,
             .token_begin = keyword,
             .token_end = open + 1,
@@ -860,7 +860,7 @@ inline void adjust_angle_depth(
         && identifier_begin(tokens[cursor].spelling.front())) {
         return {
             .kind = tokens[block.token_begin - 1].spelling == "enum"
-                ? declaration_kind::enum_
+                ? declaration_kind::enumeration
                 : declaration_kind::record,
             .name = tokens[cursor].spelling,
             .token_begin = block.token_begin - 1,
@@ -901,7 +901,7 @@ inline void adjust_angle_depth(
         if (cursor < tokens.size()
             && identifier_begin(tokens[cursor].spelling.front())) {
             return {
-                .kind = declaration_kind::enum_,
+                .kind = declaration_kind::enumeration,
                 .name = tokens[cursor].spelling,
                 .token_begin = declaration_begin,
                 .token_end = cursor + 1,
@@ -1049,7 +1049,7 @@ struct scope_region {
     std::size_t declaration_token_begin{};
     std::size_t name_token{};
     category kind{category::namespace_};
-    aggregate_kind record_kind{aggregate_kind::struct_};
+    aggregate_kind record_kind{aggregate_kind::structure};
     std::string name;
     std::string qualified_name;
     bool exported{};
@@ -1064,7 +1064,7 @@ struct scope_region {
         std::size_t declaration_token_begin{};
         std::size_t name_token{};
         scope_region::category kind{scope_region::category::namespace_};
-        aggregate_kind record_kind{aggregate_kind::struct_};
+        aggregate_kind record_kind{aggregate_kind::structure};
         std::string name;
         std::string qualified_name;
         bool exported{};
@@ -1174,10 +1174,10 @@ struct scope_region {
                                 : scope_region::category::enum_,
                             .record_kind =
                                 tokens[cursor].spelling == "class"
-                                ? aggregate_kind::class_
+                                ? aggregate_kind::class_record
                                 : tokens[cursor].spelling == "union"
-                                ? aggregate_kind::union_
-                                : aggregate_kind::struct_,
+                                ? aggregate_kind::union_record
+                                : aggregate_kind::structure,
                             .name = tokens[name_index].spelling,
                             .exported = std::ranges::any_of(
                                 tokens.begin()
@@ -1451,7 +1451,7 @@ struct scope_region {
  *
  * are valid, readable source layouts.  Clang does not consistently attach
  * the latter form to declarations carrying ignored vendor attributes, so the
- * structural pass also proves the association lexically.
+ * structural pass also confirms the association lexically.
  */
 [[nodiscard]] inline documentation_record documentation_after(
     std::string_view source,
@@ -1558,12 +1558,12 @@ inline void merge_documentation_groups(
     const subject& subject,
     std::string qualified_name,
     std::string target_usr = {}) {
-    if (subject.kind != declaration_kind::namespace_
+    if (subject.kind != declaration_kind::namespace_declaration
         || !subject.namespace_keyword
         || !subject.namespace_open_brace
         || !subject.namespace_close_brace) {
         throw std::runtime_error(
-            "structural namespace marker has no proven namespace geometry");
+            "structural namespace marker has no confirmed namespace geometry");
     }
     const std::size_t keyword = *subject.namespace_keyword;
     const std::size_t open = *subject.namespace_open_brace;
@@ -1832,9 +1832,9 @@ inline void merge_documentation_groups(
 
 [[nodiscard]] inline member_access access_from_token(
         std::string_view token) noexcept {
-    if (token == "private") return member_access::private_;
-    if (token == "protected") return member_access::protected_;
-    return member_access::public_;
+    if (token == "private") return member_access::private_access;
+    if (token == "protected") return member_access::protected_access;
+    return member_access::public_access;
 }
 
 [[nodiscard]] inline std::string enclosing_name(
@@ -1871,7 +1871,7 @@ inline void merge_documentation_groups(
         .exported = scope.exported,
         .has_base_classes = scope.has_base_classes,
     };
-    if (scope.record_kind == aggregate_kind::union_) {
+    if (scope.record_kind == aggregate_kind::union_record) {
         result.structural_errors.emplace_back(
             "result rows cannot be unions");
     }
@@ -1881,9 +1881,9 @@ inline void merge_documentation_groups(
     }
 
     member_access access =
-        scope.record_kind == aggregate_kind::class_
-        ? member_access::private_
-        : member_access::public_;
+        scope.record_kind == aggregate_kind::class_record
+        ? member_access::private_access
+        : member_access::public_access;
     std::size_t member_begin = scope.token_begin + 1;
     int parentheses = 0;
     int brackets = 0;
@@ -2098,21 +2098,111 @@ inline void merge_documentation_groups(
     return result;
 }
 
-[[nodiscard]] inline std::string source_provenance_id(
+/// Produces the stable source spelling used by generated identities. Physical
+/// paths below `main/` lose that source-tree anchor; logical relative paths
+/// retain their full spelling.
+[[nodiscard]] inline std::string canonical_repository_source_identity(
+    const std::filesystem::path& source_path) {
+    if (source_path.empty()) {
+        throw std::runtime_error("source identity path is empty");
+    }
+    const std::string raw_spelling = source_path.generic_string();
+    if (raw_spelling.contains('\\')
+        || (raw_spelling.size() >= 2
+            && std::isalpha(
+                static_cast<unsigned char>(raw_spelling.front()))
+            && raw_spelling[1] == ':')) {
+        throw std::runtime_error(
+            "source identity contains a drive or non-canonical separator");
+    }
+
+    for (const std::filesystem::path& component : source_path) {
+        if (component == "..") {
+            throw std::runtime_error(
+                "source identity contains parent traversal");
+        }
+    }
+
+    const std::filesystem::path normalized =
+        source_path.lexically_normal();
+    std::vector<std::string> components;
+    for (const std::filesystem::path& component : normalized) {
+        const std::string spelling = component.generic_string();
+        if (spelling.empty() || spelling == "."
+            || spelling == normalized.root_name().generic_string()
+            || spelling == normalized.root_directory().generic_string()) {
+            continue;
+        }
+        components.push_back(spelling);
+    }
+
+    if (normalized.is_absolute()) {
+        const std::vector<std::string>::reverse_iterator source_root =
+            std::ranges::find(components.rbegin(), components.rend(), "main");
+        if (source_root == components.rend()) {
+            throw std::runtime_error(
+                "absolute source identity is outside the repository source root");
+        }
+        components.erase(components.begin(), source_root.base());
+    } else if (!components.empty() && components.front() == "main") {
+        components.erase(components.begin());
+    }
+
+    if (components.empty() || components.front() == "main") {
+        throw std::runtime_error(
+            "source identity has no repository-relative payload");
+    }
+    std::string identity;
+    for (const std::string& component : components) {
+        if (component.empty() || component == "." || component == "..") {
+            throw std::runtime_error(
+                "source identity contains a non-canonical component");
+        }
+        if (!identity.empty()) identity.push_back('/');
+        identity += component;
+    }
+    if (identity.empty() || identity.starts_with('/')
+        || identity.starts_with("main/")) {
+        throw std::runtime_error(
+            "source identity is not repository-relative");
+    }
+    return identity;
+}
+
+[[nodiscard]] inline bool has_source_root_component(
+    const std::filesystem::path& source_path) {
+    return std::ranges::any_of(
+        source_path,
+        [](const std::filesystem::path& component) {
+            return component == "main";
+        });
+}
+
+[[nodiscard]] inline std::string source_entity_identity(
     const std::filesystem::path& source_path,
     std::string_view entity,
     std::size_t byte_offset) {
-    return source_path.generic_string() + "#" + std::string{entity}
+    const std::filesystem::path identity_path =
+        source_path.is_absolute()
+            && !has_source_root_component(source_path)
+        ? source_path.filename()
+        : source_path;
+    return canonical_repository_source_identity(identity_path)
+        + "#" + std::string{entity}
         + ":" + std::to_string(byte_offset);
 }
 
 [[nodiscard]] inline preprocessor_directive_kind directive_kind_of(
     std::string_view spelling) noexcept {
-    if (spelling == "if") return preprocessor_directive_kind::if_;
+    if (spelling == "if") {
+        return preprocessor_directive_kind::if_directive;
+    }
     if (spelling == "ifdef") return preprocessor_directive_kind::ifdef;
     if (spelling == "ifndef") return preprocessor_directive_kind::ifndef;
     if (spelling == "elif") return preprocessor_directive_kind::elif;
-    if (spelling == "else") return preprocessor_directive_kind::else_;
+    if (spelling == "else") {
+        return preprocessor_directive_kind::else_directive;
+    }
     if (spelling == "endif") return preprocessor_directive_kind::endif;
     if (spelling == "define") return preprocessor_directive_kind::define;
     if (spelling == "undef") return preprocessor_directive_kind::undef;
@@ -2213,7 +2303,7 @@ collect_preprocessor_directives(
         }
         const std::size_t record_depth =
             (kind == preprocessor_directive_kind::elif
-             || kind == preprocessor_directive_kind::else_)
+             || kind == preprocessor_directive_kind::else_directive)
                 && nesting_depth != 0
             ? nesting_depth - 1
             : nesting_depth;
@@ -2236,7 +2326,7 @@ collect_preprocessor_directives(
                 source.substr(line_begin, logical_end - line_begin)},
             .nesting_depth = record_depth,
         });
-        if (kind == preprocessor_directive_kind::if_
+        if (kind == preprocessor_directive_kind::if_directive
             || kind == preprocessor_directive_kind::ifdef
             || kind == preprocessor_directive_kind::ifndef) {
             ++nesting_depth;
@@ -2394,7 +2484,7 @@ collect_namespace_records(
         std::size_t open_brace{};
         std::string name;
         std::string qualified_name;
-        std::string provenance_id;
+        std::string source_identity;
         std::vector<attribute_record> attributes;
         bool is_inline{};
         bool is_anonymous{};
@@ -2531,7 +2621,7 @@ collect_namespace_records(
                 .open_brace = index,
                 .name = name,
                 .qualified_name = std::move(qualified),
-                .provenance_id = source_provenance_id(
+                .source_identity = source_entity_identity(
                     source_path,
                     "namespace",
                     tokens[keyword].range.begin.byte_offset),
@@ -2589,7 +2679,7 @@ collect_namespace_records(
                   },
             .open_brace_range = tokens[opened.open_brace].range,
             .close_brace_range = tokens[index].range,
-            .provenance_id = opened.provenance_id,
+            .source_identity = opened.source_identity,
             .qualified_name = opened.qualified_name,
             .attributes = opened.attributes,
             .is_inline = opened.is_inline,
@@ -3013,7 +3103,7 @@ previous_identifier_token(
     declaration_kind kind = declaration_kind::variable;
     std::optional<std::size_t> name_token;
     if (namespace_keyword) {
-        kind = declaration_kind::namespace_;
+        kind = declaration_kind::namespace_declaration;
         for (std::size_t cursor = *namespace_keyword + 1;
              cursor < head_end;
              ++cursor) {
@@ -3029,7 +3119,7 @@ previous_identifier_token(
         }
     } else if (record_keyword) {
         kind = tokens[*record_keyword].spelling == "enum"
-            ? declaration_kind::enum_
+            ? declaration_kind::enumeration
             : declaration_kind::record;
         std::size_t cursor = *record_keyword + 1;
         if (cursor < head_end
@@ -3078,11 +3168,11 @@ previous_identifier_token(
     }
     std::string name = name_token
         ? tokens[*name_token].spelling
-        : kind == declaration_kind::namespace_
+        : kind == declaration_kind::namespace_declaration
         ? std::string{"<anonymous>"}
         : std::string{};
     std::optional<std::size_t> namespace_name_end;
-    if (kind == declaration_kind::namespace_ && name_token) {
+    if (kind == declaration_kind::namespace_declaration && name_token) {
         name.clear();
         for (std::size_t cursor = *name_token;
              cursor < head_end;
@@ -3242,9 +3332,9 @@ previous_identifier_token(
               }
             : source_range{},
         .exported = has_token("export"),
-        .provenance_id = source_provenance_id(
+        .source_identity = source_entity_identity(
             source_path, "declaration", declaration_byte_begin),
-        .immediate_namespace_provenance_id = owner.provenance_id,
+        .immediate_namespace_source_identity = owner.source_identity,
         .explicit_declared_type = explicit_type,
         .declaration_range = declaration_range,
         .declaration_head_range = declaration_head_range,
@@ -3258,7 +3348,7 @@ previous_identifier_token(
                 || bounds.initializer.has_value()
                 || bounds.function_special_definition
                 || kind == declaration_kind::alias
-                || kind == declaration_kind::namespace_,
+                || kind == declaration_kind::namespace_declaration,
             .is_using_alias = kind == declaration_kind::alias,
             .is_variable = kind == declaration_kind::variable,
             .is_function = kind == declaration_kind::function,
@@ -3351,7 +3441,7 @@ collect_direct_declarations(
             result,
             {},
             [](const declaration_record& declaration) {
-                return declaration.provenance_id;
+                return declaration.source_identity;
             }).begin(),
         result.end());
     return result;
@@ -3394,23 +3484,23 @@ inline void populate_slice_overloads_and_references(
                         && token.spelling == referenced.name;
                 });
             if (appears) {
-                declaration.referenced_declaration_provenance_ids
-                    .push_back(referenced.provenance_id);
+                declaration.referenced_declaration_source_identities
+                    .push_back(referenced.source_identity);
             }
         }
         std::ranges::sort(
-            declaration.referenced_declaration_provenance_ids);
-        declaration.referenced_declaration_provenance_ids.erase(
+            declaration.referenced_declaration_source_identities);
+        declaration.referenced_declaration_source_identities.erase(
             std::ranges::unique(
-                declaration.referenced_declaration_provenance_ids).begin(),
-            declaration.referenced_declaration_provenance_ids.end());
+                declaration.referenced_declaration_source_identities).begin(),
+            declaration.referenced_declaration_source_identities.end());
     }
 }
 
 [[nodiscard]] inline translation_unit scan_token_slice_impl(
     const std::filesystem::path& source_path,
     std::string_view source,
-    bool allow_probe_provenance) {
+    bool allow_probe_source_identity) {
     const source_positions positions{source};
     std::vector<lexical_token> raw_tokens =
         clang_raw_tokens(source_path, source);
@@ -3433,17 +3523,17 @@ inline void populate_slice_overloads_and_references(
                 block.attributes,
                 [](const attribute_record& attribute) {
                     return is_materialization_attribute(attribute)
-                        || is_probe_provenance_attribute(attribute);
+                        || is_probe_source_identity_attribute(attribute);
                 });
         if (materialization_marker_count > 1) {
             throw std::runtime_error(
                 source_path.string()
                 + ": an attribute specifier cannot contain multiple bioseq materialization markers");
         }
-        if (!allow_probe_provenance
+        if (!allow_probe_source_identity
             && std::ranges::any_of(
                 block.attributes,
-                is_probe_provenance_attribute)) {
+                is_probe_source_identity_attribute)) {
             throw std::runtime_error(
                 source_path.string()
                 + ": template_flatten_provenance is reserved for generated declaration probes");
@@ -3464,51 +3554,51 @@ inline void populate_slice_overloads_and_references(
             directives,
             source_module,
             namespaces);
-    std::set<std::size_t> bound_provenance_attributes;
+    std::set<std::size_t> bound_source_identity_attributes;
     for (declaration_record& declaration : declarations) {
         auto marker = std::ranges::find_if(
             declaration.attributes,
-            is_probe_provenance_attribute);
+            is_probe_source_identity_attribute);
         if (marker == declaration.attributes.end()) continue;
-        if (!allow_probe_provenance) {
+        if (!allow_probe_source_identity) {
             throw std::runtime_error(
                 source_path.string()
-                + ": authored token slices cannot carry probe provenance");
+                + ": authored token slices cannot carry probe source identities");
         }
         if (std::ranges::find_if(
                 std::next(marker),
                 declaration.attributes.end(),
-                is_probe_provenance_attribute)
+                is_probe_source_identity_attribute)
             != declaration.attributes.end()) {
             throw std::runtime_error(
                 source_path.string()
-                + ": a declaration probe declaration has multiple provenance markers");
+                + ": a declaration probe has multiple source-identity markers");
         }
-        const auto [original_provenance, coordinate_ordinal] =
-            parse_probe_provenance_arguments(marker->argument_text);
-        if (original_provenance.empty() || coordinate_ordinal.empty()
+        const auto [original_source_identity, coordinate_ordinal] =
+            parse_probe_source_identity_arguments(marker->argument_text);
+        if (original_source_identity.empty() || coordinate_ordinal.empty()
             || !std::ranges::all_of(
                 coordinate_ordinal,
                 [](char value) { return value >= '0' && value <= '9'; })) {
             throw std::runtime_error(
                 source_path.string()
-                + ": declaration probe provenance ID/coordinate is invalid");
+                + ": declaration probe source identity/coordinate is invalid");
         }
-        declaration.provenance_id = original_provenance;
-        declaration.provenance_coordinate = coordinate_ordinal;
-        bound_provenance_attributes.insert(
-            marker->complete_range.begin.byte_offset);
+        declaration.source_identity = original_source_identity;
+        declaration.source_coordinate = coordinate_ordinal;
+        bound_source_identity_attributes.insert(
+            marker->removal_range.begin.byte_offset);
         declaration.attributes.erase(marker);
     }
-    if (allow_probe_provenance) {
+    if (allow_probe_source_identity) {
         for (const attribute_block& block : blocks) {
             for (const attribute_record& attribute : block.attributes) {
-                if (is_probe_provenance_attribute(attribute)
-                    && !bound_provenance_attributes.contains(
-                        attribute.complete_range.begin.byte_offset)) {
+                if (is_probe_source_identity_attribute(attribute)
+                    && !bound_source_identity_attributes.contains(
+                        attribute.removal_range.begin.byte_offset)) {
                     throw std::runtime_error(
                         source_path.string()
-                        + ": declaration probe provenance marker has no declaration target");
+                        + ": declaration probe source-identity marker has no target");
                 }
             }
         }
@@ -3519,7 +3609,7 @@ inline void populate_slice_overloads_and_references(
     translation_unit result{
         .source_path = source_path,
         .module_name = source_module.provided_module,
-        .source_sha256 = sha256_hex(source),
+        .source_sha256 = bioseq::common::sha256_hex(source),
         .tokens = std::move(raw_tokens),
         .declarations = std::move(declarations),
         .mode = collection_mode::token_slice,
@@ -3534,7 +3624,7 @@ inline void populate_slice_overloads_and_references(
             continue;
         }
         const subject target = find_subject(structural_tokens, block);
-        if (target.kind != declaration_kind::namespace_
+        if (target.kind != declaration_kind::namespace_declaration
             || !target.namespace_close_brace) {
             throw std::runtime_error(
                 source_path.string()
@@ -3622,7 +3712,7 @@ inline void validate_body_free_probe_syntax(
                 + ": declaration probe contains a function body");
         }
         if ((declaration.kind == declaration_kind::record
-             || declaration.kind == declaration_kind::enum_)
+             || declaration.kind == declaration_kind::enumeration)
             && declaration.specifiers.is_definition) {
             if (record_has_default_member_initializer(
                     declaration, probe.tokens)) {
@@ -3656,6 +3746,11 @@ inline void validate_body_free_probe_syntax(
 
 }  // namespace detail
 
+[[nodiscard]] std::string repository_source_identity(
+    const std::filesystem::path& source_path) {
+    return detail::canonical_repository_source_identity(source_path);
+}
+
 [[nodiscard]] translation_unit scan_token_slice(
     const std::filesystem::path& source_path,
     std::string_view source) {
@@ -3665,7 +3760,7 @@ inline void validate_body_free_probe_syntax(
 
 [[nodiscard]] translation_unit scan_token_slice(
     const std::filesystem::path& source_path) {
-    return scan_token_slice(source_path, read_file(source_path));
+    return scan_token_slice(source_path, read_artifact_bytes(source_path));
 }
 
 /// Performs a compiler-independent structural source scan. The resulting POD
@@ -3689,7 +3784,7 @@ inline void validate_body_free_probe_syntax(
 
     translation_unit result{
         .source_path = source_path,
-        .source_sha256 = sha256_hex(source),
+        .source_sha256 = bioseq::common::sha256_hex(source),
         .tokens = tokens,
     };
     for (std::size_t index = 0; index + 2 < tokens.size(); ++index) {
@@ -3774,7 +3869,7 @@ inline void validate_body_free_probe_syntax(
                 },
                 .name_range = tokens[subject.name_token].range,
             };
-            if (subject.kind == declaration_kind::namespace_
+            if (subject.kind == declaration_kind::namespace_declaration
                 && subject.namespace_close_brace) {
                 declaration.range.end =
                     tokens[*subject.namespace_close_brace].range.end;
@@ -3909,7 +4004,7 @@ inline void validate_body_free_probe_syntax(
                     attribute.placement =
                         attribute_placement::class_head;
                 } else if (subject.kind
-                               == declaration_kind::namespace_
+                               == declaration_kind::namespace_declaration
                            && detail::is_simd_namespace_marker(
                                attribute)) {
                     attribute.placement =
@@ -3918,7 +4013,7 @@ inline void validate_body_free_probe_syntax(
                 declaration.attributes.push_back(std::move(attribute));
             }
         }
-        if (subject.kind == declaration_kind::namespace_
+        if (subject.kind == declaration_kind::namespace_declaration
             && std::ranges::any_of(
                 block.attributes,
                 detail::is_simd_namespace_marker)) {
@@ -4104,7 +4199,7 @@ inline void validate_body_free_probe_syntax(
 
 [[nodiscard]] translation_unit scan_translation_unit(
     const std::filesystem::path& source_path) {
-    return scan_translation_unit(source_path, read_file(source_path));
+    return scan_translation_unit(source_path, read_artifact_bytes(source_path));
 }
 
 namespace clang_backend {
@@ -4369,22 +4464,22 @@ struct conditional_state {
 [[nodiscard]] aggregate_kind record_kind_of(
     const clang::RecordDecl* record) {
     if (record->isUnion()) {
-        return aggregate_kind::union_;
+        return aggregate_kind::union_record;
     }
     if (record->isStruct()) {
-        return aggregate_kind::struct_;
+        return aggregate_kind::structure;
     }
-    return aggregate_kind::class_;
+    return aggregate_kind::class_record;
 }
 
 [[nodiscard]] member_access access_of(clang::AccessSpecifier access) {
     switch (access) {
-        case clang::AS_private: return member_access::private_;
-        case clang::AS_protected: return member_access::protected_;
+        case clang::AS_private: return member_access::private_access;
+        case clang::AS_protected: return member_access::protected_access;
         case clang::AS_public:
-        case clang::AS_none: return member_access::public_;
+        case clang::AS_none: return member_access::public_access;
     }
-    return member_access::public_;
+    return member_access::public_access;
 }
 
 [[nodiscard]] const char* member_kind_of(
@@ -4910,7 +5005,9 @@ class structural_visitor final
         if (eligible(declaration)
             && !declaration->isAnonymousNamespace()) {
             static_cast<void>(
-                add_named(declaration, declaration_kind::namespace_));
+                add_named(
+                    declaration,
+                    declaration_kind::namespace_declaration));
         }
         return true;
     }
@@ -5178,7 +5275,7 @@ class structural_visitor final
                 .declaration_range = source_range_of(
                     lambda->getSourceRange(), sources_, language_),
                 .body_range = body_range,
-                .hwy_attr_insertion = insertion,
+                .highway_attribute_insertion = insertion,
             },
             .insertion_proven =
                 lambda_begin.isValid()
@@ -5196,7 +5293,7 @@ class structural_visitor final
     bool VisitEnumDecl(clang::EnumDecl* declaration) {
         if (eligible(declaration)) {
             static_cast<void>(
-                add_named(declaration, declaration_kind::enum_));
+                add_named(declaration, declaration_kind::enumeration));
         }
         return true;
     }
@@ -5258,7 +5355,9 @@ class structural_visitor final
     bool VisitConceptDecl(clang::ConceptDecl* declaration) {
         if (eligible(declaration)) {
             static_cast<void>(
-                add_named(declaration, declaration_kind::concept_));
+                add_named(
+                    declaration,
+                    declaration_kind::concept_declaration));
         }
         return true;
     }
@@ -5421,10 +5520,11 @@ class structural_visitor final
                     && skipped_at(conditions_, offset)) {
                     continue;
                 }
-                if (subject.kind != declaration_kind::namespace_
+                if (subject.kind
+                        != declaration_kind::namespace_declaration
                     || attached_declaration == nullptr
                     || attached_declaration->kind
-                        != declaration_kind::namespace_) {
+                        != declaration_kind::namespace_declaration) {
                     throw std::runtime_error(
                         output_.source_path.string() + ":"
                         + std::to_string(block.range.begin.line)
@@ -5506,7 +5606,7 @@ class structural_visitor final
             const std::size_t body_end =
                 candidate.record.body_range.end.byte_offset;
             const std::size_t insertion = candidate.record
-                .hwy_attr_insertion.byte_offset;
+                .highway_attribute_insertion.byte_offset;
             const bool lambda_insertion =
                 candidate.record.kind == callable_kind::lambda
                 && insertion >= declaration_begin
@@ -5526,7 +5626,7 @@ class structural_visitor final
                         candidate.record.declaration_range.begin.line)
                     + ": callable '"
                     + candidate.record.qualified_name
-                    + "' in bioseq::simd namespace has no proven "
+                    + "' in bioseq::simd namespace has no confirmed "
                       "compound-body attribute insertion point");
             }
             marked.callables.push_back(candidate.record);
@@ -5535,13 +5635,13 @@ class structural_visitor final
             marked.callables,
             {},
             [](const callable_insertion_record& callable) {
-                return callable.hwy_attr_insertion.byte_offset;
+                return callable.highway_attribute_insertion.byte_offset;
             });
         if (std::ranges::adjacent_find(
                 marked.callables,
                 {},
                 [](const callable_insertion_record& callable) {
-                    return callable.hwy_attr_insertion.byte_offset;
+                    return callable.highway_attribute_insertion.byte_offset;
                 }) != marked.callables.end()) {
             throw std::runtime_error(
                 output_.source_path.string()
@@ -5617,7 +5717,7 @@ class structural_visitor final
                     sources_,
                     language_),
                 .body_range = body_range,
-                .hwy_attr_insertion = insertion,
+                .highway_attribute_insertion = insertion,
             },
             .insertion_proven = main_file_body && compound
                 && insertion.byte_offset < body_range.begin.byte_offset
@@ -5697,7 +5797,7 @@ class structural_visitor final
                 declaration->getLocation(), sources_, language_),
             .exported = declaration->isInExportDeclContext(),
         };
-        record.provenance_id = detail::source_provenance_id(
+        record.source_identity = detail::source_entity_identity(
             output_.source_path,
             "declaration",
             record.range.begin.byte_offset);
@@ -5718,9 +5818,9 @@ class structural_visitor final
             kind == declaration_kind::variable;
         record.specifiers.is_function =
             kind == declaration_kind::function;
-        if (kind == declaration_kind::namespace_
+        if (kind == declaration_kind::namespace_declaration
             || kind == declaration_kind::alias
-            || kind == declaration_kind::concept_) {
+            || kind == declaration_kind::concept_declaration) {
             record.specifiers.is_definition = true;
         } else if (const auto* tag =
                        llvm::dyn_cast<clang::TagDecl>(declaration)) {
@@ -5742,8 +5842,8 @@ class structural_visitor final
                             < candidate.body_range.end.byte_offset;
                 });
             if (namespace_fact != output_.namespaces.end()) {
-                record.immediate_namespace_provenance_id =
-                    namespace_fact->provenance_id;
+                record.immediate_namespace_source_identity =
+                    namespace_fact->source_identity;
                 record.immediate_namespace_stable_usr =
                     namespace_fact->stable_usr;
             } else {
@@ -5888,7 +5988,8 @@ class structural_visitor final
                                == "enum")) {
                 attribute.placement =
                     attribute_placement::class_head;
-            } else if (subject.kind == declaration_kind::namespace_
+            } else if (subject.kind
+                       == declaration_kind::namespace_declaration
                        && detail::is_simd_namespace_marker(
                            attribute)) {
                 attribute.placement =
@@ -5940,10 +6041,10 @@ class structural_consumer final : public clang::ASTConsumer {
         }
         translation_unit unit{
             .source_path = source_path_,
-            .source_sha256 = sha256_hex(std::string_view{
+            .source_sha256 = bioseq::common::sha256_hex(std::string_view{
                 source.data(), source.size()}),
             .compiler_profile = compiler_profile_,
-            .clang_version = CLANG_VERSION_STRING,
+            .clang_release = CLANG_VERSION_STRING,
             .tokens = clang_tokens(
                 sources, context.getLangOpts()),
             .mode = collection_mode::full_translation_unit,
@@ -6012,7 +6113,7 @@ class structural_consumer final : public clang::ASTConsumer {
                  declaration.attributes) {
                 subject_begin = std::min(
                     subject_begin,
-                    attribute.range.begin.byte_offset);
+                    attribute.spelling_range.begin.byte_offset);
             }
             std::vector<documentation_record> lexical_candidates;
             lexical_candidates.push_back(
@@ -6028,12 +6129,12 @@ class structural_consumer final : public clang::ASTConsumer {
                     detail::documentation_before(
                         source_view,
                         comments,
-                        attribute.range.begin.byte_offset));
+                        attribute.spelling_range.begin.byte_offset));
                 lexical_candidates.push_back(
                     detail::documentation_after(
                         source_view,
                         comments,
-                        attribute.range.end.byte_offset,
+                        attribute.spelling_range.end.byte_offset,
                         declaration.name_range.begin.byte_offset));
             }
             if (detail::documentation_empty(
@@ -6172,7 +6273,8 @@ class module_edges_consumer final : public clang::ASTConsumer {
         if (const auto file =
                 sources.getFileEntryRefForID(
                     sources.getMainFileID())) {
-            unit.source_path = file->getName().str();
+            unit.source_identity = repository_source_identity(
+                std::filesystem::path{file->getName().str()});
         }
         if (const clang::Module* module =
                 context.getCurrentNamedModule()) {
@@ -6425,7 +6527,7 @@ struct lexical_module_description {
 
 [[nodiscard]] lexical_module_description describe_module_provider(
     const std::filesystem::path& source_path) {
-    const std::string source = read_file(source_path);
+    const std::string source = read_artifact_bytes(source_path);
     const auto [tokens, comments] = detail::lex_source(source);
     static_cast<void>(comments);
     lexical_module_description result;
@@ -6782,7 +6884,7 @@ void validate_owned_compile_database(
                 + response.string());
         }
         dependencies.push_back(response);
-        const std::string content = read_file(response);
+        const std::string content = read_artifact_bytes(response);
         llvm::BumpPtrAllocator allocator;
         llvm::StringSaver saver{allocator};
         llvm::SmallVector<const char*, 32> tokens;
@@ -7007,9 +7109,9 @@ struct relocation_context {
     std::string material;
     for (const std::filesystem::path& input : inputs) {
         material += input.generic_string() + "\t"
-            + sha256_hex(read_file(input)) + "\n";
+            + bioseq::common::sha256_hex(read_artifact_bytes(input)) + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] std::string relocatable_command_input_hash(
@@ -7025,7 +7127,7 @@ struct relocation_context {
             relocatable_path_spelling(input, relocation)
             + "\t"
             + relocatable_document_hash(
-                read_file(input), relocation));
+                read_artifact_bytes(input), relocation));
     }
     std::ranges::sort(rows);
     if (std::ranges::adjacent_find(rows) != rows.end()) {
@@ -7037,7 +7139,7 @@ struct relocation_context {
     for (const std::string& row : rows) {
         material += row + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] std::string json_escape(std::string_view value) {
@@ -7224,7 +7326,7 @@ void execute_clang(
         if (!diagnostics_path.empty()
             && std::filesystem::is_regular_file(
                 diagnostics_path)) {
-            diagnostics = read_file(diagnostics_path);
+            diagnostics = read_artifact_bytes(diagnostics_path);
         }
         std::string invocation;
         for (const std::string& argument : arguments) {
@@ -7251,7 +7353,7 @@ void execute_clang(
 parse_make_depfile(
     const std::filesystem::path& depfile,
     const std::filesystem::path& command_directory) {
-    std::string content = read_file(depfile);
+    std::string content = read_artifact_bytes(depfile);
     for (std::size_t position = 0;
          (position = content.find("\\\n", position))
             != std::string::npos;) {
@@ -7369,11 +7471,11 @@ parse_make_depfile(
                     + dependency.string());
             }
             position->second =
-                sha256_hex(read_file(dependency));
+                bioseq::common::sha256_hex(read_artifact_bytes(dependency));
         }
         material += key + "\t" + position->second + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] std::string relocatable_dependency_content_hash(
@@ -7398,7 +7500,7 @@ parse_make_depfile(
             }
             position->second =
                 relocatable_document_hash(
-                    read_file(dependency), relocation);
+                    read_artifact_bytes(dependency), relocation);
         }
         rows.push_back(
             relocatable_path_spelling(
@@ -7412,7 +7514,7 @@ parse_make_depfile(
     for (const std::string& row : rows) {
         material += row + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] std::string directory_content_hash(
@@ -7449,9 +7551,9 @@ parse_make_depfile(
     for (const std::filesystem::path& file : files) {
         dependencies.push_back(file);
         material += file.lexically_relative(root).generic_string()
-            + "\t" + sha256_hex(read_file(file)) + "\n";
+            + "\t" + bioseq::common::sha256_hex(read_artifact_bytes(file)) + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 void validate_clang_binary_version(
@@ -7491,7 +7593,7 @@ void validate_clang_binary_version(
         &execution_failed);
     std::string output;
     try {
-        output = read_file(std::filesystem::path{
+        output = read_artifact_bytes(std::filesystem::path{
             output_path.str().str()});
     } catch (...) {
         static_cast<void>(llvm::sys::fs::remove(output_path));
@@ -7555,7 +7657,7 @@ void validate_clang_binary_version(
         &execution_failed);
     std::string output;
     try {
-        output = read_file(std::filesystem::path{
+        output = read_artifact_bytes(std::filesystem::path{
             output_path.str().str()});
     } catch (...) {
         static_cast<void>(llvm::sys::fs::remove(output_path));
@@ -7615,7 +7717,7 @@ void validate_clang_binary_version(
         &execution_failed);
     std::string output;
     try {
-        output = read_file(std::filesystem::path{
+        output = read_artifact_bytes(std::filesystem::path{
             output_path.str().str()});
     } catch (...) {
         static_cast<void>(llvm::sys::fs::remove(output_path));
@@ -7662,7 +7764,7 @@ validate_selected_toolchain(
     const std::filesystem::path linked_llvm_config =
         weakly_canonical_path(BIOSEQ_LINKED_LLVM_CONFIG);
     if (configured_llvm_config != linked_llvm_config
-        || sha256_hex(read_file(configured_llvm_config))
+        || bioseq::common::sha256_hex(read_artifact_bytes(configured_llvm_config))
             != BIOSEQ_LINKED_LLVM_CONFIG_SHA256) {
         throw std::runtime_error(
             "selected llvm-config does not match the exact LibTooling "
@@ -7726,9 +7828,9 @@ validate_selected_toolchain(
         weakly_canonical_path(BIOSEQ_LINKED_LLVM_LIBRARY);
     if (!path_within_root(linked_clang_cpp, prefix)
         || !path_within_root(linked_llvm, prefix)
-        || sha256_hex(read_file(linked_clang_cpp))
+        || bioseq::common::sha256_hex(read_artifact_bytes(linked_clang_cpp))
             != BIOSEQ_LINKED_CLANG_CPP_SHA256
-        || sha256_hex(read_file(linked_llvm))
+        || bioseq::common::sha256_hex(read_artifact_bytes(linked_llvm))
             != BIOSEQ_LINKED_LLVM_LIBRARY_SHA256) {
         throw std::runtime_error(
             "linked Clang/LLVM libraries no longer match their "
@@ -8054,7 +8156,7 @@ void atomic_write_owned_file(
     if (!require_absent
         && owned_regular_file_exists(
             canonical_root, target, role)
-        && read_file(target) == document) {
+        && read_artifact_bytes(target) == document) {
         return;
     }
     const std::filesystem::path staged =
@@ -8100,7 +8202,7 @@ derive_active_import_artifact_paths(
         base_arguments, relocation, clang_binary_sha256);
     const std::string basename =
         safe_module_filename(module_name) + "-"
-        + sha256_hex(key_material).substr(0, 20);
+        + bioseq::common::sha256_hex(key_material).substr(0, 20);
     return {
         .database =
             scan_root / (basename + ".compile_commands.json"),
@@ -8148,7 +8250,7 @@ derive_active_import_artifact_paths(
     std::string_view relocatable_predependency_material) {
     return dependency_root
         / (safe_module_filename(module_name) + "-"
-           + sha256_hex(relocatable_predependency_material).substr(
+           + bioseq::common::sha256_hex(relocatable_predependency_material).substr(
                0, 20)
            + ".d");
 }
@@ -8426,7 +8528,7 @@ void replace_relocatable_root(
 [[nodiscard]] std::string relocatable_document_hash(
     std::string_view document,
     const relocation_context& relocation) {
-    return sha256_hex(relocatable_text(document, relocation));
+    return bioseq::common::sha256_hex(relocatable_text(document, relocation));
 }
 
 inline constexpr std::string_view
@@ -8470,7 +8572,7 @@ inline constexpr std::string_view
     const std::vector<std::string>& arguments,
     const relocation_context& relocation,
     std::string_view clang_binary_sha256) {
-    return sha256_hex(relocatable_argument_material(
+    return bioseq::common::sha256_hex(relocatable_argument_material(
         arguments, relocation, clang_binary_sha256));
 }
 
@@ -8507,10 +8609,10 @@ relocatable_compiler_document_hash(
     }
     if (replacement_count == 0) {
         throw std::runtime_error(
-            "relocatable Clang document has no selected compiler "
+            "relocatable Clang metadata has no selected compiler "
             "invocation");
     }
-    return sha256_hex(
+    return bioseq::common::sha256_hex(
         "bioseq_clang_relocatable_compiler_document/v3\n"
         + relocatable_compiler_identity(clang_binary_sha256)
         + projection);
@@ -8527,7 +8629,7 @@ load_compiler_module_inventory(
     }
     const std::filesystem::path metadata_path =
         weakly_canonical_path(configured_metadata_path);
-    const std::string document = read_file(metadata_path);
+    const std::string document = read_artifact_bytes(metadata_path);
     llvm::Expected<llvm::json::Value> parsed =
         llvm::json::parse(document);
     if (!parsed) {
@@ -8545,7 +8647,7 @@ load_compiler_module_inventory(
     }
     compiler_module_inventory result{
         .metadata_path = weakly_canonical_path(metadata_path),
-        .metadata_sha256 = sha256_hex(document),
+        .metadata_sha256 = bioseq::common::sha256_hex(document),
     };
     for (const llvm::json::Value& entry_value : *modules) {
         const llvm::json::Object* entry =
@@ -8598,7 +8700,7 @@ load_compiler_module_inventory(
     std::string_view provided_module,
     const std::filesystem::path& source_path,
     const std::filesystem::path& command_directory) {
-    const std::string document = read_file(result_path);
+    const std::string document = read_artifact_bytes(result_path);
     llvm::Expected<llvm::json::Value> parsed =
         llvm::json::parse(document);
     if (!parsed) {
@@ -8703,7 +8805,7 @@ void scan_active_module_imports(
     const std::string& clang_scan_deps_sha256,
     const std::filesystem::path& scan_root,
     const relocation_context& relocation,
-    std::vector<preparation_action_record>& observed_actions) {
+    std::vector<frontend_action_record>& observed_actions) {
     const active_import_artifact_paths artifacts =
         derive_active_import_artifact_paths(
             scan_root,
@@ -8757,7 +8859,7 @@ void scan_active_module_imports(
         database_document,
         "P1689 scan database");
     record.dependency_scan_database_sha256 =
-        sha256_hex(database_document);
+        bioseq::common::sha256_hex(database_document);
     record.relocatable_dependency_scan_database_sha256 =
         relocatable_compiler_document_hash(
             database_document,
@@ -8802,28 +8904,27 @@ void scan_active_module_imports(
         "P1689 diagnostics");
     diagnostics_cleanup.release();
     const std::string diagnostics =
-        read_file(artifacts.diagnostics);
+        read_artifact_bytes(artifacts.diagnostics);
     record.dependency_scan_diagnostics_sha256 =
-        sha256_hex(diagnostics);
+        bioseq::common::sha256_hex(diagnostics);
     record.relocatable_dependency_scan_diagnostics_sha256 =
         relocatable_document_hash(
             diagnostics, relocation);
     record.dependency_scan_result_sha256 =
-        sha256_hex(read_file(artifacts.result));
+        bioseq::common::sha256_hex(read_artifact_bytes(artifacts.result));
     record.relocatable_dependency_scan_result_sha256 =
         relocatable_document_hash(
-            read_file(artifacts.result), relocation);
+            read_artifact_bytes(artifacts.result), relocation);
     record.description.imports = parse_p1689_imports(
         artifacts.result,
         record.module_name,
         record.source_path,
         record.command.Directory);
-    observed_actions.push_back(preparation_action_record{
-        .kind = preparation_action_kind::p1689_dependency_discovery,
-        .input_class =
-            preparation_input_class::prepared_dependency,
-        .disposition =
-            preparation_action_disposition::executed,
+    observed_actions.push_back(frontend_action_record{
+        .kind = frontend_action_kind::p1689_dependency_discovery,
+        .input_role =
+            compilation_input_role::dependency_provider,
+        .outcome = frontend_action_outcome::executed,
         .module_name = record.module_name,
         .source_sha256 = record.source_sha256,
     });
@@ -8882,11 +8983,11 @@ void scan_make_dependencies(module_build_record& record) {
         record.depfile_path,
         *make_output,
         "linked-Clang make dependency output");
-    // `write_if_different` intentionally preserves mtimes. A dependency-only
+    // Atomic owned-file publication intentionally preserves mtimes. A dependency-only
     // miss caused by a newer input must nevertheless become a validated warm
     // cache hit after this successful scan, even when the dependency bytes are
     // unchanged.
-    touch_stamp(record.depfile_path);
+    mark_artifact_complete(record.depfile_path);
     record.discovered_dependencies = parse_make_depfile(
         record.depfile_path,
         record.command.Directory);
@@ -9007,14 +9108,14 @@ load_compile_database(const std::filesystem::path& path) {
     std::set<std::pair<std::string, std::string>> associations;
     for (const declaration_record& source_declaration :
          syntax.declarations) {
-        if (source_declaration.provenance_coordinate.empty()) continue;
+        if (source_declaration.source_coordinate.empty()) continue;
         const auto association = std::pair{
-            source_declaration.provenance_id,
-            source_declaration.provenance_coordinate};
+            source_declaration.source_identity,
+            source_declaration.source_coordinate};
         if (!associations.insert(association).second) {
             throw std::runtime_error(
                 syntax.source_path.string()
-                + ": declaration probe duplicates provenance/coordinate association");
+                + ": declaration probe duplicates a source identity/coordinate");
         }
         std::vector<declaration_record*> matches;
         for (declaration_record& semantic : semantics.declarations) {
@@ -9030,7 +9131,7 @@ load_compile_database(const std::filesystem::path& path) {
             || matches.front()->name != source_declaration.name) {
             throw std::runtime_error(
                 syntax.source_path.string()
-                + ": declaration probe provenance cannot be associated by declaration identity");
+                + ": declaration probe source identity cannot be associated with a declaration");
         }
         declaration_record merged = *matches.front();
         if (merged.stable_usr.empty()) {
@@ -9038,18 +9139,18 @@ load_compile_database(const std::filesystem::path& path) {
                 syntax.source_path.string()
                 + ": declaration probe declaration has no stable Clang USR");
         }
-        merged.provenance_id = source_declaration.provenance_id;
-        merged.provenance_coordinate =
-            source_declaration.provenance_coordinate;
-        merged.immediate_namespace_provenance_id =
-            source_declaration.immediate_namespace_provenance_id;
+        merged.source_identity = source_declaration.source_identity;
+        merged.source_coordinate =
+            source_declaration.source_coordinate;
+        merged.immediate_namespace_source_identity =
+            source_declaration.immediate_namespace_source_identity;
         merged.explicit_declared_type =
             source_declaration.explicit_declared_type.empty()
             ? merged.explicit_declared_type
             : source_declaration.explicit_declared_type;
-        merged.referenced_declaration_provenance_ids =
+        merged.referenced_declaration_source_identities =
             source_declaration
-                .referenced_declaration_provenance_ids;
+                .referenced_declaration_source_identities;
         merged.declaration_range =
             source_declaration.declaration_range;
         merged.declaration_head_range =
@@ -9067,7 +9168,7 @@ load_compile_database(const std::filesystem::path& path) {
     if (associated.empty()) {
         throw std::runtime_error(
             syntax.source_path.string()
-            + ": declaration probe contains no provenance-labelled declarations");
+            + ": declaration probe contains no source-identity declarations");
     }
     std::ranges::sort(
         associated,
@@ -9110,7 +9211,7 @@ load_compile_database(const std::filesystem::path& path) {
     const std::filesystem::path& pcm_root) {
     return scan_declaration_probe_from_database(
         probe_source_path,
-        read_file(probe_source_path),
+        read_artifact_bytes(probe_source_path),
         signature_source_path,
         compile_database,
         compiler_profile,
@@ -9354,9 +9455,9 @@ load_compile_database(const std::filesystem::path& path) {
     std::string_view compiler_profile,
     const std::filesystem::path& pcm_root) {
     structural_index result{
-        .clang_version = CLANG_VERSION_STRING,
-        .compilation_signature = sha256_hex(
-            read_file(compile_database)
+        .clang_release = CLANG_VERSION_STRING,
+        .compilation_signature = bioseq::common::sha256_hex(
+            read_artifact_bytes(compile_database)
             + "\n" + std::string{compiler_profile}
             + "\n" + pcm_root.generic_string()
             + "\n" + std::string{CLANG_VERSION_STRING}),
@@ -9393,9 +9494,9 @@ load_compile_database(const std::filesystem::path& path) {
     std::string_view compiler_profile,
     const std::filesystem::path& pcm_root) {
     module_graph result{
-        .clang_version = CLANG_VERSION_STRING,
-        .compilation_signature = sha256_hex(
-            read_file(compile_database)
+        .clang_release = CLANG_VERSION_STRING,
+        .compilation_signature = bioseq::common::sha256_hex(
+            read_artifact_bytes(compile_database)
             + "\n" + std::string{compiler_profile}
             + "\n" + pcm_root.generic_string()
             + "\n" + std::string{CLANG_VERSION_STRING}),
@@ -9428,7 +9529,7 @@ load_compile_database(const std::filesystem::path& path) {
     std::string_view source,
     const std::vector<std::string>& compiler_arguments) {
     module_graph result{
-        .clang_version = CLANG_VERSION_STRING,
+        .clang_release = CLANG_VERSION_STRING,
     };
     const bool success = clang::tooling::runToolOnCodeWithArgs(
         std::make_unique<clang_backend::module_edges_action>(
@@ -9443,7 +9544,7 @@ load_compile_database(const std::filesystem::path& path) {
     return std::move(result.units.front());
 }
 
-[[nodiscard]] std::string clang_api_version() {
+[[nodiscard]] std::string linked_clang_release() {
     return CLANG_VERSION_STRING;
 }
 
@@ -9486,7 +9587,7 @@ inline constexpr std::string_view dependency_authority_suffix{
 
 }  // namespace
 
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& raw_compile_database,
@@ -9525,7 +9626,7 @@ prepare_compilation_environment(
            std::string_view expected,
            std::string_view role) {
             if (expected.size() != 64
-                || sha256_hex(read_file(path)) != expected) {
+                || bioseq::common::sha256_hex(read_artifact_bytes(path)) != expected) {
                 throw std::runtime_error(
                     std::string{role}
                     + " differs from its configure-time SHA-256");
@@ -9579,11 +9680,11 @@ prepare_compilation_environment(
             llvm_config,
             compiler_module_inventory);
     const std::string clang_binary_sha256 =
-        sha256_hex(read_file(clang_binary));
+        bioseq::common::sha256_hex(read_artifact_bytes(clang_binary));
     const std::string& clang_scan_deps_version =
         toolchain.clang_scan_deps_full_version;
     const std::string clang_scan_deps_sha256 =
-        sha256_hex(read_file(clang_scan_deps));
+        bioseq::common::sha256_hex(read_artifact_bytes(clang_scan_deps));
     const std::filesystem::path import_scan_root =
         clang_backend::ensure_owned_directory(
             pcm_root, ".module-dependency-scan");
@@ -9598,7 +9699,7 @@ prepare_compilation_environment(
         clang::tooling::CompileCommand>
         raw_commands;
     // The raw database includes unrelated targets. Preserve ambiguity until
-    // dependency traversal proves that a command belongs to this closure.
+    // Dependency traversal confirms that a command belongs to this closure.
     std::set<std::filesystem::path> ambiguous_raw_commands;
     for (const clang::tooling::CompileCommand& command :
          all_commands) {
@@ -9824,7 +9925,7 @@ prepare_compilation_environment(
         toolchain.linked_clang_cpp,
         toolchain.linked_llvm_library,
     };
-    std::vector<preparation_action_record> observed_actions;
+    std::vector<frontend_action_record> observed_actions;
     const std::string resource_directory_sha256 =
         clang_backend::directory_content_hash(
             toolchain.resource_dir, dependencies);
@@ -9903,10 +10004,10 @@ prepare_compilation_environment(
                         + record.source_path.string());
                 }
                 record.source_sha256 =
-                    sha256_hex(read_file(record.source_path));
+                    bioseq::common::sha256_hex(read_artifact_bytes(record.source_path));
                 record.relocatable_source_sha256 =
                     clang_backend::relocatable_document_hash(
-                        read_file(record.source_path), relocation);
+                        read_artifact_bytes(record.source_path), relocation);
                 const std::size_t dependency_begin =
                     dependencies.size();
                 record.base_arguments =
@@ -9986,7 +10087,7 @@ prepare_compilation_environment(
             argument_material.push_back('\0');
         }
         record.argument_sha256 =
-            sha256_hex(argument_material);
+            bioseq::common::sha256_hex(argument_material);
         record.relocatable_argument_sha256 =
             clang_backend::relocatable_argument_hash(
                 record.base_arguments,
@@ -10114,25 +10215,24 @@ prepare_compilation_environment(
                 relocation,
                 relocatable_dependency_hash_cache);
         record.depfile_sha256 =
-            sha256_hex(read_file(record.depfile_path));
+            bioseq::common::sha256_hex(read_artifact_bytes(record.depfile_path));
         record.relocatable_depfile_sha256 =
             clang_backend::relocatable_document_hash(
-                read_file(record.depfile_path),
+                read_artifact_bytes(record.depfile_path),
                 relocation);
-        observed_actions.push_back(preparation_action_record{
-            .kind = preparation_action_kind::make_dependency_scan,
-            .input_class =
-                preparation_input_class::prepared_dependency,
-            .disposition = dependency_scan_cache_hit
-                ? preparation_action_disposition::validated_cache_hit
-                : preparation_action_disposition::executed,
+        observed_actions.push_back(frontend_action_record{
+            .kind = frontend_action_kind::make_dependency_scan,
+            .input_role = compilation_input_role::dependency_provider,
+            .outcome = dependency_scan_cache_hit
+                ? frontend_action_outcome::validated_cache_hit
+                : frontend_action_outcome::executed,
             .module_name = record.module_name,
             .source_sha256 = record.source_sha256,
         });
-        record.content_key = sha256_hex(
+        record.content_key = bioseq::common::sha256_hex(
             content_material + "\ndependencies="
             + record.dependency_sha256);
-        record.relocatable_content_key = sha256_hex(
+        record.relocatable_content_key = bioseq::common::sha256_hex(
             relocatable_content_material
             + "\ndependencies="
             + record.relocatable_dependency_sha256);
@@ -10181,7 +10281,7 @@ prepare_compilation_environment(
                     + module_name + "'");
             }
             record.pcm_sha256 =
-                sha256_hex(read_file(pcm_artifacts.pcm));
+                bioseq::common::sha256_hex(read_artifact_bytes(pcm_artifacts.pcm));
             const std::string expected_provenance =
                 clang_backend::render_pcm_provenance(
                     record,
@@ -10189,14 +10289,14 @@ prepare_compilation_environment(
                     clang_scan_deps_sha256,
                     record.pcm_sha256);
             const std::string persisted_provenance =
-                read_file(pcm_artifacts.provenance);
+                read_artifact_bytes(pcm_artifacts.provenance);
             if (persisted_provenance != expected_provenance) {
                 throw std::runtime_error(
                     "PREPARE PCM is missing, foreign, or corrupt for module '"
                     + module_name + "'");
             }
             record.pcm_provenance_sha256 =
-                sha256_hex(persisted_provenance);
+                bioseq::common::sha256_hex(persisted_provenance);
             pcm_cache_hit = true;
         }
         if (!pcm_cache_hit) {
@@ -10267,7 +10367,7 @@ prepare_compilation_environment(
                     + ")");
             }
             record.pcm_sha256 =
-                sha256_hex(read_file(pcm_artifacts.pcm));
+                bioseq::common::sha256_hex(read_artifact_bytes(pcm_artifacts.pcm));
             const std::string provenance =
                 clang_backend::render_pcm_provenance(
                     record,
@@ -10292,7 +10392,7 @@ prepare_compilation_environment(
                 "PCM provenance output",
                 true);
             record.pcm_provenance_sha256 =
-                sha256_hex(provenance);
+                bioseq::common::sha256_hex(provenance);
             publication.commit();
         } else {
             clang_backend::remove_owned_leaf_if_present(
@@ -10304,13 +10404,12 @@ prepare_compilation_environment(
                 pcm_artifacts.object,
                 "PCM object output");
         }
-        observed_actions.push_back(preparation_action_record{
-            .kind = preparation_action_kind::pcm_compilation,
-            .input_class =
-                preparation_input_class::prepared_dependency,
-            .disposition = pcm_cache_hit
-                ? preparation_action_disposition::validated_cache_hit
-                : preparation_action_disposition::executed,
+        observed_actions.push_back(frontend_action_record{
+            .kind = frontend_action_kind::pcm_compilation,
+            .input_role = compilation_input_role::dependency_provider,
+            .outcome = pcm_cache_hit
+                ? frontend_action_outcome::validated_cache_hit
+                : frontend_action_outcome::executed,
             .module_name = record.module_name,
             .source_sha256 = record.source_sha256,
         });
@@ -10349,7 +10448,7 @@ prepare_compilation_environment(
     const std::string owned_compile_database =
         compile_database_json.str();
     const std::string owned_compile_database_sha256 =
-        sha256_hex(owned_compile_database);
+        bioseq::common::sha256_hex(owned_compile_database);
     const std::string
         relocatable_owned_compile_database_sha256 =
         clang_backend::relocatable_compiler_document_hash(
@@ -10397,7 +10496,7 @@ prepare_compilation_environment(
         signature_material += row + "\n";
     }
     const std::string compilation_signature =
-        sha256_hex(signature_material);
+        bioseq::common::sha256_hex(signature_material);
     std::vector<std::string> relocatable_signature_rows;
     relocatable_signature_rows.reserve(build_order.size());
     for (const std::string& module_name : build_order) {
@@ -10456,7 +10555,7 @@ prepare_compilation_environment(
         relocatable_signature_material += row + "\n";
     }
     const std::string relocatable_compilation_signature =
-        sha256_hex(relocatable_signature_material);
+        bioseq::common::sha256_hex(relocatable_signature_material);
 
     std::ostringstream manifest;
     manifest
@@ -10578,10 +10677,10 @@ prepare_compilation_environment(
                 << clang_backend::json_escape(
                        input.string())
                 << "\", \"sha256\": \""
-                << sha256_hex(read_file(input))
+                << bioseq::common::sha256_hex(read_artifact_bytes(input))
                 << "\", \"relocatable_sha256\": \""
                 << clang_backend::relocatable_document_hash(
-                    read_file(input), relocation)
+                    read_artifact_bytes(input), relocation)
                 << "\"}";
         }
         manifest
@@ -10695,7 +10794,7 @@ prepare_compilation_environment(
         .relocatable_compile_database_sha256 =
             relocatable_owned_compile_database_sha256,
         .relocatable_pcm_manifest_sha256 =
-            sha256_hex(
+            bioseq::common::sha256_hex(
                 "bioseq_clang_relocatable_pcm_manifest_projection/v2\n"
                 + relocatable_compilation_signature + "\n"
                 + relocatable_owned_compile_database_sha256 + "\n"),
@@ -10714,7 +10813,7 @@ prepare_compilation_environment(
     };
 }
 
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& signature_source_path,
@@ -10909,7 +11008,7 @@ prepare_compilation_environment(
         synthetic_database_document.str(),
         "donor-retarget compile database");
 
-    prepared_compilation_environment prepared =
+    dependency_compilation_environment prepared =
         prepare_compilation_environment(
             normalized_sources,
             synthetic_database,
@@ -11198,12 +11297,12 @@ derive_dependency_compilation_authority(
         }
         canonical_material += "--\n";
     }
-    std::vector<preparation_module_identity>
+    std::vector<dependency_module_identity>
         canonical_source_identities;
     canonical_source_identities.reserve(canonical_inputs.size());
     for (const canonical_input& input : canonical_inputs) {
         canonical_source_identities.push_back(
-            preparation_module_identity{
+            dependency_module_identity{
                 .module_name = input.provided_module,
                 .source_path = input.source,
                 .source_sha256 = input.source_sha256,
@@ -11213,7 +11312,7 @@ derive_dependency_compilation_authority(
         .root_source_paths =
             std::vector<std::filesystem::path>(
                 roots.begin(), roots.end()),
-        .signature_donor = preparation_module_identity{
+        .signature_donor = dependency_module_identity{
             .module_name =
                 signature.source_module.provided_module,
             .source_path = signature_source,
@@ -11222,7 +11321,7 @@ derive_dependency_compilation_authority(
         .canonical_inputs =
             std::move(canonical_source_identities),
         .canonical_token_import_sha256 =
-            sha256_hex(canonical_material),
+            bioseq::common::sha256_hex(canonical_material),
     };
 }
 
@@ -11240,7 +11339,7 @@ derive_dependency_compilation_authority(
         + authority.canonical_token_import_sha256;
 }
 
-void validate_dependency_compilation_authority_seal(
+void validate_dependency_compilation_roots(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database) {
     if (authority.root_source_paths.empty()
@@ -11252,7 +11351,7 @@ void validate_dependency_compilation_authority_seal(
         || authority.canonical_inputs.empty()
         || std::ranges::any_of(
             authority.canonical_inputs,
-            [](const preparation_module_identity& input) {
+            [](const dependency_module_identity& input) {
                 return input.module_name.empty()
                     || !std::filesystem::is_regular_file(
                         input.source_path)
@@ -11291,7 +11390,7 @@ void validate_dependency_compilation_authority_seal(
     }
 }
 
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_dependency_compilation_environment(
     const std::filesystem::path& canonical_source_path,
     const std::filesystem::path& signature_source_path,
@@ -11324,7 +11423,7 @@ prepare_dependency_compilation_environment(
         authority);
 }
 
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_dependency_compilation_environment(
     const std::vector<std::filesystem::path>& canonical_source_paths,
     const std::filesystem::path& signature_source_path,
@@ -11456,7 +11555,7 @@ prepare_dependency_compilation_environment(
         sealed_database_document.str(),
         "dependency-only sealed compile database");
 
-    prepared_compilation_environment prepared =
+    dependency_compilation_environment prepared =
         prepare_compilation_environment(
             dependency_authority.root_source_paths,
             sealed_database,
@@ -11472,39 +11571,37 @@ prepare_dependency_compilation_environment(
             compiler_profile,
             manifest_authority);
     const auto matches_identity =
-        [](const preparation_action_record& action,
-           const preparation_module_identity& identity) {
+        [](const frontend_action_record& action,
+           const dependency_module_identity& identity) {
             return action.module_name == identity.module_name
                 && action.source_sha256 == identity.source_sha256;
         };
-    for (preparation_action_record& action :
+    for (frontend_action_record& action :
          prepared.observed_actions) {
         if (std::ranges::any_of(
                 dependency_authority.canonical_inputs,
-                [&](const preparation_module_identity& canonical) {
+                [&action](const dependency_module_identity& canonical) {
                     return matches_identity(action, canonical);
                 })) {
             throw std::runtime_error(
                 "canonical dependency-only input reached a PREPARE "
                 "semantic frontend action: " + action.module_name);
         }
-        action.input_class = matches_identity(
+        action.input_role = matches_identity(
                 action, dependency_authority.signature_donor)
-            ? preparation_input_class::signature_donor
-            : preparation_input_class::prepared_dependency;
+            ? compilation_input_role::signature_donor
+            : compilation_input_role::dependency_provider;
     }
-    std::vector<preparation_action_record> canonical_actions;
+    std::vector<frontend_action_record> canonical_actions;
     canonical_actions.reserve(
         dependency_authority.canonical_inputs.size()
         + prepared.observed_actions.size());
-    for (const preparation_module_identity& canonical :
+    for (const dependency_module_identity& canonical :
          dependency_authority.canonical_inputs) {
-        canonical_actions.push_back(preparation_action_record{
-            .kind = preparation_action_kind::canonical_token_slice,
-            .input_class =
-                preparation_input_class::canonical_scan_only,
-            .disposition =
-                preparation_action_disposition::executed,
+        canonical_actions.push_back(frontend_action_record{
+            .kind = frontend_action_kind::canonical_token_slice,
+            .input_role = compilation_input_role::canonical_scan_only,
+            .outcome = frontend_action_outcome::executed,
             .module_name = canonical.module_name,
             .source_sha256 = canonical.source_sha256,
         });
@@ -11549,8 +11646,8 @@ prepare_dependency_compilation_environment(
     return prepared;
 }
 
-[[nodiscard]] prepared_compilation_validation
-validate_prepared_compilation_environment(
+[[nodiscard]] dependency_compilation_validation
+validate_dependency_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& compile_database,
     const std::filesystem::path& configured_pcm_root,
@@ -11588,7 +11685,7 @@ validate_prepared_compilation_environment(
         clang_backend::make_relocation_context(
             relocation_root,
             clang_backend::compilation_root(*database));
-    const std::string document = read_file(pcm_manifest);
+    const std::string document = read_artifact_bytes(pcm_manifest);
     llvm::Expected<llvm::json::Value> parsed =
         llvm::json::parse(document);
     if (!parsed) {
@@ -11724,7 +11821,7 @@ validate_prepared_compilation_environment(
            std::string_view expected,
            std::string_view role) {
             if (expected.size() != 64
-                || sha256_hex(read_file(path)) != expected) {
+                || bioseq::common::sha256_hex(read_artifact_bytes(path)) != expected) {
                 throw std::runtime_error(
                     std::string{role}
                     + " differs from its configure-time SHA-256");
@@ -11755,7 +11852,7 @@ validate_prepared_compilation_environment(
     const std::filesystem::path& clang_binary =
         configured_clang_binary;
     const std::string clang_binary_sha256 =
-        sha256_hex(read_file(clang_binary));
+        bioseq::common::sha256_hex(read_artifact_bytes(clang_binary));
     if (clang_binary_sha256
         != required_string(*root, "clang_binary_sha256")) {
         throw std::runtime_error(
@@ -11766,7 +11863,7 @@ validate_prepared_compilation_environment(
     const std::string& clang_scan_deps_version =
         toolchain.clang_scan_deps_full_version;
     const std::string clang_scan_deps_sha256 =
-        sha256_hex(read_file(clang_scan_deps));
+        bioseq::common::sha256_hex(read_artifact_bytes(clang_scan_deps));
     if (clang_scan_deps_version
             != required_string(
                 *root, "clang_scan_deps_version")
@@ -11815,9 +11912,9 @@ validate_prepared_compilation_environment(
             "is stale");
     }
     const std::string compile_database_document =
-        read_file(compile_database);
+        read_artifact_bytes(compile_database);
     const std::string compile_database_sha256 =
-        sha256_hex(compile_database_document);
+        bioseq::common::sha256_hex(compile_database_document);
     const std::string relocatable_compile_database_sha256 =
         clang_backend::relocatable_compiler_document_hash(
             compile_database_document,
@@ -11845,7 +11942,7 @@ validate_prepared_compilation_environment(
             "PREPARE compiler-module inventory seal is incomplete");
     }
     if (!compiler_inventory_path.empty()
-        && sha256_hex(read_file(compiler_inventory_path))
+        && bioseq::common::sha256_hex(read_artifact_bytes(compiler_inventory_path))
             != compiler_inventory_sha256) {
         throw std::runtime_error(
             "selected Clang compiler-module inventory is stale");
@@ -12040,10 +12137,10 @@ validate_prepared_compilation_environment(
                 clang_backend::weakly_canonical_path(
                     required_string(*input, "path"));
             if (!std::filesystem::is_regular_file(path)
-                || sha256_hex(read_file(path))
+                || bioseq::common::sha256_hex(read_artifact_bytes(path))
                     != required_string(*input, "sha256")
                 || clang_backend::relocatable_document_hash(
-                       read_file(path), relocation)
+                       read_artifact_bytes(path), relocation)
                     != required_string(
                         *input, "relocatable_sha256")) {
                 throw std::runtime_error(
@@ -12089,7 +12186,7 @@ validate_prepared_compilation_environment(
                 module.base_arguments.front())
                 != clang_backend::weakly_canonical_path(
                     clang_binary)
-            || sha256_hex(argument_material)
+            || bioseq::common::sha256_hex(argument_material)
                 != module.arguments_sha256
             || clang_backend::relocatable_argument_hash(
                    module.base_arguments,
@@ -12134,10 +12231,10 @@ validate_prepared_compilation_environment(
             clang_backend::weakly_canonical_path(
                 module.pcm_provenance);
         if (!std::filesystem::is_regular_file(module.source)
-            || sha256_hex(read_file(module.source))
+            || bioseq::common::sha256_hex(read_artifact_bytes(module.source))
                 != module.source_sha256
             || clang_backend::relocatable_document_hash(
-                   read_file(module.source),
+                   read_artifact_bytes(module.source),
                    relocation)
                 != module.relocatable_source_sha256) {
             throw std::runtime_error(
@@ -12186,12 +12283,12 @@ validate_prepared_compilation_environment(
                 + module.name + "'");
         }
         const std::string scan_database_document =
-            read_file(module.scan_database);
+            read_artifact_bytes(module.scan_database);
         const std::string scan_result_document =
-            read_file(module.scan_result);
+            read_artifact_bytes(module.scan_result);
         const std::string scan_diagnostics_document =
-            read_file(module.scan_diagnostics);
-        if (sha256_hex(scan_database_document)
+            read_artifact_bytes(module.scan_diagnostics);
+        if (bioseq::common::sha256_hex(scan_database_document)
                 != module.scan_database_sha256
             || clang_backend::
                    relocatable_compiler_document_hash(
@@ -12200,12 +12297,12 @@ validate_prepared_compilation_environment(
                        module.base_arguments.front(),
                        clang_binary_sha256)
                 != module.relocatable_scan_database_sha256
-            || sha256_hex(scan_result_document)
+            || bioseq::common::sha256_hex(scan_result_document)
                 != module.scan_result_sha256
             || clang_backend::relocatable_document_hash(
                    scan_result_document, relocation)
                 != module.relocatable_scan_result_sha256
-            || sha256_hex(scan_diagnostics_document)
+            || bioseq::common::sha256_hex(scan_diagnostics_document)
                 != module.scan_diagnostics_sha256
             || clang_backend::relocatable_document_hash(
                    scan_diagnostics_document, relocation)
@@ -12352,11 +12449,11 @@ validate_prepared_compilation_environment(
                     clang_binary_sha256,
                     clang_scan_deps_sha256,
                     relocatable_import_keys);
-            if (sha256_hex(
+            if (bioseq::common::sha256_hex(
                     physical_material + "\ndependencies="
                     + module.dependency_sha256)
                     != module.content_key
-                || sha256_hex(
+                || bioseq::common::sha256_hex(
                        relocatable_material + "\ndependencies="
                        + module.relocatable_dependency_sha256)
                     != module.relocatable_content_key) {
@@ -12405,7 +12502,7 @@ validate_prepared_compilation_environment(
                 "module '" + name + "'");
         }
         const std::string provenance =
-            read_file(module.pcm_provenance);
+            read_artifact_bytes(module.pcm_provenance);
         const std::string expected_provenance =
             "bioseq_clang_pcm_provenance/v1\n"
             "module=" + module.name + "\n"
@@ -12421,7 +12518,7 @@ validate_prepared_compilation_environment(
             + clang_scan_deps_sha256 + "\n"
             "pcm_sha256=" + module.pcm_sha256 + "\n";
         if (provenance != expected_provenance
-            || sha256_hex(provenance)
+            || bioseq::common::sha256_hex(provenance)
                 != module.pcm_provenance_sha256) {
             throw std::runtime_error(
                 "PREPARE PCM provenance is corrupt or stale for module '"
@@ -12430,10 +12527,10 @@ validate_prepared_compilation_environment(
         if (!clang_backend::path_within_root(
                 module.depfile, pcm_root)
             || !std::filesystem::is_regular_file(module.depfile)
-            || sha256_hex(read_file(module.depfile))
+            || bioseq::common::sha256_hex(read_artifact_bytes(module.depfile))
                 != module.depfile_sha256
             || clang_backend::relocatable_document_hash(
-                   read_file(module.depfile),
+                   read_artifact_bytes(module.depfile),
                    relocation)
                 != module.relocatable_depfile_sha256) {
             throw std::runtime_error(
@@ -12443,7 +12540,7 @@ validate_prepared_compilation_environment(
         if (!clang_backend::path_within_root(
                 module.pcm, pcm_root)
             || !std::filesystem::is_regular_file(module.pcm)
-            || sha256_hex(read_file(module.pcm))
+            || bioseq::common::sha256_hex(read_artifact_bytes(module.pcm))
                 != module.pcm_sha256) {
             throw std::runtime_error(
                 "PREPARE PCM is missing, foreign, or corrupt for module '"
@@ -12711,7 +12808,7 @@ validate_prepared_compilation_environment(
         signature_material += row + "\n";
     }
     const std::string signature =
-        sha256_hex(signature_material);
+        bioseq::common::sha256_hex(signature_material);
     if (signature
         != required_string(*root, "compilation_signature")) {
         throw std::runtime_error(
@@ -12772,7 +12869,7 @@ validate_prepared_compilation_environment(
         relocatable_signature_material += row + "\n";
     }
     const std::string relocatable_signature =
-        sha256_hex(relocatable_signature_material);
+        bioseq::common::sha256_hex(relocatable_signature_material);
     if (
         relocatable_signature
         != required_string(
@@ -12782,17 +12879,17 @@ validate_prepared_compilation_environment(
         throw std::runtime_error(
             "PREPARE relocatable compilation signature is stale");
     }
-    std::vector<preparation_module_identity> module_identities;
+    std::vector<dependency_module_identity> module_identities;
     module_identities.reserve(modules.size());
     for (const auto& [name, module] : modules) {
-        module_identities.push_back(preparation_module_identity{
+        module_identities.push_back(dependency_module_identity{
             .module_name = name,
             .source_path = module.source,
             .source_sha256 = module.source_sha256,
         });
     }
     return {
-        .manifest_sha256 = sha256_hex(document),
+        .manifest_sha256 = bioseq::common::sha256_hex(document),
         .owned_compile_database_sha256 =
             compile_database_sha256,
         .compilation_signature = signature,
@@ -12811,10 +12908,10 @@ validate_prepared_compilation_environment(
 
 namespace {
 
-inline constexpr std::string_view preparation_action_trace_schema{
+inline constexpr std::string_view k_frontend_action_trace_schema{
     "bioseq_clang_preparation_action_trace/v1"};
 
-struct preparation_action_trace_payload {
+struct frontend_action_trace_payload {
     std::string compiler_profile;
     std::string authority;
     std::string canonical_token_import_sha256;
@@ -12824,104 +12921,104 @@ struct preparation_action_trace_payload {
     std::string clang_scan_deps_sha256;
     std::string llvm_config_sha256;
     std::string compiler_module_inventory_sha256;
-    std::vector<preparation_module_identity> canonical_inputs;
-    std::vector<preparation_action_record> actions;
-    preparation_action_summary summary;
+    std::vector<dependency_module_identity> canonical_inputs;
+    std::vector<frontend_action_record> actions;
+    frontend_action_counts counts;
     std::string trace_identity;
 };
 
-[[nodiscard]] constexpr std::string_view preparation_action_kind_spelling(
-    const preparation_action_kind kind) noexcept {
+[[nodiscard]] constexpr std::string_view frontend_action_kind_spelling(
+    const frontend_action_kind kind) noexcept {
     switch (kind) {
-        case preparation_action_kind::canonical_token_slice:
+        case frontend_action_kind::canonical_token_slice:
             return "canonical_token_slice";
-        case preparation_action_kind::p1689_dependency_discovery:
+        case frontend_action_kind::p1689_dependency_discovery:
             return "p1689_dependency_discovery";
-        case preparation_action_kind::make_dependency_scan:
+        case frontend_action_kind::make_dependency_scan:
             return "make_dependency_scan";
-        case preparation_action_kind::pcm_compilation:
+        case frontend_action_kind::pcm_compilation:
             return "pcm_compilation";
     }
     return "unknown";
 }
 
-[[nodiscard]] constexpr std::string_view preparation_input_class_spelling(
-    const preparation_input_class input_class) noexcept {
-    switch (input_class) {
-        case preparation_input_class::canonical_scan_only:
+[[nodiscard]] constexpr std::string_view compilation_input_role_spelling(
+    const compilation_input_role input_role) noexcept {
+    switch (input_role) {
+        case compilation_input_role::canonical_scan_only:
             return "canonical_scan_only";
-        case preparation_input_class::signature_donor:
+        case compilation_input_role::signature_donor:
             return "signature_donor";
-        case preparation_input_class::prepared_dependency:
+        case compilation_input_role::dependency_provider:
             return "prepared_dependency";
     }
     return "unknown";
 }
 
 [[nodiscard]] constexpr std::string_view
-preparation_action_disposition_spelling(
-    const preparation_action_disposition disposition) noexcept {
-    switch (disposition) {
-        case preparation_action_disposition::executed:
+frontend_action_outcome_spelling(
+    const frontend_action_outcome outcome) noexcept {
+    switch (outcome) {
+        case frontend_action_outcome::executed:
             return "executed";
-        case preparation_action_disposition::validated_cache_hit:
+        case frontend_action_outcome::validated_cache_hit:
             return "validated_cache_hit";
     }
     return "unknown";
 }
 
-[[nodiscard]] preparation_action_kind parse_preparation_action_kind(
+[[nodiscard]] frontend_action_kind parse_frontend_action_kind(
     const std::string_view value) {
     if (value == "canonical_token_slice") {
-        return preparation_action_kind::canonical_token_slice;
+        return frontend_action_kind::canonical_token_slice;
     }
     if (value == "p1689_dependency_discovery") {
-        return preparation_action_kind::p1689_dependency_discovery;
+        return frontend_action_kind::p1689_dependency_discovery;
     }
     if (value == "make_dependency_scan") {
-        return preparation_action_kind::make_dependency_scan;
+        return frontend_action_kind::make_dependency_scan;
     }
     if (value == "pcm_compilation") {
-        return preparation_action_kind::pcm_compilation;
+        return frontend_action_kind::pcm_compilation;
     }
     throw std::runtime_error(
         "PREPARE action trace contains an unknown action kind");
 }
 
-[[nodiscard]] preparation_input_class parse_preparation_input_class(
+[[nodiscard]] compilation_input_role parse_compilation_input_role(
     const std::string_view value) {
     if (value == "canonical_scan_only") {
-        return preparation_input_class::canonical_scan_only;
+        return compilation_input_role::canonical_scan_only;
     }
     if (value == "signature_donor") {
-        return preparation_input_class::signature_donor;
+        return compilation_input_role::signature_donor;
     }
     if (value == "prepared_dependency") {
-        return preparation_input_class::prepared_dependency;
+        return compilation_input_role::dependency_provider;
     }
     throw std::runtime_error(
         "PREPARE action trace contains an unknown input class");
 }
 
-[[nodiscard]] preparation_action_disposition
-parse_preparation_action_disposition(const std::string_view value) {
+[[nodiscard]] frontend_action_outcome parse_frontend_action_outcome(
+    const std::string_view value) {
     if (value == "executed") {
-        return preparation_action_disposition::executed;
+        return frontend_action_outcome::executed;
     }
     if (value == "validated_cache_hit") {
-        return preparation_action_disposition::validated_cache_hit;
+        return frontend_action_outcome::validated_cache_hit;
     }
     throw std::runtime_error(
         "PREPARE action trace contains an unknown disposition");
 }
 
-[[nodiscard]] std::string render_preparation_action_trace_payload(
-    const preparation_action_trace_payload& payload,
+[[nodiscard]] std::string render_frontend_action_trace_payload(
+    const frontend_action_trace_payload& payload,
     const std::string_view trace_identity) {
     std::ostringstream output;
     output
         << "{\n  \"schema\": \""
-        << preparation_action_trace_schema
+        << k_frontend_action_trace_schema
         << "\",\n  \"compiler_profile\": \""
         << clang_backend::json_escape(payload.compiler_profile)
         << "\",\n  \"authority\": \""
@@ -12945,7 +13042,7 @@ parse_preparation_action_disposition(const std::string_view value) {
     for (std::size_t index = 0;
          index < payload.canonical_inputs.size();
          ++index) {
-        const preparation_module_identity& input =
+        const dependency_module_identity& input =
             payload.canonical_inputs[index];
         output << (index == 0u ? "\n" : ",\n")
             << "    {\"module\":\""
@@ -12958,46 +13055,44 @@ parse_preparation_action_disposition(const std::string_view value) {
     for (std::size_t index = 0;
          index < payload.actions.size();
          ++index) {
-        const preparation_action_record& action =
+        const frontend_action_record& action =
             payload.actions[index];
         output << (index == 0u ? "\n" : ",\n")
             << "    {\"ordinal\":" << index
             << ",\"kind\":\""
-            << preparation_action_kind_spelling(action.kind)
+            << frontend_action_kind_spelling(action.kind)
             << "\",\"input_class\":\""
-            << preparation_input_class_spelling(
-                   action.input_class)
+            << compilation_input_role_spelling(action.input_role)
             << "\",\"module\":\""
             << clang_backend::json_escape(action.module_name)
             << "\",\"source_sha256\":\""
             << action.source_sha256
             << "\",\"disposition\":\""
-            << preparation_action_disposition_spelling(
-                   action.disposition)
+            << frontend_action_outcome_spelling(action.outcome)
             << "\"}";
     }
     output << (payload.actions.empty() ? "" : "\n  ")
            << "],\n  \"summary\": {"
            << "\"canonical_token_slice_actions\":"
-           << payload.summary.canonical_token_slice_actions
+           << payload.counts.canonical_token_slice_actions
            << ",\"canonical_semantic_frontend_actions\":"
-           << payload.summary.canonical_semantic_frontend_actions
+           << payload.counts.canonical_semantic_frontend_actions
            << "},\n  \"trace_identity\": \""
            << trace_identity << "\"\n}\n";
     return output.str();
 }
 
-[[nodiscard]] std::string preparation_action_trace_identity(
-    const preparation_action_trace_payload& payload) {
-    return sha256_hex(
+[[nodiscard]] std::string frontend_action_trace_identity(
+    const frontend_action_trace_payload& payload) {
+    return bioseq::common::sha256_hex(
         "bioseq_clang_preparation_action_trace_identity/v1\n"
-        + render_preparation_action_trace_payload(payload, ""));
+        + render_frontend_action_trace_payload(payload, ""));
 }
 
-[[nodiscard]] preparation_action_trace_payload
-parse_preparation_action_trace_document(const std::string_view document) {
+[[nodiscard]] frontend_action_trace_payload
+parse_frontend_action_trace(const std::string_view serialized_trace) {
     llvm::Expected<llvm::json::Value> parsed =
-        llvm::json::parse(document);
+        llvm::json::parse(serialized_trace);
     if (!parsed) {
         throw std::runtime_error(
             "cannot parse PREPARE action trace: "
@@ -13055,11 +13150,11 @@ parse_preparation_action_trace_document(const std::string_view document) {
         },
         "root");
     if (required_string(*root, "schema")
-        != preparation_action_trace_schema) {
+        != k_frontend_action_trace_schema) {
         throw std::runtime_error(
             "PREPARE action trace schema is unsupported");
     }
-    preparation_action_trace_payload payload{
+    frontend_action_trace_payload payload{
         .compiler_profile =
             required_string(*root, "compiler_profile"),
         .authority = required_string(*root, "authority"),
@@ -13112,7 +13207,7 @@ parse_preparation_action_trace_document(const std::string_view document) {
             *input, {"module", "source_sha256"},
             "canonical input");
         payload.canonical_inputs.push_back(
-            preparation_module_identity{
+            dependency_module_identity{
                 .module_name = required_string(*input, "module"),
                 .source_sha256 =
                     required_string(*input, "source_sha256"),
@@ -13149,12 +13244,12 @@ parse_preparation_action_trace_document(const std::string_view document) {
             throw std::runtime_error(
                 "PREPARE action trace ordinals are not canonical");
         }
-        payload.actions.push_back(preparation_action_record{
-            .kind = parse_preparation_action_kind(
+        payload.actions.push_back(frontend_action_record{
+            .kind = parse_frontend_action_kind(
                 required_string(*action, "kind")),
-            .input_class = parse_preparation_input_class(
+            .input_role = parse_compilation_input_role(
                 required_string(*action, "input_class")),
-            .disposition = parse_preparation_action_disposition(
+            .outcome = parse_frontend_action_outcome(
                 required_string(*action, "disposition")),
             .module_name = required_string(*action, "module"),
             .source_sha256 =
@@ -13188,20 +13283,20 @@ parse_preparation_action_trace_document(const std::string_view document) {
             }
             return static_cast<std::uint32_t>(*value);
         };
-    payload.summary = preparation_action_summary{
+    payload.counts = frontend_action_counts{
         .canonical_token_slice_actions = required_count(
             *summary, "canonical_token_slice_actions"),
         .canonical_semantic_frontend_actions = required_count(
             *summary, "canonical_semantic_frontend_actions"),
     };
     const std::string expected_identity =
-        preparation_action_trace_identity(payload);
+        frontend_action_trace_identity(payload);
     if (!lowercase_sha256(payload.trace_identity)
         || payload.trace_identity != expected_identity) {
         throw std::runtime_error(
             "PREPARE action trace self-seal is invalid");
     }
-    if (document != render_preparation_action_trace_payload(
+    if (serialized_trace != render_frontend_action_trace_payload(
             payload, expected_identity)) {
         throw std::runtime_error(
             "PREPARE action trace is not in canonical encoding");
@@ -13210,89 +13305,89 @@ parse_preparation_action_trace_document(const std::string_view document) {
 }
 
 [[nodiscard]] std::pair<std::string, std::string>
-preparation_identity_key(
-    const preparation_module_identity& identity) {
+frontend_identity_key(
+    const dependency_module_identity& identity) {
     return {identity.module_name, identity.source_sha256};
 }
 
 [[nodiscard]] std::pair<std::string, std::string>
-preparation_identity_key(const preparation_action_record& action) {
+frontend_identity_key(const frontend_action_record& action) {
     return {action.module_name, action.source_sha256};
 }
 
 }  // namespace
 
-[[nodiscard]] std::string render_preparation_action_trace(
-    const prepared_compilation_environment& prepared) {
-    preparation_action_trace_payload payload{
-        .compiler_profile = prepared.compiler_profile,
-        .authority = prepared.authority,
+[[nodiscard]] std::string render_frontend_action_trace(
+    const dependency_compilation_environment& environment) {
+    frontend_action_trace_payload payload{
+        .compiler_profile = environment.compiler_profile,
+        .authority = environment.authority,
         .canonical_token_import_sha256 =
-            prepared.canonical_token_import_sha256,
+            environment.canonical_token_import_sha256,
         .owned_compile_database_sha256 =
-            sha256_hex(prepared.compile_database_json),
+            bioseq::common::sha256_hex(environment.compile_database_json),
         .pcm_manifest_sha256 =
-            sha256_hex(prepared.pcm_manifest_json),
-        .clang_binary_sha256 = prepared.clang_binary_sha256,
+            bioseq::common::sha256_hex(environment.pcm_manifest_json),
+        .clang_binary_sha256 = environment.clang_binary_sha256,
         .clang_scan_deps_sha256 =
-            prepared.clang_scan_deps_sha256,
-        .llvm_config_sha256 = prepared.llvm_config_sha256,
+            environment.clang_scan_deps_sha256,
+        .llvm_config_sha256 = environment.llvm_config_sha256,
         .compiler_module_inventory_sha256 =
-            prepared.compiler_module_inventory_sha256,
-        .actions = prepared.observed_actions,
+            environment.compiler_module_inventory_sha256,
+        .actions = environment.observed_actions,
     };
-    for (const preparation_action_record& action :
+    for (const frontend_action_record& action :
          payload.actions) {
         if (action.kind
-            == preparation_action_kind::canonical_token_slice) {
+            == frontend_action_kind::canonical_token_slice) {
             payload.canonical_inputs.push_back(
-                preparation_module_identity{
+                dependency_module_identity{
                     .module_name = action.module_name,
                     .source_sha256 = action.source_sha256,
                 });
-            ++payload.summary.canonical_token_slice_actions;
-        } else if (action.input_class
-                   == preparation_input_class::canonical_scan_only) {
-            ++payload.summary.canonical_semantic_frontend_actions;
+            ++payload.counts.canonical_token_slice_actions;
+        } else if (action.input_role
+                   == compilation_input_role::canonical_scan_only) {
+            ++payload.counts.canonical_semantic_frontend_actions;
         }
     }
     std::ranges::sort(
         payload.canonical_inputs,
-        [](const preparation_module_identity& left,
-           const preparation_module_identity& right) {
-            return preparation_identity_key(left)
-                < preparation_identity_key(right);
+        [](const dependency_module_identity& left,
+           const dependency_module_identity& right) {
+            return frontend_identity_key(left)
+                < frontend_identity_key(right);
         });
     payload.trace_identity =
-        preparation_action_trace_identity(payload);
-    return render_preparation_action_trace_payload(
+        frontend_action_trace_identity(payload);
+    return render_frontend_action_trace_payload(
         payload, payload.trace_identity);
 }
 
-[[nodiscard]] preparation_action_trace_validation
-validate_preparation_action_trace(
+[[nodiscard]] frontend_trace_validation
+validate_frontend_action_trace(
     const std::filesystem::path& action_trace,
     const dependency_compilation_authority& dependency_authority,
-    const prepared_compilation_validation& prepared) {
-    const preparation_action_trace_payload payload =
-        parse_preparation_action_trace_document(
-            read_file(action_trace));
-    if (payload.compiler_profile != prepared.compiler_profile
-        || payload.authority != prepared.authority
+    const dependency_compilation_validation& environment) {
+    const frontend_action_trace_payload payload =
+        parse_frontend_action_trace(
+            read_artifact_bytes(action_trace));
+    if (payload.compiler_profile != environment.compiler_profile
+        || payload.authority != environment.authority
         || payload.canonical_token_import_sha256
             != dependency_authority.canonical_token_import_sha256
         || payload.owned_compile_database_sha256
-            != prepared.owned_compile_database_sha256
+            != environment.owned_compile_database_sha256
         || payload.pcm_manifest_sha256
-            != prepared.manifest_sha256
+            != environment.manifest_sha256
         || payload.clang_binary_sha256
-            != prepared.clang_binary_sha256
+            != environment.clang_binary_sha256
         || payload.clang_scan_deps_sha256
-            != prepared.clang_scan_deps_sha256
+            != environment.clang_scan_deps_sha256
         || payload.llvm_config_sha256
-            != prepared.llvm_config_sha256
+            != environment.llvm_config_sha256
         || payload.compiler_module_inventory_sha256
-            != prepared.compiler_module_inventory_sha256) {
+            != environment.compiler_module_inventory_sha256) {
         throw std::runtime_error(
             "PREPARE action trace metadata differs from the validated "
             "compile database, PCM manifest, or toolchain");
@@ -13302,18 +13397,18 @@ validate_preparation_action_trace(
     std::vector<identity_key> expected_canonical;
     expected_canonical.reserve(
         dependency_authority.canonical_inputs.size());
-    for (const preparation_module_identity& identity :
+    for (const dependency_module_identity& identity :
          dependency_authority.canonical_inputs) {
         expected_canonical.push_back(
-            preparation_identity_key(identity));
+            frontend_identity_key(identity));
     }
     std::ranges::sort(expected_canonical);
     std::vector<identity_key> traced_canonical;
     traced_canonical.reserve(payload.canonical_inputs.size());
-    for (const preparation_module_identity& identity :
+    for (const dependency_module_identity& identity :
          payload.canonical_inputs) {
         traced_canonical.push_back(
-            preparation_identity_key(identity));
+            frontend_identity_key(identity));
     }
     if (!std::ranges::is_sorted(traced_canonical)
         || std::ranges::adjacent_find(traced_canonical)
@@ -13327,15 +13422,15 @@ validate_preparation_action_trace(
     std::set<identity_key> canonical_keys{
         expected_canonical.begin(), expected_canonical.end()};
     std::set<identity_key> prepared_keys;
-    for (const preparation_module_identity& identity :
-         prepared.modules) {
+    for (const dependency_module_identity& identity :
+         environment.modules) {
         if (!prepared_keys.insert(
-                preparation_identity_key(identity)).second) {
+                frontend_identity_key(identity)).second) {
             throw std::runtime_error(
                 "validated PREPARE module identities are not unique");
         }
     }
-    const identity_key donor_key = preparation_identity_key(
+    const identity_key donor_key = frontend_identity_key(
         dependency_authority.signature_donor);
     if (!prepared_keys.contains(donor_key)
         || std::ranges::any_of(
@@ -13350,24 +13445,23 @@ validate_preparation_action_trace(
 
     std::set<identity_key> observed_canonical_tokens;
     std::set<std::tuple<
-        preparation_action_kind,
+        frontend_action_kind,
         std::string,
         std::string>> observed_semantic_actions;
-    preparation_action_summary recomputed;
-    for (const preparation_action_record& action : payload.actions) {
-        const identity_key key = preparation_identity_key(action);
+    frontend_action_counts recomputed;
+    for (const frontend_action_record& action : payload.actions) {
+        const identity_key key = frontend_identity_key(action);
         if (action.module_name.empty()
             || !lowercase_sha256(action.source_sha256)) {
             throw std::runtime_error(
                 "PREPARE action trace contains an invalid source identity");
         }
         if (action.kind
-            == preparation_action_kind::canonical_token_slice) {
+            == frontend_action_kind::canonical_token_slice) {
             ++recomputed.canonical_token_slice_actions;
-            if (action.input_class
-                    != preparation_input_class::canonical_scan_only
-                || action.disposition
-                    != preparation_action_disposition::executed
+            if (action.input_role
+                    != compilation_input_role::canonical_scan_only
+                || action.outcome != frontend_action_outcome::executed
                 || !canonical_keys.contains(key)
                 || !observed_canonical_tokens.insert(key).second) {
                 throw std::runtime_error(
@@ -13379,7 +13473,7 @@ validate_preparation_action_trace(
         if (canonical_keys.contains(key)) {
             ++recomputed.canonical_semantic_frontend_actions;
             throw std::runtime_error(
-                "PREPARE action trace proves a canonical input reached "
+                "PREPARE action trace reports a canonical input reached "
                 "a semantic frontend action");
         }
         if (!prepared_keys.contains(key)) {
@@ -13387,17 +13481,16 @@ validate_preparation_action_trace(
                 "PREPARE semantic action has no authenticated PCM "
                 "manifest identity");
         }
-        const preparation_input_class expected_class = key == donor_key
-            ? preparation_input_class::signature_donor
-            : preparation_input_class::prepared_dependency;
-        if (action.input_class != expected_class) {
+        const compilation_input_role expected_role = key == donor_key
+            ? compilation_input_role::signature_donor
+            : compilation_input_role::dependency_provider;
+        if (action.input_role != expected_role) {
             throw std::runtime_error(
                 "PREPARE semantic action input classification is stale");
         }
         if (action.kind
-                == preparation_action_kind::p1689_dependency_discovery
-            && action.disposition
-                != preparation_action_disposition::executed) {
+                == frontend_action_kind::p1689_dependency_discovery
+            && action.outcome != frontend_action_outcome::executed) {
             throw std::runtime_error(
                 "PREPARE P1689 discovery cannot claim a cache hit");
         }
@@ -13414,10 +13507,10 @@ validate_preparation_action_trace(
             "PREPARE action trace omits a canonical token-slice action");
     }
     for (const identity_key& key : prepared_keys) {
-        for (const preparation_action_kind kind : {
-                 preparation_action_kind::p1689_dependency_discovery,
-                 preparation_action_kind::make_dependency_scan,
-                 preparation_action_kind::pcm_compilation,
+        for (const frontend_action_kind kind : {
+                 frontend_action_kind::p1689_dependency_discovery,
+                 frontend_action_kind::make_dependency_scan,
+                 frontend_action_kind::pcm_compilation,
              }) {
             if (!observed_semantic_actions.contains(
                     {kind, key.first, key.second})) {
@@ -13427,18 +13520,18 @@ validate_preparation_action_trace(
             }
         }
     }
-    if (payload.summary.canonical_token_slice_actions
+    if (payload.counts.canonical_token_slice_actions
             != recomputed.canonical_token_slice_actions
-        || payload.summary.canonical_semantic_frontend_actions
+        || payload.counts.canonical_semantic_frontend_actions
             != recomputed.canonical_semantic_frontend_actions
         || recomputed.canonical_semantic_frontend_actions != 0u) {
         throw std::runtime_error(
             "PREPARE action trace summary differs from observed actions");
     }
-    return preparation_action_trace_validation{
+    return frontend_trace_validation{
         .trace_identity = payload.trace_identity,
-        .summary = recomputed,
+        .counts = recomputed,
     };
 }
 
-}  // namespace bioseq::codegen::clang_structural
+}  // namespace bioseq::codegen::structural_analysis

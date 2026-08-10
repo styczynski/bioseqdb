@@ -16,7 +16,7 @@ module;
 
 export module bioseq.test.postgres:row_hash;
 
-import bioseq.libpq.client;
+import bioseq.common.libpq;
 
 export namespace bioseq::postgres_test {
 
@@ -25,13 +25,14 @@ struct sha256_digest {
     std::array<std::uint8_t, 32> bytes{};
 
     /// @brief Returns the 64-character lowercase hexadecimal representation.
-    [[nodiscard]] std::string hex() const {
-        constexpr std::string_view digits{"0123456789abcdef"};
+    [[nodiscard]] std::string render_hex() const {
+        constexpr std::string_view k_digits{"0123456789abcdef"};
         std::string rendered;
         rendered.resize(bytes.size() * 2);
         for (std::size_t index = 0; index < bytes.size(); ++index) {
-            rendered[index * 2] = digits[bytes[index] >> 4U];
-            rendered[index * 2 + 1] = digits[bytes[index] & 0x0fU];
+            rendered[index * 2] = k_digits[bytes[index] >> 4U];
+            rendered[index * 2 + 1] =
+                k_digits[bytes[index] & 0x0fU];
         }
         return rendered;
     }
@@ -116,7 +117,7 @@ public:
     }
 
 private:
-    static constexpr std::array<std::uint32_t, 64> round_constants_{
+    static constexpr std::array<std::uint32_t, 64> k_round_constants{
         0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
         0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
         0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
@@ -145,53 +146,63 @@ private:
                 | static_cast<std::uint32_t>(block[index * 4 + 3]);
         }
         for (std::size_t index = 16; index < words.size(); ++index) {
-            const std::uint32_t s0 =
+            const std::uint32_t schedule_sigma_zero =
                 std::rotr(words[index - 15], 7)
                 ^ std::rotr(words[index - 15], 18)
                 ^ (words[index - 15] >> 3U);
-            const std::uint32_t s1 =
+            const std::uint32_t schedule_sigma_one =
                 std::rotr(words[index - 2], 17)
                 ^ std::rotr(words[index - 2], 19)
                 ^ (words[index - 2] >> 10U);
-            words[index] = words[index - 16] + s0
-                + words[index - 7] + s1;
+            words[index] = words[index - 16] + schedule_sigma_zero
+                + words[index - 7] + schedule_sigma_one;
         }
 
-        std::uint32_t a = state_[0];
-        std::uint32_t b = state_[1];
-        std::uint32_t c = state_[2];
-        std::uint32_t d = state_[3];
-        std::uint32_t e = state_[4];
-        std::uint32_t f = state_[5];
-        std::uint32_t g = state_[6];
-        std::uint32_t h = state_[7];
+        std::uint32_t working_a = state_[0];
+        std::uint32_t working_b = state_[1];
+        std::uint32_t working_c = state_[2];
+        std::uint32_t working_d = state_[3];
+        std::uint32_t working_e = state_[4];
+        std::uint32_t working_f = state_[5];
+        std::uint32_t working_g = state_[6];
+        std::uint32_t working_h = state_[7];
         for (std::size_t index = 0; index < words.size(); ++index) {
-            const std::uint32_t sum1 =
-                std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25);
-            const std::uint32_t choice = (e & f) ^ (~e & g);
-            const std::uint32_t temp1 =
-                h + sum1 + choice + round_constants_[index] + words[index];
-            const std::uint32_t sum0 =
-                std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
-            const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-            const std::uint32_t temp2 = sum0 + majority;
-            h = g;
-            g = f;
-            f = e;
-            e = d + temp1;
-            d = c;
-            c = b;
-            b = a;
-            a = temp1 + temp2;
+            const std::uint32_t round_sigma_one =
+                std::rotr(working_e, 6)
+                ^ std::rotr(working_e, 11)
+                ^ std::rotr(working_e, 25);
+            const std::uint32_t choice =
+                (working_e & working_f) ^ (~working_e & working_g);
+            const std::uint32_t first_temporary_word =
+                working_h + round_sigma_one + choice
+                + k_round_constants[index] + words[index];
+            const std::uint32_t round_sigma_zero =
+                std::rotr(working_a, 2)
+                ^ std::rotr(working_a, 13)
+                ^ std::rotr(working_a, 22);
+            const std::uint32_t majority =
+                (working_a & working_b)
+                ^ (working_a & working_c)
+                ^ (working_b & working_c);
+            const std::uint32_t second_temporary_word =
+                round_sigma_zero + majority;
+            working_h = working_g;
+            working_g = working_f;
+            working_f = working_e;
+            working_e = working_d + first_temporary_word;
+            working_d = working_c;
+            working_c = working_b;
+            working_b = working_a;
+            working_a = first_temporary_word + second_temporary_word;
         }
-        state_[0] += a;
-        state_[1] += b;
-        state_[2] += c;
-        state_[3] += d;
-        state_[4] += e;
-        state_[5] += f;
-        state_[6] += g;
-        state_[7] += h;
+        state_[0] += working_a;
+        state_[1] += working_b;
+        state_[2] += working_c;
+        state_[3] += working_d;
+        state_[4] += working_e;
+        state_[5] += working_f;
+        state_[6] += working_g;
+        state_[7] += working_h;
     }
 
     std::array<std::uint32_t, 8> state_{
@@ -205,14 +216,14 @@ private:
 };
 
 /// @brief Hashes an in-memory byte string with SHA-256.
-[[nodiscard]] inline sha256_digest sha256(std::string_view bytes) {
+[[nodiscard]] inline sha256_digest hash_sha256_bytes(std::string_view bytes) {
     sha256_hasher hasher;
     hasher.update(bytes);
     return hasher.finalize();
 }
 
 /// @brief Hashes a regular file without loading it wholly into memory.
-[[nodiscard]] inline sha256_digest sha256_file(
+[[nodiscard]] inline sha256_digest hash_sha256_file(
     const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -237,23 +248,23 @@ private:
 }
 
 /// @brief Non-owning view of one nullable libpq text-format field.
-struct nullable_text_cell {
+struct result_text_cell {
     bool is_null{};
     std::string_view bytes;
 };
 
 /// @brief Implements the normative BIOSEQ_CACHE_ROWS_V1 nullable-row stream.
-class exact_row_hasher {
+class ordered_result_hasher {
 public:
-    exact_row_hasher() {
-        constexpr std::array<char, 21> header{
+    ordered_result_hasher() {
+        constexpr std::array<char, 21> k_header{
             'B', 'I', 'O', 'S', 'E', 'Q', '_', 'C', 'A', 'C', 'H',
             'E', '_', 'R', 'O', 'W', 'S', '_', 'V', '1', '\0'};
-        hasher_.update(std::string_view(header.data(), header.size()));
+        hasher_.update(std::string_view(k_header.data(), k_header.size()));
     }
 
     /// @brief Appends a zero-based row ordinal and its text-format columns.
-    void append_row(std::span<const nullable_text_cell> columns) {
+    void append_row(std::span<const result_text_cell> columns) {
         if (finalized_) {
             throw std::logic_error("cannot append to a finalized row hash");
         }
@@ -262,7 +273,7 @@ public:
             throw std::overflow_error("row column count exceeds uint32");
         }
         append_u32(static_cast<std::uint32_t>(columns.size()));
-        for (const nullable_text_cell& column : columns) {
+        for (const result_text_cell& column : columns) {
             if (column.is_null) {
                 append_byte(0x00U);
                 continue;
@@ -275,17 +286,20 @@ public:
     }
 
     /// @brief Appends one row directly from the shared libpq result owner.
-    void append_result_row(const bioseq::libpq::result& result, int row) {
-        if (row < 0 || row >= result.rows()) {
+    void append_result_row(
+        const bioseq::libpq::command_result& result,
+        std::size_t row) {
+        if (row >= result.row_count()) {
             throw std::out_of_range("row hash row index is out of range");
         }
-        std::vector<nullable_text_cell> columns;
-        columns.reserve(static_cast<std::size_t>(result.columns()));
-        for (int column = 0; column < result.columns(); ++column) {
-            const bool is_null = result.is_null(row, column);
-            columns.push_back(nullable_text_cell{
+        std::vector<result_text_cell> columns;
+        columns.reserve(static_cast<std::size_t>(result.column_count()));
+        for (std::size_t column = 0;
+             column < result.column_count(); ++column) {
+            const bool is_null = result.cell_is_null(row, column);
+            columns.push_back(result_text_cell{
                 .is_null = is_null,
-                .bytes = is_null ? std::string_view{} : result.value(row, column)});
+                .bytes = is_null ? std::string_view{} : result.text_value(row, column)});
         }
         append_row(columns);
     }
@@ -338,10 +352,10 @@ private:
 };
 
 /// @brief Hashes every ordered row of a libpq result with the canonical format.
-[[nodiscard]] inline sha256_digest exact_row_hash(
-    const bioseq::libpq::result& result) {
-    exact_row_hasher hasher;
-    for (int row = 0; row < result.rows(); ++row) {
+[[nodiscard]] inline sha256_digest hash_ordered_result_rows(
+    const bioseq::libpq::command_result& result) {
+    ordered_result_hasher hasher;
+    for (std::size_t row = 0; row < result.row_count(); ++row) {
         hasher.append_result_row(result, row);
     }
     return hasher.finalize();

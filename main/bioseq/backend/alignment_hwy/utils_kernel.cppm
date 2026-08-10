@@ -1,6 +1,6 @@
 /**
  * @file utils_kernel.cppm
- * @brief Canonical target-sensitive score lookup helpers for alignment.
+ * @brief Target-specific score lookup helpers for alignment kernels.
  */
 module;
 
@@ -23,72 +23,98 @@ namespace [[bioseq::simd]] target {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-template<sequence_alphabet Alphabet, class D>
-HWY_INLINE auto load_score_lut(
-    const ScoringMatrix<Alphabet>& matrix,
-    D d,
-    std::uint8_t rank)
-{
-    static_assert(std::is_same_v<hn::TFromD<D>, std::int16_t>,
-                  "load_score_lut expects an int16_t SIMD tag");
-    const hn::Rebind<std::uint8_t, D> du8;
-    const hn::Twice<decltype(du8)> du8_twice;
-    using lut_vec_t = decltype(hn::LoadDup128(
-        du8_twice,
-        reinterpret_cast<const std::uint8_t*>(matrix.simd_row_ptr(rank))));
-    std::array<lut_vec_t, ScoringMatrix<Alphabet>::SIMD_LUT_COUNT> result{};
+/** Load the SIMD shuffle tables for one scoring-matrix row. */
+template <sequence_alphabet p_alphabet, class p_simd_tag>
+HWY_INLINE auto load_score_lookup_tables(
+    const scoring_matrix<p_alphabet>& matrix,
+    p_simd_tag simd_tag,
+    std::uint8_t rank) {
+    static_assert(
+        std::is_same_v<hn::TFromD<p_simd_tag>, std::int16_t>,
+        "Score lookup requires an int16 SIMD tag");
+    const hn::Rebind<std::uint8_t, p_simd_tag> byte_tag;
+    const hn::Twice<decltype(byte_tag)> doubled_byte_tag;
+    using lookup_vector = decltype(hn::LoadDup128(
+        doubled_byte_tag,
+        reinterpret_cast<const std::uint8_t*>(
+            matrix.simd_row_pointer(rank))));
+    std::array<
+        lookup_vector,
+        scoring_matrix<p_alphabet>::k_simd_lookup_count>
+        lookup_tables{};
     const auto* row = reinterpret_cast<const std::uint8_t*>(
-        matrix.simd_row_ptr(rank));
-    for (std::size_t lut_index = 0;
-         lut_index < ScoringMatrix<Alphabet>::SIMD_LUT_COUNT;
-         ++lut_index) {
-        result[lut_index] = hn::LoadDup128(
-            du8_twice, row + lut_index * 16);
+        matrix.simd_row_pointer(rank));
+    for (std::size_t lookup_index = 0;
+         lookup_index
+            < scoring_matrix<p_alphabet>::k_simd_lookup_count;
+         ++lookup_index) {
+        lookup_tables[lookup_index] = hn::LoadDup128(
+            doubled_byte_tag,
+            row + lookup_index * 16);
     }
-    return result;
+    return lookup_tables;
 }
 
-template<sequence_alphabet Alphabet, class D, class LUT>
-HWY_INLINE hn::Vec<D> get_scores_with_lut(
-    const ScoringMatrix<Alphabet>&,
-    D d,
-    const LUT& lut,
-    const std::uint8_t* query_ptr)
-{
-    static_assert(std::is_same_v<hn::TFromD<D>, std::int16_t>,
-                  "get_scores_with_lut expects an int16_t SIMD tag");
-    const hn::Rebind<std::uint8_t, D> du8;
-    const auto query_vec = hn::LoadU(du8, query_ptr);
-    auto scores_u8 = hn::TableLookupBytes(lut[0], query_vec);
-    if constexpr (ScoringMatrix<Alphabet>::SIMD_LUT_COUNT > 1) {
-        const auto rank_in_lut = hn::And(
-            query_vec, hn::Set(du8, static_cast<std::uint8_t>(0x0f)));
-        const auto rank_lut_index = hn::ShiftRight<4>(query_vec);
-        scores_u8 = hn::Set(du8, static_cast<std::uint8_t>(0x80));
-        for (std::size_t lut_index = 0;
-             lut_index < ScoringMatrix<Alphabet>::SIMD_LUT_COUNT;
-             ++lut_index) {
+/** Look up per-lane scores from already loaded shuffle tables. */
+template <
+    sequence_alphabet p_alphabet,
+    class p_simd_tag,
+    class p_lookup_tables>
+HWY_INLINE hn::Vec<p_simd_tag> get_scores_with_lookup_tables(
+    const scoring_matrix<p_alphabet>&,
+    p_simd_tag simd_tag,
+    const p_lookup_tables& lookup_tables,
+    const std::uint8_t* query_pointer) {
+    static_assert(
+        std::is_same_v<hn::TFromD<p_simd_tag>, std::int16_t>,
+        "Score lookup requires an int16 SIMD tag");
+    const hn::Rebind<std::uint8_t, p_simd_tag> byte_tag;
+    const auto query_ranks = hn::LoadU(byte_tag, query_pointer);
+    auto unsigned_scores =
+        hn::TableLookupBytes(lookup_tables[0], query_ranks);
+    if constexpr (scoring_matrix<p_alphabet>::k_simd_lookup_count > 1) {
+        const auto rank_within_table = hn::And(
+            query_ranks,
+            hn::Set(byte_tag, static_cast<std::uint8_t>(0x0f)));
+        const auto table_index_for_rank = hn::ShiftRight<4>(query_ranks);
+        unsigned_scores =
+            hn::Set(byte_tag, static_cast<std::uint8_t>(0x80));
+        for (std::size_t lookup_index = 0;
+             lookup_index
+                < scoring_matrix<p_alphabet>::k_simd_lookup_count;
+             ++lookup_index) {
             const auto candidate = hn::TableLookupBytes(
-                lut[lut_index], rank_in_lut);
-            const auto selected = hn::Eq(
-                rank_lut_index,
-                hn::Set(du8, static_cast<std::uint8_t>(lut_index)));
-            scores_u8 = hn::IfThenElse(selected, candidate, scores_u8);
+                lookup_tables[lookup_index],
+                rank_within_table);
+            const auto is_selected_table = hn::Eq(
+                table_index_for_rank,
+                hn::Set(
+                    byte_tag,
+                    static_cast<std::uint8_t>(lookup_index)));
+            unsigned_scores = hn::IfThenElse(
+                is_selected_table,
+                candidate,
+                unsigned_scores);
         }
     }
-    const hn::Rebind<std::int8_t, D> di8;
-    return hn::PromoteTo(d, hn::BitCast(di8, scores_u8));
+    const hn::Rebind<std::int8_t, p_simd_tag> signed_byte_tag;
+    return hn::PromoteTo(
+        simd_tag,
+        hn::BitCast(signed_byte_tag, unsigned_scores));
 }
 
-template<sequence_alphabet Alphabet, class D>
-HWY_INLINE hn::Vec<D> get_scores(
-    const ScoringMatrix<Alphabet>& matrix,
-    D d,
+/** Load one scoring row and return scores for the query ranks. */
+template <sequence_alphabet p_alphabet, class p_simd_tag>
+HWY_INLINE hn::Vec<p_simd_tag> get_scores(
+    const scoring_matrix<p_alphabet>& matrix,
+    p_simd_tag simd_tag,
     std::uint8_t rank,
-    const std::uint8_t* query_ptr)
-{
-    return get_scores_with_lut<Alphabet>(
-        matrix, d, load_score_lut<Alphabet>(matrix, d, rank), query_ptr);
+    const std::uint8_t* query_pointer) {
+    return get_scores_with_lookup_tables<p_alphabet>(
+        matrix,
+        simd_tag,
+        load_score_lookup_tables<p_alphabet>(matrix, simd_tag, rank),
+        query_pointer);
 }
 
 }  // namespace target

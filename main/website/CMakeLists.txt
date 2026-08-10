@@ -120,29 +120,190 @@ file(GLOB_RECURSE _template_files CONFIGURE_DEPENDS "${_templates_dir}/*.j2")
 file(GLOB_RECURSE _static_files CONFIGURE_DEPENDS "${_static_dir}/*")
 
 # --- Source universe (§17.3 step 2) -------------------------------------------
-# Enumerate the project's C++ module interface units plus the extension's exact
-# PG entrypoint, written path/owner-only at configure time. CONFIGURE_DEPENDS
-# reconfigures when a module interface is added or removed.
-file(GLOB_RECURSE _module_units CONFIGURE_DEPENDS
-  "${CMAKE_SOURCE_DIR}/bioseq/*.cppm"
-  "${CMAKE_SOURCE_DIR}/common/*.cppm")
-list(SORT _module_units)
-get_target_property(_pg_entrypoints postgresql_bioseq
-  BIOSEQ_EXTENSION_PG_ENTRYPOINT_SOURCES)
-if(_pg_entrypoints)
-  foreach(_entry ${_pg_entrypoints})
-    if(NOT _entry IN_LIST _module_units)
-      list(APPEND _module_units "${_entry}")
+# The configured production target graph is the source-ownership authority.
+# Filesystem globs cannot distinguish CXX_MODULES providers from ordinary
+# named-module implementation units that also use the required .cppm suffix.
+function(_bioseq_website_collect_link_closure output_variable root_target)
+  if(NOT TARGET "${root_target}")
+    message(FATAL_ERROR
+      "website source-universe root target is missing: ${root_target}")
+  endif()
+
+  set(_pending_targets "${root_target}")
+  set(_visited_targets)
+  while(_pending_targets)
+    list(POP_FRONT _pending_targets _target)
+    if(_target IN_LIST _visited_targets OR NOT TARGET "${_target}")
+      continue()
+    endif()
+    list(APPEND _visited_targets "${_target}")
+
+    get_target_property(_aliased_target "${_target}" ALIASED_TARGET)
+    if(_aliased_target)
+      list(APPEND _pending_targets "${_aliased_target}")
+      continue()
+    endif()
+
+    get_target_property(_direct_links "${_target}" LINK_LIBRARIES)
+    get_target_property(_interface_links
+      "${_target}" INTERFACE_LINK_LIBRARIES)
+    foreach(_link_entry IN LISTS _direct_links _interface_links)
+      if(TARGET "${_link_entry}")
+        list(APPEND _pending_targets "${_link_entry}")
+        continue()
+      endif()
+
+      # Link-only/build-interface generator expressions still name their
+      # target operands literally. Extract only tokens that resolve to targets;
+      # expression operators and non-target libraries are ignored.
+      string(REGEX MATCHALL "[A-Za-z0-9_.:+-]+"
+        _link_tokens "${_link_entry}")
+      foreach(_link_token IN LISTS _link_tokens)
+        if(TARGET "${_link_token}")
+          list(APPEND _pending_targets "${_link_token}")
+        endif()
+      endforeach()
+    endforeach()
+  endwhile()
+
+  list(REMOVE_DUPLICATES _visited_targets)
+  set(${output_variable} "${_visited_targets}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_website_normalize_authored_cppm
+    output_variable target source)
+  set(${output_variable} "" PARENT_SCOPE)
+  if("${source}" MATCHES "\\$<" OR NOT "${source}" MATCHES "\\.cppm$")
+    return()
+  endif()
+
+  if(IS_ABSOLUTE "${source}")
+    set(_candidate "${source}")
+  else()
+    get_target_property(_target_source_directory "${target}" SOURCE_DIR)
+    if(NOT _target_source_directory)
+      return()
+    endif()
+    get_filename_component(_candidate
+      "${_target_source_directory}/${source}" ABSOLUTE)
+  endif()
+  if(NOT EXISTS "${_candidate}" OR IS_DIRECTORY "${_candidate}")
+    return()
+  endif()
+
+  file(REAL_PATH "${_candidate}" _candidate)
+  set(_is_authored_source FALSE)
+  foreach(_authored_root IN ITEMS
+      "${CMAKE_SOURCE_DIR}/bioseq"
+      "${CMAKE_SOURCE_DIR}/common")
+    file(REAL_PATH "${_authored_root}" _authored_root_real)
+    string(FIND "${_candidate}/" "${_authored_root_real}/" _root_prefix)
+    if(_root_prefix EQUAL 0)
+      set(_is_authored_source TRUE)
+      break()
     endif()
   endforeach()
+  if(_is_authored_source)
+    set(${output_variable} "${_candidate}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+_bioseq_website_collect_link_closure(
+  _production_source_targets postgresql_bioseq)
+set(_module_units)
+set(_ordinary_cppm_units)
+foreach(_source_target IN LISTS _production_source_targets)
+  get_target_property(_module_sets "${_source_target}" CXX_MODULE_SETS)
+  get_target_property(_interface_module_sets
+    "${_source_target}" INTERFACE_CXX_MODULE_SETS)
+  if(NOT _module_sets)
+    set(_module_sets)
+  endif()
+  if(NOT _interface_module_sets)
+    set(_interface_module_sets)
+  endif()
+  list(APPEND _module_sets ${_interface_module_sets})
+  list(REMOVE_DUPLICATES _module_sets)
+  foreach(_module_set IN LISTS _module_sets)
+    if(_module_set STREQUAL "CXX_MODULES")
+      get_target_property(_module_sources
+        "${_source_target}" CXX_MODULE_SET)
+    else()
+      get_target_property(_module_sources
+        "${_source_target}" "CXX_MODULE_SET_${_module_set}")
+    endif()
+    foreach(_module_source IN LISTS _module_sources)
+      _bioseq_website_normalize_authored_cppm(
+        _normalized_source "${_source_target}" "${_module_source}")
+      if(_normalized_source)
+        list(APPEND _module_units "${_normalized_source}")
+      endif()
+    endforeach()
+  endforeach()
+
+  get_target_property(_target_sources "${_source_target}" SOURCES)
+  foreach(_target_source IN LISTS _target_sources)
+    _bioseq_website_normalize_authored_cppm(
+      _normalized_source "${_source_target}" "${_target_source}")
+    if(_normalized_source)
+      list(APPEND _ordinary_cppm_units "${_normalized_source}")
+    endif()
+  endforeach()
+endforeach()
+list(REMOVE_DUPLICATES _module_units)
+list(REMOVE_DUPLICATES _ordinary_cppm_units)
+list(REMOVE_ITEM _ordinary_cppm_units ${_module_units})
+
+get_target_property(_pg_entrypoints postgresql_bioseq
+  BIOSEQ_EXTENSION_PG_ENTRYPOINT_SOURCES)
+if(NOT _pg_entrypoints)
+  message(FATAL_ERROR
+    "postgresql_bioseq did not publish its PG entrypoint source")
 endif()
+set(_normalized_pg_entrypoints)
+foreach(_entry IN LISTS _pg_entrypoints)
+  _bioseq_website_normalize_authored_cppm(
+    _normalized_entrypoint postgresql_bioseq "${_entry}")
+  if(NOT _normalized_entrypoint)
+    message(FATAL_ERROR
+      "PG entrypoint is not an authored Bioseq .cppm unit: ${_entry}")
+  endif()
+  if(_normalized_entrypoint IN_LIST _module_units)
+    message(FATAL_ERROR
+      "PG entrypoint must be an ordinary target source, not a CXX_MODULES "
+      "provider: ${_normalized_entrypoint}")
+  endif()
+  if(NOT _normalized_entrypoint IN_LIST _ordinary_cppm_units)
+    message(FATAL_ERROR
+      "PG entrypoint is not owned by postgresql_bioseq as an ordinary source: "
+      "${_normalized_entrypoint}")
+  endif()
+  list(APPEND _normalized_pg_entrypoints "${_normalized_entrypoint}")
+endforeach()
+list(LENGTH _normalized_pg_entrypoints _pg_entrypoint_count)
+list(REMOVE_DUPLICATES _normalized_pg_entrypoints)
+list(LENGTH _normalized_pg_entrypoints _unique_pg_entrypoint_count)
+if(NOT _pg_entrypoint_count EQUAL _unique_pg_entrypoint_count)
+  message(FATAL_ERROR
+    "postgresql_bioseq published duplicate PG entrypoint source paths")
+endif()
+list(REMOVE_DUPLICATES _module_units)
+list(SORT _module_units)
+list(SORT _normalized_pg_entrypoints)
 
 set(_reachable_units_file "${_output_root}/reachable-units.txt")
+set(_entrypoint_units_file "${_output_root}/entrypoint-units.txt")
 set(_source_universe "${_output_root}/source-universe.json")
 string(REPLACE ";" "\n" _units_lines "${_module_units}")
 file(CONFIGURE
   OUTPUT "${_reachable_units_file}"
   CONTENT "${_units_lines}\n"
+  @ONLY)
+string(REPLACE ";" "\n" _entrypoint_units_lines
+  "${_normalized_pg_entrypoints}")
+file(CONFIGURE
+  OUTPUT "${_entrypoint_units_file}"
+  CONTENT "${_entrypoint_units_lines}\n"
   @ONLY)
 set(_universe_json "{\n  \"schema\": \"source_universe/v1\",\n  \"owner\": \"bioseq_website\",\n  \"units\": [\n")
 set(_first TRUE)
@@ -168,10 +329,10 @@ set(BIOSEQ_WEBSITE_PROJECT_NAME "BioseqDB")
 set(BIOSEQ_WEBSITE_DOXYGEN_OUTPUT "${_doxygen_output}")
 set(BIOSEQ_WEBSITE_STRIP_FROM_PATH "${CMAKE_SOURCE_DIR}")
 set(BIOSEQ_WEBSITE_DOXYGEN_WARN_LOG "${_output_root}/doxygen-warnings.log")
-# Doxygen INPUT is driven by the reachable interface-unit closure (§11.1), not the
-# recursive glob: source_graph writes the closure and a build-time fragment sets the
-# Doxyfile INPUT to exactly those files. The @INCLUDEd fragment path is baked here.
-set(_reachable_closure "${_output_root}/reachable-interface-units.txt")
+# Doxygen INPUT is the interface closure followed by the exact ordinary PG
+# entrypoints. source_graph writes that scan inventory; the build-time fragment
+# sets Doxyfile INPUT to exactly those files.
+set(_reachable_scan_units "${_output_root}/reachable-source-units.txt")
 set(_doxygen_input_fragment "${_output_root}/doxygen-input.cfg")
 set(BIOSEQ_WEBSITE_DOXYGEN_INPUT_INCLUDE "${_doxygen_input_fragment}")
 configure_file("${_source_dir}/Doxyfile.in" "${_output_root}/Doxyfile" @ONLY)
@@ -343,72 +504,81 @@ add_custom_command(
   VERBATIM)
 
 # --- source_graph (§17.3 step 4) ----------------------------------------------
-# Depends on the reachable universe + compile DB + provider BMIs (postgresql_bioseq).
+# The provider graph consumes only CXX_MODULES units. Exact ordinary PG
+# entrypoints are a separate scan inventory appended after graph closure.
 set(_source_graph_json "${_output_root}/source-graph.json")
 set(_source_graph_work "${_output_root}/source-graph-work")
 set(_source_graph_raw_json "${_source_graph_work}/source-graph.json")
-set(_reachable_closure_raw "${_source_graph_work}/reachable-interface-units.txt")
+set(_reachable_scan_units_raw
+  "${_source_graph_work}/reachable-source-units.txt")
 set(_source_graph_run_stamp "${_source_graph_work}/complete.stamp")
 add_custom_command(
   OUTPUT "${_source_graph_run_stamp}"
-  BYPRODUCTS "${_source_graph_raw_json}" "${_reachable_closure_raw}"
+  BYPRODUCTS "${_source_graph_raw_json}" "${_reachable_scan_units_raw}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${_source_graph_work}"
   COMMAND "${_gen}" website source_graph
+          --source-root "${CMAKE_SOURCE_DIR}"
           --reachable-units "${_reachable_units_file}"
+          --entrypoint-units "${_entrypoint_units_file}"
           --compile-db "${_compile_db}"
           --site-config "${_site_config}"
           --output "${_source_graph_raw_json}"
-          --reachable-output "${_reachable_closure_raw}"
+          --reachable-output "${_reachable_scan_units_raw}"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_source_graph_run_stamp}"
   DEPENDS ${_gen_dep} postgresql_bioseq "${_source_universe}"
-          "${_reachable_units_file}" "${_site_config}" "${_compile_db}"
-  COMMENT "website: source_graph (export-import reachable closure)"
+          "${_reachable_units_file}" "${_entrypoint_units_file}"
+          "${_site_config}" "${_compile_db}"
+          ${_normalized_pg_entrypoints}
+  COMMENT "website: interface source graph and PG entrypoint scan inventory"
   VERBATIM)
 add_custom_command(
-  OUTPUT "${_source_graph_json}" "${_reachable_closure}"
+  OUTPUT "${_source_graph_json}" "${_reachable_scan_units}"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
           "${_source_graph_raw_json}" "${_source_graph_json}"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_reachable_closure_raw}" "${_reachable_closure}"
+          "${_reachable_scan_units_raw}" "${_reachable_scan_units}"
   DEPENDS "${_source_graph_run_stamp}"
   COMMENT "website: stabilize source-graph outputs by content"
   VERBATIM)
 
 # --- Doxygen XML (§17.3 step 5) -----------------------------------------------
-# Doxygen INPUT is the reachable interface-unit closure, never the glob (§11.1): the
-# fragment step rewrites the Doxyfile INPUT from source_graph's closure before the run.
+# Doxygen INPUT is the interface closure followed by exact PG entrypoints,
+# never a recursive source glob. The graph JSON remains interface-only.
 set(_doxygen_stamp "${_output_root}/doxygen.stamp")
 add_custom_command(
   OUTPUT "${_doxygen_stamp}"
   COMMAND "${CMAKE_COMMAND}"
-          -DCLOSURE=${_reachable_closure}
+          -DCLOSURE=${_reachable_scan_units}
           -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
           -DFRAGMENT_OUT=${_doxygen_input_fragment}
           -P "${CMAKE_SOURCE_DIR}/cmake/doxygen_input_fragment.cmake"
   COMMAND "${DOXYGEN_EXECUTABLE}" "${_output_root}/Doxyfile"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_doxygen_stamp}"
-  DEPENDS "${_source_graph_json}" "${_reachable_closure}" "${_output_root}/Doxyfile"
-          "${CMAKE_SOURCE_DIR}/cmake/doxygen_input_fragment.cmake" ${_module_units}
-  COMMENT "website: Doxygen 1.9.8 XML over the reachable closure"
+  DEPENDS "${_source_graph_json}" "${_reachable_scan_units}"
+          "${_output_root}/Doxyfile"
+          "${CMAKE_SOURCE_DIR}/cmake/doxygen_input_fragment.cmake"
+          ${_module_units} ${_normalized_pg_entrypoints}
+  COMMENT "website: Doxygen 1.9.8 XML over interfaces and PG entrypoints"
   VERBATIM)
 
 # --- cpp_index (§17.3 step 5) -------------------------------------------------
-# cpp_index parses exactly the reachable closure (§11.1), not the recursive glob.
+# cpp_index parses the same interface-plus-entrypoint inventory as Doxygen.
 set(_cpp_entities "${_output_root}/cpp-entities.json")
 set(_cpp_coverage "${_output_root}/cpp-coverage.json")
 add_custom_command(
   OUTPUT "${_cpp_entities}" "${_cpp_coverage}"
   COMMAND "${_gen}" website cpp_index
+          --source-root "${CMAKE_SOURCE_DIR}"
           --doxygen-xml "${_doxygen_xml}"
           --compile-db "${_compile_db}"
-          --reachable-units "${_reachable_closure}"
+          --reachable-units "${_reachable_scan_units}"
           --site-config "${_site_config}"
           --output "${_cpp_entities}"
           --coverage-output "${_cpp_coverage}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_doxygen_stamp}" "${_plan_json}" "${_source_graph_json}"
-          "${_compile_db}" "${_reachable_closure}"
-  COMMENT "website: cpp_index (Doxygen/Clang merge + coverage over the closure)"
+          "${_compile_db}" "${_reachable_scan_units}"
+  COMMENT "website: cpp_index over interfaces and PG entrypoints"
   VERBATIM)
 
 # --- Relocatable PostgreSQL stage (§13.2 / §17.3 step 6) ----------------------
@@ -432,8 +602,8 @@ if(NOT _extension_control_file
 endif()
 
 # The website stage is also the packaging acceptance seam: prove that the
-# extension publishes the generated install artifact (not the checked source
-# golden), that its bytes match the manifest digest, and that the
+# extension publishes the generated install artifact, that its bytes match
+# the manifest digest, and that the
 # Doxygen-derived public projection remains the approved 11-identity set.
 set(_sql_package_verifier
   "${_source_dir}/tests/verify_generated_sql_package.py")
@@ -446,14 +616,11 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${_sql_package_verifier}"
           --install-sql "${_extension_install_sql}"
           --manifest "${_extension_sql_manifest}"
-          --source-golden
-            "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq--1.0.sql"
           --public-identities "${_sql_public_identity_golden}"
           --stamp "${_sql_package_verification_stamp}"
   DEPENDS postgresql_bioseq
           "${_extension_install_sql}"
           "${_extension_sql_manifest}"
-          "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq--1.0.sql"
           "${_sql_package_verifier}"
           "${_sql_public_identity_golden}"
   COMMENT "website: verify generated SQL packaging and public manifest identity set"

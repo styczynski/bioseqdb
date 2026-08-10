@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -18,9 +18,9 @@ import :alignment_hook_contract;
 
 namespace bioseq::pg::detail {
 
-std::vector<AlignmentExecutorFrame*> alignment_frames{};
-std::vector<AlignmentQueryRegistryEntry> alignment_query_registry{};
-std::vector<AlignmentEstateRegistryEntry> alignment_estate_registry{};
-std::vector<AlignmentExecutorFrame*> alignment_start_in_progress{};
+std::vector<alignment_executor_frame*> alignment_frames{};
+std::vector<alignment_query_registry_entry> alignment_query_registry{};
+std::vector<alignment_estate_registry_entry> alignment_estate_registry{};
+std::vector<alignment_executor_frame*> alignment_start_in_progress{};
 
 } // namespace bioseq::pg::detail

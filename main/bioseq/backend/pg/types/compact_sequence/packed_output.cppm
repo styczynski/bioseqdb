@@ -16,14 +16,14 @@ module;
 #include <type_traits>
 #include <utility>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "storage/shmem.h"
 #include "utils/datum.h"
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:packed_output;
+export module bioseq.postgres.types.compact_sequence:packed_output;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -31,11 +31,12 @@ import :source_abi;
 import :tree_types;
 import :tree_ops;
 import :view_session;
-import bioseq.pg_utils;
+import bioseq.postgres.support;
 import bioseq.parallelism.pool;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
+import bioseq.storage.layout;
 
 /* Fixed, allocation-free materialization tracing and provenance accounting.
  * This belongs to the sole packed-output/materialization boundary; the tree
@@ -765,7 +766,7 @@ inline void publish_sequence_payload_allocation_noexcept(
   const bool kind_matches =
       (event.kind
            == bioseq::storage::sequence_payload_allocation_kind::
-               admitted_packed_region
+               admitted_packed_sequence
        && mechanism == materialization_mechanism::packed_region)
       || (event.kind
               == bioseq::storage::sequence_payload_allocation_kind::
@@ -1572,7 +1573,7 @@ run_slice_async_shutdown_end_reset_contention_test_noexcept() noexcept {
       statuses{};
   const auto observer =
       make_slice_async_pool_observer_noexcept(std::addressof(guard));
-  auto &pool = bioseq::parallelism::GlobalPool::instance();
+  auto &pool = bioseq::parallelism::global_pool::instance();
   tasks[0] = {std::addressof(started[0]),
               std::addressof(cancel_observed[0]),
               std::addressof(submissions[0])};
@@ -1830,7 +1831,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       materialization_mechanism::packed_full,
       materialization_reason::executor_copy);
   const bool index_observed =
-      bioseq::storage::observe_sequence_payload_allocation_noexcept(
+      bioseq::storage::publish_sequence_allocation(
           std::addressof(index_observer),
           bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
           64u, 64u, 64u, 64u);
@@ -1952,7 +1953,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
     }
     for (std::uint32_t iteration = 0u; iteration < probe->iterations;
          ++iteration) {
-      (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+      (void)bioseq::storage::publish_sequence_allocation(
           std::addressof(probe->observer),
           bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
           1u, 1u, 1u, 1u);
@@ -1961,7 +1962,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   const auto observer =
       make_slice_async_pool_observer_noexcept(std::addressof(guard));
   std::array<bioseq::parallelism::tracked_submit_status, 2> probe_statuses{};
-  auto &pool = bioseq::parallelism::GlobalPool::instance();
+  auto &pool = bioseq::parallelism::global_pool::instance();
   for (std::size_t index = 0u; index < probe_submissions.size(); ++index) {
     probe_statuses[index] = pool.submit_tracked_task_noexcept(
         std::addressof(probe_submissions[index]),
@@ -2624,7 +2625,7 @@ void pack_view_into(bioseq::pg_types::seq& destination, View view, std::uint64_t
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{units}};
-    bioseq::storage::stream_transformed_packed<
+    bioseq::storage::stream_transformed_ranks<
         bioseq::storage::sequence_transform::identity>(
             view, 0u, length, writer);
     const auto result = writer.finish(length, unit_count);
@@ -2716,7 +2717,7 @@ export inline void pg_sequence_flatten_into(
             value.trace, value.producer_value_id,
             materialization_mechanism::packed_full,
             materialization_reason::executor_copy);
-        (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+        (void)bioseq::storage::publish_sequence_allocation(
             std::addressof(observer),
             bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
             value.bp_length, value.bp_length,
@@ -2755,7 +2756,7 @@ export inline void pg_sequence_flatten_into(
                         destination, owner->view(), value.bp_length);
                 });
             finish_pg_sequence_read_session(local_session, true);
-        } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        } catch (bioseq::postgres::support::postgres_error& error) {
             callback_exact_error = error.release_error_data();
         } catch (std::exception const& error) {
             strlcpy(callback_detail,
@@ -2801,7 +2802,7 @@ export inline void pg_sequence_flatten_into(
         value.trace, value.producer_value_id,
         materialization_mechanism::packed_full,
         materialization_reason::executor_copy);
-    (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+    (void)bioseq::storage::publish_sequence_allocation(
         std::addressof(observer),
         bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
         value.bp_length, value.bp_length,
@@ -3057,7 +3058,7 @@ namespace {
         trace, producer_value_id,
         materialization_mechanism::backing_copy,
         materialization_reason::executor_copy);
-    (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+    (void)bioseq::storage::publish_sequence_allocation(
         std::addressof(observer),
         bioseq::storage::sequence_payload_allocation_kind::backing_copy,
         descriptor.bp_length, descriptor.bp_length,
@@ -3073,7 +3074,7 @@ namespace {
                 .alphabet_code = pgseq_unbound_alphabet_code,
                 .storage_unit_byte_width = pgseq_unbound_width_tag,
               }
-            : flat.get_type_params(),
+            : flat.type_parameters(),
         .encoding = unbound
             ? literal_encoding::unbound_ascii
             : literal_encoding::packed,
@@ -3161,7 +3162,7 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
                  errdetail("relation, column, snapshot, and cache ownership are unavailable")));
     }
     const compact_sequence_stdc_type_params type = descriptor.alphabet_bound
-        ? flat->get_type_params()
+        ? flat->type_parameters()
         : compact_sequence_stdc_type_params{
             .alphabet_code = pgseq_unbound_alphabet_code,
             .storage_unit_byte_width = pgseq_unbound_width_tag,
@@ -3422,7 +3423,7 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
                     continue;
                 }
                 const auto complemented =
-                    bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+                    bioseq::storage::lazy_sequence_traits<Alphabet>::
                         letter_complement(static_cast<std::uint8_t>(rank));
                 char symbol = '\0';
                 if (!pgseq_symbol_for_rank(
@@ -3439,14 +3440,14 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
  * source-domain handle from the verified binding registry. */
 export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     pg_sequence_source_handle source,
-    bioseq::storage::seq_locator locator,
+    bioseq::storage::sequence_locator locator,
     compact_sequence_stdc_type_params stored_type,
     std::uint16_t last_padding_letters,
     slice_trace_attachment* trace = nullptr,
     std::uint32_t producer_value_id = 0u)
 {
     if (!pg_sequence_source_handle_valid(source)
-        || locator.total_bp_size > static_cast<std::uint64_t>(INT64_MAX)) {
+        || locator.logical_length > static_cast<std::uint64_t>(INT64_MAX)) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("invalid source binding for bioseq locator promotion")));
@@ -3456,7 +3457,7 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     result->producer_value_id = producer_value_id;
     retain_slice_trace_attachment(trace);
     replace_root_error_safe(
-        *result, stored_type, locator.total_bp_size, true,
+        *result, stored_type, locator.logical_length, true,
         [source, locator, stored_type,
          last_padding_letters](
             piece_tree_arena& arena,
@@ -3469,7 +3470,7 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
                     .stored_type_params = stored_type,
                     .last_padding_letters = last_padding_letters,
                     .from = 0u,
-                    .to = locator.total_bp_size,
+                    .to = locator.logical_length,
                 });
         });
     return pg_sequence_ro_datum(result);
@@ -3498,20 +3499,20 @@ synthetic_lazy_source_worker_shareable(void const *) noexcept {
 
 [[nodiscard]] inline pg_sequence_source_read_status
 read_synthetic_lazy_source(void const *, pg_sequence_read_session &,
-                           bioseq::storage::seq_locator const &locator,
+                           bioseq::storage::sequence_locator const &locator,
                            compact_sequence_stdc_type_params stored_type,
                            bioseq::storage::sequence_transform transform,
                            std::uint64_t from, std::span<std::uint8_t> output) {
   constexpr std::uint8_t dna4_code =
       pgseq_supported_alphabets::index_of<seq::dna4>();
-  if (stored_type.alphabet_code != dna4_code || from > locator.total_bp_size ||
-      output.size() > locator.total_bp_size - from) {
+  if (stored_type.alphabet_code != dna4_code || from > locator.logical_length ||
+      output.size() > locator.logical_length - from) {
     return pg_sequence_source_read_status::wrong_thread;
   }
   std::uint8_t rank = 0u;
   if (bioseq::storage::has_complement(transform)) {
     rank =
-        bioseq::storage::lazy_rank_stream_traits<seq::dna4>::letter_complement(
+        bioseq::storage::lazy_sequence_traits<seq::dna4>::letter_complement(
             rank);
   }
   std::fill(output.begin(), output.end(), rank);
@@ -3555,15 +3556,15 @@ synthetic_lazy_source_handle() noexcept {
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
-  constexpr bioseq::storage::seq_locator locator{
-      .version = bioseq::storage::kLocatorVersion,
-      .bucket_idx = 0u,
-      ._pad_2 = 0u,
-      .shard_idx = 0u,
-      .num_fragments = 1u,
-      ._pad_4 = 0u,
-      .total_bp_size = piece_length,
-      .first_sub_row_no = 0u,
+  constexpr bioseq::storage::sequence_locator locator{
+      .payload_version = bioseq::storage::sequence_locator_payload_version,
+      .bucket_index = 0u,
+      .reserved_16 = 0u,
+      .shard_index = 0u,
+      .fragment_count = 1u,
+      .reserved_32 = 0u,
+      .logical_length = piece_length,
+      .first_fragment_row = 0u,
       .source_epoch = 1u,
   };
 
@@ -3896,15 +3897,15 @@ Datum synthetic_lazy_sequence(std::int64_t requested) {
   const auto length = static_cast<std::uint64_t>(requested);
   return make_source_backed_pg_sequence(
       synthetic_lazy_source_handle(),
-      bioseq::storage::seq_locator{
-          .version = bioseq::storage::kLocatorVersion,
-          .bucket_idx = 0u,
-          ._pad_2 = 0u,
-          .shard_idx = 0u,
-          .num_fragments = length == 0u ? 0u : 1u,
-          ._pad_4 = 0u,
-          .total_bp_size = length,
-          .first_sub_row_no = 0u,
+      bioseq::storage::sequence_locator{
+          .payload_version = bioseq::storage::sequence_locator_payload_version,
+          .bucket_index = 0u,
+          .reserved_16 = 0u,
+          .shard_index = 0u,
+          .fragment_count = length == 0u ? 0u : 1u,
+          .reserved_32 = 0u,
+          .logical_length = length,
+          .first_fragment_row = 0u,
           .source_epoch = 1u,
       },
       type, 0u);

@@ -10,7 +10,7 @@
  *        path on the same letters (nt4 makes dna5's ACGT identical to minimap2).
  */
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <string>
@@ -22,7 +22,7 @@ import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
-import bioseq.sequences.kmers.mm_sketch_baseline;
+import bioseq.sequences.kmers.minimap2_sketch_baseline;
 
 using namespace seq::literals;
 
@@ -50,24 +50,24 @@ std::vector<seq::dna5> NT4_DNA5_ACGT{
     "TTACGATCGTAGCTAGCTTACGTACGATCGATCGTAGCTAGCATCGATCGTAGCTAGCTACGTAC"_dna5
 };
 
-template <typename Alphabet>
-[[nodiscard]] static auto scalar_pairs(std::vector<Alphabet>& data,
+template <typename p_alphabet>
+[[nodiscard]] static auto scalar_pairs(std::vector<p_alphabet>& data,
                                        std::size_t w, std::size_t k) {
-    using seq_type = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+    using seq_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(data);
     sketch_collector collector;
-    collect_minimizers<minimap_int_hasher, MinimapSketchData, seq_type,
+    collect_minimizers<minimap_int_hasher, minimap_sketch_data, seq_type,
                        decltype(seq.begin()), std::uint64_t>(
         collector, seq, seq.begin(), seq.end(), w, k);
     return collector.extract_pairs();
 }
 
-template <typename Alphabet>
-[[nodiscard]] static auto baseline_pairs(std::vector<Alphabet>& data,
+template <typename p_alphabet>
+[[nodiscard]] static auto baseline_pairs(std::vector<p_alphabet>& data,
                                          std::size_t w, std::size_t k) {
-    using seq_type = sequence_custom_alphabet<Alphabet, std::uint64_t>;
+    using seq_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(data);
-    return mm_sketch_baseline_pairs(seq, w, k);
+    return minimap2_sketch_baseline_pairs(seq, w, k);
 }
 
 TEST_CASE("nt4: dna5 with T == mm_sketch (T is a normal base)",

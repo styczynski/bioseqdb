@@ -4,34 +4,34 @@
       "_": {"type": "integer", "default": 0, "description": "bioseq scalar minimizer sketch + scalar DP chaining/backtracking + KSW2; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact index construction + mapping timed"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after proving both persisted policies absent"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL recompute path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     },
     "bioseq_ksw2_scalar_dp_scalar_mm_just_index": {
       "_": {"type": "integer", "default": 0, "description": "bioseq scalar minimizer sketch + scalar DP chaining/backtracking + KSW2; index prebuilt untimed, then assembled cold from PostgreSQL storage and mapped after a PostgreSQL restart"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
     },
     "bioseq_block_simd_dp_two_stack_nthash_no_index": {
       "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact index construction + mapping timed"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after proving both persisted policies absent"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL recompute path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     },
     "bioseq_block_simd_dp_two_stack_nthash_just_index": {
       "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; index prebuilt (untimed); assemble align via SQL, timed (cold read after a PostgreSQL restart)"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
     },
     "bioseq_block_gpu_dp_gpu_seed_just_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C GPU frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
     },
     "bioseq_block_gpu_dp_gpu_seed_no_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 GPU frontend; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact GPU index construction + mapping timed"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact GPU index construction + mapping timed"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after proving both persisted policies absent"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
-      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "DOC0294 scheduler concurrency mode for the bioseq SQL recompute path"}
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
     },
     "minimap2_no_index": {
       "_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"},
@@ -52,7 +52,7 @@
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
         "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
-      "description": "dna4 2 Gbp reference, 16 independent ~5 Mbp HiFi-error query rows through BioseqBatchJoin (DOC0283 seed)" },
+      "description": "dna4 2 Gbp reference, 16 independent ~5 Mbp HiFi-error query rows through BioseqBatchJoin (fixed seed)" },
 
     "E2E_2GBP_DNA5": { "concurrency": 1, "data": {
         "alphabet": "dna5", "size_label": "2gbp_dna5", "reference_length": 2000000000,

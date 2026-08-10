@@ -3,7 +3,7 @@
 // pulled from an arbitrary io_source (the mechanism used to stream a remote
 // .fa.gz asset), including the decoded-byte cap. Deterministic + offline.
 //
-// Tag: [external][streaming][gzip].
+// Catch taxonomy: external API integration over the streaming decoder.
 
 #include <algorithm>
 #include <cstddef>
@@ -92,7 +92,7 @@ std::string decode_all(exio::gzip_decode_source<memory_source>& source,
 }  // namespace
 
 TEST_CASE("gzip_decode_source inflates a gzip stream from an arbitrary source",
-          "[external][streaming][gzip]") {
+          "[component:external_api][layer:integration][feature:external_source]") {
     std::string plain =
         ">chr_test synthetic\n";
     for (int i = 0; i < 5000; ++i) {

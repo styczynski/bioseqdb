@@ -1,11 +1,9 @@
 /**
  * @file instrumentation/gauge.cppm
- * @brief Per-thread "last set value" gauges (Part 19.10 of the design doc).
+ * @brief Process-wide named gauges with atomic last-value storage.
  *
- * Gauges are single-writer per-thread on the producer side; readers
- * see eventual consistency. On 64-bit platforms (our only target)
- * aligned 64-bit reads/writes are tear-free at the hardware level so
- * std::atomic is unnecessary.
+ * Relaxed atomic access preserves tear-free concurrent updates without adding
+ * ordering constraints to the instrumentation hot path.
  */
 module;
 
@@ -17,65 +15,70 @@ module;
 #include <string_view>
 #include <unordered_map>
 
-export module bioseq.instr.gauge;
+export module bioseq.instrumentation.gauge;
 
-import bioseq.instr.config;
-import bioseq.instr.descriptor;
+import bioseq.instrumentation.configuration;
+import bioseq.instrumentation.descriptor;
 
-export namespace bioseq::instr {
+export namespace bioseq::instrumentation {
 
-struct Gauge {
-    const RegionDescriptor* desc = nullptr;
+struct named_gauge {
+    const region_descriptor* descriptor = nullptr;
     std::atomic<std::int64_t> value{0};
 
-    Gauge() = default;
-    explicit Gauge(const RegionDescriptor* d) noexcept : desc(d) {}
+    named_gauge() = default;
+    explicit named_gauge(const region_descriptor* metric_descriptor) noexcept
+        : descriptor(metric_descriptor) {}
 };
 
-namespace detail {
+}  // namespace bioseq::instrumentation
 
-struct GaugeRegistry {
-    std::mutex mu;
-    std::unordered_map<std::string, Gauge*> by_name;
+namespace bioseq::instrumentation::detail {
+
+struct gauge_registry {
+    std::mutex mutex;
+    std::unordered_map<std::string, named_gauge*> by_name;
 };
 
-[[nodiscard]] inline GaugeRegistry& gauge_registry() noexcept {
-    static GaugeRegistry r;
-    return r;
+[[nodiscard]] inline gauge_registry& get_gauge_registry() noexcept {
+    static gauge_registry registry;
+    return registry;
 }
 
 }  // namespace detail
 
+export namespace bioseq::instrumentation {
+
 [[nodiscard, gnu::cold]]
-inline Gauge& gauge(
+inline named_gauge& get_named_gauge(
     std::string_view name,
     std::source_location loc = std::source_location::current()) noexcept
 {
-    auto& reg = detail::gauge_registry();
-    std::lock_guard<std::mutex> g(reg.mu);
+    auto& registry = detail::get_gauge_registry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
     std::string key{name};
-    auto it = reg.by_name.find(key);
-    if (it != reg.by_name.end()) return *it->second;
-    auto* d = register_region_static(name, loc);
-    auto* gp = new Gauge{d};
-    reg.by_name.emplace(std::move(key), gp);
-    return *gp;
+    auto entry = registry.by_name.find(key);
+    if (entry != registry.by_name.end()) return *entry->second;
+    auto* descriptor = register_static_gauge(name, loc);
+    auto* created_gauge = new named_gauge{descriptor};
+    registry.by_name.emplace(std::move(key), created_gauge);
+    return *created_gauge;
 }
 
-template<is_context_args Args>
+template<profiling_configuration configuration_type>
 [[gnu::always_inline]]
-inline void gauge_set(Gauge& g, std::int64_t v) noexcept {
-    if constexpr (Args::enable_profiling) {
-        g.value.store(v, std::memory_order_relaxed);
+inline void set_gauge_value(named_gauge& gauge, std::int64_t value) noexcept {
+    if constexpr (configuration_type::enable_profiling) {
+        gauge.value.store(value, std::memory_order_relaxed);
     } else {
-        (void)g;
-        (void)v;
+        (void)gauge;
+        (void)value;
     }
 }
 
 [[nodiscard, gnu::always_inline]]
-inline std::int64_t gauge_value(const Gauge& g) noexcept {
-    return g.value.load(std::memory_order_relaxed);
+inline std::int64_t current_gauge_value(const named_gauge& gauge) noexcept {
+    return gauge.value.load(std::memory_order_relaxed);
 }
 
-}  // namespace bioseq::instr
+}  // namespace bioseq::instrumentation

@@ -1,4 +1,4 @@
-# bench_framework — generic algorithm-agnostic benchmark orchestration.
+# Bioseq benchmark framework — algorithm-agnostic benchmark orchestration.
 #
 # Included from main/bioseq/CMakeLists.txt so the find_package(...) calls
 # done there (TBB, simdjson, ftxui, nlohmann_json_schema_validator,
@@ -16,14 +16,15 @@ get_filename_component(BIOSEQ_DIR
   "${CMAKE_CURRENT_LIST_DIR}/../bioseq"
   ABSOLUTE)
 
-# Module file set: ONLY the framework's own interface unit (index.cppm).
-# instrumentation/* and mlogging.cppm come from `bioseq_modules_nopg`
-# (DOC0269 Phase A) so we don't rebuild them for this target.
+# Module file set: the framework interface and the example driver's primary
+# module. Instrumentation and logging come from `bioseq_modules_nopg`, so this
+# target does not compile duplicate providers.
 set(BENCH_FRAMEWORK_MODULE_FILES
-  "${BENCH_FRAMEWORK_DIR}/index.cppm")
+  "${BENCH_FRAMEWORK_DIR}/index.cppm"
+  "${BENCH_FRAMEWORK_DIR}/example/index.cppm")
 
-# `interactive.cppm` is a *module implementation unit* of `bench_framework`
-# (declared `module bench_framework;`, no `export`). CMake's
+# `interactive.cppm` is an implementation unit of `bioseq.bench.framework`
+# (declared without `export`). CMake's
 # `target_sources(... FILE_SET TYPE CXX_MODULES ...)` only accepts module
 # interface units / partitions in CXX_MOD_FILES; implementation units go in
 # the regular SOURCES list, where they're compiled as part of the same
@@ -54,7 +55,7 @@ AddCommonTargetX(
   COMPONENT  ${PROJECT_NAME}
   INCLUDE_DIRS
     "${BIOSEQ_DIR}/../config"
-    "${BIOSEQ_DIR}/include2"
+    "${BIOSEQ_DIR}" "${BIOSEQ_DIR}/backend/pg/include" "${BIOSEQ_DIR}/include2"
     "${BIOSEQ_DIR}/../vendor/safestringlib/include"
     "${BIOSEQ_DIR}/../vendor/fmtlog"
     "${BIOSEQ_DIR}/../vendor/fmt"
@@ -71,7 +72,6 @@ AddCommonTargetX(
     simdjson::simdjson
     nlohmann_json_schema_validator::validator
     TBB::tbb
-    lfreist-hwinfo::hwinfo
     # The shared no-PG module set contains the Vulkan shader compiler. Keep
     # this test/demo target aligned with bioseq_bench so importing production
     # parallelism modules cannot leave glslang symbols unresolved.

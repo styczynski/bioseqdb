@@ -11,8 +11,8 @@
 // to pin a `pgseq_supported_alphabets::entry_for<seq::dnaX>` brand directly
 // so the alphabet name string is sourced from the production pack.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

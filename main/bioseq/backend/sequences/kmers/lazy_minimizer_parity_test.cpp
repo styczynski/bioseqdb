@@ -17,7 +17,7 @@
 // storage-unit fragments → 1024/2048/32 letters per fragment on dna4/uint64).
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>
@@ -38,8 +38,8 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
-import bioseq.sequences.kmers.two_stacks;
-import bioseq.sequences.kmers.vulkan;
+import bioseq.sequences.kmers.two_stack_minimizers;
+import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
 import bioseq.sequences.pipe;
@@ -68,7 +68,7 @@ fixed_highway_kernels() noexcept {
 }
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using range_t  = compact_sequence_range<dna4_u64>;
+using range_type  = compact_sequence_range<dna4_u64>;
 using facade_t = bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
 using sequence_size_t = bioseq::storage::sequence_size_t;
 
@@ -259,7 +259,7 @@ using minimizer_record =
         const sketch_collector& collector) {
     std::vector<minimizer_record> records;
     records.reserve(collector.extract_sketches_data().size());
-    for (const MinimapSketchData& minimizer :
+    for (const minimap_sketch_data& minimizer :
          collector.extract_sketches_data()) {
         records.emplace_back(
             minimizer.last_pos(), minimizer.kmer(), minimizer.strand());
@@ -275,7 +275,7 @@ using minimizer_record =
 }
 
 inline constexpr std::array<std::uint32_t, 4u>
-paper_nthash_oracle_forward_table{
+bounded_nthash_oracle_forward_table{
     0x95c60474u,
     0x62a02b4cu,
     0x82572324u,
@@ -287,23 +287,23 @@ struct paper_hash_and_strand {
     std::uint32_t strand{};
 };
 
-template <std::size_t K>
+template <std::size_t p_kmer_size>
 [[nodiscard]] paper_hash_and_strand paper_oracle_hash_and_strand(
         std::span<const std::uint32_t> ranks,
         std::size_t start) {
     std::uint32_t forward = 0u;
     std::uint32_t reverse = 0u;
-    for (std::size_t offset = 0u; offset < K; ++offset) {
+    for (std::size_t offset = 0u; offset < p_kmer_size; ++offset) {
         const std::uint32_t rank = ranks[start + offset];
         if (rank >= 4u) {
             throw std::invalid_argument(
                 "Paper ntHash oracle accepts DNA4 ranks only");
         }
         forward ^= std::rotl(
-            paper_nthash_oracle_forward_table[rank],
-            static_cast<int>(((K - 1u - offset) * 7u) & 31u));
+            bounded_nthash_oracle_forward_table[rank],
+            static_cast<int>(((p_kmer_size - 1u - offset) * 7u) & 31u));
         reverse ^= std::rotl(
-            paper_nthash_oracle_forward_table[3u - rank],
+            bounded_nthash_oracle_forward_table[3u - rank],
             static_cast<int>((offset * 7u) & 31u));
     }
     return {
@@ -312,17 +312,17 @@ template <std::size_t K>
     };
 }
 
-template <std::size_t K, std::size_t W>
+template <std::size_t p_kmer_size, std::size_t p_window_size>
 [[nodiscard]] std::vector<minimizer_record> paper_scalar_oracle(
         std::span<const std::uint32_t> ranks) {
-    if (ranks.size() < K + W - 1u) {
+    if (ranks.size() < p_kmer_size + p_window_size - 1u) {
         return {};
     }
-    const std::size_t kmer_count = ranks.size() - K + 1u;
-    const std::size_t window_count = kmer_count - W + 1u;
+    const std::size_t kmer_count = ranks.size() - p_kmer_size + 1u;
+    const std::size_t window_count = kmer_count - p_window_size + 1u;
     std::vector<paper_hash_and_strand> kmers(kmer_count);
     for (std::size_t position = 0u; position < kmer_count; ++position) {
-        kmers[position] = paper_oracle_hash_and_strand<K>(ranks, position);
+        kmers[position] = paper_oracle_hash_and_strand<p_kmer_size>(ranks, position);
     }
 
     std::vector<minimizer_record> records;
@@ -332,7 +332,7 @@ template <std::size_t K, std::size_t W>
             (std::numeric_limits<std::uint32_t>::max)();
         std::size_t left_position = window;
         std::size_t right_position = window;
-        for (std::size_t offset = 0u; offset < W; ++offset) {
+        for (std::size_t offset = 0u; offset < p_window_size; ++offset) {
             const std::size_t position = window + offset;
             if (kmers[position].hash < minimum_hash) {
                 minimum_hash = kmers[position].hash;
@@ -345,7 +345,7 @@ template <std::size_t K, std::size_t W>
         const auto append =
             [&records, &kmers, minimum_hash](std::size_t position) {
             const minimizer_record record{
-                position + K - 1u,
+                position + p_kmer_size - 1u,
                 minimum_hash,
                 kmers[position].strand,
             };
@@ -400,16 +400,16 @@ void require_paper_oracle_parity(
     return identity->alphabet_code;
 }
 
-template <class StorageUnit>
-using paper_sequence = sequence_custom_alphabet<seq::dna4, StorageUnit>;
+template <class p_storage_unit>
+using paper_sequence = sequence_custom_alphabet<seq::dna4, p_storage_unit>;
 
-template <class StorageUnit>
-using paper_range = compact_sequence_range<paper_sequence<StorageUnit>>;
+template <class p_storage_unit>
+using paper_range = compact_sequence_range<paper_sequence<p_storage_unit>>;
 
-template <class StorageUnit>
-[[nodiscard]] ::bioseq::minimizers::PackedSequenceKernelView
+template <class p_storage_unit>
+[[nodiscard]] ::bioseq::minimizers::packed_sequence_kernel_view
 paper_kernel_view(
-        paper_range<StorageUnit>& sequence,
+        paper_range<p_storage_unit>& sequence,
         std::size_t begin_unit,
         std::size_t end_unit) {
     if (begin_unit > end_unit
@@ -418,7 +418,7 @@ paper_kernel_view(
     }
     auto begin = sequence.begin();
     std::advance(begin, static_cast<std::ptrdiff_t>(begin_unit));
-    using traits = typename paper_range<StorageUnit>::traits;
+    using traits = typename paper_range<p_storage_unit>::traits;
     constexpr std::size_t letters_per_unit =
         traits::letters_per_unit;
     const std::size_t begin_bp = begin_unit * letters_per_unit;
@@ -433,19 +433,19 @@ paper_kernel_view(
         .end_symbol = end_bp - begin_bp,
         .alphabet_code = fixed_dna4_alphabet_code(),
         .bits_per_symbol = 2u,
-        .storage_unit_bytes = sizeof(StorageUnit),
+        .storage_unit_bytes = sizeof(p_storage_unit),
         .final_segment = true,
     };
 }
 
-template <class Collector>
-[[nodiscard]] ::bioseq::minimizers::MinimizerKernelResult invoke_paper_leaf(
-        Collector& collector,
-        ::bioseq::minimizers::PackedSequenceKernelView sequence) {
-    return pipe::invoke_selected_minimizer_kernel<MinimapSketchData>(
+template <class p_collector_type>
+[[nodiscard]] ::bioseq::minimizers::minimizer_kernel_result invoke_paper_leaf(
+        p_collector_type& collector,
+        ::bioseq::minimizers::packed_sequence_kernel_view sequence) {
+    return pipe::invoke_selected_minimizer_kernel<minimap_sketch_data>(
         fixed_highway_kernels(),
-        ::bioseq::simd_dispatch::HighwayKernelId::minimizer_paper_nthash,
-        ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash,
+        ::bioseq::simd_dispatch::HighwayKernelId::minimizer_bounded_nthash,
+        ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
         sequence,
         10u,
         15u,
@@ -454,15 +454,15 @@ template <class Collector>
 
 struct paper_leaf_run {
     std::vector<minimizer_record> records;
-    ::bioseq::minimizers::MinimizerKernelResult result;
+    ::bioseq::minimizers::minimizer_kernel_result result;
 };
 
-template <class StorageUnit>
+template <class p_storage_unit>
 [[nodiscard]] paper_leaf_run run_paper_leaf(
         std::vector<seq::dna4>& data,
         std::size_t begin_unit = 0u,
         std::size_t end_unit = (std::numeric_limits<std::size_t>::max)()) {
-    paper_range<StorageUnit> sequence(data);
+    paper_range<p_storage_unit> sequence(data);
     if (end_unit == (std::numeric_limits<std::size_t>::max)()) {
         end_unit = static_cast<std::size_t>(sequence.size());
     }
@@ -480,16 +480,16 @@ template <class StorageUnit>
     return lanes == 4u || lanes == 8u;
 }
 
-[[nodiscard]] ::bioseq::minimizers::PackedPaperNthashStatus
+[[nodiscard]] ::bioseq::minimizers::bounded_nthash_status
 paper_family_status(
-        const ::bioseq::minimizers::MinimizerKernelResult& result) noexcept {
-    return static_cast<::bioseq::minimizers::PackedPaperNthashStatus>(
+        const ::bioseq::minimizers::minimizer_kernel_result& result) noexcept {
+    return static_cast<::bioseq::minimizers::bounded_nthash_status>(
         result.family_status);
 }
 
-template <class Collector>
+template <class p_collector_type>
 [[nodiscard]] std::vector<std::uint64_t> normalized_minimizer_values(
-        const Collector& collector) {
+        const p_collector_type& collector) {
     std::vector<std::uint64_t> values;
     values.reserve(collector.extract_sketches_data().size());
     for (const auto& record : collector.extract_sketches_data()) {
@@ -500,17 +500,17 @@ template <class Collector>
     return values;
 }
 
-template <sequence_alphabet Alphabet, class StorageUnit>
+template <sequence_alphabet p_alphabet, class p_storage_unit>
 void require_reference_route_parity() {
     using sequence_type =
-        sequence_custom_alphabet<Alphabet, StorageUnit>;
+        sequence_custom_alphabet<p_alphabet, p_storage_unit>;
     using range_type = compact_sequence_range<sequence_type>;
     using pipe::MinKernelKind;
 
-    std::vector<Alphabet> data(4099u);
+    std::vector<p_alphabet> data(4099u);
     for (std::size_t index = 0u; index < data.size(); ++index) {
         std::uint8_t rank = static_cast<std::uint8_t>(index & 3u);
-        if constexpr (std::same_as<Alphabet, seq::dna5>) {
+        if constexpr (std::same_as<p_alphabet, seq::dna5>) {
             rank = index % 97u == 41u
                 ? 3u
                 : std::array<std::uint8_t, 4u>{0u, 1u, 2u, 4u}
@@ -521,25 +521,25 @@ void require_reference_route_parity() {
     range_type resident(data);
     auto lazy = bioseq::storage::make_lazy_in_memory(resident);
     const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
-    constexpr bool scalar_routed = std::same_as<Alphabet, seq::dna5>;
+    constexpr bool scalar_routed = std::same_as<p_alphabet, seq::dna5>;
     const auto* table = scalar_routed ? nullptr : fixed_highway_kernels();
 
     sketch_collector runtime_collector;
-    const auto runtime_proof = pipe::minimizer_dispatch<
-        MinKernelKind::Simd, MinimapSketchData>(
+    const auto runtime_stats = pipe::minimizer_dispatch<
+        MinKernelKind::Simd, minimap_sketch_data>(
             runtime_collector, view, 10u, 15u, table);
     sketch_collector constexpr_collector;
-    const auto constexpr_proof = pipe::minimizer_dispatch_constexpr<
-        MinKernelKind::Simd, 10u, 15u, MinimapSketchData>(
+    const auto constexpr_stats = pipe::minimizer_dispatch_constexpr<
+        MinKernelKind::Simd, 10u, 15u, minimap_sketch_data>(
             constexpr_collector, view, 10u, 15u, table);
     sketch_collector scalar_collector;
     (void)pipe::minimizer_dispatch<
-        MinKernelKind::Scalar, MinimapSketchData>(
+        MinKernelKind::scalar, minimap_sketch_data>(
             scalar_collector, view, 10u, 15u, table);
 
-    CAPTURE(sizeof(StorageUnit), scalar_routed);
-    REQUIRE(runtime_proof == TwoStackExecutionProof{});
-    REQUIRE(constexpr_proof == TwoStackExecutionProof{});
+    CAPTURE(sizeof(p_storage_unit), scalar_routed);
+    REQUIRE(runtime_stats == two_stack_execution_stats{});
+    REQUIRE(constexpr_stats == two_stack_execution_stats{});
     REQUIRE(normalized_minimizer_values(runtime_collector)
             == normalized_minimizer_values(scalar_collector));
     REQUIRE(normalized_minimizer_values(constexpr_collector)
@@ -562,22 +562,22 @@ void require_reference_route_parity() {
 
 struct minimizer_run {
     std::vector<minimizer_record> records;
-    pipe::MinimizerRangeExecutionProof proof;
+    pipe::MinimizerRangeExecutionStats stats;
 };
 
 [[nodiscard]] minimizer_run run_dispatch(
         facade_t view,
         sequence_size_t from,
         sequence_size_t to,
-        MinimizerSketchBackend backend) {
+        minimizer_sketch_backend backend) {
     sketch_collector collector;
-    auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
+    auto stats = pipe::minimizer_dispatch_range<minimap_sketch_data>(
         collector, view, from, to, 10u, 15u, backend,
         pipe::ExactSimdRangeRoute::require_continuation,
         fixed_highway_kernels());
     return {
         .records = canonical_records(collector),
-        .proof = proof,
+        .stats = stats,
     };
 }
 
@@ -596,7 +596,7 @@ template <class SeqView, class I>
 [[nodiscard]] std::vector<std::pair<std::size_t, std::uint64_t>>
 run_scalar(SeqView& seq, I begin, I end, std::size_t w, std::size_t k) {
     sketch_collector collector;
-    collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+    collect_minimizers_view<minimap_int_hasher, minimap_sketch_data>(
         collector, seq, begin, end, w, k);
     auto pairs = collector.extract_pairs();
     std::sort(pairs.begin(), pairs.end());
@@ -608,7 +608,7 @@ template <std::size_t FragUnits>
 void check_parity(std::size_t n, std::uint64_t seed, std::size_t w, std::size_t k) {
     using chunked = bioseq::storage::sequence_scanner_test_chunked<std::uint64_t, FragUnits>;
     auto data = make_dna4(n, seed);
-    range_t range(data);
+    range_type range(data);
 
     const auto baseline = run_scalar(range, range.begin(), range.end(), w, k);
 
@@ -644,7 +644,7 @@ TEST_CASE("DOC0263 §11.2.1 — fragmented minimizer parity across w/k variation
 }
 
 TEST_CASE("live packed Paper leaf matches its independent scalar oracle at every retained tail",
-          "[packed-paper][highway][live-leaf][oracle][tail][multiplicity]") {
+          "[packed-bounded_nthash][highway][live-leaf][oracle][tail][multiplicity]") {
     constexpr std::array<std::size_t, 13u> lengths{
         24u, 25u, 31u, 32u, 33u, 63u, 64u,
         65u, 127u, 128u, 129u, 257u, 521u,
@@ -656,24 +656,24 @@ TEST_CASE("live packed Paper leaf matches its independent scalar oracle at every
             paper_ranks(data));
         const auto actual = run_paper_leaf<std::uint32_t>(data);
         if (!paper_target_shape_supported()) {
-            REQUIRE_FALSE(actual.result.ok());
+            REQUIRE_FALSE(actual.result.is_ok());
             REQUIRE(paper_family_status(actual.result)
-                    == ::bioseq::minimizers::PackedPaperNthashStatus::
+                    == ::bioseq::minimizers::bounded_nthash_status::
                         unsupported_vector_shape);
             REQUIRE(actual.records.empty());
-            REQUIRE(actual.result.proof.paper.packed_decode_batches == 0u);
+            REQUIRE(actual.result.stats.bounded_nthash.packed_decode_batches == 0u);
             continue;
         }
 
-        REQUIRE(actual.result.ok());
-        REQUIRE(actual.result.proof.paper.accepted(true));
+        REQUIRE(actual.result.is_ok());
+        REQUIRE(actual.result.stats.bounded_nthash.is_internally_consistent(true));
         REQUIRE(actual.result.emitted == actual.records.size());
         require_paper_oracle_parity(actual.records, expected);
         REQUIRE(actual.records.size() == expected.size());
-        REQUIRE(actual.result.proof.paper.scalar_hash_symbols == 0u);
-        REQUIRE(actual.result.proof.paper.scalar_window_transitions == 0u);
-        REQUIRE(actual.result.proof.paper.scalar_minimum_decisions == 0u);
-        REQUIRE(actual.result.proof.paper.fallback_calls == 0u);
+        REQUIRE(actual.result.stats.bounded_nthash.scalar_hash_symbols == 0u);
+        REQUIRE(actual.result.stats.bounded_nthash.scalar_window_transitions == 0u);
+        REQUIRE(actual.result.stats.bounded_nthash.scalar_minimum_decisions == 0u);
+        REQUIRE(actual.result.stats.bounded_nthash.fallback_calls == 0u);
         if (length == 521u) {
             REQUIRE(std::ranges::any_of(
                 actual.records,
@@ -685,7 +685,7 @@ TEST_CASE("live packed Paper leaf matches its independent scalar oracle at every
 }
 
 TEST_CASE("live packed Paper reverse complement preserves hashes and flips strand",
-          "[packed-paper][highway][live-leaf][reverse-complement][strand]") {
+          "[packed-bounded_nthash][highway][live-leaf][reverse-complement][strand]") {
     constexpr std::size_t kmer = 15u;
     auto forward_data = make_dna4(377u, 0x399100u);
     std::vector<seq::dna4> reverse_data;
@@ -701,15 +701,15 @@ TEST_CASE("live packed Paper reverse complement preserves hashes and flips stran
     const auto reverse = run_paper_leaf<std::uint32_t>(reverse_data);
     if (!paper_target_shape_supported()) {
         REQUIRE(paper_family_status(forward.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         REQUIRE(paper_family_status(reverse.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         return;
     }
-    REQUIRE(forward.result.proof.paper.accepted(true));
-    REQUIRE(reverse.result.proof.paper.accepted(true));
+    REQUIRE(forward.result.stats.bounded_nthash.is_internally_consistent(true));
+    REQUIRE(reverse.result.stats.bounded_nthash.is_internally_consistent(true));
     require_paper_oracle_parity(
         forward.records,
         paper_scalar_oracle<15u, 10u>(paper_ranks(forward_data)));
@@ -730,24 +730,24 @@ TEST_CASE("live packed Paper reverse complement preserves hashes and flips stran
 }
 
 TEST_CASE("live packed Paper u64 storage preserves raw u32 order and local subrange coordinates",
-          "[packed-paper][highway][live-leaf][u64][u32][subrange][order]") {
+          "[packed-bounded_nthash][highway][live-leaf][u64][u32][subrange][order]") {
     auto whole_data = make_dna4(521u, 0x399200u);
     const auto whole_u32 = run_paper_leaf<std::uint32_t>(whole_data);
     const auto whole_u64 = run_paper_leaf<std::uint64_t>(whole_data);
     if (!paper_target_shape_supported()) {
         REQUIRE(paper_family_status(whole_u32.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         REQUIRE(paper_family_status(whole_u64.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         return;
     }
-    REQUIRE(whole_u32.result.proof.paper.accepted(true));
-    REQUIRE(whole_u64.result.proof.paper.accepted(true));
-    REQUIRE(whole_u32.result.proof.paper.source_storage_unit_bytes
+    REQUIRE(whole_u32.result.stats.bounded_nthash.is_internally_consistent(true));
+    REQUIRE(whole_u64.result.stats.bounded_nthash.is_internally_consistent(true));
+    REQUIRE(whole_u32.result.stats.bounded_nthash.source_storage_unit_bytes
             == sizeof(std::uint32_t));
-    REQUIRE(whole_u64.result.proof.paper.source_storage_unit_bytes
+    REQUIRE(whole_u64.result.stats.bounded_nthash.source_storage_unit_bytes
             == sizeof(std::uint64_t));
     REQUIRE(whole_u64.records == whole_u32.records);
     require_paper_oracle_parity(
@@ -762,8 +762,8 @@ TEST_CASE("live packed Paper u64 storage preserves raw u32 order and local subra
         subrange_data, begin_u64, end_u64);
     const auto u32 = run_paper_leaf<std::uint32_t>(
         subrange_data, 2u * begin_u64, 2u * end_u64);
-    REQUIRE(u64.result.proof.paper.accepted(true));
-    REQUIRE(u32.result.proof.paper.accepted(true));
+    REQUIRE(u64.result.stats.bounded_nthash.is_internally_consistent(true));
+    REQUIRE(u32.result.stats.bounded_nthash.is_internally_consistent(true));
     REQUIRE(u64.records == u32.records);
     const auto ranks = paper_ranks(subrange_data);
     const std::size_t begin_bp = begin_u64 * letters_per_u64;
@@ -772,9 +772,9 @@ TEST_CASE("live packed Paper u64 storage preserves raw u32 order and local subra
         u64.records,
         paper_scalar_oracle<15u, 10u>(std::span<const std::uint32_t>{
             ranks.data() + begin_bp, end_bp - begin_bp}));
-    REQUIRE(u64.result.proof.paper.positions_are_segment_local);
-    REQUIRE(u64.result.proof.paper.input_symbols == end_bp - begin_bp);
-    REQUIRE(u64.result.proof.paper.input_storage_units
+    REQUIRE(u64.result.stats.bounded_nthash.positions_are_segment_local);
+    REQUIRE(u64.result.stats.bounded_nthash.input_symbols == end_bp - begin_bp);
+    REQUIRE(u64.result.stats.bounded_nthash.input_storage_units
             == end_u64 - begin_u64);
     REQUIRE(std::ranges::all_of(
         u64.records,
@@ -784,7 +784,7 @@ TEST_CASE("live packed Paper u64 storage preserves raw u32 order and local subra
 }
 
 TEST_CASE("live packed Paper suppresses persistent minima at all seven stream joins",
-          "[packed-paper][highway][live-leaf][boundary][dedup][multiplicity]") {
+          "[packed-bounded_nthash][highway][live-leaf][boundary][dedup][multiplicity]") {
     constexpr std::size_t length = 521u;
     constexpr std::size_t kmer = 15u;
     constexpr std::size_t window = 10u;
@@ -843,21 +843,21 @@ TEST_CASE("live packed Paper suppresses persistent minima at all seven stream jo
     const auto actual = run_paper_leaf<std::uint32_t>(data);
     if (!paper_target_shape_supported()) {
         REQUIRE(paper_family_status(actual.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         return;
     }
     const auto expected = paper_scalar_oracle<kmer, window>(ranks);
     require_paper_oracle_parity(actual.records, expected);
     REQUIRE(actual.records.size() == expected.size());
-    REQUIRE(actual.result.proof.paper.stream_boundary_records_buffered == 7u);
-    REQUIRE(actual.result.proof.paper.stream_boundary_duplicates_suppressed
+    REQUIRE(actual.result.stats.bounded_nthash.stream_boundary_records_buffered == 7u);
+    REQUIRE(actual.result.stats.bounded_nthash.stream_boundary_duplicates_suppressed
             == 7u);
-    REQUIRE(actual.result.proof.paper.stream_boundary_records_committed == 0u);
+    REQUIRE(actual.result.stats.bounded_nthash.stream_boundary_records_committed == 0u);
 }
 
 TEST_CASE("live packed Paper ties retain endpoints, adjacent dedup, and strand zero",
-          "[packed-paper][highway][live-leaf][ties][dedup][strand-zero]") {
+          "[packed-bounded_nthash][highway][live-leaf][ties][dedup][strand-zero]") {
     std::vector<seq::dna4> tied_a(257u);
     for (seq::dna4& symbol : tied_a) {
         symbol.assign_rank(0u);
@@ -871,10 +871,10 @@ TEST_CASE("live packed Paper ties retain endpoints, adjacent dedup, and strand z
     const auto g_result = run_paper_leaf<std::uint32_t>(tied_g);
     if (!paper_target_shape_supported()) {
         REQUIRE(paper_family_status(a_result.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         REQUIRE(paper_family_status(g_result.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         return;
     }
@@ -882,16 +882,16 @@ TEST_CASE("live packed Paper ties retain endpoints, adjacent dedup, and strand z
     require_paper_oracle_parity(
         a_result.records,
         paper_scalar_oracle<15u, 10u>(paper_ranks(tied_a)));
-    REQUIRE(a_result.result.proof.paper.tied_endpoint_records_emitted > 0u);
-    REQUIRE(a_result.result.proof.paper.stream_boundary_records_buffered
-            == a_result.result.proof.paper.stream_boundary_records_committed
-                + a_result.result.proof.paper.
+    REQUIRE(a_result.result.stats.bounded_nthash.tied_endpoint_records_emitted > 0u);
+    REQUIRE(a_result.result.stats.bounded_nthash.stream_boundary_records_buffered
+            == a_result.result.stats.bounded_nthash.stream_boundary_records_committed
+                + a_result.result.stats.bounded_nthash.
                     stream_boundary_duplicates_suppressed);
 
     require_paper_oracle_parity(
         g_result.records,
         paper_scalar_oracle<15u, 10u>(paper_ranks(tied_g)));
-    REQUIRE(g_result.result.proof.paper.tied_endpoint_records_emitted > 0u);
+    REQUIRE(g_result.result.stats.bounded_nthash.tied_endpoint_records_emitted > 0u);
     REQUIRE_FALSE(g_result.records.empty());
     REQUIRE(std::ranges::all_of(
         g_result.records,
@@ -901,7 +901,7 @@ TEST_CASE("live packed Paper ties retain endpoints, adjacent dedup, and strand z
 }
 
 TEST_CASE("live packed Paper rejects reversed and narrow views before biological work",
-          "[packed-paper][highway][live-leaf][range][storage][fail-closed]") {
+          "[packed-bounded_nthash][highway][live-leaf][range][storage][fail-closed]") {
     auto data = make_dna4(257u, 0x399300u);
     paper_range<std::uint64_t> reversed_sequence(data);
     auto reversed_view = paper_kernel_view(
@@ -914,25 +914,25 @@ TEST_CASE("live packed Paper rejects reversed and narrow views before biological
     const auto reversed = invoke_paper_leaf(
         reversed_collector, reversed_view);
     REQUIRE(reversed.status
-            == ::bioseq::minimizers::MinimizerKernelStatus::
+            == ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_sequence_view);
     REQUIRE(paper_family_status(reversed)
-            == ::bioseq::minimizers::PackedPaperNthashStatus::invalid_range);
-    REQUIRE(reversed.proof.paper
-            == ::bioseq::minimizers::PackedPaperNthashExecutionProof{
+            == ::bioseq::minimizers::bounded_nthash_status::invalid_range);
+    REQUIRE(reversed.stats.bounded_nthash
+            == ::bioseq::minimizers::bounded_nthash_execution_stats{
                 .fail_closed_rejections = 1u});
     REQUIRE(reversed_collector.extract_sketches_data().empty());
 
-    const auto require_narrow_rejection = [&]<class StorageUnit>() {
-        const auto rejected = run_paper_leaf<StorageUnit>(data);
+    const auto require_narrow_rejection = [&]<class p_storage_unit>() {
+        const auto rejected = run_paper_leaf<p_storage_unit>(data);
         REQUIRE(rejected.result.status
-                == ::bioseq::minimizers::MinimizerKernelStatus::
+                == ::bioseq::minimizers::minimizer_kernel_status::
                     invalid_configuration);
         REQUIRE(paper_family_status(rejected.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_storage);
-        REQUIRE(rejected.result.proof.paper
-                == ::bioseq::minimizers::PackedPaperNthashExecutionProof{
+        REQUIRE(rejected.result.stats.bounded_nthash
+                == ::bioseq::minimizers::bounded_nthash_execution_stats{
                     .fail_closed_rejections = 1u});
         REQUIRE(rejected.records.empty());
     };
@@ -940,79 +940,79 @@ TEST_CASE("live packed Paper rejects reversed and narrow views before biological
     require_narrow_rejection.template operator()<std::uint16_t>();
 }
 
-TEST_CASE("live packed Paper proof aggregation requires one exact source width",
-          "[packed-paper][highway][live-leaf][proof][combine][storage]") {
+TEST_CASE("live packed Paper stats aggregation requires one exact source width",
+          "[packed-bounded_nthash][highway][live-leaf][stats][merge][storage]") {
     auto data = make_dna4(2048u, 0x399400u);
     const auto first_u32 = run_paper_leaf<std::uint32_t>(data, 0u, 16u);
     const auto second_u32 = run_paper_leaf<std::uint32_t>(data, 16u, 32u);
     const auto first_u64 = run_paper_leaf<std::uint64_t>(data, 0u, 8u);
     if (!paper_target_shape_supported()) {
         REQUIRE(paper_family_status(first_u32.result)
-                == ::bioseq::minimizers::PackedPaperNthashStatus::
+                == ::bioseq::minimizers::bounded_nthash_status::
                     unsupported_vector_shape);
         return;
     }
-    auto same_width = first_u32.result.proof.paper;
-    same_width.combine(second_u32.result.proof.paper);
+    auto same_width = first_u32.result.stats.bounded_nthash;
+    same_width.merge(second_u32.result.stats.bounded_nthash);
     REQUIRE_FALSE(same_width.aggregation_mismatch);
     REQUIRE(same_width.source_storage_unit_bytes == sizeof(std::uint32_t));
     REQUIRE(same_width.segments_combined
-            == first_u32.result.proof.paper.segments_combined
-                + second_u32.result.proof.paper.segments_combined);
-    REQUIRE(same_width.accepted(true));
+            == first_u32.result.stats.bounded_nthash.segments_combined
+                + second_u32.result.stats.bounded_nthash.segments_combined);
+    REQUIRE(same_width.is_internally_consistent(true));
 
-    auto mixed_width = first_u32.result.proof.paper;
-    mixed_width.combine(first_u64.result.proof.paper);
+    auto mixed_width = first_u32.result.stats.bounded_nthash;
+    mixed_width.merge(first_u64.result.stats.bounded_nthash);
     REQUIRE(mixed_width.aggregation_mismatch);
     REQUIRE(mixed_width.source_storage_unit_bytes == sizeof(std::uint32_t));
-    REQUIRE_FALSE(mixed_width.accepted(false));
+    REQUIRE_FALSE(mixed_width.is_internally_consistent(false));
 
-    auto saturated = first_u32.result.proof.paper;
+    auto saturated = first_u32.result.stats.bounded_nthash;
     saturated.input_symbols =
         (std::numeric_limits<std::uint64_t>::max)() - 1u;
-    auto overflow = second_u32.result.proof.paper;
+    auto overflow = second_u32.result.stats.bounded_nthash;
     overflow.input_symbols = 2u;
-    saturated.combine(overflow);
+    saturated.merge(overflow);
     REQUIRE(saturated.saturated);
     REQUIRE(saturated.input_symbols
             == (std::numeric_limits<std::uint64_t>::max)());
-    REQUIRE_FALSE(saturated.accepted(false));
+    REQUIRE_FALSE(saturated.is_internally_consistent(false));
 }
 
 TEST_CASE("live admitted collector owns tie-heavy Paper output above input bp",
-          "[packed-paper][highway][live-leaf][ties][admission]") {
-    using collector_type = admitted_sketch_collector_t<
-        MinimapSketchData, bioseq::parallelism::MemoryPermit>;
+          "[packed-bounded_nthash][highway][live-leaf][ties][admission]") {
+    using collector_type = admitted_sketch_collector<
+        minimap_sketch_data, bioseq::parallelism::memory_permit>;
     std::vector<seq::dna4> data(96u);
     for (seq::dna4& symbol : data) {
         symbol.assign_rank(0u);
     }
     paper_range<std::uint32_t> sequence(data);
-    bioseq::parallelism::MemoryAdmissionController admission;
+    bioseq::parallelism::memory_admission_controller admission;
     {
         auto permit = admission.try_reserve(0u);
         REQUIRE(permit.has_value());
         collector_type collector{
             std::move(*permit),
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor};
+            bioseq::parallelism::k_vector_preallocation_headroom_factor};
         const auto result = invoke_paper_leaf(
             collector,
             paper_kernel_view(
                 sequence, 0u,
                 static_cast<std::size_t>(sequence.size())));
         if (!paper_target_shape_supported()) {
-            REQUIRE_FALSE(result.ok());
+            REQUIRE_FALSE(result.is_ok());
             REQUIRE(collector.extract_sketches_data().empty());
         } else {
-            REQUIRE(result.ok());
-            REQUIRE(result.proof.paper.accepted(true));
-            REQUIRE(collector.ok());
+            REQUIRE(result.is_ok());
+            REQUIRE(result.stats.bounded_nthash.is_internally_consistent(true));
+            REQUIRE(collector.is_ok());
             REQUIRE(collector.extract_sketches_data().size()
-                    == result.proof.paper.minimizers_emitted);
+                    == result.stats.bounded_nthash.minimizers_emitted);
             REQUIRE(collector.extract_sketches_data().size() > data.size());
             REQUIRE(collector.admitted_capacity_bytes()
                     == collector.extract_sketches_data().capacity()
-                        * sizeof(MinimapSketchData));
+                        * sizeof(minimap_sketch_data));
             REQUIRE(admission.reserved_bytes()
                     == collector.admitted_capacity_bytes());
         }
@@ -1038,7 +1038,7 @@ TEST_CASE("DOC0377 — scalar minimizers stream only a sliced composite source r
         bioseq::storage::as_lazy_sequence_view(selected_owner);
     const auto baseline = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        MinimizerSketchBackend::Scalar);
+        minimizer_sketch_backend::scalar);
 
     reset_source_observation(fixture.source);
     const auto source_view = make_composite_source_view(fixture.source);
@@ -1047,17 +1047,17 @@ TEST_CASE("DOC0377 — scalar minimizers stream only a sliced composite source r
         fixture.selected_from, fixture.selected_to, sizeof(std::uint32_t)));
     const auto source = run_dispatch(
         source_view, fixture.selected_from, fixture.selected_to,
-        MinimizerSketchBackend::Scalar);
+        minimizer_sketch_backend::scalar);
 
     REQUIRE(source.records == baseline.records);
-    REQUIRE(pipe::minimizer_range_proof_matches_backend(
-        MinimizerSketchBackend::Scalar, source.proof,
+    REQUIRE(pipe::minimizer_range_stats_matches_backend(
+        minimizer_sketch_backend::scalar, source.stats,
         /*require_nonempty_vector_work=*/false));
     require_partial_source_read(
         fixture.source, fixture.selected_to - fixture.selected_from);
 }
 
-TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite source range",
+TEST_CASE("DOC0377 — two_stack_nthash and Paper SIMD admit only a sliced composite source range",
           "[lazy-view][slice][concat][reverse][source-backed][simd][minimizer-parity]") {
     auto fixture = make_composite_fixture();
     using packed_t = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
@@ -1067,7 +1067,7 @@ TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite so
         bioseq::storage::as_lazy_sequence_view(selected_owner);
     const auto scalar = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        MinimizerSketchBackend::Scalar);
+        minimizer_sketch_backend::scalar);
     const auto source_view = make_composite_source_view(fixture.source);
     const sequence_size_t selected_length =
         fixture.selected_to - fixture.selected_from;
@@ -1075,21 +1075,21 @@ TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite so
     try {
         const auto exact_baseline = run_dispatch(
             selected_view, 0u, selected_view.bp_size(),
-            MinimizerSketchBackend::ExactSimd);
+            minimizer_sketch_backend::two_stack_nthash);
         reset_source_observation(fixture.source);
         const auto exact_source = run_dispatch(
             source_view, fixture.selected_from, fixture.selected_to,
-            MinimizerSketchBackend::ExactSimd);
+            minimizer_sketch_backend::two_stack_nthash);
         REQUIRE(exact_source.records == exact_baseline.records);
         REQUIRE(exact_source.records == scalar.records);
-        REQUIRE(pipe::minimizer_range_proof_matches_backend(
-            MinimizerSketchBackend::ExactSimd, exact_source.proof,
+        REQUIRE(pipe::minimizer_range_stats_matches_backend(
+            minimizer_sketch_backend::two_stack_nthash, exact_source.stats,
             /*require_nonempty_vector_work=*/true,
             pipe::ExactSimdRangeRoute::require_continuation));
         require_partial_source_read(fixture.source, selected_length);
-    } catch (const pipe::ExactSimdRuntimeError& error) {
+    } catch (const pipe::exact_simd_runtime_error& error) {
         REQUIRE(error.status()
-                == TwoStackContinuationStatus::unsupported_vector_shape);
+                == two_stack_continuation_status::unsupported_vector_shape);
     }
 
     const std::size_t lanes = hn::Lanes(hn::ScalableTag<std::uint32_t>{});
@@ -1098,7 +1098,7 @@ TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite so
         REQUIRE_THROWS_AS(
             run_dispatch(
                 source_view, fixture.selected_from, fixture.selected_to,
-                MinimizerSketchBackend::PaperNtHashSimd),
+                minimizer_sketch_backend::bounded_nthash_simd),
             pipe::PaperNtHashRuntimeError);
         require_partial_source_read(fixture.source, selected_length);
         return;
@@ -1106,14 +1106,14 @@ TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite so
 
     const auto paper_baseline = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        MinimizerSketchBackend::PaperNtHashSimd);
+        minimizer_sketch_backend::bounded_nthash_simd);
     reset_source_observation(fixture.source);
     const auto paper_source = run_dispatch(
         source_view, fixture.selected_from, fixture.selected_to,
-        MinimizerSketchBackend::PaperNtHashSimd);
+        minimizer_sketch_backend::bounded_nthash_simd);
     REQUIRE(paper_source.records == paper_baseline.records);
-    REQUIRE(pipe::minimizer_range_proof_matches_backend(
-        MinimizerSketchBackend::PaperNtHashSimd, paper_source.proof,
+    REQUIRE(pipe::minimizer_range_stats_matches_backend(
+        minimizer_sketch_backend::bounded_nthash_simd, paper_source.stats,
         /*require_nonempty_vector_work=*/true));
     require_partial_source_read(fixture.source, selected_length);
 }
@@ -1122,14 +1122,14 @@ TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range
           "[lazy-view][slice][concat][reverse][source-backed][vulkan][minimizer-parity][memory-admission]") {
     auto fixture = make_composite_fixture();
     const auto source_view = make_composite_source_view(fixture.source);
-    if (!vk::hardware_device_available(vk::Runtime::instance())) {
+    if (!vk::hardware_device_available(vk::vulkan_runtime::instance())) {
         auto& admission =
-            bioseq::parallelism::MemoryAdmissionController::instance();
+            bioseq::parallelism::memory_admission_controller::instance();
         const std::uint64_t baseline = admission.reserved_bytes();
-        vk::VulkanSketchDecline decline{};
+        vk::vulkan_sketch_decline decline{};
         reset_source_observation(fixture.source);
         const auto rejected =
-            vk::build_gpu_segment_index_on_device<MinimapSketchData>(
+            vk::build_gpu_segment_index_on_device<minimap_sketch_data>(
                 source_view,
                 fixture.selected_from,
                 fixture.selected_to,
@@ -1139,7 +1139,7 @@ TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range
                 &decline);
         REQUIRE_FALSE(rejected.has_value());
         REQUIRE(decline.reason
-                == vk::VulkanSketchDeclineReason::hardware_device_unavailable);
+                == vk::vulkan_sketch_decline_reason::hardware_device_unavailable);
         REQUIRE(decline.bp_size
                 == fixture.selected_to - fixture.selected_from);
         REQUIRE(fixture.source.requested_bp
@@ -1157,11 +1157,11 @@ TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range
         bioseq::storage::as_lazy_sequence_view(selected_owner);
     const auto scalar = run_dispatch(
         selected_view, 0u, selected_view.bp_size(),
-        MinimizerSketchBackend::Scalar);
+        minimizer_sketch_backend::scalar);
 
     reset_source_observation(fixture.source);
     sketch_collector gpu_collector;
-    vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
+    vk::collect_minimizers_vulkan_segment_or_throw<minimap_sketch_data>(
         gpu_collector,
         source_view,
         fixture.selected_from,

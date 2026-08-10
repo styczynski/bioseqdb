@@ -23,7 +23,7 @@ import :model;
 import :renderer;
 import :validator;
 import :contract_tests;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
 
@@ -247,7 +247,7 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
             + topology.topology_digest + "\t" + topology.content_sha256
             + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] inline int execute_prepare(prepare_command_line command) {
@@ -275,8 +275,8 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
     // canonical module, then build their complete module graph only inside
     // the codegen-owned scratch PCM authority. No authored scan target or
     // linked object provider is involved.
-    clang_structural::prepared_compilation_environment prepared =
-        clang_structural::prepare_compilation_environment(
+    structural_analysis::dependency_compilation_environment prepared =
+        structural_analysis::prepare_compilation_environment(
             source_paths,
             command.signature_source,
             command.raw_compile_database,
@@ -296,32 +296,32 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
     for (const domain_topology_provenance& topology : domain_topologies) {
         prepared.dependencies.push_back(topology.path);
     }
-    write_if_different(
+    publish_artifact_if_changed(
         command.compile_database_output, prepared.compile_database_json);
-    write_if_different(command.pcm_manifest, prepared.pcm_manifest_json);
-    write_if_different(
+    publish_artifact_if_changed(command.pcm_manifest, prepared.pcm_manifest_json);
+    publish_artifact_if_changed(
         command.depfile,
         render_depfile(command.stamp, std::move(prepared.dependencies)));
-    write_if_different(
+    publish_artifact_if_changed(
         command.stamp,
         "bioseq_highway_prepare_stamp/v2\n"
         "profile=production\n"
         "authority=core\n"
         "signature_source_sha256="
-            + sha256_hex(read_file(command.signature_source)) + "\n"
+            + bioseq::common::sha256_hex(read_artifact_bytes(command.signature_source)) + "\n"
         "compilation_signature=" + prepared.compilation_signature + "\n"
         "relocatable_compilation_signature="
             + prepared.relocatable_compilation_signature + "\n"
         "compile_database_sha256="
-            + sha256_hex(prepared.compile_database_json) + "\n"
-        "pcm_manifest_sha256=" + sha256_hex(prepared.pcm_manifest_json) + "\n"
+            + bioseq::common::sha256_hex(prepared.compile_database_json) + "\n"
+        "pcm_manifest_sha256=" + bioseq::common::sha256_hex(prepared.pcm_manifest_json) + "\n"
         "relocatable_compile_database_sha256="
             + prepared.relocatable_compile_database_sha256 + "\n"
         "relocatable_pcm_manifest_sha256="
             + prepared.relocatable_pcm_manifest_sha256 + "\n"
         "domain_topologies_sha256="
             + domain_topology_identity(domain_topologies) + "\n");
-    touch_stamp(command.stamp);
+    mark_artifact_complete(command.stamp);
     return 0;
 }
 
@@ -345,8 +345,8 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
     // authority only (never CMake-attached or linked); structural collection
     // retains compiler-proven callable geometry for generated HWY_ATTR sites.
     constexpr std::string_view compiler_profile = "production";
-    const clang_structural::prepared_compilation_validation prepared =
-        clang_structural::validate_prepared_compilation_environment(
+    const structural_analysis::dependency_compilation_validation prepared =
+        structural_analysis::validate_dependency_compilation_environment(
             source_paths,
             command.compile_database,
             command.pcm_root,
@@ -362,14 +362,14 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
             compiler_profile,
             "core");
     validate_highway_prepared_closure(sources, prepared);
-    const clang_structural::structural_index structural =
-        clang_structural::scan_translation_units_from_database(
+    const structural_analysis::structural_index structural =
+        structural_analysis::scan_translation_units_from_database(
             source_paths,
             command.compile_database,
             compiler_profile,
             command.pcm_root);
-    const clang_structural::module_graph graph =
-        clang_structural::scan_module_graph_from_database(
+    const structural_analysis::module_graph graph =
+        structural_analysis::scan_module_graph_from_database(
             source_paths,
             command.compile_database,
             compiler_profile,
@@ -378,8 +378,8 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
     generation_plan plan{
         .target_inventory = std::move(targets),
         .source_inventory = std::move(sources),
-        .clang_version = structural.clang_version,
-        .compilation_signature = sha256_hex(
+        .clang_release = structural.clang_release,
+        .compilation_signature = bioseq::common::sha256_hex(
             "bioseq_highway_relocatable_prepared_closure/v2\n"
             + prepared.relocatable_compilation_signature + "\n"
             + "domain_topologies_sha256="
@@ -438,7 +438,7 @@ inline void run_contract_self_test() {
                     .platform = "x86_64",
                     .slug = "emu128",
                     .token = "HWY_EMU128",
-                    .name_space = "N_EMU128",
+                    .target_namespace = "N_EMU128",
                     .bit = 1,
                 },
             },
@@ -447,7 +447,7 @@ inline void run_contract_self_test() {
             .contract_module = "bioseq.highway.dispatch_contract",
             .dispatch_module = "bioseq.scheduler.dispatch_processor",
         },
-        .clang_version = "self-test",
+        .clang_release = "self-test",
         .compilation_signature = "self-test",
     };
     const generation_result generated = render_generation(plan);
@@ -468,9 +468,9 @@ inline void run_contract_self_test() {
         || inventory == generated.artifacts.end()
         || registry->content.find("HWY_DYNAMIC_DISPATCH(")
             == std::string::npos
-        || registry->content.find("registered_highway_dispatch_info")
+        || registry->content.find("registered_highway_dispatch_plan")
             != std::string::npos
-        || inventory->content.find("registered_highway_dispatch_info")
+        || inventory->content.find("registered_highway_dispatch_plan")
             == std::string::npos
         || inventory->content.find("registered_highway_target_binding")
             == std::string::npos

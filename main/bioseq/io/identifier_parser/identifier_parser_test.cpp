@@ -3,8 +3,7 @@
 // DOC0295 §11 / §11.1 — NO_POSTGRES unit tests for the SIMD header lexer,
 // per-format extractors, mapping resolution order (D5/D6/D7/D8) and the
 // auto-mode FASTQ header sampler. Compiles into the normal unit-test executable.
-#include "common_tests.h"
-#include "common.h"
+#include <tests/support/common.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -13,17 +12,19 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.io.options;
-import bioseq.io.public_api;
-import bioseq.io.identifier_formats;
+import bioseq.io.reader;
+import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser;
 
-using namespace bioseq::io::idparse;
+using namespace bioseq::io::identifier_parser;
 
 namespace {
 
@@ -34,23 +35,23 @@ struct capture_identifier_writer {
 
     explicit capture_identifier_writer(std::size_t n) : values(n) {}
     void begin_tuple() { for (auto& v : values) v.reset(); }
-    void set_field(dest_slot_t slot, const char* data, std::int32_t len) {
+    void set_field(destination_slot slot, const char* data, std::int32_t len) {
         values.at(static_cast<std::size_t>(slot)) =
             std::string{data, static_cast<std::size_t>(len)};
     }
-    void set_null(dest_slot_t slot) {
+    void set_null(destination_slot slot) {
         values.at(static_cast<std::size_t>(slot)).reset();
     }
     void end_tuple() {}
     void finish() {}
-    [[nodiscard]] std::size_t dest_count() const noexcept { return values.size(); }
+    [[nodiscard]] std::size_t destination_count() const noexcept { return values.size(); }
 };
-static_assert(is_identifier_dest_writer<capture_identifier_writer>);
+static_assert(identifier_destination_writer<capture_identifier_writer>);
 
 [[nodiscard]] std::size_t slot_for_column(
         const identifier_mapping_result& map, std::uint16_t col_index) {
-    for (std::size_t slot = 0; slot < map.slot_to_col.size(); ++slot)
-        if (map.slot_to_col[slot] == col_index) return slot;
+    for (std::size_t slot = 0; slot < map.slot_to_column.size(); ++slot)
+        if (map.slot_to_column[slot] == col_index) return slot;
     FAIL("column was not routed");
     return 0;
 }
@@ -83,10 +84,11 @@ struct parse_run {
     auto map = resolve_identifier_mapping(requested, effective, columns, maps);
     REQUIRE(map.has_value());
     identifier_parse_state state;
-    capture_identifier_writer writer{map->routing.dest_count};
+    capture_identifier_writer writer{map->routing.destination_count};
     writer.begin_tuple();
     auto parsed = parse_and_route_header(
-        effective, header, map->routing, state, make_identifier_writer_ref(writer));
+        effective, header, map->routing, state,
+        make_identifier_writer_reference(writer));
     REQUIRE(parsed.has_value());
     writer.end_tuple();
     return {std::move(*map), std::move(writer)};
@@ -95,10 +97,10 @@ struct parse_run {
 }  // namespace
 
 TEST_CASE("identifier_parser: T2 auto GenBank claims text columns before identifier",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("id"), text_col("organism"), scalar_col("chromosome"), text_col("moltype")};
-    auto r = run_parse(header_format::AUTO, header_format::GENBANK, columns,
+    auto r = run_parse(header_format::automatic, header_format::genbank, columns,
         "dna_new [organism=Homo sapiens] [chromosome=17] [moltype=mRNA]");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "dna_new");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "Homo sapiens");
@@ -107,11 +109,11 @@ TEST_CASE("identifier_parser: T2 auto GenBank claims text columns before identif
 }
 
 TEST_CASE("identifier_parser: T3 one value routes to many columns (D5)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         scalar_col("SequenceVersion"), scalar_col("sequence_version"),
         scalar_col("sv"), scalar_col("protein_existence")};
-    auto r = run_parse(header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+    auto r = run_parse(header_format::uniprotkb, header_format::uniprotkb, columns,
         "tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase OS=Pseudomonas aeruginosa PE=4 SV=1");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "1");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "1");
@@ -120,10 +122,10 @@ TEST_CASE("identifier_parser: T3 one value routes to many columns (D5)",
 }
 
 TEST_CASE("identifier_parser: T4 fixed uni_prot routes positional + tags",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("accession"), text_col("organism_name"), scalar_col("sv")};
-    auto r = run_parse(header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+    auto r = run_parse(header_format::uniprotkb, header_format::uniprotkb, columns,
         "tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase OS=Pseudomonas aeruginosa PE=4 SV=1");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "R9RJF1");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "Pseudomonas aeruginosa");
@@ -131,10 +133,10 @@ TEST_CASE("identifier_parser: T4 fixed uni_prot routes positional + tags",
 }
 
 TEST_CASE("identifier_parser: T5 isoform leaves absent PE column NULL",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("gene_name"), scalar_col("organism_identifier"), scalar_col("pe")};
-    auto r = run_parse(header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+    auto r = run_parse(header_format::uniprotkb, header_format::uniprotkb, columns,
         "sp|Q4R572-2|1433B_MACFA Isoform Short of 14-3-3 protein beta/alpha "
         "OS=Macaca fascicularis OX=9541 GN=YWHAB");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "YWHAB");
@@ -143,11 +145,11 @@ TEST_CASE("identifier_parser: T5 isoform leaves absent PE column NULL",
 }
 
 TEST_CASE("identifier_parser: T6 uni_ref id + cluster + tags",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("id"), text_col("cluster"), scalar_col("n"),
         text_col("tax"), text_col("rep_id")};
-    auto r = run_parse(header_format::UNIREF, header_format::UNIREF, columns,
+    auto r = run_parse(header_format::uniref, header_format::uniref, columns,
         "UniRef100_A5DI11 Elongation factor 2 n=1 Tax=Pichia guilliermondii RepID=EF2_PICGU");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "UniRef100_A5DI11");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "Elongation factor 2");
@@ -157,19 +159,19 @@ TEST_CASE("identifier_parser: T6 uni_ref id + cluster + tags",
 }
 
 TEST_CASE("identifier_parser: T7 uni_parc id + status (no description)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("id"), text_col("status")};
-    auto r = run_parse(header_format::UNIPARC, header_format::UNIPARC, columns,
+    auto r = run_parse(header_format::uniparc, header_format::uniparc, columns,
         "UPI0000000005 status=active");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "UPI0000000005");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "active");
 }
 
 TEST_CASE("identifier_parser: T8 spd positional + gene split on '_'",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("id"), text_col("gene_id"), text_col("taxon"), text_col("description")};
-    auto r = run_parse(header_format::SPD, header_format::SPD, columns,
+    auto r = run_parse(header_format::spd, header_format::spd, columns,
         "P31947|1433S_HUMAN| 14-3-3 protein sigma");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "P31947");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "1433S");
@@ -178,10 +180,10 @@ TEST_CASE("identifier_parser: T8 spd positional + gene split on '_'",
 }
 
 TEST_CASE("identifier_parser: T9 ncbi id + description + trailing [organism]",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("id"), text_col("description"), text_col("taxon")};
-    auto r = run_parse(header_format::NCBI, header_format::NCBI, columns,
+    auto r = run_parse(header_format::ncbi, header_format::ncbi, columns,
         "NP_001351877.1 acylglycerol kinase, mitochondrial isoform 2 [Homo sapiens]");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "NP_001351877.1");
     REQUIRE(value_for_column(r.map, r.writer, 1).value()
@@ -190,11 +192,11 @@ TEST_CASE("identifier_parser: T9 ncbi id + description + trailing [organism]",
 }
 
 TEST_CASE("identifier_parser: T11 imgt positional incl. range-shaped field (F22)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("ligm_accession"), text_col("imgt_allele_name"),
         text_col("species"), text_col("positions")};
-    auto r = run_parse(header_format::IMGT, header_format::IMGT, columns,
+    auto r = run_parse(header_format::imgt, header_format::imgt, columns,
         "M99641|IGHV1-18*01|Homo sapiens|F|V-REGION|188..483|296 nt|1| | | | |296+24=320| | ");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "M99641");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "IGHV1-18*01");
@@ -203,10 +205,10 @@ TEST_CASE("identifier_parser: T11 imgt positional incl. range-shaped field (F22)
 }
 
 TEST_CASE("identifier_parser: T13 auto/uni_prot keeps embedded '=' in description",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{
         text_col("protein_name"), scalar_col("sv"), text_col("organism_name")};
-    auto r = run_parse(header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+    auto r = run_parse(header_format::uniprotkb, header_format::uniprotkb, columns,
         "tr|Q9S8M8|Q9S8M8_WHEAT FRIII-2-VIII=GAMMA-gliadin (Fragment) "
         "OS=Triticum aestivum OX=4565 PE=1 SV=1");
     REQUIRE(value_for_column(r.map, r.writer, 0).value()
@@ -216,9 +218,9 @@ TEST_CASE("identifier_parser: T13 auto/uni_prot keeps embedded '=' in descriptio
 }
 
 TEST_CASE("identifier_parser: T14 auto strips trailing bracket into identifier (NEW-1)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("id"), text_col("organism")};
-    auto r = run_parse(header_format::AUTO, header_format::AUTO, columns,
+    auto r = run_parse(header_format::automatic, header_format::automatic, columns,
         "gi|347012980| 4-O-methyl-glucuronoyl methylesterase "
         "[Myceliophthora thermophila ATCC 42464]");
     REQUIRE(value_for_column(r.map, r.writer, 0).value()
@@ -228,21 +230,21 @@ TEST_CASE("identifier_parser: T14 auto strips trailing bracket into identifier (
 }
 
 TEST_CASE("identifier_parser: E17 trailing value-only bracket -> organism AND taxon",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("organism"), text_col("taxon")};
-    auto r = run_parse(header_format::AUTO, header_format::NCBI_GI, columns,
+    auto r = run_parse(header_format::automatic, header_format::ncbi_gi, columns,
         "gi|12345| some protein description [Homo sapiens]");
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "Homo sapiens");
     REQUIRE(value_for_column(r.map, r.writer, 1).value() == "Homo sapiens");
 }
 
 TEST_CASE("identifier_parser: D6 numeric + name data_source coexist in one array",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("x"), text_col("organism_name")};
     const std::vector<user_column_mapping> maps{
         {.column_name = "x", .data_source = "1"},            // 0-based positional index
         {.column_name = "organism_name", .data_source = "OS"}}; // named field
-    auto r = run_parse(header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+    auto r = run_parse(header_format::uniprotkb, header_format::uniprotkb, columns,
         "tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase OS=Pseudomonas aeruginosa PE=4 SV=1",
         maps);
     REQUIRE(value_for_column(r.map, r.writer, 0).value() == "R9RJF1");
@@ -250,47 +252,47 @@ TEST_CASE("identifier_parser: D6 numeric + name data_source coexist in one array
 }
 
 TEST_CASE("identifier_parser: E7 unknown mapping target column errors",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("x")};
     const std::vector<user_column_mapping> maps{{.column_name = "nope", .data_source = "0"}};
     auto map = resolve_identifier_mapping(
-        header_format::AUTO, header_format::AUTO, columns, maps);
+        header_format::automatic, header_format::automatic, columns, maps);
     REQUIRE_FALSE(map.has_value());
     REQUIRE(map.error().find("not found") != std::string::npos);
 }
 
 TEST_CASE("identifier_parser: E8 fixed format rejects unknown data_source field",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("x")};
     const std::vector<user_column_mapping> maps{{.column_name = "x", .data_source = "nonsense"}};
     auto map = resolve_identifier_mapping(
-        header_format::UNIPROTKB, header_format::UNIPROTKB, columns, maps);
+        header_format::uniprotkb, header_format::uniprotkb, columns, maps);
     REQUIRE_FALSE(map.has_value());
     REQUIRE(map.error().find("not a field of format") != std::string::npos);
 }
 
 TEST_CASE("identifier_parser: E5 ambiguous unmapped text columns error (D8)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<column_descriptor> columns{text_col("h1"), text_col("h2")};
     auto map = resolve_identifier_mapping(
-        header_format::AUTO, header_format::PLAIN, columns,
+        header_format::automatic, header_format::plain, columns,
         std::span<const user_column_mapping>{});
     REQUIRE_FALSE(map.has_value());
     REQUIRE(map.error().find("disambiguate") != std::string::npos);
 }
 
 TEST_CASE("identifier_parser: detect_header_format majority vote",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<std::string_view> uniprot{
         "tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase OS=Pseudomonas aeruginosa PE=4 SV=1",
         "sp|P27748|ACOX_CUPNH Acetoin catabolism protein X OS=Cupriavidus necator OX=381666 GN=acoX PE=4 SV=2"};
-    REQUIRE(detect_header_format(uniprot) == header_format::UNIPROTKB);
+    REQUIRE(detect_header_format(uniprot) == header_format::uniprotkb);
 
     const std::vector<std::string_view> plain{"chr1 human chromosome 1", "chr2"};
-    REQUIRE(detect_header_format(plain) == header_format::PLAIN);
+    REQUIRE(detect_header_format(plain) == header_format::plain);
 
     const std::vector<std::string_view> gi{"gi|12345| protein [Homo sapiens]"};
-    REQUIRE(detect_header_format(gi) == header_format::NCBI_GI);
+    REQUIRE(detect_header_format(gi) == header_format::ncbi_gi);
 }
 
 namespace {
@@ -310,7 +312,7 @@ std::string write_tmp_file(const std::string& content) {
 }  // namespace
 
 TEST_CASE("identifier_parser: sample_sequence_headers supports multiline FASTQ (HIGH-03)",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     const std::string corpus =
         "@read1 OS=Homo sapiens SV=1\n"
         "ACGT\nACGT\n"
@@ -326,7 +328,7 @@ TEST_CASE("identifier_parser: sample_sequence_headers supports multiline FASTQ (
     opts.io.gzip_auto_detect = false;
     opts.io.prefer_mmap = false;
     auto headers = bioseq::io::sample_sequence_headers(
-        path.c_str(), bioseq::io::sequence_io_file_type::FASTQ, opts, 4, 4096);
+        path.c_str(), bioseq::io::sequence_file_format::fastq, opts, 4, 4096);
 
     REQUIRE(headers.has_value());
     REQUIRE(headers->size() == 2);
@@ -336,7 +338,7 @@ TEST_CASE("identifier_parser: sample_sequence_headers supports multiline FASTQ (
 }
 
 TEST_CASE("identifier_parser: sample_sequence_headers FASTA prefix",
-          "[io-identifier-parser]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     const std::string corpus =
         ">chr1 human chromosome 1\nACGTACGT\n>chr2\nTTTT\n";
     const std::string path = write_tmp_file(corpus);
@@ -345,7 +347,7 @@ TEST_CASE("identifier_parser: sample_sequence_headers FASTA prefix",
     opts.io.gzip_auto_detect = false;
     opts.io.prefer_mmap = false;
     auto headers = bioseq::io::sample_sequence_headers(
-        path.c_str(), bioseq::io::sequence_io_file_type::FASTA, opts, 8, 4096);
+        path.c_str(), bioseq::io::sequence_file_format::fasta, opts, 8, 4096);
     REQUIRE(headers.has_value());
     REQUIRE(headers->size() == 2);
     REQUIRE((*headers)[0] == "chr1 human chromosome 1");

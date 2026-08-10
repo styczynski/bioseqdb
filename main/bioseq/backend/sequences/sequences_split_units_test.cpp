@@ -4,7 +4,7 @@
  *        unit-aligned record boundaries, last-record-only padding, and that
  *        concatenating the sub-record views reproduces the original sequence.
  */
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <string>

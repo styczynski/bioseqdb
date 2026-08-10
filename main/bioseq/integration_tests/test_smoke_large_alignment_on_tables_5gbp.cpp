@@ -14,7 +14,7 @@
 // sub-table rows + exercise the 28-bit sidecar-skip threshold) and the
 // query fragments are `kFragmentBp` bp with HiFi-style ~0.2 % error.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <algorithm>
 #include <filesystem>

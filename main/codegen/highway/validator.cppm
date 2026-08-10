@@ -18,7 +18,7 @@ module;
 export module bioseq.codegen.highway:validator;
 
 import :model;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
 
@@ -309,8 +309,8 @@ struct parsed_slot_callable final {
 }
 
 [[nodiscard]] inline std::string callable_kind_name(
-    clang_structural::callable_kind kind) {
-    using enum clang_structural::callable_kind;
+    structural_analysis::callable_kind kind) {
+    using enum structural_analysis::callable_kind;
     switch (kind) {
         case function: return "function";
         case member_function: return "member_function";
@@ -343,7 +343,7 @@ inline void validate_no_forbidden_source_macros(
         "SetSupportedTargetsForTest",
         "DisableTargets",
         "select_highway_target_once",
-        "registered_highway_dispatch_info",
+        "registered_highway_dispatch_plan",
         "registered_highway_target_binding",
         "STATIC_FACADE",
     };
@@ -430,7 +430,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
         "GetChosenTarget",
         "SupportedTargets",
         "select_highway_target_once",
-        "registered_highway_dispatch_info",
+        "registered_highway_dispatch_plan",
         "registered_highway_target_binding",
     };
     static_assert(!forbidden.back().empty());
@@ -583,7 +583,7 @@ inline void validate_domain_topology_authority(
 }
 
 inline void validate_highway_source_policy(
-    const clang_structural::translation_unit& unit) {
+    const structural_analysis::translation_unit& unit) {
     static constexpr std::array<std::string_view, 3> forbidden_attributes{
         "bioseq::template_flatten",
         "bioseq::template_flatten_when",
@@ -591,7 +591,7 @@ inline void validate_highway_source_policy(
     };
     const auto reject_policy_attributes =
         [&unit](const auto& attributes) {
-        for (const clang_structural::attribute_record& attribute
+        for (const structural_analysis::attribute_record& attribute
              : attributes) {
             if (std::ranges::contains(
                     forbidden_attributes, attribute.qualified_name)) {
@@ -603,21 +603,21 @@ inline void validate_highway_source_policy(
             }
         }
     };
-    for (const clang_structural::declaration_record& declaration
+    for (const structural_analysis::declaration_record& declaration
          : unit.declarations) {
         reject_policy_attributes(declaration.attributes);
-        for (const clang_structural::parameter_record& parameter
+        for (const structural_analysis::parameter_record& parameter
              : declaration.parameters) {
             reject_policy_attributes(parameter.attributes);
         }
     }
-    for (const clang_structural::namespace_record& name_space
+    for (const structural_analysis::namespace_record& namespace_declaration
          : unit.namespaces) {
-        reject_policy_attributes(name_space.attributes);
+        reject_policy_attributes(namespace_declaration.attributes);
     }
-    for (const clang_structural::aggregate_record& aggregate
+    for (const structural_analysis::aggregate_record& aggregate
          : unit.aggregate_records) {
-        for (const clang_structural::aggregate_field_record& field
+        for (const structural_analysis::aggregate_field_record& field
              : aggregate.fields) {
             reject_policy_attributes(field.attributes);
         }
@@ -639,8 +639,8 @@ inline void validate_highway_direct_import(
 
 inline void validate_highway_prepared_closure(
     const source_manifest& inventory,
-    const clang_structural::prepared_compilation_validation& prepared) {
-    for (const clang_structural::preparation_module_identity& provider
+    const structural_analysis::dependency_compilation_validation& prepared) {
+    for (const structural_analysis::dependency_module_identity& provider
          : prepared.modules) {
         if (forbidden_typed_scheduler_provider(
                 inventory, provider.module_name)) {
@@ -821,7 +821,28 @@ inline void validate_inventories(
         }
         policy_block += "#define " + name + " " + value + "\n";
     }
-    if (sha256_hex(policy_block) != targets.policy_digest) {
+    static constexpr std::array required_policy_definitions{
+        std::pair{
+            std::string_view{"HWY_COMPILE_ALL_ATTAINABLE"},
+            std::string_view{"1"}},
+        std::pair{
+            std::string_view{"HWY_DISABLED_TARGETS"},
+            std::string_view{"(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"}},
+    };
+    if (targets.policy_definitions.size()
+        != required_policy_definitions.size()
+        || !std::ranges::equal(
+            targets.policy_definitions,
+            required_policy_definitions,
+            [](const auto& actual, const auto& expected) {
+                return actual.first == expected.first
+                    && actual.second == expected.second;
+            })) {
+        throw std::runtime_error(
+            "Highway target manifest does not contain the exact all-target "
+            "compile policy");
+    }
+    if (bioseq::common::sha256_hex(policy_block) != targets.policy_digest) {
         throw std::runtime_error(
             "Highway policy digest does not match the canonical definition block");
     }
@@ -833,19 +854,19 @@ inline void validate_inventories(
     for (const target_spec& target : targets.targets) {
         if (!detail::identifier(target.platform) || !detail::identifier(target.slug)
             || !detail::identifier(target.token)
-            || !detail::identifier(target.name_space)
+            || !detail::identifier(target.target_namespace)
             || !target.token.starts_with("HWY_")
-            || !target.name_space.starts_with("N_")
+            || !target.target_namespace.starts_with("N_")
             || target.bit == 0u
             || (target.bit & (target.bit - 1U)) != 0) {
             throw std::runtime_error(
                 "invalid Highway target record for token '" + target.token + "'");
         }
-        if (!namespaces_by_bit.emplace(target.bit, target.name_space).second) {
+        if (!namespaces_by_bit.emplace(target.bit, target.target_namespace).second) {
             throw std::runtime_error(
                 "Highway target inventory contains a duplicate or conflicting bit");
         }
-        if (!bits_by_namespace.emplace(target.name_space, target.bit).second) {
+        if (!bits_by_namespace.emplace(target.target_namespace, target.bit).second) {
             throw std::runtime_error(
                 "Highway target inventory contains a duplicate or conflicting namespace");
         }
@@ -867,6 +888,12 @@ inline void validate_inventories(
         || !detail::module_name(sources.dispatch_module)
         || sources.contract_module == sources.dispatch_module) {
         throw std::runtime_error("invalid Highway contract or dispatch module name");
+    }
+    if (sources.require_complete_table
+        && sources.sources.size() != highway_source_record_count) {
+        throw std::runtime_error(
+            "complete Highway generation requires exactly 16 registered "
+            "source records");
     }
 
     std::map<std::string, const source_spec*, std::less<>> by_key;
@@ -903,6 +930,51 @@ inline void validate_inventories(
                 throw std::runtime_error(
                     "invalid or duplicate dependency '" + dependency
                     + "' of Highway source '" + source.key + "'");
+            }
+        }
+    }
+    if (sources.require_complete_table) {
+        struct required_source_record final {
+            std::string_view key;
+            std::string_view family;
+        };
+        static constexpr std::array<
+            required_source_record,
+            highway_source_record_count> required_source_records{
+                required_source_record{"alignment_utils", "alignment"},
+                required_source_record{"block_aligner", "alignment"},
+                required_source_record{"chaining", "chaining"},
+                required_source_record{"hasher_base", "hasher_base"},
+                required_source_record{"hasher_lexic", "hasher_lexic"},
+                required_source_record{
+                    "hasher_minimap_int", "hasher_minimap_int"},
+                required_source_record{"indexing", "indexing"},
+                required_source_record{"ksw2", "alignment"},
+                required_source_record{"ksw2_batched", "alignment"},
+                required_source_record{
+                    "minimizer_bounded_nthash", "minimizers"},
+                required_source_record{
+                    "minimizer_minimap2_reference", "minimizers"},
+                required_source_record{
+                    "minimizer_two_stack_nthash", "minimizers"},
+                required_source_record{"prefilter", "common"},
+                required_source_record{"sequence_ops", "sequence_ops"},
+                required_source_record{"simd_utils", "simd_utils"},
+                required_source_record{"vector_stream", "vector_stream"},
+            };
+        for (const required_source_record& expected
+             : required_source_records) {
+            const auto source = by_key.find(expected.key);
+            if (source == by_key.end()) {
+                throw std::runtime_error(
+                    "complete Highway generation omits registered source '"
+                    + std::string{expected.key} + "'");
+            }
+            if (source->second->family != expected.family
+                || source->second->partition != expected.key) {
+                throw std::runtime_error(
+                    "complete Highway source '" + std::string{expected.key}
+                    + "' has a non-canonical family or partition");
             }
         }
     }
@@ -948,47 +1020,48 @@ inline void validate_inventories(
         }
     };
     validate_probes(sources.unit_probes, 4u, "unit");
-    validate_probes(sources.bench_probes, 1u, "benchmark");
 
-    struct expected_repr_owner final {
+    struct expected_representation_owner final {
         std::string_view algorithm;
         std::string_view source_key;
         std::string_view representation_type;
         bool u64_only{};
         bool high_profile{};
     };
-    static const std::map<std::string_view, expected_repr_owner, std::less<>>
-        expected_repr_owners{
-            {"reference_l15_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<15u,15u>", false, false}},
-            {"reference_l28_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<28u,15u>", false, false}},
-            {"reference_l33_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<33u,15u>", false, false}},
-            {"reference_l63_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,15u>", false, false}},
-            {"paper_l15_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<15u,15u>", false, false}},
-            {"paper_l28_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<28u,15u>", false, false}},
-            {"paper_l63_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<63u,15u>", false, false}},
-            {"reference_l7_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<7u,7u>", false, true}},
-            {"reference_l17_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<17u,7u>", false, true}},
-            {"reference_l49_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<49u,7u>", false, true}},
-            {"reference_l63_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,7u>", false, true}},
-            {"reference_l27_k27", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<27u,27u>", true, true}},
-            {"reference_l63_k27", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,27u>", true, true}},
+    static const std::map<std::string_view, expected_representation_owner, std::less<>>
+        expected_representation_owners{
+            {"minimap2_reference_l15_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<15u,15u>", false, false}},
+            {"minimap2_reference_l28_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<28u,15u>", false, false}},
+            {"minimap2_reference_l33_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<33u,15u>", false, false}},
+            {"minimap2_reference_l63_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,15u>", false, false}},
+            {"bounded_nthash_l15_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<15u,15u>", false, false}},
+            {"bounded_nthash_l28_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<28u,15u>", false, false}},
+            {"bounded_nthash_l63_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<63u,15u>", false, false}},
+            {"minimap2_reference_l7_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<7u,7u>", false, true}},
+            {"minimap2_reference_l17_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<17u,7u>", false, true}},
+            {"minimap2_reference_l49_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<49u,7u>", false, true}},
+            {"minimap2_reference_l63_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,7u>", false, true}},
+            {"minimap2_reference_l27_k27", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<27u,27u>", true, true}},
+            {"minimap2_reference_l63_k27", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,27u>", true, true}},
         };
-    if (!sources.minimizer_repr_instances.empty()) {
+    if (sources.require_complete_table
+        || !sources.minimizer_representation_instances.empty()) {
         const bool high_profile =
-            sources.minimizer_repr_instances.size() == 13u;
-        if (!high_profile && sources.minimizer_repr_instances.size() != 7u) {
+            sources.minimizer_representation_instances.size() == 13u;
+        if (!high_profile
+            && sources.minimizer_representation_instances.size() != 7u) {
             throw std::runtime_error(
                 "Highway minimizer representation owners must contain "
                 "exactly 7 K15-only or 13 high-profile identities");
         }
         std::set<std::string, std::less<>> observed_owners;
         std::size_t typed_instantiations = 0u;
-        std::size_t reference_instantiations = 0u;
-        std::size_t paper_instantiations = 0u;
-        for (const minimizer_repr_instance_spec& instance :
-             sources.minimizer_repr_instances) {
-            const auto expected = expected_repr_owners.find(instance.owner_key);
-            if (expected == expected_repr_owners.end()
+        std::size_t minimap2_reference_instantiations = 0u;
+        std::size_t bounded_nthash_instantiations = 0u;
+        for (const minimizer_representation_instance_spec& instance :
+             sources.minimizer_representation_instances) {
+            const auto expected = expected_representation_owners.find(instance.owner_key);
+            if (expected == expected_representation_owners.end()
                 || expected->second.algorithm != instance.algorithm
                 || expected->second.source_key != instance.source_key
                 || expected->second.representation_type
@@ -1011,11 +1084,12 @@ inline void validate_inventories(
                     + "' has an invalid input-storage instantiation set");
             }
             typed_instantiations += instance.storage_types.size();
-            (instance.algorithm == "reference"
-                 ? reference_instantiations
-                 : paper_instantiations) += instance.storage_types.size();
+            (instance.algorithm == "minimap2_reference"
+                 ? minimap2_reference_instantiations
+                 : bounded_nthash_instantiations) +=
+                instance.storage_types.size();
         }
-        for (const auto& [owner, expected] : expected_repr_owners) {
+        for (const auto& [owner, expected] : expected_representation_owners) {
             if ((!expected.high_profile || high_profile)
                 && !observed_owners.contains(std::string{owner})) {
                 throw std::runtime_error(
@@ -1024,10 +1098,11 @@ inline void validate_inventories(
             }
         }
         const std::size_t expected_total = high_profile ? 24u : 14u;
-        const std::size_t expected_reference = high_profile ? 18u : 8u;
+        const std::size_t expected_minimap2_reference =
+            high_profile ? 18u : 8u;
         if (typed_instantiations != expected_total
-            || reference_instantiations != expected_reference
-            || paper_instantiations != 6u) {
+            || minimap2_reference_instantiations != expected_minimap2_reference
+            || bounded_nthash_instantiations != 6u) {
             throw std::runtime_error(
                 "Highway minimizer representation instantiation caps diverged");
         }
@@ -1054,6 +1129,11 @@ inline void validate_inventories(
     std::set<std::string, std::less<>> whole_families;
     std::set<std::string, std::less<>> partial_families;
     for (const slot_spec& slot : sources.slots) {
+        if (slot.owner_key == "indexing") {
+            throw std::runtime_error(
+                "the retained Highway indexing source is type-only and may "
+                "not own a dispatch-table callable");
+        }
         if (!by_key.contains(slot.owner_key)
             || !detail::identifier(slot.family_field)
             || (slot.slot_field != "@" && !detail::identifier(slot.slot_field))
@@ -1096,21 +1176,22 @@ inline void validate_inventories(
 
 [[nodiscard]] inline std::vector<extracted_source> extract_sources(
     const source_manifest& inventory,
-    const clang_structural::structural_index& structural,
-    const clang_structural::module_graph& graph) {
+    const structural_analysis::structural_index& structural,
+    const structural_analysis::module_graph& graph) {
     std::map<std::filesystem::path,
-             const clang_structural::translation_unit*> units;
+             const structural_analysis::translation_unit*> units;
     for (const auto& unit : structural.translation_units) {
         if (!units.emplace(detail::path_identity(unit.source_path), &unit).second) {
             throw std::runtime_error(
                 "structural scan returned a duplicate translation unit");
         }
     }
-    std::map<std::filesystem::path,
-             const clang_structural::module_graph_unit*> graph_units;
+    std::map<std::string,
+             const structural_analysis::module_graph_unit*,
+             std::less<>> graph_units;
     for (const auto& unit : graph.units) {
         if (!graph_units.emplace(
-                detail::path_identity(std::filesystem::path{unit.source_path}),
+                unit.source_identity,
                 &unit).second) {
             throw std::runtime_error("module scan returned a duplicate source unit");
         }
@@ -1124,15 +1205,17 @@ inline void validate_inventories(
     result.reserve(inventory.sources.size());
     for (const source_spec& source : inventory.sources) {
         const std::filesystem::path identity = detail::path_identity(source.path);
+        const std::string graph_identity =
+            structural_analysis::repository_source_identity(source.path);
         const auto unit_position = units.find(identity);
-        const auto graph_position = graph_units.find(identity);
+        const auto graph_position = graph_units.find(graph_identity);
         if (unit_position == units.end() || graph_position == graph_units.end()) {
             throw std::runtime_error(
                 source.path.string()
                 + ": missing structural or module-graph scan result");
         }
-        const clang_structural::translation_unit& unit = *unit_position->second;
-        const clang_structural::module_graph_unit& graph_unit = *graph_position->second;
+        const structural_analysis::translation_unit& unit = *unit_position->second;
+        const structural_analysis::module_graph_unit& graph_unit = *graph_position->second;
         if (unit.module_name != source.module_name
             || graph_unit.provided_module != source.module_name) {
             throw std::runtime_error(
@@ -1146,14 +1229,14 @@ inline void validate_inventories(
                 source.path.string()
                 + ": registered source must contain exactly one marked namespace");
         }
-        const clang_structural::marked_namespace_record& marked =
+        const structural_analysis::marked_namespace_record& marked =
             unit.marked_namespaces.front();
         if (marked.marker.qualified_name != "bioseq::simd"
             || marked.marker.vendor_namespace != "bioseq"
             || marked.marker.name != "simd"
             || !marked.marker.argument_text.empty()
             || marked.marker.placement
-                != clang_structural::attribute_placement::namespace_head
+                != structural_analysis::attribute_placement::namespace_head
             || !marked.qualified_name.ends_with("::target")
             || marked.has_explicit_export
             || marked.crosses_preprocessor_region) {
@@ -1161,9 +1244,9 @@ inline void validate_inventories(
                 source.path.string()
                 + ": invalid [[bioseq::simd]] namespace contract");
         }
-        const std::string content = read_file(source.path);
+        const std::string content = read_artifact_bytes(source.path);
         detail::validate_no_forbidden_source_macros(source.path, content);
-        const auto exact_text = [&](const clang_structural::source_range& range) {
+        const auto exact_text = [&](const structural_analysis::source_range& range) {
             const std::size_t begin = range.begin.byte_offset;
             const std::size_t end = range.end.byte_offset;
             if (begin > end || end > content.size()) return std::string{};
@@ -1175,8 +1258,8 @@ inline void validate_inventories(
                 source.path.string()
                 + ": marked namespace must use the simple name 'target'");
         }
-        const clang_structural::lexical_token* previous_token = nullptr;
-        for (const clang_structural::lexical_token& token : unit.tokens) {
+        const structural_analysis::lexical_token* previous_token = nullptr;
+        for (const structural_analysis::lexical_token& token : unit.tokens) {
             const std::size_t offset = token.range.begin.byte_offset;
             if (token.range.end.byte_offset
                 <= marked.keyword_range.begin.byte_offset) {
@@ -1212,20 +1295,20 @@ inline void validate_inventories(
         };
 
         std::set<std::size_t> insertion_offsets;
-        for (const clang_structural::callable_insertion_record& callable
+        for (const structural_analysis::callable_insertion_record& callable
              : marked.callables) {
             const std::size_t insertion =
-                callable.hwy_attr_insertion.byte_offset;
+                callable.highway_attribute_insertion.byte_offset;
             const bool lambda = callable.kind
-                == clang_structural::callable_kind::lambda;
+                == structural_analysis::callable_kind::lambda;
             const auto preceding_token = std::ranges::find_if(
                 unit.tokens,
-                [&](const clang_structural::lexical_token& token) {
+                [&](const structural_analysis::lexical_token& token) {
                     return token.range.end.byte_offset == insertion;
                 });
             const auto following_token = std::ranges::find_if(
                 unit.tokens,
-                [&](const clang_structural::lexical_token& token) {
+                [&](const structural_analysis::lexical_token& token) {
                     return token.range.begin.byte_offset >= insertion;
                 });
             const bool valid_lambda_suffix = !lambda

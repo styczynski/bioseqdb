@@ -1,19 +1,11 @@
 /**
- * @file ksw2_batched.cppm
- * @brief Inter-region batched KSW2 (DOC0254 §11 / DOC0134 §10).
+ * @file ksw2_batched_kernel.cppm
+ * @brief Bucketed inter-region KSW2 alignment for one Highway target.
  *
- * Walks every region's chain in the same order as the intra-sequence
- * `align_regions<KSW2>` kernel, emits one `FillDescriptor` per
- * (left-extend, gap-between, right-extend), buckets the descriptors
- * by `(query_len, target_len, bandwidth)`, runs the per-bucket DP,
- * and stitches the per-fill CIGAR back into each region's `cigar`
- * vector.
- *
- * For each bucket of short fills (max(q_len, t_len) ≤ 256) the kernel
- * packs up to `Lanes(int16_t-tag)` fills into a single batched inner
- * loop (`ksw2_extz2_batched_inner`).  Long fills fall through to the
- * intra-sequence striped KSW2 kernel one at a time — this preserves
- * cell-efficiency on long DPs where intra-sequence wins.
+ * Fills are collected in stable chain order, grouped by geometry and
+ * orientation, aligned through the current recurrence, and stitched back
+ * into their regions. Short groups retain the target-lane dispatch shape;
+ * long fills retain the existing single-fill route.
  */
 module;
 
@@ -32,73 +24,147 @@ module;
 export module bioseq.highway.sources.ksw2_batched;
 
 import std;
-import bioseq.common.mlogging;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.sources.ksw2;
 import bioseq.highway.sources.alignment_utils;
-import bioseq.sequences.chaining.utils;
+import bioseq.chaining.core;
 import bioseq.common.context;
-import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view
+import bioseq.storage.scanner;
+import bioseq.storage.lazy_sequence;
 
 export namespace bioseq::simd {
 
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// ============================================================================
-// DOC0254 §11.2 — FillDescriptor and bucket key.
-// ============================================================================
-
-enum class FillKind : std::uint8_t {
-    LeftExtend  = 0,
-    GapBetween  = 1,
-    RightExtend = 2,
+/** Role of one alignment fill within its containing region. */
+enum class fill_kind : std::uint8_t {
+    left_extension  = 0,  ///< Extension preceding the first seed.
+    gap_between     = 1,  ///< Gap between retained seed groups.
+    right_extension = 2,  ///< Extension following the last seed.
 };
 
-struct alignas(16) FillDescriptor {
-    std::int32_t query_offset;
-    std::int32_t target_offset;
-    std::int32_t query_len;
-    std::int32_t target_len;
-    std::int32_t bandwidth;
-    std::int32_t region_idx;
-    std::int32_t fill_order;
-    FillKind     kind;
-    bool         is_reverse;
-    std::uint8_t reserved[2];
+/** Geometry, result storage, and stable ordering key for one KSW2 fill. */
+struct alignas(16) fill_descriptor {
+    std::int32_t query_offset;   ///< Inclusive query offset.
+    std::int32_t target_offset;  ///< Inclusive target offset.
+    std::int32_t query_length;   ///< Query extent in symbols.
+    std::int32_t target_length;  ///< Target extent in symbols.
+    std::int32_t bandwidth;      ///< Admitted recurrence bandwidth.
+    std::int32_t region_index;   ///< Owning region's stable index.
+    std::int32_t fill_order;     ///< Fill order within the owning region.
+    fill_kind     kind;          ///< Semantic role within the region.
+    bool         is_reversed;    ///< Whether query ranks use reverse orientation.
+    std::uint8_t reserved[2];    ///< Explicit layout-preserving padding.
 
     /// Per-fill CIGAR scratch — chain-arena slab allocated before the
-    /// fill is bucketed; the stitch phase concatenates these into the
+    /// fill is bucketed; the stitch stage concatenates these into the
     /// region's CIGAR in chain order.
-    ::bioseq::chaining::ArenaSlab<CigarOp>* cigar_scratch;
+    ::bioseq::chaining::arena_slab<cigar_operation>* cigar_scratch;
 
     /// Per-fill score accumulator — written by the kernel's per-lane
     /// scalar backtrace, accumulated into `region.dp_score` during stitch.
-    std::int32_t fill_score;
-    std::uint64_t fill_edit_distance;
+    std::int32_t fill_score;               ///< Alignment score for this fill.
+    std::uint64_t fill_edit_distance;       ///< Exact edit distance for this fill.
 
-    /// Per-fill final-coordinates accumulator — used by the stitch phase
+    /// Per-fill final-coordinates accumulator — used by the stitch stage
     /// to fold the final-position fields back into the region.
-    std::int32_t final_ref_offset;
-    std::int32_t final_query_offset;
-    bool         zdropped;
+    std::int32_t final_reference_offset;  ///< Final target coordinate.
+    std::int32_t final_query_offset;      ///< Final query coordinate.
+    bool         is_z_dropped;            ///< Whether Z-drop terminated the fill.
 
-    std::uint8_t pad[3];
+    std::uint8_t pad[3];  ///< Explicit layout-preserving tail padding.
 };
 
-using FillBucketKey =
-    ::bioseq::simd::detail_ksw2_batched_ordering::FillBucketKey;
+/** Bucket key shared with the Highway-free ordering contract. */
+using fill_bucket_key =
+    ::bioseq::simd::detail_ksw2_batched_ordering::fill_bucket_key;
+/** Construct a bucket key through the Highway-free ordering contract. */
 using ::bioseq::simd::detail_ksw2_batched_ordering::bucket_key_for;
 
 namespace detail_ksw2_batched {
 
-/// Estimated fill count per region — used to pre-reserve the fill slab.
+/** Compute the historical 1.5x alignment bandwidth without narrowing. */
+[[nodiscard]] constexpr bool try_calculate_alignment_bandwidth(
+    std::int32_t configured_bandwidth,
+    std::int32_t& alignment_bandwidth) noexcept {
+    const std::int64_t scaled_bandwidth =
+        static_cast<std::int64_t>(configured_bandwidth) * 3 / 2 + 1;
+    if (scaled_bandwidth
+            < static_cast<std::int64_t>(
+                (std::numeric_limits<std::int32_t>::min)())
+        || scaled_bandwidth
+            > static_cast<std::int64_t>(
+                (std::numeric_limits<std::int32_t>::max)())) {
+        return false;
+    }
+    alignment_bandwidth = static_cast<std::int32_t>(scaled_bandwidth);
+    return true;
+}
+
+/** Return whether every coordinate fits the batched descriptor domain. */
+[[nodiscard]] inline bool are_alignment_coordinates_supported(
+    std::span<const alignment_region> regions,
+    std::span<const ::bioseq::chaining::anchor> anchors,
+    std::uint64_t query_extent,
+    std::uint64_t target_extent) noexcept {
+    constexpr std::uint64_t k_maximum_coordinate =
+        static_cast<std::uint64_t>(
+            (std::numeric_limits<std::int32_t>::max)());
+    if (query_extent > k_maximum_coordinate
+        || target_extent > k_maximum_coordinate
+        || regions.size() > k_maximum_coordinate) {
+        return false;
+    }
+
+    for (const alignment_region& region : regions) {
+        if (region.query_start > region.query_end
+            || region.query_end > query_extent
+            || region.ref_start > region.ref_end
+            || region.ref_end > target_extent) {
+            return false;
+        }
+        if (region.seed_count <= 0) continue;
+        if (region.anchor_start < 0) return false;
+
+        const std::size_t anchor_begin =
+            static_cast<std::size_t>(region.anchor_start);
+        const std::size_t anchor_count =
+            static_cast<std::size_t>(region.seed_count);
+        if (anchor_begin > anchors.size()
+            || anchor_count > anchors.size() - anchor_begin) {
+            return false;
+        }
+        for (std::size_t offset = 0; offset < anchor_count; ++offset) {
+            const ::bioseq::chaining::anchor& current_anchor =
+                anchors[anchor_begin + offset];
+            if (current_anchor.query_position >= query_extent
+                || current_anchor.ref_position >= target_extent) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/** Clear alignment-owned outputs after an unsupported-coordinate rejection. */
+inline void clear_unsupported_alignment_outputs(
+    std::span<alignment_region> regions) noexcept {
+    for (alignment_region& region : regions) {
+        region.dp_score = 0;
+        region.dp_max_score = 0;
+        region.has_alignment = false;
+        region.cigar.clear();
+        region.edit_distance = 0;
+    }
+}
+
+/** Estimate descriptor capacity without traversing individual anchors. */
 [[nodiscard]] inline std::size_t estimated_fill_count(
-    std::span<const AlignRegion> regions) noexcept
+    std::span<const alignment_region> regions) noexcept
 {
     std::size_t total = 16;
     for (const auto& region : regions) {
@@ -109,102 +175,99 @@ namespace detail_ksw2_batched {
     return total;
 }
 
+/** Estimate CIGAR capacity from nonnegative query/reference extents. */
 [[nodiscard, gnu::always_inline]] inline std::size_t
-estimated_cigar_op_count(std::int32_t q_extent, std::int32_t r_extent) noexcept
-{
-    const std::int32_t q = q_extent > 0 ? q_extent : 0;
-    const std::int32_t r = r_extent > 0 ? r_extent : 0;
-    return static_cast<std::size_t>(q) + static_cast<std::size_t>(r) + 16u;
+estimated_cigar_operation_count(
+    std::int32_t query_extent,
+    std::int32_t reference_extent) noexcept {
+    const std::int32_t bounded_query_extent = query_extent > 0
+        ? query_extent
+        : 0;
+    const std::int32_t bounded_reference_extent = reference_extent > 0
+        ? reference_extent
+        : 0;
+    return static_cast<std::size_t>(bounded_query_extent)
+        + static_cast<std::size_t>(bounded_reference_extent) + 16u;
 }
 
 }  // namespace detail_ksw2_batched
 
-// ============================================================================
-// DOC0254 §11.4 — Bucketing.
-// ============================================================================
-
-[[nodiscard]] inline std::vector<std::pair<FillBucketKey, std::span<FillDescriptor>>>
+/** Group fills by stable geometry and orientation buckets. */
+[[nodiscard]] inline std::vector<std::pair<fill_bucket_key, std::span<fill_descriptor>>>
 bucket_fills_by_geometry(
-    ::bioseq::chaining::ArenaSlab<FillDescriptor>& fills,
-    const Minimap2Params&                          params)
+    ::bioseq::chaining::arena_slab<fill_descriptor>& fills,
+    std::int32_t default_bandwidth)
 {
-    const std::int32_t default_bw =
-        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
-
     std::stable_sort(fills.data(), fills.data() + fills.size(),
-        ::bioseq::simd::detail_ksw2_batched_ordering::ByBucketThenOrder{
-            default_bw});
+        ::bioseq::simd::detail_ksw2_batched_ordering::by_bucket_then_order{
+            default_bandwidth});
 
-    std::vector<std::pair<FillBucketKey, std::span<FillDescriptor>>> out;
-    if (fills.size() == 0) return out;
-    out.reserve(16);
+    std::vector<std::pair<fill_bucket_key, std::span<fill_descriptor>>> buckets;
+    if (fills.size() == 0) return buckets;
+    buckets.reserve(16);
 
     std::size_t bucket_start = 0;
-    FillBucketKey current = bucket_key_for(fills.data()[0], default_bw);
+    fill_bucket_key current = bucket_key_for(fills.data()[0], default_bandwidth);
     for (std::size_t i = 1; i < fills.size(); ++i) {
-        const FillBucketKey key = bucket_key_for(fills.data()[i], default_bw);
+        const fill_bucket_key key = bucket_key_for(fills.data()[i], default_bandwidth);
         if (!(key == current)) {
-            out.push_back({current,
-                std::span<FillDescriptor>{fills.data() + bucket_start, i - bucket_start}});
+            buckets.push_back({current,
+                std::span<fill_descriptor>{fills.data() + bucket_start, i - bucket_start}});
             current = key;
             bucket_start = i;
         }
     }
-    out.push_back({current,
-        std::span<FillDescriptor>{
+    buckets.push_back({current,
+        std::span<fill_descriptor>{
             fills.data() + bucket_start, fills.size() - bucket_start}});
-    return out;
+    return buckets;
 }
 
-// ============================================================================
-// DOC0254 §11.7 — Per-lane scalar backtrace + DP inner loop.
+// Per-fill execution uses the same recurrence as the single-pair path.
 //
-// The implementation runs the existing `ksw2_align_pair<reverse>` kernel
+// The implementation runs the matching single- or dual-affine KSW2 callable
 // once per lane and writes the resulting CIGAR into the lane's
 // `cigar_scratch` slab.  This produces lane-correct output identical
 // (modulo bucketed tie-break ordering) to the intra-sequence kernel.
 //
-// The structural batching/bucketing/stitching machinery is in place so
-// the inner loop can later be replaced by a fused inter-sequence SIMD
-// DP — that swap is local to this function and does not touch the
-// trait, the descriptor layout, or the bucketing/stitch phases.
+// The batching boundary admits a fused inter-sequence SIMD kernel without
+// changing descriptor layout, bucketing, or stitching semantics.
 // ============================================================================
 
 namespace detail_ksw2_batched {
 
-template <bool Reverse, sequence_alphabet Alphabet>
-[[gnu::always_inline]] inline void run_single_fill(
-    FillDescriptor&                    fill,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ScoringMatrix<Alphabet>&      scoring_matrix,
-    const Minimap2Params&              params,
+/** Align one fill through the matching current KSW2 recurrence. */
+template <bool p_is_reversed, sequence_alphabet p_alphabet>
+[[gnu::always_inline]] inline void align_single_fill(
+    fill_descriptor&                    fill,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>&      scoring_matrix,
+    const minimap2_parameters&              params,
     std::int32_t                       align_bandwidth,
-    Ksw2BatchedExecutionProof*         execution_proof,
-    bool                               long_fill)
-{
-    if (fill.query_len <= 0 || fill.target_len <= 0) {
+    ksw2_batched_execution_stats*         execution_stats,
+    bool                               is_long_fill) {
+    if (fill.query_length <= 0 || fill.target_length <= 0) {
         fill.fill_score = 0;
-        fill.zdropped = false;
+        fill.is_z_dropped = false;
         return;
     }
 
-    if (execution_proof != nullptr) {
-        execution_proof->record_nonempty_fill(
-            static_cast<std::uint64_t>(fill.query_len),
-            static_cast<std::uint64_t>(fill.target_len),
-            long_fill);
+    if (execution_stats != nullptr) {
+        execution_stats->record_nonempty_fill(
+            static_cast<std::uint64_t>(fill.query_length),
+            static_cast<std::uint64_t>(fill.target_length),
+            is_long_fill);
     }
 
-    KswFlags flags;
+    ksw_flags flags;
     int32_t end_bonus_for_fill = -1;
-    bool reverse_cigar_after = false;
-    if (fill.kind == FillKind::LeftExtend) {
+    if (fill.kind == fill_kind::left_extension) {
         flags.right_align    = true;
         flags.extz_only      = true;
         flags.reverse_cigar  = true;
         end_bonus_for_fill   = params.end_bonus;
-    } else if (fill.kind == FillKind::RightExtend) {
+    } else if (fill.kind == fill_kind::right_extension) {
         flags.extz_only      = true;
         end_bonus_for_fill   = params.end_bonus;
     } else {
@@ -212,25 +275,25 @@ template <bool Reverse, sequence_alphabet Alphabet>
     }
 
     const std::size_t qs = static_cast<std::size_t>(fill.query_offset);
-    const std::size_t qe = qs + static_cast<std::size_t>(fill.query_len);
+    const std::size_t qe = qs + static_cast<std::size_t>(fill.query_length);
     const std::size_t rs = static_cast<std::size_t>(fill.target_offset);
-    const std::size_t re = rs + static_cast<std::size_t>(fill.target_len);
+    const std::size_t re = rs + static_cast<std::size_t>(fill.target_length);
 
     const int effective_bandwidth =
-        params.compute_edit_distance && fill.kind == FillKind::GapBetween
+        params.compute_edit_distance && fill.kind == fill_kind::gap_between
             ? -1
             : align_bandwidth;
     const int effective_zdrop =
-        params.compute_edit_distance && fill.kind == FillKind::GapBetween
+        params.compute_edit_distance && fill.kind == fill_kind::gap_between
             ? -1
             : params.zdrop;
-    KswAlignResult result;
+    ksw_alignment_result result;
     if (params.gap_open1 == params.gap_open2
         && params.gap_ext1 == params.gap_ext2) {
-        result = ksw2_z2<Alphabet>(
-            Reverse, query_seq, target_seq, qs, qe, rs, re,
+        result = align_ksw2_single_affine<p_alphabet>(
+            p_is_reversed, query_seq, target_seq, qs, qe, rs, re,
             scoring_matrix,
-            KswZ2Params{
+            ksw_single_affine_parameters{
                 .gap_open = static_cast<std::int8_t>(params.gap_open1),
                 .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
                 .band_width = effective_bandwidth,
@@ -239,10 +302,10 @@ template <bool Reverse, sequence_alphabet Alphabet>
                 .flags = flags,
             });
     } else {
-        result = ksw2_d2<Alphabet>(
-            Reverse, query_seq, target_seq, qs, qe, rs, re,
+        result = align_ksw2_dual_affine<p_alphabet>(
+            p_is_reversed, query_seq, target_seq, qs, qe, rs, re,
             scoring_matrix,
-            KswD2Params{
+            ksw_dual_affine_parameters{
                 .gap_open_short = static_cast<std::int8_t>(params.gap_open1),
                 .gap_extend_short = static_cast<std::int8_t>(params.gap_ext1),
                 .gap_open_long = static_cast<std::int8_t>(params.gap_open2),
@@ -254,32 +317,32 @@ template <bool Reverse, sequence_alphabet Alphabet>
             });
     }
 
-    fill.zdropped = result.zdropped;
-    if (fill.kind == FillKind::GapBetween) {
-        if (result.zdropped) {
-            fill.final_ref_offset   = fill.target_offset + (result.max_t + 1);
+    fill.is_z_dropped = result.is_z_dropped;
+    if (fill.kind == fill_kind::gap_between) {
+        if (result.is_z_dropped) {
+            fill.final_reference_offset   = fill.target_offset + (result.max_t + 1);
             fill.final_query_offset = fill.query_offset  + (result.max_q + 1);
             fill.fill_score = result.max;
         } else {
-            fill.final_ref_offset   = fill.target_offset + fill.target_len;
-            fill.final_query_offset = fill.query_offset  + fill.query_len;
+            fill.final_reference_offset   = fill.target_offset + fill.target_length;
+            fill.final_query_offset = fill.query_offset  + fill.query_length;
             fill.fill_score = result.score;
         }
     } else {
         fill.fill_score = result.max;
-        if (fill.kind == FillKind::LeftExtend) {
-            const std::int32_t ref_offset = result.reach_end
+        if (fill.kind == fill_kind::left_extension) {
+            const std::int32_t reference_offset = result.has_reached_end
                 ? (result.mqe_t + 1) : (result.max_t + 1);
-            const std::int32_t query_offset = result.reach_end
-                ? fill.query_len : (result.max_q + 1);
-            fill.final_ref_offset   = fill.target_offset + fill.target_len - ref_offset;
-            fill.final_query_offset = fill.query_offset  + fill.query_len  - query_offset;
+            const std::int32_t query_offset = result.has_reached_end
+                ? fill.query_length : (result.max_q + 1);
+            fill.final_reference_offset   = fill.target_offset + fill.target_length - reference_offset;
+            fill.final_query_offset = fill.query_offset  + fill.query_length  - query_offset;
         } else {
-            const std::int32_t ref_offset = result.reach_end
+            const std::int32_t reference_offset = result.has_reached_end
                 ? (result.mqe_t + 1) : (result.max_t + 1);
-            const std::int32_t query_offset = result.reach_end
-                ? fill.query_len : (result.max_q + 1);
-            fill.final_ref_offset   = fill.target_offset + ref_offset;
+            const std::int32_t query_offset = result.has_reached_end
+                ? fill.query_length : (result.max_q + 1);
+            fill.final_reference_offset   = fill.target_offset + reference_offset;
             fill.final_query_offset = fill.query_offset  + query_offset;
         }
     }
@@ -290,17 +353,17 @@ template <bool Reverse, sequence_alphabet Alphabet>
         std::size_t exact_query_end = static_cast<std::size_t>(
             fill.final_query_offset);
         std::size_t exact_target_end = static_cast<std::size_t>(
-            fill.final_ref_offset);
-        if (fill.kind == FillKind::LeftExtend) {
+            fill.final_reference_offset);
+        if (fill.kind == fill_kind::left_extension) {
             exact_query_start = static_cast<std::size_t>(
                 fill.final_query_offset);
             exact_target_start = static_cast<std::size_t>(
-                fill.final_ref_offset);
+                fill.final_reference_offset);
             exact_query_end = qe;
             exact_target_end = re;
         }
         fill.fill_edit_distance =
-            exact_edit_distance_from_packed_cigar<Reverse>(
+            exact_edit_distance_from_packed_cigar<p_is_reversed>(
                 query_seq, target_seq,
                 exact_query_start, exact_query_end,
                 exact_target_start, exact_target_end,
@@ -309,13 +372,13 @@ template <bool Reverse, sequence_alphabet Alphabet>
 
     if (fill.cigar_scratch != nullptr && !result.cigar.empty()) {
         // Unpack the KSW2 packed CIGAR (length << 4 | opcode) into
-        // CigarOp { length, opcode }.  Direct push without merging
-        // adjacent same-opcode entries — the stitch phase merges across
+        // cigar_operation { length, opcode }.  Direct push without merging
+        // adjacent same-opcode entries — the stitch stage merges across
         // fill boundaries instead.
         for (std::uint32_t entry : result.cigar) {
             const std::uint32_t opcode    = entry & 0xfU;
             const std::uint32_t op_length = entry >> 4;
-            fill.cigar_scratch->push_back(CigarOp{op_length, opcode});
+            fill.cigar_scratch->push_back(cigar_operation{op_length, opcode});
         }
     }
 }
@@ -323,7 +386,7 @@ template <bool Reverse, sequence_alphabet Alphabet>
 }  // namespace detail_ksw2_batched
 
 /**
- * @brief Inter-sequence batched inner DP (DOC0254 §11.7).
+ * @brief Dispatch one target-lane-sized fill group.
  *
  * Per-lane scalar dispatcher — sequences whose query/target lengths
  * fit in the bucket bracket are processed lane-by-lane via the
@@ -331,108 +394,109 @@ template <bool Reverse, sequence_alphabet Alphabet>
  * batching is preserved so a future fused-lanes DP can substitute
  * here without touching the bucketing or stitching infrastructure.
  */
-template <std::size_t Lanes, bool Reverse, sequence_alphabet Alphabet>
-void ksw2_extz2_batched_inner(
-    FillDescriptor*                    fills,
-    std::size_t                        n_fills,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ScoringMatrix<Alphabet>&      scoring_matrix,
-    const Minimap2Params&              params,
-    std::int32_t                       bucket_max_q,
-    std::int32_t                       bucket_max_t,
-    std::int32_t                       bucket_max_bw,
-    Ksw2BatchedExecutionProof*         execution_proof)
+template <
+    std::size_t p_lane_count,
+    bool p_is_reversed,
+    sequence_alphabet p_alphabet>
+void align_ksw2_fill_batch(
+    fill_descriptor*                    fills,
+    std::size_t                        fill_count,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>&      scoring_matrix,
+    const minimap2_parameters&              params,
+    std::int32_t                       alignment_bandwidth,
+    std::int32_t                       maximum_bucket_query_length,
+    std::int32_t                       maximum_bucket_target_length,
+    std::int32_t                       maximum_bucket_bandwidth,
+    ksw2_batched_execution_stats*         execution_stats)
 {
-    (void)bucket_max_q;
-    (void)bucket_max_t;
-    (void)bucket_max_bw;
-    const std::int32_t align_bandwidth =
-        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
-    for (std::size_t l = 0; l < n_fills && l < Lanes; ++l) {
-        detail_ksw2_batched::run_single_fill<Reverse>(
-            fills[l], query_seq, target_seq,
-            scoring_matrix, params, align_bandwidth,
-            execution_proof, /*long_fill=*/false);
+    (void)maximum_bucket_query_length;
+    (void)maximum_bucket_target_length;
+    (void)maximum_bucket_bandwidth;
+    for (std::size_t lane_index = 0;
+         lane_index < fill_count && lane_index < p_lane_count;
+         ++lane_index) {
+        detail_ksw2_batched::align_single_fill<p_is_reversed>(
+            fills[lane_index], query_seq, target_seq,
+            scoring_matrix, params, alignment_bandwidth,
+            execution_stats, /*is_long_fill=*/false);
     }
 }
 
-// ============================================================================
-// DOC0254 §11.5 — Per-bucket execute phase.
-// ============================================================================
-
-template <sequence_alphabet Alphabet>
-void execute_buckets(
-    std::span<std::pair<FillBucketKey, std::span<FillDescriptor>>> buckets,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ScoringMatrix<Alphabet>&      scoring_matrix,
-    const Minimap2Params&              params,
-    Ksw2BatchedExecutionProof*         execution_proof)
+/** Execute every short or long fill bucket without changing route policy. */
+template <sequence_alphabet p_alphabet>
+void align_fill_buckets(
+    std::span<std::pair<fill_bucket_key, std::span<fill_descriptor>>> buckets,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>&      scoring_matrix,
+    const minimap2_parameters&              params,
+    std::int32_t                       alignment_bandwidth,
+    ksw2_batched_execution_stats*         execution_stats)
 {
-    using D = hn::ScalableTag<std::int16_t>;
-    constexpr std::size_t Lanes = hn::MaxLanes(D{});
-
-    const std::int32_t align_bandwidth =
-        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
+    using simd_tag_type = hn::ScalableTag<std::int16_t>;
+    constexpr std::size_t k_lane_count = hn::MaxLanes(simd_tag_type{});
 
     for (auto& [bucket_key, bucket_fills] : buckets) {
-        const bool reverse = bucket_key.is_reverse;
+        const bool is_reversed = bucket_key.is_reversed;
         if (bucket_key.is_long_fill) {
             // Long fills route through the intra-sequence striped KSW2
             // kernel per fill — same code path the unbatched kernel uses.
             for (auto& fill : bucket_fills) {
-                if (reverse) {
-                    detail_ksw2_batched::run_single_fill<true>(
+                if (is_reversed) {
+                    detail_ksw2_batched::align_single_fill<true>(
                         fill, query_seq, target_seq,
-                        scoring_matrix, params, align_bandwidth,
-                        execution_proof, /*long_fill=*/true);
+                        scoring_matrix, params, alignment_bandwidth,
+                        execution_stats, /*is_long_fill=*/true);
                 } else {
-                    detail_ksw2_batched::run_single_fill<false>(
+                    detail_ksw2_batched::align_single_fill<false>(
                         fill, query_seq, target_seq,
-                        scoring_matrix, params, align_bandwidth,
-                        execution_proof, /*long_fill=*/true);
+                        scoring_matrix, params, alignment_bandwidth,
+                        execution_stats, /*is_long_fill=*/true);
                 }
             }
             continue;
         }
-        for (std::size_t i = 0; i < bucket_fills.size(); i += Lanes) {
-            const std::size_t lane_count = std::min(Lanes,
-                bucket_fills.size() - i);
-            if (execution_proof != nullptr) {
-                execution_proof->record_short_bucket_dispatch(
+        for (std::size_t fill_index = 0;
+             fill_index < bucket_fills.size();
+             fill_index += k_lane_count) {
+            const std::size_t lane_count = std::min(
+                k_lane_count,
+                bucket_fills.size() - fill_index);
+            if (execution_stats != nullptr) {
+                execution_stats->record_short_bucket_dispatch(
                     static_cast<std::uint64_t>(lane_count));
             }
-            if (reverse) {
-                ksw2_extz2_batched_inner<Lanes, true, Alphabet>(
-                    bucket_fills.data() + i, lane_count,
+            if (is_reversed) {
+                align_ksw2_fill_batch<k_lane_count, true, p_alphabet>(
+                    bucket_fills.data() + fill_index, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
-                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
-                    execution_proof);
+                    alignment_bandwidth,
+                    bucket_key.maximum_query_length, bucket_key.maximum_target_length, bucket_key.maximum_bandwidth,
+                    execution_stats);
             } else {
-                ksw2_extz2_batched_inner<Lanes, false, Alphabet>(
-                    bucket_fills.data() + i, lane_count,
+                align_ksw2_fill_batch<k_lane_count, false, p_alphabet>(
+                    bucket_fills.data() + fill_index, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
-                    bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
-                    execution_proof);
+                    alignment_bandwidth,
+                    bucket_key.maximum_query_length, bucket_key.maximum_target_length, bucket_key.maximum_bandwidth,
+                    execution_stats);
             }
         }
     }
 }
 
-// ============================================================================
-// DOC0254 §11.6 — CIGAR stitching.
-// ============================================================================
-
+/** Stitch per-fill CIGAR and coordinate results into stable region order. */
 inline void stitch_cigars_into_regions(
-    std::span<AlignRegion>                          regions,
-    std::span<const ::bioseq::chaining::Anchor>      anchors,
-    ::bioseq::chaining::ArenaSlab<FillDescriptor>&  fills,
+    std::span<alignment_region>                          regions,
+    std::span<const ::bioseq::chaining::anchor>      anchors,
+    ::bioseq::chaining::arena_slab<fill_descriptor>&  fills,
     std::int32_t                                    query_length,
-    bool                                            emit_cigar)
+    bool                                            should_emit_cigar)
 {
     std::stable_sort(fills.data(), fills.data() + fills.size(),
-        ::bioseq::simd::detail_ksw2_batched_ordering::ChainOrder{});
+        ::bioseq::simd::detail_ksw2_batched_ordering::chain_order{});
 
     std::size_t fill_index = 0;
     const sequence_size_t query_extent =
@@ -449,22 +513,22 @@ inline void stitch_cigars_into_regions(
             ? query_extent - region.query_start
             : region.query_end;
         bool implicit_seed_appended = false;
-        bool left_zdropped = false;
-        bool gap_zdropped = false;
+        bool left_is_z_dropped = false;
+        bool gap_is_z_dropped = false;
 
         while (fill_index < fills.size()
-               && fills.data()[fill_index].region_idx
+               && fills.data()[fill_index].region_index
                     < static_cast<std::int32_t>(region_index)) {
             ++fill_index;
         }
         while (fill_index < fills.size()
-               && fills.data()[fill_index].region_idx
+               && fills.data()[fill_index].region_index
                     == static_cast<std::int32_t>(region_index)) {
             const auto& fill = fills.data()[fill_index++];
-            if (fill.kind == FillKind::RightExtend
+            if (fill.kind == fill_kind::right_extension
                 && region.seed_count == 1
                 && !implicit_seed_appended
-                && emit_cigar) {
+                && should_emit_cigar) {
                 const auto& anchor =
                     anchors[static_cast<std::size_t>(region.anchor_start)];
                 const std::size_t span =
@@ -481,16 +545,16 @@ inline void stitch_cigars_into_regions(
             }
 
             const bool suppress_fill =
-                (fill.kind == FillKind::GapBetween && gap_zdropped)
-                || (fill.kind == FillKind::RightExtend
+                (fill.kind == fill_kind::gap_between && gap_is_z_dropped)
+                || (fill.kind == fill_kind::right_extension
                     && (region.seed_count == 1
-                        ? left_zdropped
-                        : gap_zdropped));
+                        ? left_is_z_dropped
+                        : gap_is_z_dropped));
             if (suppress_fill) continue;
 
             if (fill.cigar_scratch != nullptr) {
                 const auto& scratch = *fill.cigar_scratch;
-                for (const CigarOp op : scratch.as_const_span()) {
+                for (const cigar_operation op : scratch.as_const_span()) {
                     if (!region.cigar.empty()
                         && region.cigar.back().opcode == op.opcode) {
                         region.cigar.back().length += op.length;
@@ -502,24 +566,24 @@ inline void stitch_cigars_into_regions(
             region.dp_score += fill.fill_score;
             region.edit_distance += fill.fill_edit_distance;
 
-            if (fill.kind == FillKind::LeftExtend) {
+            if (fill.kind == fill_kind::left_extension) {
                 final_ref_start = static_cast<sequence_size_t>(
-                    fill.final_ref_offset);
+                    fill.final_reference_offset);
                 final_query_start = static_cast<sequence_size_t>(
                     fill.final_query_offset);
-                left_zdropped = fill.zdropped;
+                left_is_z_dropped = fill.is_z_dropped;
             } else {
                 final_ref_end = static_cast<sequence_size_t>(
-                    fill.final_ref_offset);
+                    fill.final_reference_offset);
                 final_query_end = static_cast<sequence_size_t>(
                     fill.final_query_offset);
-                if (fill.kind == FillKind::GapBetween) {
-                    gap_zdropped = fill.zdropped;
+                if (fill.kind == fill_kind::gap_between) {
+                    gap_is_z_dropped = fill.is_z_dropped;
                 }
             }
         }
 
-        if (region.seed_count == 1 && !implicit_seed_appended && emit_cigar) {
+        if (region.seed_count == 1 && !implicit_seed_appended && should_emit_cigar) {
             const auto& anchor =
                 anchors[static_cast<std::size_t>(region.anchor_start)];
             const std::size_t span =
@@ -546,80 +610,88 @@ inline void stitch_cigars_into_regions(
     }
 }
 
-// ============================================================================
-// DOC0254 §11.3 — Phase A: fill collection.  Walks each region's chain
-// and emits one FillDescriptor per (left-extend, gap-between,
-// right-extend) phase.  Coordinates mirror the per-fill setup inside
-// `align_regions<KSW2>` exactly so the batched and intra-sequence kernels
-// agree on per-fill geometry.
-// ============================================================================
+// Fill collection walks each region in stable chain order and preserves the
+// exact coordinates consumed by the single-pair KSW2 route.
 
 namespace detail_ksw2_batched {
 
-[[gnu::always_inline]] inline FillDescriptor* push_fill(
-    ::bioseq::chaining::ArenaSlab<FillDescriptor>& fills,
+/** Append a fully initialized fill descriptor to arena-backed storage. */
+[[gnu::always_inline]] inline fill_descriptor* append_fill(
+    ::bioseq::chaining::arena_slab<fill_descriptor>& fills,
     ::context::context&          /*ctx*/,
-    std::int32_t                                   region_idx,
+    std::int32_t                                   region_index,
     std::int32_t                                   fill_order,
-    FillKind                                       kind,
-    bool                                           is_reverse,
+    fill_kind                                       kind,
+    bool                                           is_reversed,
     std::int32_t                                   query_offset,
     std::int32_t                                   target_offset,
-    std::int32_t                                   query_len,
-    std::int32_t                                   target_len,
+    std::int32_t                                   query_length,
+    std::int32_t                                   target_length,
     std::int32_t                                   bandwidth)
 {
-    FillDescriptor desc{};
-    desc.region_idx        = region_idx;
-    desc.fill_order        = fill_order;
-    desc.kind              = kind;
-    desc.is_reverse        = is_reverse;
-    desc.query_offset      = query_offset;
-    desc.target_offset     = target_offset;
-    desc.query_len         = query_len;
-    desc.target_len        = target_len;
-    desc.bandwidth         = bandwidth;
-    desc.cigar_scratch     = nullptr;
-    desc.fill_score        = 0;
-    desc.fill_edit_distance= 0;
-    desc.final_ref_offset  = 0;
-    desc.final_query_offset= 0;
-    desc.zdropped          = false;
-    fills.push_back(desc);
+    fill_descriptor descriptor{};
+    descriptor.region_index        = region_index;
+    descriptor.fill_order        = fill_order;
+    descriptor.kind              = kind;
+    descriptor.is_reversed        = is_reversed;
+    descriptor.query_offset      = query_offset;
+    descriptor.target_offset     = target_offset;
+    descriptor.query_length         = query_length;
+    descriptor.target_length        = target_length;
+    descriptor.bandwidth         = bandwidth;
+    descriptor.cigar_scratch     = nullptr;
+    descriptor.fill_score        = 0;
+    descriptor.fill_edit_distance= 0;
+    descriptor.final_reference_offset  = 0;
+    descriptor.final_query_offset= 0;
+    descriptor.is_z_dropped          = false;
+    fills.push_back(descriptor);
     return &fills.data()[fills.size() - 1];
 }
 
 }  // namespace detail_ksw2_batched
 
 /**
- * @brief Top-level inter-region batched KSW2 entry.  Trait's `call`
- * forwards to this; the per-region inner loop mirrors
- * `align_regions<KSW2>` exactly on every per-fill coordinate.
+ * @brief Collect, bucket, execute, and stitch all KSW2 fills for the regions.
  */
-template <sequence_alphabet Alphabet>
-void align_regions_batched(
-    std::span<AlignRegion>                       regions,
-    std::span<const ::bioseq::chaining::Anchor>  anchors,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ScoringMatrix<Alphabet>&                scoring_matrix,
-    const Minimap2Params&                        params,
-    Ksw2BatchedExecutionProof* execution_proof = nullptr)
+template <sequence_alphabet p_alphabet>
+void align_regions_with_batched_ksw2(
+    std::span<alignment_region>                       regions,
+    std::span<const ::bioseq::chaining::anchor>  anchors,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>&                scoring_matrix,
+    const minimap2_parameters&                        params,
+    ksw2_batched_execution_stats* execution_stats = nullptr)
 {
-    if (execution_proof != nullptr) {
-        *execution_proof = {};
-        execution_proof->record_invocation(
+    if (execution_stats != nullptr) {
+        *execution_stats = {};
+        execution_stats->record_invocation(
             static_cast<std::uint64_t>(regions.size()));
     }
+
+    const std::uint64_t query_extent =
+        static_cast<std::uint64_t>(query_seq.bp_size());
+    const std::uint64_t target_extent =
+        static_cast<std::uint64_t>(target_seq.bp_size());
+    std::int32_t alignment_bandwidth = 0;
+    if (!detail_ksw2_batched::try_calculate_alignment_bandwidth(
+            params.bandwidth, alignment_bandwidth)
+        || !detail_ksw2_batched::are_alignment_coordinates_supported(
+            regions, anchors, query_extent, target_extent)) {
+        detail_ksw2_batched::clear_unsupported_alignment_outputs(regions);
+        return;
+    }
+
     auto& ctx = ::context::current();
-    auto chain_scope = ctx.push<::context::Arena::Chain>();
+    auto chain_scope = ctx.push<::context::arena::chain>();
 
-    const std::int32_t query_length  = static_cast<std::int32_t>(query_seq.bp_size());
-    const std::int32_t target_length = static_cast<std::int32_t>(target_seq.bp_size());
-    const std::int32_t align_bandwidth =
-        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
+    const std::int32_t query_length =
+        static_cast<std::int32_t>(query_extent);
+    const std::int32_t target_length =
+        static_cast<std::int32_t>(target_extent);
 
-    auto fills = ::bioseq::chaining::make_arena_slab<FillDescriptor>();
+    auto fills = ::bioseq::chaining::make_arena_slab<fill_descriptor>();
     fills.reserve(detail_ksw2_batched::estimated_fill_count(regions));
 
     // Per-fill cigar scratch slabs.  The slab object itself is not
@@ -627,18 +699,20 @@ void align_regions_batched(
     // so the outer container is a plain std::vector that owns the slab
     // wrappers; the slab payloads still live in the chain arena and are
     // reclaimed at the end of this scope.
-    std::vector<::bioseq::chaining::ArenaSlab<CigarOp>> cigar_scratch_pool;
+    std::vector<::bioseq::chaining::arena_slab<cigar_operation>> cigar_scratch_pool;
     cigar_scratch_pool.reserve(detail_ksw2_batched::estimated_fill_count(regions));
 
-    for (std::int32_t region_idx = 0;
-         region_idx < static_cast<std::int32_t>(regions.size()); ++region_idx)
+    for (std::size_t region_index = 0;
+         region_index < regions.size(); ++region_index)
     {
-        auto& region = regions[region_idx];
+        auto& region = regions[region_index];
         if (region.seed_count <= 0) continue;
 
-        const std::int32_t anchor_begin = region.anchor_start;
-        const ::bioseq::chaining::Anchor& first_anchor = anchors[anchor_begin];
-        const ::bioseq::chaining::Anchor& last_anchor  = anchors[anchor_begin + region.seed_count - 1];
+        const std::size_t anchor_begin =
+            static_cast<std::size_t>(region.anchor_start);
+        const ::bioseq::chaining::anchor& first_anchor = anchors[anchor_begin];
+        const ::bioseq::chaining::anchor& last_anchor = anchors[
+            anchor_begin + static_cast<std::size_t>(region.seed_count) - 1u];
 
         const std::int32_t first_span =
             static_cast<std::int32_t>(first_anchor.query_span);
@@ -685,9 +759,9 @@ void align_regions_batched(
         }
         if (outer_query_end > query_length) outer_query_end = query_length;
 
-        // DOC0254 §10.3 parity: reserve once from outer extents.
+        // Reserve once from the admitted outer extents.
         region.cigar.reserve(
-            detail_ksw2_batched::estimated_cigar_op_count(
+            detail_ksw2_batched::estimated_cigar_operation_count(
                 outer_query_end - outer_query_start,
                 outer_ref_end   - outer_ref_start));
         region.cigar.clear();
@@ -712,95 +786,96 @@ void align_regions_batched(
 
         std::int32_t fill_order = 0;
 
-        // --- Phase 1: left extension ---
+        // --- Stage 1: left extension ---
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
             cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<CigarOp>());
+                ::bioseq::chaining::make_arena_slab<cigar_operation>());
             auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
             scratch_back->reserve(static_cast<std::size_t>(
                 std::max(seed_query_start - outer_query_start,
                          seed_ref_start   - outer_ref_start)) + 16u);
-            FillDescriptor* d = detail_ksw2_batched::push_fill(
-                fills, ctx, region_idx, fill_order++,
-                FillKind::LeftExtend, region.is_reverse,
+            fill_descriptor* d = detail_ksw2_batched::append_fill(
+                fills, ctx, static_cast<std::int32_t>(region_index), fill_order++,
+                fill_kind::left_extension, region.is_reverse,
                 outer_query_start, outer_ref_start,
                 seed_query_start - outer_query_start,
                 seed_ref_start   - outer_ref_start,
-                align_bandwidth);
+                alignment_bandwidth);
             d->cigar_scratch = scratch_back;
         }
 
-        // --- Phase 2: gap-fills ---
+        // --- Stage 2: gap-fills ---
         if (region.seed_count > 1) {
             std::int32_t qs = seed_query_start;
             std::int32_t rs = seed_ref_start;
             for (std::int32_t i = 1; i < region.seed_count; ++i) {
-                const ::bioseq::chaining::Anchor& cur_anchor = anchors[anchor_begin + i];
+                const ::bioseq::chaining::anchor& cur_anchor = anchors[
+                    anchor_begin + static_cast<std::size_t>(i)];
                 const std::int32_t qe =
                     static_cast<std::int32_t>(cur_anchor.query_position) + 1;
                 const std::int32_t re =
                     static_cast<std::int32_t>(cur_anchor.ref_position) + 1;
                 const bool is_last = (i == region.seed_count - 1);
                 const std::int32_t gap_query = qe - qs;
-                const std::int32_t gap_ref   = re - rs;
+                const std::int32_t gap_reference_length   = re - rs;
                 if (!is_last
                     && (gap_query < params.min_ksw_len
-                        || gap_ref < params.min_ksw_len))
+                        || gap_reference_length < params.min_ksw_len))
                 {
                     continue;
                 }
-                if (gap_query <= 0 || gap_ref <= 0) {
+                if (gap_query <= 0 || gap_reference_length <= 0) {
                     qs = qe; rs = re;
                     continue;
                 }
                 cigar_scratch_pool.push_back(
-                    ::bioseq::chaining::make_arena_slab<CigarOp>());
+                    ::bioseq::chaining::make_arena_slab<cigar_operation>());
                 auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
                 scratch_back->reserve(static_cast<std::size_t>(
-                    std::max(gap_query, gap_ref)) + 16u);
-                FillDescriptor* d = detail_ksw2_batched::push_fill(
-                    fills, ctx, region_idx, fill_order++,
-                    FillKind::GapBetween, region.is_reverse,
-                    qs, rs, gap_query, gap_ref, align_bandwidth);
+                    std::max(gap_query, gap_reference_length)) + 16u);
+                fill_descriptor* d = detail_ksw2_batched::append_fill(
+                    fills, ctx, static_cast<std::int32_t>(region_index), fill_order++,
+                    fill_kind::gap_between, region.is_reverse,
+                    qs, rs, gap_query, gap_reference_length,
+                    alignment_bandwidth);
                 d->cigar_scratch = scratch_back;
                 qs = qe; rs = re;
             }
         }
 
-        // --- Phase 3: right extension ---
+        // --- Stage 3: right extension ---
         if (seed_query_end < outer_query_end && seed_ref_end < outer_ref_end) {
             cigar_scratch_pool.push_back(
-                ::bioseq::chaining::make_arena_slab<CigarOp>());
+                ::bioseq::chaining::make_arena_slab<cigar_operation>());
             auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
             scratch_back->reserve(static_cast<std::size_t>(
                 std::max(outer_query_end - seed_query_end,
                          outer_ref_end   - seed_ref_end)) + 16u);
-            FillDescriptor* d = detail_ksw2_batched::push_fill(
-                fills, ctx, region_idx, fill_order++,
-                FillKind::RightExtend, region.is_reverse,
+            fill_descriptor* d = detail_ksw2_batched::append_fill(
+                fills, ctx, static_cast<std::int32_t>(region_index), fill_order++,
+                fill_kind::right_extension, region.is_reverse,
                 seed_query_end, seed_ref_end,
                 outer_query_end - seed_query_end,
                 outer_ref_end   - seed_ref_end,
-                align_bandwidth);
+                alignment_bandwidth);
             d->cigar_scratch = scratch_back;
         }
     }
 
-    // Phases B / C / D — bucketing, execution, stitch.
-    if (execution_proof != nullptr) {
-        execution_proof->record_collected_fills(
+    // Bucket, execute, and stitch the collected fills.
+    if (execution_stats != nullptr) {
+        execution_stats->record_collected_fills(
             static_cast<std::uint64_t>(fills.size()));
     }
-    auto buckets = bucket_fills_by_geometry(fills, params);
-    execute_buckets<Alphabet>(buckets, query_seq, target_seq,
-                            scoring_matrix, params, execution_proof);
+    auto buckets = bucket_fills_by_geometry(fills, alignment_bandwidth);
+    align_fill_buckets<p_alphabet>(buckets, query_seq, target_seq,
+        scoring_matrix, params, alignment_bandwidth, execution_stats);
     stitch_cigars_into_regions(
         regions, anchors, fills, query_length,
         params.do_cigar || params.compute_edit_distance);
 
-    // Update per-region coordinates and length fields — mirrors the
-    // post-fill bookkeeping in `align_regions<KSW2>` (final-coordinates
-    // derivation + match/block length tally).
+    // Derive final region coordinates and match/block lengths from the
+    // stitched fill results.
     for (auto& region : regions) {
         if (region.seed_count <= 0) continue;
         region.dp_max_score = region.dp_score;
@@ -809,14 +884,14 @@ void align_regions_batched(
         std::int32_t cigar_match_count = 0;
         std::int32_t cigar_block_count = 0;
         for (const auto& cigar_op : region.cigar) {
-            const std::int32_t op_len = static_cast<std::int32_t>(cigar_op.length);
-            if (cigar_op.opcode == CIGAR_MATCH || cigar_op.opcode == CIGAR_EQ) {
-                cigar_match_count += op_len;
-                cigar_block_count += op_len;
-            } else if (cigar_op.opcode == CIGAR_X) {
-                cigar_block_count += op_len;
-            } else if (cigar_op.opcode == CIGAR_INS || cigar_op.opcode == CIGAR_DEL) {
-                cigar_block_count += op_len;
+            const std::int32_t operation_length = static_cast<std::int32_t>(cigar_op.length);
+            if (cigar_op.opcode == cigar_match_opcode || cigar_op.opcode == cigar_equal_opcode) {
+                cigar_match_count += operation_length;
+                cigar_block_count += operation_length;
+            } else if (cigar_op.opcode == cigar_mismatch_opcode) {
+                cigar_block_count += operation_length;
+            } else if (cigar_op.opcode == cigar_insertion_opcode || cigar_op.opcode == cigar_deletion_opcode) {
+                cigar_block_count += operation_length;
             }
         }
         if (cigar_match_count > 0) {
@@ -828,19 +903,20 @@ void align_regions_batched(
     }
 }
 
-template <sequence_alphabet Alphabet>
-void ksw2_batched(
-    std::span<AlignRegion> regions,
-    std::span<const ::bioseq::chaining::Anchor> anchors,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ScoringMatrix<Alphabet>& scoring_matrix,
-    const Minimap2Params& params,
-    Ksw2BatchedExecutionProof* execution_proof)
+/** Fixed-target callable for the batched KSW2 route. */
+template <sequence_alphabet p_alphabet>
+void align_ksw2_batched(
+    std::span<alignment_region> regions,
+    std::span<const ::bioseq::chaining::anchor> anchors,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const scoring_matrix<p_alphabet>& scoring_matrix,
+    const minimap2_parameters& params,
+    ksw2_batched_execution_stats* execution_stats)
 {
-    align_regions_batched<Alphabet>(
+    align_regions_with_batched_ksw2<p_alphabet>(
         regions, anchors, query_seq, target_seq, scoring_matrix, params,
-        execution_proof);
+        execution_stats);
 }
 
 }  // namespace target

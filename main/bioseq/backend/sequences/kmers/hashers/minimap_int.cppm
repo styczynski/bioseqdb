@@ -1,4 +1,7 @@
-/** Target-neutral scalar minimap integer hasher. */
+/**
+ * @file minimap_int.cppm
+ * @brief Target-neutral scalar minimap2 integer hasher.
+ */
 module;
 
 #include <algorithm>
@@ -10,55 +13,62 @@ export module bioseq.sequences.kmers.hashers.minimap_int;
 
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.lexic;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 
 export namespace bioseq::simd {
 
-template<sequence_alphabet Alphabet>
+template<sequence_alphabet p_alphabet>
 struct minimap_int_hasher {
-    using base_hasher_t = lexic_hasher<Alphabet>;
+    using base_hasher_type = lexic_hasher<p_alphabet>;
 
-    template<typename Input>
+    /** Stateful scalar minimap2 integer hash. */
+    template<typename p_input_type>
     class scalar_hash
-        : public hasher_base<scalar_hash<Input>, Alphabet, Input> {
+        : public hasher_base<p_alphabet, p_input_type> {
     public:
-        using traits = scalar_hash<Input>::hasher_base::traits;
+        using base_type = hasher_base<p_alphabet, p_input_type>;
+        using traits = typename base_type::traits;
 
-        explicit scalar_hash(const std::size_t& kmer_length)
-            : base_hasher(kmer_length),
-              mask((static_cast<typename traits::input_t>(1)
+        /** Initialize the rolling lexicographic state and k-mer mask. */
+        explicit scalar_hash(std::size_t kmer_length)
+            : base_hasher_(kmer_length),
+              mask_((static_cast<typename traits::input_type>(1)
                     << (2u * kmer_length)) - 1u) {}
 
-        template<std::size_t Offset>
-        static constexpr std::size_t shift =
-            std::min(Offset, sizeof(Input) * 8u - 1u);
+        /** Clamp a fixed scramble shift to the selected storage width. */
+        template<std::size_t p_offset>
+        static constexpr std::size_t k_shift =
+            std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
 
-        constexpr traits::hasher_return_t next(
-            traits::input_t incoming,
-            traits::input_t outgoing)
+        /** Consume one incoming/outgoing code and return the mixed canonical hash. */
+        constexpr typename traits::hasher_return_type next(
+            typename traits::input_type incoming,
+            typename traits::input_type outgoing)
         {
-            auto [key, base_strand] = base_hasher.next(
+            auto [key, base_strand] = base_hasher_.next(
                 std::move(incoming), std::move(outgoing));
-            key = minimap_int_hasher::template scramble<Input>(key, mask);
+            key = minimap_int_hasher::template scramble<p_input_type>(key, mask_);
             return std::make_pair(key, base_strand);
         }
 
     private:
-        typename base_hasher_t::template scalar_hash<Input> base_hasher;
-        const typename traits::input_t mask;
+        typename base_hasher_type::template scalar_hash<p_input_type> base_hasher_;
+        const typename traits::input_type mask_;
     };
 
-    template<typename Input>
-    [[nodiscard]] static constexpr Input scramble(
-        const Input& lex_kmer,
-        const Input& kmer_mask)
+    /** Apply minimap2's width-clamped integer permutation. */
+    template<typename p_input_type>
+    [[nodiscard]] static constexpr p_input_type scramble(
+        const p_input_type& lex_kmer,
+        const p_input_type& kmer_mask)
     {
-        constexpr std::size_t storage_max_shift = sizeof(Input) * 8u - 1u;
+        constexpr std::size_t k_max_storage_shift =
+            sizeof(p_input_type) * 8u - 1u;
         constexpr auto clamp = [](std::size_t shift) constexpr {
-            return shift > storage_max_shift ? storage_max_shift : shift;
+            return shift > k_max_storage_shift ? k_max_storage_shift : shift;
         };
-        Input key = lex_kmer;
+        p_input_type key = lex_kmer;
         key = (~key + (key << clamp(21u))) & kmer_mask;
         key = key ^ (key >> clamp(24u));
         key = ((key + (key << clamp(3u)))

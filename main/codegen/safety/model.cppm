@@ -3,24 +3,27 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 export module bioseq.codegen.safety:model;
 
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::safety {
 
-using source_range = clang_structural::source_range;
-using source_position = clang_structural::source_position;
+using source_range = structural_analysis::source_range;
+using source_position = structural_analysis::source_position;
 
+/// Compiler configuration whose SQL-wrapper closure is being analyzed.
 enum class compilation_profile : std::uint8_t {
     production,
     test_indexes,
 };
 
+/// PostgreSQL severity reachable from a compiler-derived call site.
 enum class postgres_severity : std::uint8_t {
     recoverable_error,
     fatal,
@@ -28,6 +31,7 @@ enum class postgres_severity : std::uint8_t {
     unresolved,
 };
 
+/// Safety disposition assigned to one recoverable PostgreSQL error site.
 enum class site_classification : std::uint8_t {
     bridged,
     specialized_bridge,
@@ -36,14 +40,16 @@ enum class site_classification : std::uint8_t {
     unclassified,
 };
 
+/// Boundary primitive protecting C++ lifetimes from PostgreSQL `longjmp`.
 enum class bridge_kind : std::uint8_t {
     none,
     invoke_pg_as_cpp,
-    sql_subtransaction,
-    sql_call_context,
+    subtransaction,
+    cross_transaction_callback,
     generated_boundary_tail,
 };
 
+/// Completeness status for a direct or indirect call-graph edge.
 enum class resolution_status : std::uint8_t {
     direct,
     resolved_indirect,
@@ -53,6 +59,7 @@ enum class resolution_status : std::uint8_t {
     cycle_without_fixed_point,
 };
 
+/// C++ object category whose lifetime crosses a PostgreSQL call.
 enum class crossing_origin : std::uint8_t {
     automatic_object,
     temporary,
@@ -61,6 +68,7 @@ enum class crossing_origin : std::uint8_t {
     coroutine_state,
 };
 
+/// Reviewed authority represented by one provenance record.
 enum class provenance_kind : std::uint8_t {
     recoverable_error_seed,
     terminal_severity_seed,
@@ -71,6 +79,7 @@ enum class provenance_kind : std::uint8_t {
     compiler_builtin_declaration,
 };
 
+/// Axis used to prove runtime coverage of the static safety ledger.
 enum class coverage_dimension : std::uint8_t {
     classification,
     bridge,
@@ -79,24 +88,28 @@ enum class coverage_dimension : std::uint8_t {
     cleanup_phase,
 };
 
+/// Relationship between a runtime fault injection and its ERROR site.
 enum class runtime_relation : std::uint8_t {
     natural_at_site,
     injected_routes_to_site,
     injected_after_site_success,
 };
 
+/// Compiler call-site role recorded in runtime probe evidence.
 enum class runtime_anchor_kind : std::uint8_t {
     postgres_error_site,
     record_site_visit,
     consume_fault,
 };
 
+/// Required temporal ordering of runtime visit and trigger probes.
 enum class runtime_probe_ordering : std::uint8_t {
     visit_only,
     trigger_before_visit,
     visit_before_trigger,
 };
 
+/// Reviewed external domain at which transitive call analysis may stop.
 enum class audited_stop_domain : std::uint8_t {
     postgresql_server,
     standard_library,
@@ -104,6 +117,7 @@ enum class audited_stop_domain : std::uint8_t {
     compiler_builtin,
 };
 
+/// Returns the stable wire name for a compilation profile.
 [[nodiscard]] inline constexpr std::string_view profile_name(
     compilation_profile value) noexcept {
     switch (value) {
@@ -113,6 +127,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a PostgreSQL severity.
 [[nodiscard]] inline constexpr std::string_view severity_name(
     postgres_severity value) noexcept {
     switch (value) {
@@ -124,6 +139,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a site classification.
 [[nodiscard]] inline constexpr std::string_view classification_name(
     site_classification value) noexcept {
     switch (value) {
@@ -139,19 +155,22 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a bridge kind.
 [[nodiscard]] inline constexpr std::string_view bridge_name(
     bridge_kind value) noexcept {
     switch (value) {
         case bridge_kind::none: return "none";
         case bridge_kind::invoke_pg_as_cpp: return "invoke_pg_as_cpp";
-        case bridge_kind::sql_subtransaction: return "sql_subtransaction";
-        case bridge_kind::sql_call_context: return "sql_call_context";
+        case bridge_kind::subtransaction: return "sql_subtransaction";
+        case bridge_kind::cross_transaction_callback:
+            return "sql_call_context";
         case bridge_kind::generated_boundary_tail:
             return "generated_boundary_tail";
     }
     return "unknown";
 }
 
+/// Returns the stable wire name for a call-resolution status.
 [[nodiscard]] inline constexpr std::string_view resolution_name(
     resolution_status value) noexcept {
     switch (value) {
@@ -170,6 +189,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a provenance kind.
 [[nodiscard]] inline constexpr std::string_view provenance_kind_name(
     provenance_kind value) noexcept {
     switch (value) {
@@ -191,6 +211,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a runtime coverage dimension.
 [[nodiscard]] inline constexpr std::string_view coverage_dimension_name(
     coverage_dimension value) noexcept {
     switch (value) {
@@ -203,6 +224,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a runtime relation.
 [[nodiscard]] inline constexpr std::string_view runtime_relation_name(
     runtime_relation value) noexcept {
     switch (value) {
@@ -216,6 +238,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for a runtime anchor kind.
 [[nodiscard]] inline constexpr std::string_view runtime_anchor_kind_name(
     runtime_anchor_kind value) noexcept {
     switch (value) {
@@ -229,6 +252,7 @@ enum class audited_stop_domain : std::uint8_t {
     return "unknown";
 }
 
+/// Returns the stable wire name for runtime probe ordering.
 [[nodiscard]] inline constexpr std::string_view
 runtime_probe_ordering_name(
     runtime_probe_ordering value) noexcept {
@@ -243,6 +267,7 @@ runtime_probe_ordering_name(
     return "unknown";
 }
 
+/// Returns the stable wire name for an audited external stop domain.
 [[nodiscard]] inline constexpr std::string_view audited_stop_domain_name(
     audited_stop_domain value) noexcept {
     switch (value) {
@@ -258,6 +283,7 @@ runtime_probe_ordering_name(
     return "unknown";
 }
 
+/// Exact upstream definition bytes sealing a reviewed provenance record.
 struct provenance_definition {
     std::string upstream_file;
     source_range upstream_span;
@@ -265,6 +291,7 @@ struct provenance_definition {
     std::string fragment_sha256;
 };
 
+/// One reviewed PostgreSQL, library, compiler, or bridge authority record.
 struct provenance_record {
     std::string record_id;
     provenance_kind kind{provenance_kind::recoverable_error_seed};
@@ -283,6 +310,7 @@ struct provenance_record {
     bool user_code_callback_free{};
 };
 
+/// Versioned provenance authority for a PostgreSQL source revision.
 struct provenance_bundle {
     std::uint32_t schema_version{2};
     std::uint32_t postgresql_major{17};
@@ -291,6 +319,7 @@ struct provenance_bundle {
     std::vector<provenance_record> records;
 };
 
+/// Ledger-local reference to one sealed provenance record.
 struct provenance_reference {
     std::string record_id;
     std::string postgresql_revision;
@@ -300,6 +329,7 @@ struct provenance_reference {
     std::string rationale;
 };
 
+/// One concrete C++ lifetime crossing a PostgreSQL error boundary.
 struct crossing_type {
     std::string canonical_type;
     crossing_origin origin{crossing_origin::automatic_object};
@@ -309,6 +339,7 @@ struct crossing_type {
     bool crosses_postgres_longjmp{};
 };
 
+/// One compiler-resolved function in a transitive call path.
 struct call_path_step {
     std::string usr;
     std::string qualified_declaration;
@@ -316,6 +347,7 @@ struct call_path_step {
     source_range source_span;
 };
 
+/// Completeness evidence for template, macro, CFG, lifetime, and call analysis.
 struct analysis_completeness {
     bool template_instantiation_complete{};
     bool macro_expansion_complete{};
@@ -327,6 +359,7 @@ struct analysis_completeness {
     std::vector<std::string> control_flow_assembly_sites;
 };
 
+/// Compiler and provenance evidence for one active bridge transition.
 struct bridge_transition_proof {
     provenance_reference primitive;
     std::string target_usr;
@@ -344,6 +377,7 @@ struct bridge_transition_proof {
     std::string protected_region_id;
 };
 
+/// Static evidence for one PostgreSQL severity-producing call site.
 struct error_site {
     std::string site_id;
     std::string source_file;
@@ -368,6 +402,7 @@ struct error_site {
     std::vector<std::string> cleanup_phases;
 };
 
+/// Reviewed external call-graph boundary that cannot re-enter user code.
 struct audited_stop {
     std::string stop_id;
     std::string source_file;
@@ -383,6 +418,7 @@ struct audited_stop {
     bool user_code_callback_free{};
 };
 
+/// Complete ERROR-safety closure for one SQL identity.
 struct safety_parent_row {
     std::string sql_identity;
     std::string owner_usr;
@@ -401,6 +437,7 @@ struct safety_parent_row {
     std::vector<audited_stop> audited_stops;
 };
 
+/// Generated-wrapper ownership shared by one or more SQL identities.
 struct symbol_group {
     std::string public_symbol;
     std::string finfo_symbol;
@@ -408,6 +445,7 @@ struct symbol_group {
     std::vector<std::string> sql_identities;
 };
 
+/// Canonical static ERROR-safety ledger for one compilation profile.
 struct safety_ledger {
     std::uint32_t schema_version{2};
     compilation_profile profile{compilation_profile::production};
@@ -430,6 +468,7 @@ struct safety_ledger {
     std::vector<symbol_group> symbol_groups;
 };
 
+/// Source-authenticated compiler anchor for a runtime probe call.
 struct runtime_source_anchor {
     runtime_anchor_kind kind{
         runtime_anchor_kind::postgres_error_site};
@@ -440,6 +479,7 @@ struct runtime_source_anchor {
     std::string source_fragment_sha256;
 };
 
+/// Exact visit/trigger counts and ordering required by a runtime relation.
 struct runtime_probe_contract {
     std::uint32_t abi_version{2};
     std::size_t expected_visit_count{1};
@@ -448,6 +488,36 @@ struct runtime_probe_contract {
         runtime_probe_ordering::visit_only};
 };
 
+/// Returns the ABI-v2 runtime probe contract for a relation.
+[[nodiscard]] inline runtime_probe_contract
+runtime_probe_contract_for(runtime_relation relation) {
+    switch (relation) {
+        case runtime_relation::natural_at_site:
+            return {
+                .abi_version = 2,
+                .expected_visit_count = 1,
+                .expected_trigger_count = 0,
+                .ordering = runtime_probe_ordering::visit_only,
+            };
+        case runtime_relation::injected_routes_to_site:
+            return {
+                .abi_version = 2,
+                .expected_visit_count = 1,
+                .expected_trigger_count = 1,
+                .ordering = runtime_probe_ordering::trigger_before_visit,
+            };
+        case runtime_relation::injected_after_site_success:
+            return {
+                .abi_version = 2,
+                .expected_visit_count = 1,
+                .expected_trigger_count = 1,
+                .ordering = runtime_probe_ordering::visit_before_trigger,
+            };
+    }
+    throw std::invalid_argument("unknown runtime probe relation");
+}
+
+/// Runtime probe evidence joined to one exact ledger site.
 struct runtime_probe_inventory_entry {
     std::string sql_identity;
     std::string fault_key;
@@ -462,6 +532,7 @@ struct runtime_probe_inventory_entry {
     runtime_probe_contract probe_contract;
 };
 
+/// Canonical runtime-probe inventory for one compiler-fact authority.
 struct runtime_probe_inventory {
     std::uint32_t schema_version{1};
     compilation_profile profile{compilation_profile::production};
@@ -477,12 +548,14 @@ struct runtime_probe_inventory {
     std::vector<runtime_probe_inventory_entry> entries;
 };
 
+/// One profile-scoped runtime coverage obligation.
 struct coverage_key {
     compilation_profile profile{compilation_profile::production};
     coverage_dimension dimension{coverage_dimension::classification};
     std::string value;
 };
 
+/// Immutable runtime result proving one recoverable ERROR path.
 struct runtime_case {
     std::string case_id;
     compilation_profile profile{compilation_profile::test_indexes};
@@ -517,6 +590,7 @@ struct runtime_case {
     std::string immutable_result_sha256;
 };
 
+/// Complete runtime evidence matrix covering both compilation profiles.
 struct runtime_matrix {
     std::uint32_t schema_version{2};
     std::string production_ledger_sha256;
@@ -533,6 +607,7 @@ struct runtime_matrix {
     std::vector<runtime_case> cases;
 };
 
+/// One symbol occurrence reported by an ABI inspection tool.
 struct dso_symbol_occurrence {
     std::string name;
     std::string binding;
@@ -542,20 +617,18 @@ struct dso_symbol_occurrence {
     bool dynamic_visible{};
 };
 
+/// Raw dynamic-library symbol evidence used for ownership validation.
 struct dso_inventory {
     std::vector<dso_symbol_occurrence> symbols;
 };
 
+/// Exact current symbol cardinalities and separately owned public symbols.
 struct dso_contract {
-    std::size_t expected_main_identity_count{272};
-    std::size_t expected_main_symbol_count{270};
-    std::size_t expected_external_symbol_count{1};
-    std::size_t expected_retired_symbol_count{117};
-    std::vector<std::string> expected_shared_symbols;
+    std::size_t main_identity_count{272};
+    std::size_t main_symbol_count{270};
+    std::size_t external_symbol_count{1};
+    std::vector<std::string> shared_symbols;
     std::vector<std::string> external_symbols;
-    std::vector<std::string> retired_symbols;
-    std::vector<std::string> legacy_macro_symbols;
-    bool require_complete_codegen{true};
 };
 
 }  // namespace bioseq::codegen::safety

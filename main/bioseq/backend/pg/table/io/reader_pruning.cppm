@@ -1,112 +1,107 @@
-/*-------------------------------------------------------------------------
- *
- * table/io/reader_pruning.cppm
- *
- * Chunk-group pruning helpers for the bioseq table reader.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Predicate-driven chunk-group pruning for Bioseq table reads.
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.table.io:pruning;
+export module bioseq.postgres.table.io:pruning;
 
-import bioseq.common.mlogging;
-import bioseq.storage.metadata;
-import bioseq.pg_utils;
-import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_expect<Const>/<Var>
-import bioseq.types.pg_compact_sequence;
+import bioseq.common.logging;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.support;
+import bioseq.postgres.types.compact_sequence;
 
-using namespace bioseq::pg_utils;   // DOC0333 — node view helpers live in bioseq::pg_utils
+using namespace bioseq::postgres::support;
 
 static Oid
-GetOperatorByType(Oid typeId, Oid accessMethodId, int16_t strategyNumber)
+get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number)
 {
 	/* Get default operator class from pg_opclass */
-	Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
+	Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
 
-	Oid operatorFamily = get_opclass_family(operatorClassId);
+	Oid operator_family = get_opclass_family(operator_class_id);
 
-	Oid operatorId = get_opfamily_member(operatorFamily, typeId, typeId, strategyNumber);
+	Oid operator_id = get_opfamily_member(operator_family, type_id, type_id, strategy_number);
 
-	return operatorId;
+	return operator_id;
 }
 
 static OpExpr *
-MakeOpExpression(Var *variable, int16_t strategyNumber)
+make_operator_expression(Var *variable, int16_t strategy_number)
 {
-	Oid typeId = variable->vartype;
-	Oid typeModId = variable->vartypmod;
-	Oid collationId = variable->varcollid;
+	Oid type_id = variable->vartype;
+	Oid type_mod_id = variable->vartypmod;
+	Oid collation_id = variable->varcollid;
 
-	Oid accessMethodId = BTREE_AM_OID;
+	Oid access_method_id = BTREE_AM_OID;
 
 	/* Load the operator from system catalogs */
-	Oid operatorId = GetOperatorByType(typeId, accessMethodId, strategyNumber);
+	Oid operator_id = get_operator_for_type(type_id, access_method_id, strategy_number);
 
 	/* No operator for typeId, search for operator class type */
-	if (operatorId == InvalidOid)
+	if (operator_id == InvalidOid)
 	{
-		Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
-		Oid opcintype = get_opclass_input_type(operatorClassId);
-		operatorId = GetOperatorByType(opcintype, accessMethodId, strategyNumber);
+		Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
+		Oid opcintype = get_opclass_input_type(operator_class_id);
+		operator_id = get_operator_for_type(opcintype, access_method_id, strategy_number);
 	}
 
-	Const *constantValue = makeNullConst(typeId, typeModId, collationId);
+	Const *constant_value = makeNullConst(type_id, type_mod_id, collation_id);
 
 	/* Now make the expression with the given variable and a null constant */
-	OpExpr *expression = reinterpret_cast<OpExpr *>(make_opclause(operatorId,
+	OpExpr *expression = reinterpret_cast<OpExpr *>(make_opclause(operator_id,
 												  InvalidOid, /* no result type yet */
 												  false, /* no return set */
 												  reinterpret_cast<Expr *>(variable),
-												  reinterpret_cast<Expr *>(constantValue),
-												  InvalidOid, collationId));
+												  reinterpret_cast<Expr *>(constant_value),
+												  InvalidOid, collation_id));
 
 	/* Set implementing function id and result type */
-	expression->opfuncid = get_opcode(operatorId);
+	expression->opfuncid = get_opcode(operator_id);
 	expression->opresulttype = get_func_rettype(expression->opfuncid);
 
 	return expression;
 }
 
 static Node *
-BuildBaseConstraint(Var *variable)
+build_chunk_constraint(Var *variable)
 {
-	OpExpr *lessThanExpr = MakeOpExpression(variable, BTLessEqualStrategyNumber);
-	OpExpr *greaterThanExpr = MakeOpExpression(variable, BTGreaterEqualStrategyNumber);
+	OpExpr *less_than_expr = make_operator_expression(variable, BTLessEqualStrategyNumber);
+	OpExpr *greater_than_expr = make_operator_expression(variable, BTGreaterEqualStrategyNumber);
 
-	Node *baseConstraint = make_and_qual(reinterpret_cast<Node *>(lessThanExpr),
-										 reinterpret_cast<Node *>(greaterThanExpr));
+	Node *base_constraint = make_and_qual(reinterpret_cast<Node *>(less_than_expr),
+										 reinterpret_cast<Node *>(greater_than_expr));
 
-	return baseConstraint;
+	return base_constraint;
 }
 
 static void
-UpdateConstraint(Node *baseConstraint, Datum minValue, Datum maxValue)
+update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max_value)
 {
-	BoolExpr *andExpr = reinterpret_cast<BoolExpr *>(baseConstraint);
-	PList<Node> argList{andExpr->args};
-	Node *lessThanExpr = argList.first();
-	Node *greaterThanExpr = argList.second();
+	BoolExpr *and_expr = reinterpret_cast<BoolExpr *>(base_constraint);
+	bioseq::postgres::support::postgres_list<Node> arg_list{and_expr->args};
+	Node *less_than_expr = arg_list.first();
+	Node *greater_than_expr = arg_list.second();
 
-	Node *minNode = get_rightop(reinterpret_cast<Expr *>(greaterThanExpr));
-	Node *maxNode = get_rightop(reinterpret_cast<Expr *>(lessThanExpr));
+	Node *min_node = get_rightop(reinterpret_cast<Expr *>(greater_than_expr));
+	Node *max_node = get_rightop(reinterpret_cast<Expr *>(less_than_expr));
 
-	Const *minConstant = pg_node_expect<Const>(minNode);
-	Const *maxConstant = pg_node_expect<Const>(maxNode);
+	Const *min_constant = pg_node_expect<Const>(min_node);
+	Const *max_constant = pg_node_expect<Const>(max_node);
 
-	minConstant->constvalue = minValue;
-	maxConstant->constvalue = maxValue;
+	min_constant->constvalue = min_value;
+	max_constant->constvalue = max_value;
 
-	minConstant->constisnull = false;
-	maxConstant->constisnull = false;
+	min_constant->constisnull = false;
+	max_constant->constisnull = false;
 
-	minConstant->constbyval = true;
-	maxConstant->constbyval = true;
+	min_constant->constbyval = true;
+	max_constant->constbyval = true;
 }
 
 export List *
-GetClauseVars(List *whereClauseList, int natts)
+collect_clause_variables(List *filter_clauses, int natts)
 {
 	/*
 	 * We don't recurse into or include aggregates, window functions, or
@@ -115,10 +110,10 @@ GetClauseVars(List *whereClauseList, int natts)
 	 * constraints that can be refuted.
 	 */
 	int flags = 0;
-	List *vars = pull_var_clause(reinterpret_cast<Node *>(whereClauseList), flags);
-	Var **deduplicate = make_array<Var *>(natts);
+	List *vars = pull_var_clause(reinterpret_cast<Node *>(filter_clauses), flags);
+	Var **deduplicate = bioseq::postgres::support::allocate_zeroed_array<Var *>(natts);
 
-	for (auto node : PList<Node>(vars))
+	for (auto node : bioseq::postgres::support::postgres_list<Node>(vars))
 	{
 		Var *var = pg_node_expect<Var>(node);
 		int idx = var->varattno - 1;
@@ -132,208 +127,208 @@ GetClauseVars(List *whereClauseList, int natts)
 		deduplicate[idx] = var;
 	}
 
-	PList<Var> whereClauseVars;
+	bioseq::postgres::support::postgres_list<Var> filter_variables;
 	for (int i = 0; i < natts; i++)
 	{
 		Var *var = deduplicate[i];
 		if (var != NULL)
 		{
-			whereClauseVars.append(var);
+			filter_variables.append(var);
 		}
 	}
 
 	pfree(deduplicate);
 
-	return whereClauseVars;
+	return filter_variables;
 }
 
 export bool *
-SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
-				  List *whereClauseVars, int64 *chunkGroupsFiltered)
+select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
+				  List *filter_variables, int64 *filtered_chunk_groups)
 {
-	uint32_t chunkIndex = 0;
+	uint32_t chunk_index = 0;
 
-	bool *selectedChunkMask = make_array<bool>(stripeSkipList->chunkCount);
-	memset(selectedChunkMask, true, stripeSkipList->chunkCount * sizeof(bool));
-	const Oid sequenceTypeId = bioseq_seq_type_oid_missing_ok();
+	bool *selected_chunk_mask = bioseq::postgres::support::allocate_zeroed_array<bool>(skip_list->chunk_count);
+	memset(selected_chunk_mask, true, skip_list->chunk_count * sizeof(bool));
+	const Oid sequence_type_id = bioseq_seq_type_oid_missing_ok();
 
-	for (auto column : PList<Var>(whereClauseVars))
+	for (auto column : bioseq::postgres::support::postgres_list<Var>(filter_variables))
 	{
 		if (column->varattno <= 0 ||
-			static_cast<uint32_t>(column->varattno) > stripeSkipList->columnCount)
+			static_cast<uint32_t>(column->varattno) > skip_list->column_count)
 		{
-			bioseq_log<ERR, PG>("restriction column {} is outside stripe column count {}",
-				   column->varattno, stripeSkipList->columnCount);
+			bioseq_log<logging_level::error, logging_target::postgres>("restriction column {} is outside stripe column count {}",
+				   column->varattno, skip_list->column_count);
 		}
 
-		uint32_t columnIndex = column->varattno - 1;
+		uint32_t column_index = column->varattno - 1;
 
-		/* seq extrema are never a sound proxy for logical rank-stream order.
-		 * Fail closed even if legacy or corrupt metadata claims min/max data. */
-		if (OidIsValid(sequenceTypeId)
-			&& column->vartype == sequenceTypeId)
+		/* Sequence extrema are never a sound proxy for logical rank-stream
+		 * order, so claimed min/max metadata is ignored conservatively. */
+		if (OidIsValid(sequence_type_id)
+			&& column->vartype == sequence_type_id)
 		{
 			continue;
 		}
 
 		/* if this column's data type doesn't have a comparator, skip it */
-		FmgrInfo *comparisonFunction = GetFunctionInfoOrNull(column->vartype,
+		FmgrInfo *comparison_function = find_index_support_function(column->vartype,
 															 BTREE_AM_OID,
 															 BTORDER_PROC);
-		if (comparisonFunction == NULL)
+		if (comparison_function == NULL)
 		{
 			continue;
 		}
 
-		Node *baseConstraint = BuildBaseConstraint(column);
-		for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
+		Node *base_constraint = build_chunk_constraint(column);
+		for (chunk_index = 0; chunk_index < skip_list->chunk_count; chunk_index++)
 		{
-			ColumnChunkSkipNode *chunkSkipNodeArray =
-				stripeSkipList->chunkSkipNodeArray[columnIndex];
-			ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
+			chunk_skip_node *chunk_skip_nodes =
+				skip_list->chunk_skip_nodes[column_index];
+			chunk_skip_node *chunk_skip_node_entry = &chunk_skip_nodes[chunk_index];
 
 			/*
 			 * A column chunk with comparable data type can miss min/max values
 			 * if all values in the chunk are NULL.
 			 */
-			if (!chunkSkipNode->hasMinMax)
+			if (!chunk_skip_node_entry->has_min_max)
 			{
 				continue;
 			}
 
-			UpdateConstraint(baseConstraint, chunkSkipNode->minimumValue,
-							 chunkSkipNode->maximumValue);
+			update_chunk_constraint_bounds(base_constraint, chunk_skip_node_entry->minimum_value,
+							 chunk_skip_node_entry->maximum_value);
 
-			auto constraintList = PList<Node>::of(baseConstraint);
-			bool predicateRefuted =
-				predicate_refuted_by(constraintList, whereClauseList, false);
-			if (predicateRefuted && selectedChunkMask[chunkIndex])
+			auto constraint_list = bioseq::postgres::support::postgres_list<Node>::of(base_constraint);
+			bool predicate_refuted =
+				predicate_refuted_by(constraint_list, filter_clauses, false);
+			if (predicate_refuted && selected_chunk_mask[chunk_index])
 			{
-				selectedChunkMask[chunkIndex] = false;
-				*chunkGroupsFiltered += 1;
+				selected_chunk_mask[chunk_index] = false;
+				*filtered_chunk_groups += 1;
 			}
 		}
 	}
 
-	return selectedChunkMask;
+	return selected_chunk_mask;
 }
 
-export StripeSkipList *
-SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
-					  bool *selectedChunkMask)
+export stripe_skip_list *
+select_chunk_skip_list(stripe_skip_list *skip_list, bool *projected_column_mask,
+					  bool *selected_chunk_mask)
 {
-	uint32_t selectedChunkCount = 0;
-	uint32_t chunkIndex = 0;
-	uint32_t columnIndex = 0;
-	uint32_t columnCount = stripeSkipList->columnCount;
-	uint32_t selectedChunkIndex = 0;
+	uint32_t selected_chunk_count = 0;
+	uint32_t chunk_index = 0;
+	uint32_t column_index = 0;
+	uint32_t column_count = skip_list->column_count;
+	uint32_t selected_chunk_index = 0;
 
-	for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < skip_list->chunk_count; chunk_index++)
 	{
-		if (selectedChunkMask[chunkIndex])
+		if (selected_chunk_mask[chunk_index])
 		{
-			selectedChunkCount++;
+			selected_chunk_count++;
 		}
 	}
 
-	if (selectedChunkCount == stripeSkipList->chunkCount)
+	if (selected_chunk_count == skip_list->chunk_count)
 	{
-		return stripeSkipList;
+		return skip_list;
 	}
 
-	ColumnChunkSkipNode **selectedChunkSkipNodeArray =
-		make_array<ColumnChunkSkipNode*>(columnCount);
+	chunk_skip_node **selected_chunk_skip_node_array =
+		bioseq::postgres::support::allocate_zeroed_array<chunk_skip_node*>(column_count);
 
-	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	for (column_index = 0; column_index < column_count; column_index++)
 	{
-		bool firstColumn = columnIndex == 0;
-		selectedChunkIndex = 0;
+		bool first_column = column_index == 0;
+		selected_chunk_index = 0;
 
 		/* first column's chunk skip node is always read */
-		if (!projectedColumnMask[columnIndex] && !firstColumn)
+		if (!projected_column_mask[column_index] && !first_column)
 		{
-			selectedChunkSkipNodeArray[columnIndex] = NULL;
+			selected_chunk_skip_node_array[column_index] = NULL;
 			continue;
 		}
 
-		Assert(stripeSkipList->chunkSkipNodeArray[columnIndex] != NULL);
+		Assert(skip_list->chunk_skip_nodes[column_index] != NULL);
 
-		selectedChunkSkipNodeArray[columnIndex] = make_array<ColumnChunkSkipNode>(selectedChunkCount);
+		selected_chunk_skip_node_array[column_index] = bioseq::postgres::support::allocate_zeroed_array<chunk_skip_node>(selected_chunk_count);
 
-		for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
+		for (chunk_index = 0; chunk_index < skip_list->chunk_count; chunk_index++)
 		{
-			if (selectedChunkMask[chunkIndex])
+			if (selected_chunk_mask[chunk_index])
 			{
-				selectedChunkSkipNodeArray[columnIndex][selectedChunkIndex] =
-					stripeSkipList->chunkSkipNodeArray[columnIndex][chunkIndex];
-				selectedChunkIndex++;
+				selected_chunk_skip_node_array[column_index][selected_chunk_index] =
+					skip_list->chunk_skip_nodes[column_index][chunk_index];
+				selected_chunk_index++;
 			}
 		}
 	}
 
-	selectedChunkIndex = 0;
-	uint32_t *chunkGroupRowCounts = make_array<uint32_t>(selectedChunkCount);
-	uint32_t *chunkGroupRowOffset = make_array<uint32_t>(selectedChunkCount);
-	uint32_t *chunkGroupDeletedRows = make_array<uint32_t>(selectedChunkCount);
+	selected_chunk_index = 0;
+	uint32_t *chunk_group_row_counts = bioseq::postgres::support::allocate_zeroed_array<uint32_t>(selected_chunk_count);
+	uint32_t *chunk_group_row_offsets = bioseq::postgres::support::allocate_zeroed_array<uint32_t>(selected_chunk_count);
+	uint32_t *chunk_group_deleted_rows = bioseq::postgres::support::allocate_zeroed_array<uint32_t>(selected_chunk_count);
 
-	for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < skip_list->chunk_count; chunk_index++)
 	{
-		if (selectedChunkMask[chunkIndex])
+		if (selected_chunk_mask[chunk_index])
 		{
-			chunkGroupRowCounts[selectedChunkIndex] =
-				stripeSkipList->chunkGroupRowCounts[chunkIndex];
-			chunkGroupRowOffset[selectedChunkIndex] =
-				stripeSkipList->chunkGroupRowOffset[chunkIndex];
-			chunkGroupDeletedRows[selectedChunkIndex] =
-				stripeSkipList->chunkGroupDeletedRows[chunkIndex];
-			selectedChunkIndex++;
+			chunk_group_row_counts[selected_chunk_index] =
+				skip_list->chunk_group_row_counts[chunk_index];
+			chunk_group_row_offsets[selected_chunk_index] =
+				skip_list->chunk_group_row_offsets[chunk_index];
+			chunk_group_deleted_rows[selected_chunk_index] =
+				skip_list->chunk_group_deleted_rows[chunk_index];
+			selected_chunk_index++;
 		}
 	}
 
-	StripeSkipList *selectedChunkSkipList = make0<StripeSkipList>();
-	selectedChunkSkipList->chunkSkipNodeArray = selectedChunkSkipNodeArray;
-	selectedChunkSkipList->chunkCount = selectedChunkCount;
-	selectedChunkSkipList->columnCount = stripeSkipList->columnCount;
-	selectedChunkSkipList->chunkGroupRowCounts = chunkGroupRowCounts;
-	selectedChunkSkipList->chunkGroupRowOffset = chunkGroupRowOffset;
-	selectedChunkSkipList->chunkGroupDeletedRows = chunkGroupDeletedRows;
+	stripe_skip_list *selected_chunk_skip_list = bioseq::postgres::support::allocate_zeroed_object<stripe_skip_list>();
+	selected_chunk_skip_list->chunk_skip_nodes = selected_chunk_skip_node_array;
+	selected_chunk_skip_list->chunk_count = selected_chunk_count;
+	selected_chunk_skip_list->column_count = skip_list->column_count;
+	selected_chunk_skip_list->chunk_group_row_counts = chunk_group_row_counts;
+	selected_chunk_skip_list->chunk_group_row_offsets = chunk_group_row_offsets;
+	selected_chunk_skip_list->chunk_group_deleted_rows = chunk_group_deleted_rows;
 
-	return selectedChunkSkipList;
+	return selected_chunk_skip_list;
 }
 
 export uint32_t
-StripeSkipListRowCount(StripeSkipList *stripeSkipList)
+count_stripe_skip_rows(stripe_skip_list *skip_list)
 {
-	uint32_t stripeSkipListRowCount = 0;
-	uint32_t chunkIndex = 0;
-	uint32_t *chunkGroupRowCounts = stripeSkipList->chunkGroupRowCounts;
+	uint32_t stripe_skip_list_row_count = 0;
+	uint32_t chunk_index = 0;
+	uint32_t *chunk_group_row_counts = skip_list->chunk_group_row_counts;
 
-	for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < skip_list->chunk_count; chunk_index++)
 	{
-		uint32_t chunkGroupRowCount = chunkGroupRowCounts[chunkIndex];
-		stripeSkipListRowCount += chunkGroupRowCount;
+		uint32_t chunk_group_row_count = chunk_group_row_counts[chunk_index];
+		stripe_skip_list_row_count += chunk_group_row_count;
 	}
 
-	return stripeSkipListRowCount;
+	return stripe_skip_list_row_count;
 }
 
 export bool *
-ProjectedColumnMask(uint32_t columnCount, List *projectedColumnList)
+build_projected_column_mask(uint32_t column_count, List *projected_columns)
 {
-	bool *projectedColumnMask = make_array<bool>(columnCount);
+	bool *projected_column_mask = bioseq::postgres::support::allocate_zeroed_array<bool>(column_count);
 
-	for (auto attno : PIntList{projectedColumnList})
+	for (auto attno : bioseq::postgres::support::postgres_integer_list{projected_columns})
 	{
-		if (attno <= 0 || static_cast<uint32_t>(attno) > columnCount)
+		if (attno <= 0 || static_cast<uint32_t>(attno) > column_count)
 		{
-			bioseq_log<ERR, PG>("projected column {} is outside column count {}",
-				   attno, columnCount);
+			bioseq_log<logging_level::error, logging_target::postgres>("projected column {} is outside column count {}",
+				   attno, column_count);
 		}
 
 		/* attno is 1-indexed; projectedColumnMask is 0-indexed */
-		int columnIndex = attno - 1;
-		projectedColumnMask[columnIndex] = true;
+		int column_index = attno - 1;
+		projected_column_mask[column_index] = true;
 	}
 
-	return projectedColumnMask;
+	return projected_column_mask;
 }

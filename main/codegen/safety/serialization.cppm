@@ -4,7 +4,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -21,6 +20,7 @@ export module bioseq.codegen.safety:serialization;
 import :analyzer_model;
 import :json;
 import :model;
+import :validation;
 
 export namespace bioseq::codegen::safety {
 
@@ -356,10 +356,10 @@ inline void validate_runtime_probe_fact_shape(
         return bridge_kind::invoke_pg_as_cpp;
     }
     if (value == "sql_subtransaction") {
-        return bridge_kind::sql_subtransaction;
+        return bridge_kind::subtransaction;
     }
     if (value == "sql_call_context") {
-        return bridge_kind::sql_call_context;
+        return bridge_kind::cross_transaction_callback;
     }
     if (value == "generated_boundary_tail") {
         return bridge_kind::generated_boundary_tail;
@@ -565,15 +565,34 @@ parse_postgres_callback_root(
     };
 }
 
-[[nodiscard]] inline bool lowercase_sha256_value(
-    std::string_view value) noexcept {
-    return value.size() == 64
-        && std::ranges::all_of(
-            value,
-            [](const char digit) {
-                return (digit >= '0' && digit <= '9')
-                    || (digit >= 'a' && digit <= 'f');
-            });
+[[nodiscard]] inline std::vector<postgres_callback_root>
+parse_postgres_callback_roots(
+    const json_value& input,
+    std::string_view context) {
+    const json_value::array& values = json_array(input, context);
+    std::vector<postgres_callback_root> result;
+    result.reserve(values.size());
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        result.push_back(parse_postgres_callback_root(
+            values[index],
+            std::string{context} + "[" + std::to_string(index) + "]"));
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::vector<runtime_probe_fact>
+parse_runtime_probe_facts(
+    const json_value& input,
+    std::string_view context) {
+    const json_value::array& values = json_array(input, context);
+    std::vector<runtime_probe_fact> result;
+    result.reserve(values.size());
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        result.push_back(parse_runtime_probe_fact(
+            values[index],
+            std::string{context} + "[" + std::to_string(index) + "]"));
+    }
+    return result;
 }
 
 [[nodiscard]] inline bool valid_inventory_fault_key(
@@ -600,40 +619,6 @@ parse_postgres_callback_root(
         && value.begin.byte_offset < value.end.byte_offset;
 }
 
-[[nodiscard]] inline runtime_probe_contract
-expected_runtime_probe_contract(runtime_relation relation) {
-    switch (relation) {
-        case runtime_relation::natural_at_site:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 0,
-                .ordering =
-                    runtime_probe_ordering::visit_only,
-            };
-        case runtime_relation::injected_routes_to_site:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 1,
-                .ordering =
-                    runtime_probe_ordering::
-                        trigger_before_visit,
-            };
-        case runtime_relation::injected_after_site_success:
-            return {
-                .abi_version = 2,
-                .expected_visit_count = 1,
-                .expected_trigger_count = 1,
-                .ordering =
-                    runtime_probe_ordering::
-                        visit_before_trigger,
-            };
-    }
-    throw std::runtime_error(
-        "runtime inventory has an unknown relation");
-}
-
 inline void validate_runtime_source_anchor_shape(
     const runtime_source_anchor& anchor,
     std::string_view context) {
@@ -643,7 +628,7 @@ inline void validate_runtime_source_anchor_shape(
         || anchor.source_file.empty()
         || !valid_inventory_range(
             anchor.expanded_source_span)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             anchor.source_fragment_sha256)) {
         throw std::runtime_error(
             std::string{context}
@@ -657,20 +642,20 @@ inline void validate_runtime_probe_inventory_shape(
     if (inventory.schema_version != 1
         || inventory.probe_abi_version != 2
         || profile_name(inventory.profile) == "unknown"
-        || !lowercase_sha256_value(inventory.ledger_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(inventory.ledger_sha256)
+        || !detail::lowercase_sha256(
             inventory.compiler_facts_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory.sql_manifest_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory.source_list_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory.compile_database_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory.compile_graph_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory.pcm_manifest_sha256)
-        || !lowercase_sha256_value(
+        || !detail::lowercase_sha256(
             inventory
                 .inventory_producer_executable_sha256)
         || inventory.entries.empty()) {
@@ -686,7 +671,7 @@ inline void validate_runtime_probe_inventory_shape(
     for (const runtime_probe_inventory_entry& entry :
          inventory.entries) {
         const runtime_probe_contract expected =
-            expected_runtime_probe_contract(entry.relation);
+            runtime_probe_contract_for(entry.relation);
         if (!keys.emplace(
                 entry.sql_identity,
                 entry.fault_key).second) {
@@ -702,9 +687,9 @@ inline void validate_runtime_probe_inventory_shape(
             || !valid_inventory_fault_key(entry.fault_key)
             || !entry.site_id.starts_with("probe:v2:")
             || entry.site_id.size() != 73
-            || !lowercase_sha256_value(
+            || !detail::lowercase_sha256(
                 std::string_view{entry.site_id}.substr(9))
-            || !lowercase_sha256_value(
+            || !detail::lowercase_sha256(
                 entry.ledger_site_sha256)
             || entry.transitive_call_path.empty()
             || entry.probe_contract.abi_version
@@ -1502,6 +1487,19 @@ parse_bridge_transition_proof(
     const json_value& input,
     std::string_view context) {
     const json_value::object& value = json_object(input, context);
+    require_exact_fields(
+        value,
+        {
+            "call_graph_fixed_point_complete",
+            "cfg_complete",
+            "control_flow_assembly_sites",
+            "lifetime_analysis_complete",
+            "macro_expansion_complete",
+            "template_instantiation_complete",
+            "unavailable_bodies",
+            "unresolved_indirect_targets",
+        },
+        context);
     return {
         .template_instantiation_complete = boolean_field(
             value, "template_instantiation_complete", context),
@@ -1533,6 +1531,26 @@ parse_bridge_transition_proof(
     const json_value& input,
     std::string_view context) {
     const json_value::object& value = json_object(input, context);
+    require_exact_fields(
+        value,
+        {
+            "analysis",
+            "audited_stop_count",
+            "audited_stops",
+            "generated_wrapper",
+            "owner_source_file",
+            "owner_source_span",
+            "owner_usr",
+            "profile",
+            "public_symbol",
+            "qualified_declaration",
+            "recoverable_site_count",
+            "sites",
+            "sql_identity",
+            "terminal_site_count",
+            "transitive_closure_sha256",
+        },
+        context);
     safety_parent_row result{
         .sql_identity = string_field(
             value, "sql_identity", context),
@@ -1593,6 +1611,15 @@ parse_bridge_transition_proof(
     const json_value& input,
     std::string_view context) {
     const json_value::object& value = json_object(input, context);
+    require_exact_fields(
+        value,
+        {
+            "finfo_symbol",
+            "generated_wrapper",
+            "public_symbol",
+            "sql_identities",
+        },
+        context);
     return {
         .public_symbol = string_field(
             value, "public_symbol", context),
@@ -1921,6 +1948,26 @@ parse_bridge_transition_proof(
     };
 }
 
+using runtime_probe_sort_key = std::tuple<
+    std::string_view,
+    std::string_view,
+    std::string_view,
+    std::string_view,
+    std::string_view>;
+
+[[nodiscard]] inline runtime_probe_sort_key runtime_probe_key(
+    const runtime_probe_fact& value) noexcept {
+    return {
+        value.fault_key,
+        value.site_call_stable_id,
+        value.visit_call_stable_id,
+        value.trigger_call_stable_id
+            ? std::string_view{*value.trigger_call_stable_id}
+            : std::string_view{},
+        runtime_relation_name(value.relation),
+    };
+}
+
 [[nodiscard]] inline json_value::array runtime_probes_json(
     const std::vector<runtime_probe_fact>& values) {
     std::vector<const runtime_probe_fact*> ordered;
@@ -1932,21 +1979,8 @@ parse_bridge_transition_proof(
         ordered,
         [](const runtime_probe_fact* left,
            const runtime_probe_fact* right) {
-            const auto key = [](const runtime_probe_fact* value) {
-                return std::tuple{
-                    std::string_view{value->fault_key},
-                    std::string_view{
-                        value->site_call_stable_id},
-                    std::string_view{
-                        value->visit_call_stable_id},
-                    value->trigger_call_stable_id
-                        ? std::string_view{
-                              *value->trigger_call_stable_id}
-                        : std::string_view{},
-                    runtime_relation_name(value->relation),
-                };
-            };
-            return key(left) < key(right);
+            return runtime_probe_key(*left)
+                < runtime_probe_key(*right);
         });
     json_value::array result;
     result.reserve(ordered.size());
@@ -2306,6 +2340,7 @@ runtime_probe_inventory_entry_json(
 
 }  // namespace serialization_detail
 
+/// Parses one PostgreSQL provenance bundle without changing wire values.
 [[nodiscard]] inline provenance_bundle parse_provenance_bundle_json(
     std::string_view text) {
     const json_value document = parse_json(text);
@@ -2449,6 +2484,7 @@ runtime_probe_inventory_entry_json(
     return result;
 }
 
+/// Parses exact schema-v2 compiler facts and rejects unknown root fields.
 [[nodiscard]] inline compiler_analysis_facts
 parse_compiler_analysis_facts_json(std::string_view text) {
     const json_value document = parse_json(text);
@@ -2533,51 +2569,21 @@ parse_compiler_analysis_facts_json(std::string_view text) {
             json_field(
                 root, "root_usrs", "compiler analysis facts"),
             "compiler analysis facts.root_usrs"),
-        .callback_roots = [&] {
-            std::vector<postgres_callback_root> parsed;
-            const json_value::array& values = json_array(
+        .callback_roots =
+            serialization_detail::parse_postgres_callback_roots(
                 json_field(
                     root,
                     "callback_roots",
                     "compiler analysis facts"),
-                "compiler analysis facts.callback_roots");
-            parsed.reserve(values.size());
-            for (std::size_t index = 0;
-                 index < values.size();
-                 ++index) {
-                parsed.push_back(
-                    serialization_detail::
-                        parse_postgres_callback_root(
-                            values[index],
-                            "compiler analysis facts."
-                            "callback_roots["
-                                + std::to_string(index) + "]"));
-            }
-            return parsed;
-        }(),
+                "compiler analysis facts.callback_roots"),
         .functions = {},
-        .runtime_probes = [&] {
-            std::vector<runtime_probe_fact> parsed;
-            const json_value::array& values = json_array(
+        .runtime_probes =
+            serialization_detail::parse_runtime_probe_facts(
                 json_field(
                     root,
                     "runtime_probes",
                     "compiler analysis facts"),
-                "compiler analysis facts.runtime_probes");
-            parsed.reserve(values.size());
-            for (std::size_t index = 0;
-                 index < values.size();
-                 ++index) {
-                parsed.push_back(
-                    serialization_detail::
-                        parse_runtime_probe_fact(
-                            values[index],
-                            "compiler analysis facts."
-                            "runtime_probes["
-                                + std::to_string(index) + "]"));
-            }
-            return parsed;
-        }(),
+                "compiler analysis facts.runtime_probes"),
     };
     const json_value::array& functions = json_array(
         json_field(root, "functions", "compiler analysis facts"),
@@ -2723,6 +2729,7 @@ parse_compiler_analysis_facts_json(std::string_view text) {
     return result;
 }
 
+/// Parses and validates a canonical runtime-probe inventory.
 [[nodiscard]] inline runtime_probe_inventory
 parse_runtime_probe_inventory_json(std::string_view text) {
     const json_value document = parse_json(text);
@@ -2833,11 +2840,36 @@ parse_runtime_probe_inventory_json(std::string_view text) {
     return result;
 }
 
+/// Parses the exact current safety-ledger wire schema.
 [[nodiscard]] inline safety_ledger parse_safety_ledger_json(
     std::string_view text) {
     const json_value document = parse_json(text);
     const json_value::object& root =
         json_object(document, "safety ledger");
+    serialization_detail::require_exact_fields(
+        root,
+        {
+            "analyzer_version",
+            "callback_closure_sha256",
+            "callback_root_count",
+            "clang_version",
+            "compile_database_sha256",
+            "compile_graph_sha256",
+            "compiler_facts_sha256",
+            "generator_revision",
+            "parents",
+            "pcm_manifest_sha256",
+            "postgresql_major",
+            "postgresql_revision",
+            "producer_executable_sha256",
+            "profile",
+            "provenance_bundle_sha256",
+            "schema_version",
+            "source_list_sha256",
+            "sql_manifest_sha256",
+            "symbol_groups",
+        },
+        "safety ledger");
     const std::size_t schema_version =
         serialization_detail::size_value(
             json_field(
@@ -2848,12 +2880,9 @@ parse_runtime_probe_inventory_json(std::string_view text) {
             json_field(
                 root, "postgresql_major", "safety ledger"),
             "safety ledger.postgresql_major");
-    if (schema_version
-            > std::numeric_limits<std::uint32_t>::max()
-        || postgresql_major
-            > std::numeric_limits<std::uint32_t>::max()) {
+    if (schema_version != 2 || postgresql_major != 17) {
         throw std::runtime_error(
-            "safety ledger version fields exceed uint32");
+            "safety ledger requires schema version 2 and PostgreSQL 17");
     }
     safety_ledger result{
         .schema_version =
@@ -2958,6 +2987,7 @@ parse_runtime_probe_inventory_json(std::string_view text) {
     return result;
 }
 
+/// Renders compiler facts with deterministic function and object ordering.
 [[nodiscard]] inline std::string render_compiler_analysis_facts_json(
     const compiler_analysis_facts& facts) {
     if (facts.schema_version != 2) {
@@ -3019,6 +3049,7 @@ parse_runtime_probe_inventory_json(std::string_view text) {
     });
 }
 
+/// Renders runtime probe inventory entries in deterministic identity order.
 [[nodiscard]] inline std::string
 render_runtime_probe_inventory_json(
     const runtime_probe_inventory& inventory) {
@@ -3080,8 +3111,13 @@ render_runtime_probe_inventory_json(
     });
 }
 
+/// Renders the exact current safety-ledger schema.
 [[nodiscard]] inline std::string render_safety_ledger_json(
     const safety_ledger& ledger) {
+    if (ledger.schema_version != 2) {
+        throw std::runtime_error(
+            "safety ledger requires schema version 2");
+    }
     json_value::array parents;
     parents.reserve(ledger.parents.size());
     for (const safety_parent_row& parent : ledger.parents) {

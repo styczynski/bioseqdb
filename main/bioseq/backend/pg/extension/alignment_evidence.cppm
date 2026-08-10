@@ -1,10 +1,10 @@
 /**
  * @file alignment_evidence.cppm
- * @brief Alignment reader and persisted-GPU execution evidence diagnostics.
+ * @brief Alignment reader and persisted-GPU execution statistics.
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <array>
 #include <cstddef>
@@ -16,26 +16,26 @@ module;
 module bioseq.postgres.extension;
 
 import bioseq.pipeline.stats;
-import bioseq.pg_utils;
+import bioseq.postgres.support;
 import bioseq.postgres.table.alignment_execution;
 
 namespace {
 
-namespace alignment_exec = bioseq::pg::alignment_execution;
+namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-[[nodiscard]] std::string format5_reader_memory_evidence_json(
-		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+[[nodiscard]] std::string grouped_soa_reader_memory_stats_json(
+		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
 	/*
 	 * Keep this post-statement diagnostic separate from both frozen alignment
-	 * stats SRFs and the version-1 cold-index object.  One immutable backend-
+	 * stats SRFs and the cold-index object. One immutable backend-
 	 * local snapshot supplies the identity, counters and saturation flags.
 	 */
 	const auto& operational = snapshot.pipeline.operational;
 	std::string result =
-		R"({"schema":"bioseq.format5_reader_memory_evidence","version":1)";
+		R"({"schema":"bioseq.grouped_soa_reader_memory_stats","revision":1)";
 	result.reserve(768);
 	const auto append_signed = [&result](
 			const std::string_view key,
@@ -57,33 +57,33 @@ using bioseq::pg::detail::fixed_hex_u64;
 	append_signed("backend_pid", snapshot.backend_pid);
 	append("database_oid", snapshot.database_oid);
 	append(
-		"format5_reader_capacity_accounting_passes",
-		operational.format5_reader_capacity_accounting_passes);
+		"grouped_soa_reader_capacity_accounting_passes",
+		operational.grouped_soa_reader_capacity_accounting_passes);
 	append(
-		"format5_reader_global_position_storage_preparations",
-		operational.format5_reader_global_position_storage_preparations);
+		"grouped_soa_reader_global_position_storage_preparations",
+		operational.grouped_soa_reader_global_position_storage_preparations);
 	append(
-		"format5_reader_global_position_storage_allocations",
-		operational.format5_reader_global_position_storage_allocations);
+		"grouped_soa_reader_global_position_storage_allocations",
+		operational.grouped_soa_reader_global_position_storage_allocations);
 	append(
-		"format5_reader_position_append_growth_reservations",
-		operational.format5_reader_position_append_growth_reservations);
+		"grouped_soa_reader_position_append_growth_reservations",
+		operational.grouped_soa_reader_position_append_growth_reservations);
 	append(
-		"format5_reader_retained_position_count",
-		operational.format5_reader_retained_position_count);
+		"grouped_soa_reader_retained_position_count",
+		operational.grouped_soa_reader_retained_position_count);
 	append(
-		"format5_reader_retained_position_capacity",
-		operational.format5_reader_retained_position_capacity);
-	result += R"(,"format5_reader_memory_evidence_saturated":)";
-	result += operational.format5_reader_memory_evidence_saturated
+		"grouped_soa_reader_retained_position_capacity",
+		operational.grouped_soa_reader_retained_position_capacity);
+	result += R"(,"are_grouped_soa_reader_memory_stats_saturated":)";
+	result += operational.are_grouped_soa_reader_memory_stats_saturated
 		? "true" : "false";
-	result += R"(,"stats_saturated":)";
-	result += operational.stats_saturated ? "true" : "false";
+	result += R"(,"are_stats_saturated":)";
+	result += operational.are_stats_saturated ? "true" : "false";
 	result += '}';
 	return result;
 }
 
-enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
+enum class grouped_soa_reader_memory_stats_revision : std::uint32_t {
     exact_array_layout = 2u,
     fragment_native_query = 3u,
     provider_lifecycle = 4u,
@@ -91,42 +91,42 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
     compact_direct_one_decode = 6u,
 };
 
-[[nodiscard]] std::string format5_reader_memory_evidence_json_versioned(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot,
-        const Format5ReaderMemoryEvidenceVersion version)
+[[nodiscard]] std::string grouped_soa_reader_memory_stats_json_for_revision(
+        const alignment_exec::alignment_execution_snapshot& snapshot,
+        const grouped_soa_reader_memory_stats_revision revision)
 {
     bool include_fragment_native_query = false;
     bool include_provider_lifecycle = false;
     bool include_bucket_direct_query = false;
     bool include_compact_direct_one_decode = false;
-    switch (version) {
-        case Format5ReaderMemoryEvidenceVersion::exact_array_layout:
+    switch (revision) {
+        case grouped_soa_reader_memory_stats_revision::exact_array_layout:
             break;
-        case Format5ReaderMemoryEvidenceVersion::fragment_native_query:
+        case grouped_soa_reader_memory_stats_revision::fragment_native_query:
             include_fragment_native_query = true;
             break;
-        case Format5ReaderMemoryEvidenceVersion::provider_lifecycle:
+        case grouped_soa_reader_memory_stats_revision::provider_lifecycle:
             include_fragment_native_query = true;
             include_provider_lifecycle = true;
             break;
-        case Format5ReaderMemoryEvidenceVersion::bucket_direct_query:
+        case grouped_soa_reader_memory_stats_revision::bucket_direct_query:
             include_fragment_native_query = true;
             include_provider_lifecycle = true;
             include_bucket_direct_query = true;
             break;
-        case Format5ReaderMemoryEvidenceVersion::compact_direct_one_decode:
+        case grouped_soa_reader_memory_stats_revision::compact_direct_one_decode:
             include_fragment_native_query = true;
             include_provider_lifecycle = true;
             include_bucket_direct_query = true;
             include_compact_direct_one_decode = true;
             break;
     }
-    const std::uint32_t version_number =
-        static_cast<std::uint32_t>(version);
+    const std::uint32_t revision_number =
+        static_cast<std::uint32_t>(revision);
     const auto& operational = snapshot.pipeline.operational;
     std::string result =
-        R"({"schema":"bioseq.format5_reader_memory_evidence","version":)"
-        + std::to_string(version_number);
+        R"({"schema":"bioseq.grouped_soa_reader_memory_stats","revision":)"
+        + std::to_string(revision_number);
     result.reserve(include_provider_lifecycle
         ? 12'288u
         : include_fragment_native_query ? 6'144u : 2'048u);
@@ -150,311 +150,315 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 	append_signed("backend_pid", snapshot.backend_pid);
 	append("database_oid", snapshot.database_oid);
 	append(
-		"format5_reader_capacity_accounting_passes",
-		operational.format5_reader_capacity_accounting_passes);
+		"grouped_soa_reader_capacity_accounting_passes",
+		operational.grouped_soa_reader_capacity_accounting_passes);
 	append(
-		"format5_reader_global_position_storage_preparations",
-		operational.format5_reader_global_position_storage_preparations);
+		"grouped_soa_reader_global_position_storage_preparations",
+		operational.grouped_soa_reader_global_position_storage_preparations);
 	append(
-		"format5_reader_global_position_storage_allocations",
-		operational.format5_reader_global_position_storage_allocations);
+		"grouped_soa_reader_global_position_storage_allocations",
+		operational.grouped_soa_reader_global_position_storage_allocations);
 	append(
-		"format5_reader_position_append_growth_reservations",
-		operational.format5_reader_position_append_growth_reservations);
+		"grouped_soa_reader_position_append_growth_reservations",
+		operational.grouped_soa_reader_position_append_growth_reservations);
 	append(
-		"format5_reader_retained_position_count",
-		operational.format5_reader_retained_position_count);
+		"grouped_soa_reader_retained_position_count",
+		operational.grouped_soa_reader_retained_position_count);
 	append(
-		"format5_reader_retained_position_capacity",
-		operational.format5_reader_retained_position_capacity);
+		"grouped_soa_reader_retained_position_capacity",
+		operational.grouped_soa_reader_retained_position_capacity);
 	append(
-		"format5_reader_directory_capacity_bytes",
-		operational.format5_reader_directory_capacity_bytes);
+		"grouped_soa_reader_directory_capacity_bytes",
+		operational.grouped_soa_reader_directory_capacity_bytes);
 	append(
-		"format5_reader_query_hash_capacity_bytes",
-		operational.format5_reader_query_hash_capacity_bytes);
+		"grouped_soa_reader_query_hash_capacity_bytes",
+		operational.grouped_soa_reader_query_hash_capacity_bytes);
 	append(
-		"format5_reader_query_record_capacity_bytes",
-		operational.format5_reader_query_record_capacity_bytes);
+		"grouped_soa_reader_query_record_capacity_bytes",
+		operational.grouped_soa_reader_query_record_capacity_bytes);
 	append(
-		"format5_reader_ordinal_route_capacity_bytes",
-		operational.format5_reader_ordinal_route_capacity_bytes);
+		"grouped_soa_reader_ordinal_route_capacity_bytes",
+		operational.grouped_soa_reader_ordinal_route_capacity_bytes);
 	append(
-		"format5_reader_selected_extent_capacity_bytes",
-		operational.format5_reader_selected_extent_capacity_bytes);
+		"grouped_soa_reader_selected_extent_capacity_bytes",
+		operational.grouped_soa_reader_selected_extent_capacity_bytes);
 	append(
-		"format5_reader_current_selected_control_capacity_bytes",
-		operational.format5_reader_current_selected_control_capacity_bytes);
+		"grouped_soa_reader_current_selected_control_capacity_bytes",
+		operational.grouped_soa_reader_current_selected_control_capacity_bytes);
 	append(
-		"format5_reader_global_position_capacity_bytes",
-		operational.format5_reader_global_position_capacity_bytes);
+		"grouped_soa_reader_global_position_capacity_bytes",
+		operational.grouped_soa_reader_global_position_capacity_bytes);
 	append(
-		"format5_reader_control_payload_capacity_bytes",
-		operational.format5_reader_control_payload_capacity_bytes);
+		"grouped_soa_reader_control_payload_capacity_bytes",
+		operational.grouped_soa_reader_control_payload_capacity_bytes);
 	append(
-		"format5_reader_owned_capacity_bytes",
-		operational.format5_reader_owned_capacity_bytes);
+		"grouped_soa_reader_owned_capacity_bytes",
+		operational.grouped_soa_reader_owned_capacity_bytes);
 	append(
-		"format5_reader_admitted_bytes",
-		operational.format5_reader_admitted_bytes);
+		"grouped_soa_reader_admitted_bytes",
+		operational.grouped_soa_reader_admitted_bytes);
 	append(
-		"format5_reader_exact_position_image_checks",
-		operational.format5_reader_exact_position_image_checks);
+		"grouped_soa_reader_exact_position_image_checks",
+		operational.grouped_soa_reader_exact_position_image_checks);
 	append(
-		"format5_reader_exact_position_image_failures",
-		operational.format5_reader_exact_position_image_failures);
+		"grouped_soa_reader_exact_position_image_failures",
+		operational.grouped_soa_reader_exact_position_image_failures);
 	append(
-		"format5_reader_retained_layout_checks",
-		operational.format5_reader_retained_layout_checks);
+		"grouped_soa_reader_retained_layout_checks",
+		operational.grouped_soa_reader_retained_layout_checks);
     append(
-        "format5_reader_retained_layout_failures",
-        operational.format5_reader_retained_layout_failures);
+        "grouped_soa_reader_retained_layout_failures",
+        operational.grouped_soa_reader_retained_layout_failures);
     if (include_fragment_native_query) {
-        const auto& evidence = operational.fragment_native_query_evidence;
-        append("fragment_native_waves", evidence.waves);
-        append("fragment_native_queries", evidence.queries);
+        const auto& stats = operational.fragment_native_query_stats;
+        append("fragment_native_waves", stats.waves);
+        append("fragment_native_queries", stats.queries);
         append("fragment_native_occurrence_fill_ns",
-            evidence.occurrence_fill_ns);
+            stats.occurrence_fill_ns);
         append("fragment_native_occurrence_radix_ns",
-            evidence.occurrence_radix_ns);
+            stats.occurrence_radix_ns);
         append("fragment_native_unique_plan_build_ns",
-            evidence.unique_plan_build_ns);
+            stats.unique_plan_build_ns);
         append("fragment_native_query_plan_radix_fill_ns",
-            evidence.query_plan_radix_fill_ns);
+            stats.query_plan_radix_fill_ns);
         append("fragment_native_control_count_pass_ns",
-            evidence.control_count_pass_ns);
+            stats.control_count_pass_ns);
         append("fragment_native_rejected_control_validation_ns",
-            evidence.rejected_control_validation_ns);
+            stats.rejected_control_validation_ns);
         append("fragment_native_orientation_layout_ns",
-            evidence.orientation_layout_ns);
+            stats.orientation_layout_ns);
         append("fragment_native_direct_emission_ns",
-            evidence.direct_emission_ns);
-        append("fragment_native_local_sort_ns", evidence.local_sort_ns);
+            stats.direct_emission_ns);
+        append("fragment_native_local_sort_ns", stats.local_sort_ns);
         append("fragment_native_tie_normalization_ns",
-            evidence.tie_normalization_ns);
+            stats.tie_normalization_ns);
         append("fragment_native_control_count_bytes",
-            evidence.control_count_bytes);
+            stats.control_count_bytes);
         append("fragment_native_rejected_control_validation_bytes",
-            evidence.rejected_control_validation_bytes);
+            stats.rejected_control_validation_bytes);
         append("fragment_native_pass2_position_bytes",
-            evidence.pass2_position_bytes);
+            stats.pass2_position_bytes);
         append("fragment_native_pass3_position_bytes",
-            evidence.pass3_position_bytes);
+            stats.pass3_position_bytes);
         append("fragment_native_anchors_constructed",
-            evidence.anchors_constructed);
+            stats.anchors_constructed);
         append("fragment_native_local_sort_bytes",
-            evidence.local_sort_bytes);
+            stats.local_sort_bytes);
         append("fragment_native_tie_normalization_bytes",
-            evidence.tie_normalization_bytes);
+            stats.tie_normalization_bytes);
         append("fragment_native_exact_final_bytes",
-            evidence.exact_final_bytes);
+            stats.exact_final_bytes);
         append("fragment_native_peak_exact_final_bytes",
-            evidence.peak_exact_final_bytes);
+            stats.peak_exact_final_bytes);
         append("fragment_native_global_sort_calls_invoked",
-            evidence.global_sort_calls_invoked);
+            stats.global_sort_calls_invoked);
         append("fragment_native_global_sort_calls_skipped",
-            evidence.global_sort_calls_skipped);
+            stats.global_sort_calls_skipped);
         append("fragment_native_candidate_anchor_bytes",
-            evidence.candidate_anchor_bytes);
+            stats.candidate_anchor_bytes);
         append("fragment_native_plan_ordinal_bytes",
-            evidence.plan_ordinal_bytes);
+            stats.plan_ordinal_bytes);
         append("fragment_native_compaction_bytes",
-            evidence.compaction_bytes);
+            stats.compaction_bytes);
         append("fragment_native_final_copy_bytes",
-            evidence.final_copy_bytes);
+            stats.final_copy_bytes);
         append("fragment_native_peak_occurrence_capacity_bytes",
-            evidence.peak_occurrence_capacity_bytes);
+            stats.peak_occurrence_capacity_bytes);
         append("fragment_native_peak_query_plan_capacity_bytes",
-            evidence.peak_query_plan_capacity_bytes);
+            stats.peak_query_plan_capacity_bytes);
         append("fragment_native_peak_query_radix_capacity_bytes",
-            evidence.peak_query_radix_capacity_bytes);
+            stats.peak_query_radix_capacity_bytes);
         append("fragment_native_peak_occurrence_count_capacity_bytes",
-            evidence.peak_occurrence_count_capacity_bytes);
+            stats.peak_occurrence_count_capacity_bytes);
         append("fragment_native_peak_block_layout_capacity_bytes",
-            evidence.peak_block_layout_capacity_bytes);
-        append("fragment_native_peak_block_evidence_capacity_bytes",
-            evidence.peak_block_evidence_capacity_bytes);
+            stats.peak_block_layout_capacity_bytes);
+        append("fragment_native_peak_block_stats_capacity_bytes",
+            stats.peak_block_stats_capacity_bytes);
         append("fragment_native_occurrence_allocations",
-            evidence.occurrence_allocations);
+            stats.occurrence_allocations);
         append("fragment_native_query_plan_allocations",
-            evidence.query_plan_allocations);
+            stats.query_plan_allocations);
         append("fragment_native_query_radix_allocations",
-            evidence.query_radix_allocations);
+            stats.query_radix_allocations);
         append("fragment_native_occurrence_count_allocations",
-            evidence.occurrence_count_allocations);
+            stats.occurrence_count_allocations);
         append("fragment_native_block_layout_allocations",
-            evidence.block_layout_allocations);
-        append("fragment_native_block_evidence_allocations",
-            evidence.block_evidence_allocations);
+            stats.block_layout_allocations);
+        append("fragment_native_block_stats_allocations",
+            stats.block_stats_allocations);
         append("fragment_native_query_occurrences",
-            evidence.query_occurrences);
+            stats.query_occurrences);
         append("fragment_native_unique_query_plans",
-            evidence.unique_query_plans);
+            stats.unique_query_plans);
         append("fragment_native_packed_occurrence_waves",
-            evidence.packed_occurrence_waves);
+            stats.packed_occurrence_waves);
         append("fragment_native_wide_occurrence_waves",
-            evidence.wide_occurrence_waves);
-        result += R"(,"fragment_native_evidence_saturated":)";
-        result += evidence.saturated ? "true" : "false";
+            stats.wide_occurrence_waves);
+        result += R"(,"are_fragment_native_stats_saturated":)";
+        result += stats.is_saturated ? "true" : "false";
     }
-	result += R"(,"format5_reader_memory_evidence_saturated":)";
-	result += operational.format5_reader_memory_evidence_saturated
+	result += R"(,"are_grouped_soa_reader_memory_stats_saturated":)";
+	result += operational.are_grouped_soa_reader_memory_stats_saturated
 		? "true" : "false";
-	result += R"(,"stats_saturated":)";
-	result += operational.stats_saturated ? "true" : "false";
+	result += R"(,"are_stats_saturated":)";
+	result += operational.are_stats_saturated ? "true" : "false";
 	if (include_provider_lifecycle) {
-		const auto& evidence = operational.format5_provider_evidence;
-		append("provider_configured", evidence.provider_configured);
-		append("provider_captured", evidence.provider_captured);
-		append("provider_persisted", evidence.provider_persisted);
-		append("provider_opened", evidence.provider_opened);
-		append("provider_head_scans", evidence.provider_head_scans);
-		append("provider_head_rows", evidence.provider_head_rows);
+		const auto& stats = operational.grouped_soa_provider;
+		append("provider_configured", stats.provider_configured);
+		append("provider_captured", stats.provider_captured);
+		append("provider_persisted", stats.provider_persisted);
+		append("provider_opened", stats.provider_opened);
+		append("provider_head_scans", stats.provider_head_scans);
+		append("provider_head_rows", stats.provider_head_rows);
 		append("provider_descriptor_scans",
-			evidence.provider_descriptor_scans);
-		append("provider_descriptor_rows", evidence.provider_descriptor_rows);
-		append("payload_tuples_formed", evidence.payload_tuples_formed);
-		append("payload_tuples_inserted", evidence.payload_tuples_inserted);
-		append("payload_tuples_reread", evidence.payload_tuples_reread);
-		append("mapped_sink_calls", evidence.mapped_sink_calls);
-		append("mapped_sink_bytes", evidence.mapped_sink_bytes);
-		append("mapped_sink_flushes", evidence.mapped_sink_flushes);
+			stats.provider_descriptor_scans);
+		append("provider_descriptor_rows", stats.provider_descriptor_rows);
+		append("payload_tuples_formed", stats.payload_tuples_formed);
+		append("payload_tuples_inserted", stats.payload_tuples_inserted);
+		append("payload_tuples_reread", stats.payload_tuples_reread);
+		append("mapped_sink_calls", stats.mapped_sink_calls);
+		append("mapped_sink_bytes", stats.mapped_sink_bytes);
+		append("mapped_sink_flushes", stats.mapped_sink_flushes);
 		append("mapped_sink_coalescer_capacity_bytes",
-			evidence.mapped_sink_coalescer_capacity_bytes);
-		append("mapped_sink_pwrite_calls", evidence.mapped_sink_pwrite_calls);
-		append("mapped_sink_short_writes", evidence.mapped_sink_short_writes);
-		append("mapped_sink_eintr_retries", evidence.mapped_sink_eintr_retries);
+			stats.mapped_sink_coalescer_capacity_bytes);
+		append("mapped_sink_pwrite_calls", stats.mapped_sink_pwrite_calls);
+		append("mapped_sink_short_writes", stats.mapped_sink_short_writes);
+		append("mapped_sink_eintr_retries", stats.mapped_sink_eintr_retries);
 		append("mapped_sink_preallocation_bytes",
-			evidence.mapped_sink_preallocation_bytes);
+			stats.mapped_sink_preallocation_bytes);
 		append("mapped_sink_preallocation_result",
-			evidence.mapped_sink_preallocation_result);
-		append("header_crc_bytes", evidence.header_crc_bytes);
-		append("directory_crc_bytes", evidence.directory_crc_bytes);
-		append("manifest_crc_bytes", evidence.manifest_crc_bytes);
+			stats.mapped_sink_preallocation_result);
+		append("header_crc_bytes", stats.header_crc_bytes);
+		append("directory_crc_bytes", stats.directory_crc_bytes);
+		append("manifest_crc_bytes", stats.manifest_crc_bytes);
 		append("seal_aggregate_payload_crc_bytes",
-			evidence.seal_aggregate_payload_crc_bytes);
+			stats.seal_aggregate_payload_crc_bytes);
 		append("open_aggregate_payload_crc_bytes",
-			evidence.open_aggregate_payload_crc_bytes);
-		append("lazy_extent_cas_winners", evidence.lazy_extent_cas_winners);
-		append("lazy_extent_waiters", evidence.lazy_extent_waiters);
-		append("lazy_extent_executions", evidence.lazy_extent_executions);
-		append("lazy_extent_reuses", evidence.lazy_extent_reuses);
-		append("lazy_extent_crc_bytes", evidence.lazy_extent_crc_bytes);
-		append("lazy_extent_state_bytes", evidence.lazy_extent_state_bytes);
+			stats.open_aggregate_payload_crc_bytes);
+		append("lazy_extent_cas_winners", stats.lazy_extent_cas_winners);
+		append("lazy_extent_waiters", stats.lazy_extent_waiters);
+		append("lazy_extent_executions", stats.lazy_extent_executions);
+		append("lazy_extent_reuses", stats.lazy_extent_reuses);
+		append("lazy_extent_crc_bytes", stats.lazy_extent_crc_bytes);
+		append("lazy_extent_state_bytes", stats.lazy_extent_state_bytes);
 		append("lazy_extent_invalid_receipts",
-			evidence.lazy_extent_invalid_receipts);
-		append("lazy_state_layout", evidence.lazy_state_layout);
-		append("mapping_bytes", evidence.mapping_bytes);
-		append("mapping_count", evidence.mapping_count);
+			stats.lazy_extent_is_invalid_receipts);
+		append("lazy_state_layout", stats.lazy_state_layout);
+		append("mapping_bytes", stats.mapping_bytes);
+		append("mapping_count", stats.mapping_count);
 		append("mapping_resourceowner_releases",
-			evidence.mapping_resourceowner_releases);
-		append("file_action_high_water", evidence.file_action_high_water);
+			stats.mapping_resourceowner_releases);
+		append("file_action_high_water", stats.file_action_high_water);
 		append("file_action_identity_mismatches",
-			evidence.file_action_identity_mismatches);
+			stats.file_action_identity_mismatches);
 		append("reaper_descriptors_examined",
-			evidence.reaper_descriptors_examined);
+			stats.reaper_descriptors_examined);
 		append("reaper_relation_rows_deleted",
-			evidence.reaper_relation_rows_deleted);
+			stats.reaper_relation_rows_deleted);
 		append("reaper_payload_bytes_deleted",
-			evidence.reaper_payload_bytes_deleted);
-		append("reaper_files_queued", evidence.reaper_files_queued);
-		append("reaper_remaining", evidence.reaper_remaining);
-		append("orphan_entries_examined", evidence.orphan_entries_examined);
-		append("orphan_files_acted", evidence.orphan_files_acted);
-		append("orphan_bytes_acted", evidence.orphan_bytes_acted);
-		append("orphan_remaining", evidence.orphan_remaining);
-		append("orphan_cursor_wraps", evidence.orphan_cursor_wraps);
-		append("madvise_choice", evidence.madvise_choice);
-			append("madvise_result", evidence.madvise_result);
+			stats.reaper_payload_bytes_deleted);
+		append("reaper_files_queued", stats.reaper_files_queued);
+		append("reaper_remaining", stats.reaper_remaining);
+		append("orphan_entries_examined", stats.orphan_entries_examined);
+		append("orphan_files_acted", stats.orphan_files_acted);
+		append("orphan_bytes_acted", stats.orphan_bytes_acted);
+		append("orphan_remaining", stats.orphan_remaining);
+		append("orphan_cursor_wraps", stats.orphan_cursor_wraps);
+		append("madvise_choice", stats.madvise_choice);
+			append("madvise_result", stats.madvise_result);
 		}
     if (include_bucket_direct_query) {
-        const auto& evidence = operational.fragment_native_query_evidence;
+        const auto& stats = operational.fragment_native_query_stats;
         append("fragment_native_peak_query_group_offset_capacity_bytes",
-            evidence.peak_query_group_offset_capacity_bytes);
+            stats.peak_query_group_offset_capacity_bytes);
         append("fragment_native_peak_query_membership_filter_capacity_bytes",
-            evidence.peak_query_membership_filter_capacity_bytes);
+            stats.peak_query_membership_filter_capacity_bytes);
         append("fragment_native_query_group_offset_allocations",
-            evidence.query_group_offset_allocations);
+            stats.query_group_offset_allocations);
         append("fragment_native_query_membership_filter_allocations",
-            evidence.query_membership_filter_allocations);
+            stats.query_membership_filter_allocations);
     }
 	if (include_compact_direct_one_decode) {
-		const auto& evidence = operational.fragment_native_query_evidence;
+		const auto& stats = operational.fragment_native_query_stats;
 		append("fragment_native_compact_direct_lookup_ns",
-			evidence.compact_direct_lookup_ns);
+			stats.compact_direct_lookup_ns);
 		append("fragment_native_compact_direct_selection_shards",
-			evidence.compact_direct_selection_shards);
+			stats.compact_direct_selection_shards);
 		append("fragment_native_compact_direct_shard_query_layouts",
-			evidence.compact_direct_shard_query_layouts);
+			stats.compact_direct_shard_query_layouts);
 		append("fragment_native_compact_direct_layout_shards_completed",
-			evidence.compact_direct_layout_shards_completed);
+			stats.compact_direct_layout_shards_completed);
 		append("fragment_native_compact_direct_emission_shards_completed",
-			evidence.compact_direct_emission_shards_completed);
+			stats.compact_direct_emission_shards_completed);
 		append("fragment_native_compact_direct_posting_visit_passes",
-			evidence.compact_direct_posting_visit_passes);
+			stats.compact_direct_posting_visit_passes);
 		append("fragment_native_compact_direct_selected_postings",
-			evidence.compact_direct_selected_postings);
+			stats.compact_direct_selected_postings);
 		append("fragment_native_compact_direct_layout_postings_visited",
-			evidence.compact_direct_layout_postings_visited);
+			stats.compact_direct_layout_postings_visited);
 		append("fragment_native_compact_direct_emission_postings_visited",
-			evidence.compact_direct_emission_postings_visited);
+			stats.compact_direct_emission_postings_visited);
 		append("fragment_native_compact_direct_target_control_scan_bytes",
-			evidence.compact_direct_target_control_scan_bytes);
+			stats.compact_direct_target_control_scan_bytes);
 		append("fragment_native_compact_direct_target_control_scan_passes",
-			evidence.compact_direct_target_control_scan_passes);
+			stats.compact_direct_target_control_scan_passes);
 		append("fragment_native_compact_direct_fallbacks",
-			evidence.compact_direct_fallbacks);
+			stats.compact_direct_fallbacks);
 		append(
 			"fragment_native_compact_direct_traversal_rank_checkpoints_examined",
-			evidence.compact_direct_traversal_rank_checkpoints_examined);
+			stats.compact_direct_traversal_rank_checkpoints_examined);
 		append(
 			"fragment_native_compact_direct_traversal_membership_words_examined",
-			evidence.compact_direct_traversal_membership_words_examined);
+			stats.compact_direct_traversal_membership_words_examined);
 		append("fragment_native_compact_direct_rejected_posting_reads",
-			evidence.compact_direct_rejected_posting_reads);
+			stats.compact_direct_rejected_posting_reads);
 	}
 	result += '}';
     return result;
 }
 
-[[nodiscard]] std::string format5_reader_memory_evidence_json_v2(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
-    return format5_reader_memory_evidence_json_versioned(
-        snapshot, Format5ReaderMemoryEvidenceVersion::exact_array_layout);
-}
-
-[[nodiscard]] std::string format5_reader_memory_evidence_json_v3(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
-    return format5_reader_memory_evidence_json_versioned(
-        snapshot, Format5ReaderMemoryEvidenceVersion::fragment_native_query);
-}
-
-[[nodiscard]] std::string format5_reader_memory_evidence_json_v4(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
-    return format5_reader_memory_evidence_json_versioned(
-        snapshot, Format5ReaderMemoryEvidenceVersion::provider_lifecycle);
-}
-
-[[nodiscard]] std::string format5_reader_memory_evidence_json_v5(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
-    return format5_reader_memory_evidence_json_versioned(
-        snapshot, Format5ReaderMemoryEvidenceVersion::bucket_direct_query);
-}
-
-[[nodiscard]] std::string format5_reader_memory_evidence_json_v6(
-        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
-    return format5_reader_memory_evidence_json_versioned(
+[[nodiscard]] std::string grouped_soa_exact_array_layout_reader_memory_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot) {
+    return grouped_soa_reader_memory_stats_json_for_revision(
         snapshot,
-        Format5ReaderMemoryEvidenceVersion::compact_direct_one_decode);
+        grouped_soa_reader_memory_stats_revision::exact_array_layout);
 }
 
-[[nodiscard]] std::string format6_reader_evidence_json(
-		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+[[nodiscard]] std::string grouped_soa_fragment_native_query_reader_memory_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot) {
+    return grouped_soa_reader_memory_stats_json_for_revision(
+        snapshot,
+        grouped_soa_reader_memory_stats_revision::fragment_native_query);
+}
+
+[[nodiscard]] std::string grouped_soa_provider_lifecycle_reader_memory_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot) {
+    return grouped_soa_reader_memory_stats_json_for_revision(
+        snapshot,
+        grouped_soa_reader_memory_stats_revision::provider_lifecycle);
+}
+
+[[nodiscard]] std::string grouped_soa_bucket_direct_query_reader_memory_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot) {
+    return grouped_soa_reader_memory_stats_json_for_revision(
+        snapshot,
+        grouped_soa_reader_memory_stats_revision::bucket_direct_query);
+}
+
+[[nodiscard]] std::string grouped_soa_compact_direct_one_decode_reader_memory_stats_json(
+        const alignment_exec::alignment_execution_snapshot& snapshot) {
+    return grouped_soa_reader_memory_stats_json_for_revision(
+        snapshot,
+        grouped_soa_reader_memory_stats_revision::compact_direct_one_decode);
+}
+
+[[nodiscard]] std::string hash_major_reader_stats_json(
+		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
 	const auto& operational = snapshot.pipeline.operational;
-	const auto& evidence = operational.format6_reader_evidence;
+	const auto& stats = operational.hash_major_reader;
 	std::string result =
-		R"({"schema":"bioseq.format6_reader_evidence","version":1)";
+		R"({"schema":"bioseq.hash_major_reader_stats","revision":1)";
 	result.reserve(3'072);
 	const auto append_signed = [&result](
 			const std::string_view key,
@@ -484,140 +488,140 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 	append_signed("execution_id", snapshot.execution_id);
 	append_signed("backend_pid", snapshot.backend_pid);
 	append("database_oid", snapshot.database_oid);
-	append("format_version", evidence.format_version);
-	append("sessions", evidence.sessions);
-	append("generation_id", evidence.generation_id);
+	append("format_revision", stats.format_revision);
+	append("sessions", stats.sessions);
+	append("generation_id", stats.generation_id);
 	append_string(
 		"source_identity",
-		fixed_hex_bytes(evidence.source_identity));
+		fixed_hex_bytes(stats.source_identity));
 	append_string(
 		"source_content_crc64",
-		fixed_hex_u64(evidence.source_content_crc64));
+		fixed_hex_u64(stats.source_content_crc64));
 	append_string(
 		"compatibility_digest",
-		fixed_hex_bytes(evidence.compatibility_digest));
-	append("directory_rows", evidence.directory_rows);
-	append("directory_bytes", evidence.directory_bytes);
-	append("control_rows", evidence.control_rows);
-	append("control_bytes", evidence.control_bytes);
-	append("posting_rows", evidence.posting_rows);
-	append("posting_bytes", evidence.posting_bytes);
+		fixed_hex_bytes(stats.compatibility_digest));
+	append("directory_rows", stats.directory_rows);
+	append("directory_bytes", stats.directory_bytes);
+	append("control_rows", stats.control_rows);
+	append("control_bytes", stats.control_bytes);
+	append("posting_rows", stats.posting_rows);
+	append("posting_bytes", stats.posting_bytes);
 	append(
 		"directory_row_crc_receipts",
-		evidence.directory_row_crc_receipts);
+		stats.directory_row_crc_receipts);
 	append(
 		"directory_stream_crc_receipts",
-		evidence.directory_stream_crc_receipts);
+		stats.directory_stream_crc_receipts);
 	append(
 		"control_row_crc_receipts",
-		evidence.control_row_crc_receipts);
+		stats.control_row_crc_receipts);
 	append(
 		"control_block_crc_receipts",
-		evidence.control_block_crc_receipts);
+		stats.control_block_crc_receipts);
 	append(
 		"control_semantic_receipts",
-		evidence.control_semantic_receipts);
+		stats.control_semantic_receipts);
 	append(
 		"posting_row_crc_receipts",
-		evidence.posting_row_crc_receipts);
+		stats.posting_row_crc_receipts);
 	append(
 		"posting_ranges_delivered",
-		evidence.posting_ranges_delivered);
+		stats.posting_ranges_delivered);
 	append(
 		"posting_range_crc_receipts",
-		evidence.posting_range_crc_receipts);
+		stats.posting_range_crc_receipts);
 	append(
 		"posting_semantic_receipts",
-		evidence.posting_semantic_receipts);
+		stats.posting_semantic_receipts);
 	append(
 		"authorized_posting_bytes",
-		evidence.authorized_posting_bytes);
-	append("query_count", evidence.query_count);
-	append("selected_block_count", evidence.selected_block_count);
-	append("accepted_hash_count", evidence.accepted_hash_count);
+		stats.authorized_posting_bytes);
+	append("query_count", stats.query_count);
+	append("selected_block_count", stats.selected_block_count);
+	append("accepted_hash_count", stats.accepted_hash_count);
 	append(
 		"retained_position_count",
-		evidence.retained_position_count);
+		stats.retained_position_count);
 	append(
-		"directory_phase_peak_bytes",
-		evidence.directory_phase_peak_bytes);
+		"directory_stage_peak_bytes",
+		stats.directory_peak_bytes);
 	append(
-		"control_phase_peak_bytes",
-		evidence.control_phase_peak_bytes);
+		"control_stage_peak_bytes",
+		stats.control_peak_bytes);
 	append(
-		"posting_phase_peak_bytes",
-		evidence.posting_phase_peak_bytes);
-	append("peak_admitted_bytes", evidence.peak_admitted_bytes);
-	append("retained_owner_bytes", evidence.retained_owner_bytes);
-	append("admitted_bytes", evidence.admitted_bytes);
+		"posting_stage_peak_bytes",
+		stats.posting_peak_bytes);
+	append("peak_admitted_bytes", stats.peak_admitted_bytes);
+	append("retained_owner_bytes", stats.retained_owner_bytes);
+	append("admitted_bytes", stats.admitted_bytes);
 	append(
-		"legacy_assembly_calls",
+		"assembly_calls",
 		operational.persisted_hash_build_calls);
 	append(
-		"legacy_globalize_calls",
-		operational.persisted_legacy_globalize_calls);
+		"pair_index_conversion_calls",
+		operational.persisted_pair_index_conversion_calls);
 	append(
-		"legacy_rebase_calls",
-		operational.persisted_legacy_rebase_calls);
+		"segment_rebase_calls",
+		operational.persisted_segment_rebase_calls);
 	append(
 		"recompute_calls",
 		operational.recomputed_target_index_rows);
 	append(
 		"generic_source_fallback_calls",
-		evidence.generic_source_fallback_calls);
+		stats.generic_source_fallback_calls);
 	append("backend_fallbacks", operational.backend_fallbacks);
-	append("failures", evidence.failures);
-	result += R"(,"saturated":)";
-	result += evidence.saturated ? "true" : "false";
-	result += R"(,"operational_identity_conflict":)";
-	result += operational.operational_identity_conflict
+	append("failures", stats.failures);
+	result += R"(,"is_saturated":)";
+	result += stats.is_saturated ? "true" : "false";
+	result += R"(,"has_operational_identity_conflict":)";
+	result += operational.has_operational_identity_conflict
 		? "true" : "false";
-	result += R"(,"stats_saturated":)";
-	result += operational.stats_saturated ? "true" : "false";
+	result += R"(,"are_stats_saturated":)";
+	result += operational.are_stats_saturated ? "true" : "false";
 	result += '}';
 	return result;
 }
 
-[[nodiscard]] std::string persisted_gpu_operation_evidence_json(
-		const alignment_exec::AlignmentExecutionSnapshot& snapshot,
-		const bool include_cache_qualification_v2)
+[[nodiscard]] std::string persisted_gpu_operation_stats_json(
+		const alignment_exec::alignment_execution_snapshot& snapshot,
+		const bool include_cache_validation)
 {
-	const auto& ledger = snapshot.persisted_gpu_operation_evidence;
+	const auto& ledger = snapshot.persisted_gpu_operations;
 	const auto& stats = snapshot.pipeline;
-	const bool requires_evidence =
+	const bool requires_persisted_stats =
 		stats.actual_backend
-			== bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+			== bioseq::pipeline_stats::executed_backend::vulkan_gpu
 		&& stats.actual_target_index_source
-			== bioseq::pipeline_stats::TargetIndexSource::persisted;
-	const bool ledger_complete = ledger.complete();
-	const bool pipeline_matches = requires_evidence
-		? ledger.matches_pipeline(stats)
+			== bioseq::pipeline_stats::target_index_source::persisted;
+	const bool is_ledger_complete = ledger.is_complete();
+	const bool is_pipeline_match = requires_persisted_stats
+		? ledger.is_pipeline_match(stats)
 		: ledger.operation_count() == 0u && ledger.job_count() == 0u;
-	const bool complete = ledger_complete && pipeline_matches;
-	const bool saturated = ledger.saturated()
-		|| stats.operational.stats_saturated;
+	const bool is_complete = is_ledger_complete && is_pipeline_match;
+	const bool is_saturated = ledger.is_saturated()
+		|| stats.operational.are_stats_saturated;
 	const auto* first_chunk = ledger.head();
-	const bioseq::pipeline_stats::PersistedGpuCacheQualificationEvidence*
-		cache_qualification = first_chunk == nullptr
+	const bioseq::pipeline_stats::persisted_gpu_cache_validation_result*
+		cache_validation = first_chunk == nullptr
 		? nullptr
 		: &first_chunk->operation().cache_qualification;
-	bool cache_qualification_complete = cache_qualification != nullptr
-		&& cache_qualification->accepted();
+	bool is_cache_validation_complete = cache_validation != nullptr
+		&& cache_validation->is_internally_consistent();
 	for (const auto* chunk = first_chunk; chunk != nullptr;
 		 chunk = chunk->next()) {
-		cache_qualification_complete = cache_qualification_complete
+		is_cache_validation_complete = is_cache_validation_complete
 			&& chunk->operation().cache_qualification
-				== *cache_qualification;
+				== *cache_validation;
 	}
-	const bool accepted = requires_evidence && snapshot.completed
-		&& !snapshot.partial && snapshot.fully_drained && complete
-		&& !saturated && ledger.dropped_operation_count() == 0u
-		&& (!include_cache_qualification_v2
-			|| cache_qualification_complete);
+	const bool is_consistent = requires_persisted_stats && snapshot.is_completed
+		&& !snapshot.is_partial && snapshot.is_fully_drained && is_complete
+		&& !is_saturated && ledger.dropped_operation_count() == 0u
+		&& (!include_cache_validation
+			|| is_cache_validation_complete);
 
 	std::string result =
-		R"({"schema":"bioseq.persisted_gpu_operation_evidence","version":)";
-	result += include_cache_qualification_v2 ? "2" : "1";
+		R"({"schema":"bioseq.persisted_gpu_operation_stats","revision":)";
+	result += include_cache_validation ? "2" : "1";
 	result.reserve(2048u + static_cast<std::size_t>(ledger.job_count()) * 1400u);
 	const auto append_unsigned = [&result](
 			const std::string_view key,
@@ -677,92 +681,95 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 	append_signed("execution_id", snapshot.execution_id);
 	append_signed("backend_pid", snapshot.backend_pid);
 	append_unsigned("database_oid", snapshot.database_oid);
-	append_bool("completed", snapshot.completed);
-	append_bool("partial", snapshot.partial);
-	append_bool("fully_drained", snapshot.fully_drained);
-	append_bool("accepted", accepted);
-	append_bool("complete", complete);
-	append_bool("saturated", saturated);
+	append_bool("is_completed", snapshot.is_completed);
+	append_bool("is_partial", snapshot.is_partial);
+	append_bool("is_fully_drained", snapshot.is_fully_drained);
+	append_bool("is_consistent", is_consistent);
+	append_bool("is_complete", is_complete);
+	append_bool("is_saturated", is_saturated);
 	append_unsigned(
 		"dropped_operation_count", ledger.dropped_operation_count());
 	append_unsigned("operation_count", ledger.operation_count());
 	append_unsigned(
 		"accepted_operation_count",
-		ledger.accepted() ? ledger.operation_count() : 0u);
+		ledger.is_internally_consistent() ? ledger.operation_count() : 0u);
 	append_unsigned(
 		"complete_operation_count",
-		ledger_complete ? ledger.operation_count() : 0u);
+		is_ledger_complete ? ledger.operation_count() : 0u);
 	append_unsigned("job_count", ledger.job_count());
 	append_unsigned(
-		"accepted_job_count", ledger.accepted() ? ledger.job_count() : 0u);
-	if (include_cache_qualification_v2) {
-		result += R"(,"cache_qualification":)";
-		if (cache_qualification == nullptr) {
+		"accepted_job_count",
+		ledger.is_internally_consistent() ? ledger.job_count() : 0u);
+	if (include_cache_validation) {
+		result += R"(,"cache_validation":)";
+		if (cache_validation == nullptr) {
 			result += "null";
 		} else {
-			const auto& qualification = *cache_qualification;
-			result += R"({"version":)";
-			result += std::to_string(qualification.version);
-			append_hex("identity", qualification.identity);
-			append_bool("accepted", qualification.accepted());
-			append_bool("saturated", qualification.saturated);
-			append_unsigned("archive_count", qualification.archive_count);
-			append_unsigned("archive_bytes", qualification.archive_bytes);
-			append_hex("archive_checksum", qualification.archive_checksum);
-			append_unsigned("receipt_count", qualification.receipt_count);
-			append_unsigned("hash_passes", qualification.hash_passes);
-			append_unsigned("hashed_bytes", qualification.hashed_bytes);
+			const auto& validation = *cache_validation;
+			result += R"({"revision":)";
+			result += std::to_string(
+				validation.qualification_wire_revision);
+			append_hex("identity", validation.identity);
+			append_bool(
+				"is_consistent", validation.is_internally_consistent());
+			append_bool("is_saturated", validation.is_saturated);
+			append_unsigned("archive_count", validation.archive_count);
+			append_unsigned("archive_bytes", validation.archive_bytes);
+			append_hex("archive_checksum", validation.archive_checksum);
+			append_unsigned("receipt_count", validation.receipt_count);
+			append_unsigned("hash_passes", validation.hash_passes);
+			append_unsigned("hashed_bytes", validation.hashed_bytes);
 			append_unsigned(
 				"private_files_created",
-				qualification.private_files_created);
+				validation.private_files_created);
 			append_unsigned(
 				"private_files_unlinked",
-				qualification.private_files_unlinked);
+				validation.private_files_unlinked);
 			append_unsigned(
-				"live_private_paths", qualification.live_private_paths);
+				"live_private_paths", validation.live_private_paths);
 			append_unsigned(
 				"pipeline_filesystem_hash_passes",
-				qualification.pipeline_filesystem_hash_passes);
+				validation.pipeline_filesystem_hash_passes);
 			append_unsigned(
 				"pipeline_filesystem_hashed_bytes",
-				qualification.pipeline_filesystem_hashed_bytes);
+				validation.pipeline_filesystem_hashed_bytes);
 			append_unsigned(
-				"helper_protocol_version",
-				qualification.helper_protocol_version);
+				"helper_protocol_revision",
+				validation.helper_wire_revision);
 			append_text(
 				"helper_build_identity",
-				qualification.helper_build_identity_text());
+				validation.helper_build_identity_text());
 			append_text(
-				"helper_source", qualification.helper_source_text());
+				"helper_source", validation.helper_source_text());
 			append_unsigned(
 				"helper_executable_size",
-				qualification.helper_executable_size);
+				validation.helper_executable_size);
 			result += R"(,"helper_executable_sha256":")";
 			result += fixed_hex_bytes(
-				qualification.helper_executable_sha256);
+				validation.helper_executable_sha256);
 			result += '"';
 			append_hex(
 				"helper_metal_registry_id",
-				qualification.helper_metal_registry_id);
+				validation.helper_metal_registry_id);
 			result += R"(,"device_uuid":")";
-			result += fixed_hex_bytes(qualification.device_uuid);
+			result += fixed_hex_bytes(validation.device_uuid);
 			result += '"';
-			append_unsigned("api_version", qualification.api_version);
-			append_unsigned("driver_version", qualification.driver_version);
-			append_unsigned("vendor_id", qualification.vendor_id);
-			append_unsigned("device_id", qualification.device_id);
+			append_unsigned("api_version", validation.api_version);
+			append_unsigned("driver_version", validation.driver_version);
+			append_unsigned("vendor_id", validation.vendor_id);
+			append_unsigned("device_id", validation.device_id);
 			result += R"(,"pipeline_cache_uuid":")";
-			result += fixed_hex_bytes(qualification.pipeline_cache_uuid);
+			result += fixed_hex_bytes(validation.pipeline_cache_uuid);
 			result += '"';
 			append_hex(
 				"seed_receipt_identity",
-				qualification.seed_receipt_identity);
+				validation.seed_receipt_identity);
 			result += R"(,"seed_sha256":")";
-			result += fixed_hex_bytes(qualification.seed_sha256);
+			result += fixed_hex_bytes(validation.seed_sha256);
 			result += '"';
-			append_unsigned("seed_size", qualification.seed_size);
+			append_unsigned("seed_size", validation.seed_size);
 			append_hex(
-				"manifest_checksum", qualification.manifest_checksum);
+				"manifest_checksum", validation.manifest_checksum);
 			result += '}';
 		}
 	}
@@ -781,7 +788,7 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 		result += fixed_hex_u64(operation.operation_identity);
 		result += '"';
 		append_unsigned("expected_jobs", publication.expected_jobs);
-		append_unsigned("proof_jobs", publication.proof_jobs);
+		append_unsigned("validated_jobs", publication.validated_jobs);
 		append_unsigned("consumed_jobs", publication.consumed_jobs);
 		append_unsigned("accepted_jobs", publication.accepted_jobs);
 		append_unsigned("burned_jobs", publication.burned_jobs);
@@ -809,15 +816,15 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 		result += ']';
 		append_hex("seed_receipt_identity", operation.seed_receipt_identity);
 		append_hex("cache_token_identity", cache.token_identity);
-		if (include_cache_qualification_v2) {
+		if (include_cache_validation) {
 			append_hex(
-				"cache_qualification_identity",
+				"cache_validation_identity",
 				operation.cache_qualification.identity);
 		}
 		append_unsigned("generation_id", operation.generation_id);
 		append_hex("source_identity", operation.source_identity);
 		append_hex("cold_load_identity", operation.cold_load_identity);
-		result += R"(,"source":"persisted_shape_v5")";
+		result += R"(,"source":"persisted_grouped_soa")";
 		result += R"(,"environment":{"device_uuid":")";
 		result += fixed_hex_bytes(environment.device_uuid);
 		result += '"';
@@ -912,7 +919,7 @@ enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
 			result += '}';
 			const auto& coordinate = job.coordinate;
 			result += R"(,"coordinate":{"valid":)";
-			result += coordinate.valid ? "true" : "false";
+			result += coordinate.is_valid ? "true" : "false";
 			append_unsigned("query_start", coordinate.query_start);
 			append_unsigned("query_end", coordinate.query_end);
 			append_unsigned("target_start", coordinate.target_start);
@@ -939,138 +946,88 @@ namespace bioseq::pg::sql_routines {
 
 using bioseq::pg::detail::validate_alignment_snapshot_environment;
 
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	if (!last_alignment_execution_snapshot.has_value()) {
+namespace {
+
+template<class serializer>
+[[nodiscard]] std::optional<bioseq::postgres::support::jsonb_value>
+serialize_alignment_snapshot(
+		const std::optional<alignment_exec::alignment_execution_snapshot>& source,
+		serializer&& encode) {
+	if (!source.has_value()) {
 		return std::nullopt;
 	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
+	const alignment_exec::alignment_execution_snapshot& snapshot = *source;
 	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		format5_reader_memory_evidence_json(snapshot)};
+	return bioseq::postgres::support::jsonb_value{encode(snapshot)};
 }
 
+} // namespace
 
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v2() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	if (!last_alignment_execution_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		format5_reader_memory_evidence_json_v2(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v3() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	if (!last_alignment_execution_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		format5_reader_memory_evidence_json_v3(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_exact_array_layout_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_exact_array_layout_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v4() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	if (!last_alignment_execution_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		format5_reader_memory_evidence_json_v4(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_fragment_native_query_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_fragment_native_query_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v5() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-    if (!last_alignment_execution_snapshot.has_value()) {
-        return std::nullopt;
-    }
-    const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-        *last_alignment_execution_snapshot;
-    (void)validate_alignment_snapshot_environment(snapshot);
-    return bioseq::pg_utils::sql_jsonb{
-        format5_reader_memory_evidence_json_v5(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_provider_lifecycle_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_provider_lifecycle_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v6() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-    if (!last_alignment_execution_snapshot.has_value()) {
-        return std::nullopt;
-    }
-    const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-        *last_alignment_execution_snapshot;
-    (void)validate_alignment_snapshot_environment(snapshot);
-    return bioseq::pg_utils::sql_jsonb{
-        format5_reader_memory_evidence_json_v6(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_bucket_direct_query_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_bucket_direct_query_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format6_reader_evidence() {
-	const auto& last_alignment_execution_snapshot =
-		bioseq::pg::detail::last_alignment_execution_snapshot_ref();
-	if (!last_alignment_execution_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_alignment_execution_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		format6_reader_evidence_json(snapshot)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_compact_direct_one_decode_reader_memory_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		grouped_soa_compact_direct_one_decode_reader_memory_stats_json);
 }
 
-
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_persisted_gpu_operation_evidence_v1() {
-	const auto& last_completed_alignment_evidence_snapshot =
-		bioseq::pg::detail::last_completed_alignment_evidence_snapshot_ref();
-	if (!last_completed_alignment_evidence_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_completed_alignment_evidence_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		persisted_gpu_operation_evidence_json(snapshot, false)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_hash_major_reader_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_alignment_execution_snapshot_ref(),
+		hash_major_reader_stats_json);
 }
 
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_persisted_gpu_operation_stats() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_completed_alignment_snapshot_ref(),
+		[](const alignment_exec::alignment_execution_snapshot& snapshot) {
+			return persisted_gpu_operation_stats_json(snapshot, false);
+		});
+}
 
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_persisted_gpu_operation_evidence_v2() {
-	const auto& last_completed_alignment_evidence_snapshot =
-		bioseq::pg::detail::last_completed_alignment_evidence_snapshot_ref();
-	if (!last_completed_alignment_evidence_snapshot.has_value()) {
-		return std::nullopt;
-	}
-	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
-		*last_completed_alignment_evidence_snapshot;
-	(void)validate_alignment_snapshot_environment(snapshot);
-	return bioseq::pg_utils::sql_jsonb{
-		persisted_gpu_operation_evidence_json(snapshot, true)};
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_persisted_gpu_operation_stats_with_cache_validation() {
+	return serialize_alignment_snapshot(
+		bioseq::pg::detail::last_completed_alignment_snapshot_ref(),
+		[](const alignment_exec::alignment_execution_snapshot& snapshot) {
+			return persisted_gpu_operation_stats_json(snapshot, true);
+		});
 }
 
 } // namespace bioseq::pg::sql_routines

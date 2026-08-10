@@ -2,7 +2,7 @@
 // Proves: on-insert index build, exact-rowno chunk placement, assemble==recompute
 // (single-segment dna4 byte-identical), forced-scanner disables assembly, ROLLBACK
 // leaves no index rows, and the reserved-sentinel / missing-manifest corruption hooks.
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <array>
 #include <set>
 #include <string_view>

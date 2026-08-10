@@ -10,7 +10,7 @@
  * with one to five predecessors and final partial vectors. Batches that cannot
  * improve the current score update exact max-skip state from SIMD masks;
  * improvement-capable batches replay only scalar control in descending order.
- * Chain extraction is local to this backend: predecessor paths are gathered
+ * chain extraction is local to this backend: predecessor paths are gathered
  * in lane batches and committed with vector visited-prefix operations in
  * strict score-rank order.
  */
@@ -32,34 +32,34 @@ export module bioseq.highway.sources.chaining;
 
 import std;
 import bioseq.common.context;
-import bioseq.common.mlogging;
-import bioseq.instr;
-import bioseq.sequences.chaining.simd;
-import bioseq.sequences.chaining.utils;
+import bioseq.common.logging;
+import bioseq.instrumentation;
+import bioseq.chaining.simd;
+import bioseq.chaining.core;
 import bioseq.highway.sources.simd_utils;
 
 namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-using bioseq::chaining::Anchor;
-using bioseq::chaining::ArenaSlab;
-using bioseq::chaining::Chain;
-using bioseq::chaining::ChainingParams;
-using bioseq::chaining::SimdChainingExecutionProof;
-using bioseq::chaining::SimdChainingPolicyEvidence;
-using bioseq::chaining::SimdChainingPolicy;
-using bioseq::chaining::SimdChainingRuntimeError;
-using bioseq::chaining::SimdChainingStatus;
+using bioseq::chaining::anchor;
+using bioseq::chaining::arena_slab;
+using bioseq::chaining::chain;
+using bioseq::chaining::chaining_parameters;
+using bioseq::chaining::simd_chaining_execution_stats;
+using bioseq::chaining::simd_chaining_policy_stats;
+using bioseq::chaining::simd_chaining_policy;
+using bioseq::chaining::simd_chaining_runtime_error;
+using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-// Production attestation needs route evidence without turning the O(n*iter)
-// score loop into a stream of writes through a proof pointer. These local
+// Production attestation needs route stats without turning the O(n*iter)
+// score loop into a stream of writes through a stats pointer. These local
 // counters and flags live in the caller's frame, are updated only at the actual
-// SIMD/control call sites, and are folded into SimdChainingExecutionProof once
-// after the kernels return. Detailed proof mode remains available to tests.
-struct SimdChainingRouteSummary {
+// SIMD/control call sites, and are folded into simd_chaining_execution_stats once
+// after the kernels return. Detailed stats mode remains available to tests.
+struct simd_chaining_route_stats {
     bool score_vector_work = false;
     bool global_best_vector_work = false;
     bool backtrack_rank_work = false;
@@ -84,36 +84,36 @@ struct SimdChainingRouteSummary {
     std::uint64_t global_best_rescue_wins = 0;
 };
 
-template<bool TrackProof>
-HWY_INLINE void proof_add(
-    SimdChainingExecutionProof* proof,
-    std::uint64_t SimdChainingExecutionProof::* member,
+template<bool collect_stats>
+HWY_INLINE void stats_add(
+    simd_chaining_execution_stats* stats,
+    std::uint64_t simd_chaining_execution_stats::* member,
     std::uint64_t value = 1) noexcept
 {
-    if constexpr (TrackProof) {
-        proof->*member += value;
+    if constexpr (collect_stats) {
+        stats->*member += value;
     } else {
-        (void)proof;
+        (void)stats;
         (void)member;
         (void)value;
     }
 }
 
 [[noreturn]] inline void reject(
-    SimdChainingExecutionProof* proof,
-    SimdChainingStatus status,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_status status,
     std::string_view detail)
 {
-    if (proof != nullptr) {
-        ++proof->fail_closed_rejections;
-        if (status == SimdChainingStatus::invalid_policy) {
-            ++proof->policy.policy_rejections;
+    if (stats != nullptr) {
+        ++stats->fail_closed_rejections;
+        if (status == simd_chaining_status::invalid_policy) {
+            ++stats->policy.policy_rejections;
         }
     }
-    throw SimdChainingRuntimeError(status, detail);
+    throw simd_chaining_runtime_error(status, detail);
 }
 
-struct SoaAnchors {
+struct soa_anchors {
     std::uint32_t* ref_positions = nullptr;
     std::uint32_t* query_positions = nullptr;
     std::uint32_t* query_spans = nullptr;
@@ -139,15 +139,15 @@ struct SoaAnchors {
     }
 };
 
-template<class D>
-[[nodiscard]] SoaAnchors create_soa_anchors(
-    D,
-    std::span<const Anchor> anchors)
+template<class descriptor_type>
+[[nodiscard]] soa_anchors create_soa_anchors(
+    descriptor_type,
+    std::span<const anchor> anchors)
 {
     const std::size_t count = anchors.size();
     auto storage =
         context::current().alloc_chain_array<std::uint32_t, 64>(3 * count);
-    SoaAnchors result{
+    soa_anchors result{
         .ref_positions = storage.data(),
         .query_positions = storage.data() + count,
         .query_spans = storage.data() + 2 * count,
@@ -166,20 +166,20 @@ template<class D>
     return result;
 }
 
-template<bool FullBatch, bool HasSkipPenalty, class D, class D_F>
-HWY_INLINE hn::Vec<D> vectorized_chaining_score(
-    D d,
-    D_F df,
+template<bool full_batch, bool has_skip_penalty, class descriptor_type, class float_descriptor_type>
+HWY_INLINE hn::Vec<descriptor_type> vectorized_chaining_score(
+    descriptor_type d,
+    float_descriptor_type df,
     std::size_t active_lanes,
-    hn::Vec<D> current_ref,
-    hn::Vec<D> current_query,
-    hn::Vec<D> predecessor_ref,
-    hn::Vec<D> predecessor_query,
-    hn::Vec<D> predecessor_span,
-    hn::Vec<D> max_ref_dist,
-    hn::Vec<D> max_query_dist,
-    hn::Vec<D> bandwidth,
-    hn::Vec<D_F> gap_penalty,
+    hn::Vec<descriptor_type> current_ref,
+    hn::Vec<descriptor_type> current_query,
+    hn::Vec<descriptor_type> predecessor_ref,
+    hn::Vec<descriptor_type> predecessor_query,
+    hn::Vec<descriptor_type> predecessor_span,
+    hn::Vec<descriptor_type> max_ref_dist,
+    hn::Vec<descriptor_type> max_query_dist,
+    hn::Vec<descriptor_type> bandwidth,
+    hn::Vec<float_descriptor_type> gap_penalty,
     float skip_penalty)
 {
     const auto zero = hn::Zero(d);
@@ -200,7 +200,7 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
         hn::Or(
             hn::Gt(query_distance, max_query_dist),
             hn::Gt(diagonal_deviation, bandwidth)));
-    if constexpr (!FullBatch) {
+    if constexpr (!full_batch) {
         const auto active = hn::FirstN(d, active_lanes);
         invalid = hn::Or(hn::Not(active), invalid);
     }
@@ -218,7 +218,7 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
 
     const auto deviation_f = hn::ConvertTo(df, diagonal_deviation);
     const auto linear_penalty = [&] {
-        if constexpr (HasSkipPenalty) {
+        if constexpr (has_skip_penalty) {
             const auto gap_length_f = hn::ConvertTo(df, gap_length);
             // Same source ordering as scalar:
             // gap_penalty * diagonal_deviation
@@ -234,7 +234,7 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
             return hn::Mul(gap_penalty, deviation_f);
         }
     }();
-    const auto raw_log2 = vectorized_fast_log2(
+    const auto raw_log2 = approximate_log2(
         d, df, hn::Add(diagonal_deviation, hn::Set(d, 1)));
     const auto deviation_positive_f = hn::RebindMask(
         df, hn::Gt(diagonal_deviation, zero));
@@ -247,20 +247,20 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
     return hn::Sub(score, penalty_i);
 }
 
-template<bool TrackProof, bool FullBatch, bool HasSkipPenalty, class D>
-HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
-    D d,
+template<bool collect_stats, bool full_batch, bool has_skip_penalty, class descriptor_type>
+HWY_INLINE hn::Vec<descriptor_type> score_candidate_batch_specialized(
+    descriptor_type d,
     std::size_t active_lanes,
     std::int64_t load_start,
     std::int64_t current_idx,
-    const SoaAnchors& soa,
+    const soa_anchors& soa,
     std::int32_t max_ref_dist,
     std::int32_t max_query_dist,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats)
 {
-    using DF = hn::RebindToFloat<D>;
-    const DF df;
+    using float_descriptor = hn::RebindToFloat<descriptor_type>;
+    const float_descriptor df;
     const std::int32_t* predecessor_ref_ptr =
         reinterpret_cast<const std::int32_t*>(
             soa.ref_data() + load_start);
@@ -271,7 +271,7 @@ HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
         reinterpret_cast<const std::int32_t*>(
             soa.span_data() + load_start);
     const auto predecessor_ref = [&] {
-        if constexpr (FullBatch) {
+        if constexpr (full_batch) {
             return hn::LoadU(d, predecessor_ref_ptr);
         } else {
             return hn::MaskedLoad(
@@ -279,7 +279,7 @@ HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
         }
     }();
     const auto predecessor_query = [&] {
-        if constexpr (FullBatch) {
+        if constexpr (full_batch) {
             return hn::LoadU(d, predecessor_query_ptr);
         } else {
             return hn::MaskedLoad(
@@ -287,7 +287,7 @@ HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
         }
     }();
     const auto predecessor_span = [&] {
-        if constexpr (FullBatch) {
+        if constexpr (full_batch) {
             return hn::LoadU(d, predecessor_span_ptr);
         } else {
             return hn::MaskedLoad(
@@ -295,7 +295,7 @@ HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
         }
     }();
     const auto scores =
-        vectorized_chaining_score<FullBatch, HasSkipPenalty>(
+        vectorized_chaining_score<full_batch, has_skip_penalty>(
             d,
             df,
             active_lanes,
@@ -311,32 +311,32 @@ HWY_INLINE hn::Vec<D> score_candidate_batch_specialized(
             hn::Set(d, params.bandwidth),
             hn::Set(df, params.gap_penalty),
             params.skip_penalty);
-    proof_add<TrackProof>(
-        proof, &SimdChainingExecutionProof::score_vector_batches);
-    proof_add<TrackProof>(
-        proof, &SimdChainingExecutionProof::score_vector_lanes,
+    stats_add<collect_stats>(
+        stats, &simd_chaining_execution_stats::score_vector_batches);
+    stats_add<collect_stats>(
+        stats, &simd_chaining_execution_stats::score_vector_lanes,
         active_lanes);
-    proof_add<TrackProof>(
-        proof, &SimdChainingExecutionProof::score_masked_lanes,
+    stats_add<collect_stats>(
+        stats, &simd_chaining_execution_stats::score_masked_lanes,
         hn::Lanes(d) - active_lanes);
     return scores;
 }
 
-template<bool TrackProof, class D>
-HWY_INLINE hn::Vec<D> score_candidate_batch(
-    D d,
+template<bool collect_stats, class descriptor_type>
+HWY_INLINE hn::Vec<descriptor_type> score_candidate_batch(
+    descriptor_type d,
     std::size_t active_lanes,
     std::int64_t load_start,
     std::int64_t current_idx,
-    const SoaAnchors& soa,
+    const soa_anchors& soa,
     std::int32_t max_ref_dist,
     std::int32_t max_query_dist,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats)
 {
     if (active_lanes == hn::Lanes(d)) {
         return score_candidate_batch_specialized<
-            TrackProof, true, true>(
+            collect_stats, true, true>(
             d,
             active_lanes,
             load_start,
@@ -345,10 +345,10 @@ HWY_INLINE hn::Vec<D> score_candidate_batch(
             max_ref_dist,
             max_query_dist,
             params,
-            proof);
+            stats);
     }
     return score_candidate_batch_specialized<
-        TrackProof, false, true>(
+        collect_stats, false, true>(
         d,
         active_lanes,
         load_start,
@@ -357,36 +357,36 @@ HWY_INLINE hn::Vec<D> score_candidate_batch(
         max_ref_dist,
         max_query_dist,
         params,
-        proof);
+        stats);
 }
 
-template<bool TrackProof, bool HasSkipPenalty = true, class D>
+template<bool collect_stats, bool has_skip_penalty = true, class descriptor_type>
 [[nodiscard]] std::int32_t score_one_candidate(
-    D d,
+    descriptor_type d,
     std::int64_t candidate_idx,
     std::int64_t current_idx,
-    const SoaAnchors& soa,
+    const soa_anchors& soa,
     std::int32_t max_ref_dist,
     std::int32_t max_query_dist,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats)
 {
     HWY_ALIGN std::int32_t lanes[hn::MaxLanes(d)];
     const auto scores = score_candidate_batch_specialized<
-        TrackProof, false, HasSkipPenalty>(
+        collect_stats, false, has_skip_penalty>(
         d, 1, candidate_idx, current_idx, soa,
-        max_ref_dist, max_query_dist, params, proof);
+        max_ref_dist, max_query_dist, params, stats);
     hn::Store(scores, d, lanes);
     return lanes[0];
 }
 
-template<bool TrackProof, class D>
+template<bool collect_stats, class descriptor_type>
 [[nodiscard]] std::int32_t exact_global_best(
-    D d,
+    descriptor_type d,
     const std::int32_t* best_scores,
     std::int32_t begin,
     std::int32_t end,
-    SimdChainingExecutionProof* proof)
+    simd_chaining_execution_stats* stats)
 {
     const std::size_t lanes = hn::Lanes(d);
     auto lane_best_scores =
@@ -414,12 +414,12 @@ template<bool TrackProof, class D>
             better, scores, lane_best_scores);
         lane_best_indices = hn::IfThenElse(
             better, indices, lane_best_indices);
-        proof_add<TrackProof>(
-            proof,
-            &SimdChainingExecutionProof::global_best_vector_batches);
-        proof_add<TrackProof>(
-            proof,
-            &SimdChainingExecutionProof::global_best_vector_lanes,
+        stats_add<collect_stats>(
+            stats,
+            &simd_chaining_execution_stats::global_best_vector_batches);
+        stats_add<collect_stats>(
+            stats,
+            &simd_chaining_execution_stats::global_best_vector_lanes,
             active_lanes);
     }
 
@@ -433,17 +433,17 @@ template<bool TrackProof, class D>
     return hn::GetLane(hn::MaxOfLanes(d, tied_indices));
 }
 
-template<bool TrackProof, class D>
+template<bool collect_stats, class descriptor_type>
 void simd_dp_forward_pass_exact(
-    D d,
-    std::span<const Anchor> anchors,
-    const SoaAnchors& soa,
+    descriptor_type d,
+    std::span<const anchor> anchors,
+    const soa_anchors& soa,
     std::span<std::int32_t> best_scores,
     std::span<std::int32_t> predecessors,
     std::span<std::int32_t> peak_scores,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
     const std::int32_t anchor_count =
         static_cast<std::int32_t>(anchors.size());
@@ -485,10 +485,10 @@ void simd_dp_forward_pass_exact(
         std::int64_t skip_count = 0;
 
         while (window_start < current_idx
-               && (anchors[current_idx].ref_chromosome_key()
-                       != anchors[window_start].ref_chromosome_key()
-                   || anchors[current_idx].ref_bits()
-                       > anchors[window_start].ref_bits()
+               && (anchors[current_idx].strand_partition_key()
+                       != anchors[window_start].strand_partition_key()
+                   || anchors[current_idx].reference_sort_key()
+                       > anchors[window_start].reference_sort_key()
                            + static_cast<std::uint64_t>(max_ref_dist)))
         {
             ++window_start;
@@ -511,7 +511,7 @@ void simd_dp_forward_pass_exact(
                 std::min(lanes, candidate_end - window_start);
             const std::int32_t load_start =
                 candidate_end - active_lanes;
-            const auto scores = score_candidate_batch<TrackProof>(
+            const auto scores = score_candidate_batch<collect_stats>(
                 d,
                 static_cast<std::size_t>(active_lanes),
                 load_start,
@@ -520,7 +520,7 @@ void simd_dp_forward_pass_exact(
                 max_ref_dist,
                 max_query_dist,
                 params,
-                proof);
+                stats);
             ++route_score_vector_batches;
             route_score_vector_lanes +=
                 static_cast<std::uint64_t>(active_lanes);
@@ -572,13 +572,13 @@ void simd_dp_forward_pass_exact(
                     d,
                     visited_generation.data() + load_start - 1,
                     static_cast<std::size_t>(active_lanes));
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::visited_marks,
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::visited_marks,
                     static_cast<std::uint64_t>(active_lanes));
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         contiguous_predecessor_store_batches);
                 ++route_contiguous_predecessor_store_batches;
             } else {
@@ -588,10 +588,10 @@ void simd_dp_forward_pass_exact(
                     d,
                     visited_generation.data(),
                     predecessor_indices);
-                if constexpr (TrackProof) {
-                    proof_add<true>(
-                        proof,
-                        &SimdChainingExecutionProof::visited_marks,
+                if constexpr (collect_stats) {
+                    stats_add<true>(
+                        stats,
+                        &simd_chaining_execution_stats::visited_marks,
                         hn::CountTrue(d, predecessor_marks));
                 }
             }
@@ -613,18 +613,18 @@ void simd_dp_forward_pass_exact(
             const auto can_improve = hn::And(
                 valid_scores,
                 hn::Gt(total_scores, hn::Set(d, best_score)));
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::descending_candidate_steps,
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::descending_candidate_steps,
                 static_cast<std::uint64_t>(active_lanes));
 
             if (hn::AllFalse(d, can_improve)) {
                 // best_score can only increase, so if no lane beats it at
                 // batch entry no lane can improve later in this batch. Exact
                 // max-skip state is then just the number of visited hits.
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         no_improvement_fast_batches);
                 ++route_no_improvement_fast_batches;
                 const std::int64_t hit_count =
@@ -664,14 +664,14 @@ void simd_dp_forward_pass_exact(
                                 ? active_lanes - stop_lane
                                 : active_lanes);
                     route_scalar_orchestration_steps += processed_lanes;
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             scalar_orchestration_steps,
                         processed_lanes);
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             max_chain_skip_stops);
                 } else {
                     skip_count += hit_count;
@@ -681,14 +681,14 @@ void simd_dp_forward_pass_exact(
                 // scalar state. Replay only this batch's control decisions in
                 // exact descending order; no scalar score implementation is
                 // called.
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         improvement_replay_batches);
                 ++route_improvement_replay_batches;
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         improvement_replay_lanes,
                     static_cast<std::uint64_t>(active_lanes));
                 route_improvement_replay_lanes +=
@@ -738,9 +738,9 @@ void simd_dp_forward_pass_exact(
                                 params.max_chain_skip))
                         {
                             search_end = candidate_idx;
-                            proof_add<TrackProof>(
-                                proof,
-                                &SimdChainingExecutionProof::
+                            stats_add<collect_stats>(
+                                stats,
+                                &simd_chaining_execution_stats::
                                     max_chain_skip_stops);
                             processed_lanes = active_lanes - lane;
                             stopped = true;
@@ -752,9 +752,9 @@ void simd_dp_forward_pass_exact(
                     static_cast<std::uint64_t>(processed_lanes);
                 route_scalar_orchestration_steps +=
                     processed_lane_count;
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         scalar_orchestration_steps,
                     processed_lane_count);
             }
@@ -762,14 +762,14 @@ void simd_dp_forward_pass_exact(
         }
 
         if (global_best_idx < 0
-            || anchors[current_idx].ref_bits()
-                    - anchors[global_best_idx].ref_bits()
+            || anchors[current_idx].reference_sort_key()
+                    - anchors[global_best_idx].reference_sort_key()
                 > static_cast<std::uint64_t>(max_ref_dist))
         {
             route_global_best_vector_work =
                 route_global_best_vector_work || window_start < current_idx;
-            global_best_idx = exact_global_best<TrackProof>(
-                d, best_scores.data(), window_start, current_idx, proof);
+            global_best_idx = exact_global_best<collect_stats>(
+                d, best_scores.data(), window_start, current_idx, stats);
             global_pair_score_cached = false;
         }
 
@@ -785,7 +785,7 @@ void simd_dp_forward_pass_exact(
             const std::int32_t global_pair_score =
                 global_pair_score_cached
                 ? cached_global_pair_score
-                : score_one_candidate<TrackProof>(
+                : score_one_candidate<collect_stats>(
                       d,
                       global_best_idx,
                       current_idx,
@@ -793,7 +793,7 @@ void simd_dp_forward_pass_exact(
                       max_ref_dist,
                       max_query_dist,
                       params,
-                      proof);
+                      stats);
             if (global_pair_score
                     != std::numeric_limits<std::int32_t>::min()
                 && best_score
@@ -814,8 +814,8 @@ void simd_dp_forward_pass_exact(
                 : best_score;
 
         if (global_best_idx < 0
-            || (anchors[current_idx].ref_bits()
-                        - anchors[global_best_idx].ref_bits()
+            || (anchors[current_idx].reference_sort_key()
+                        - anchors[global_best_idx].reference_sort_key()
                     <= static_cast<std::uint64_t>(max_ref_dist)
                 && best_scores[global_best_idx]
                     < best_scores[current_idx]))
@@ -848,15 +848,15 @@ void simd_dp_forward_pass_exact(
 /// including masked tails and the one-candidate rescue, is produced by
 /// the specialized SIMD batch scorer; scalar work is limited to batch
 /// orchestration and extracting the vector-reduced winning predecessor.
-template<class D>
-HWY_INLINE hn::Mask<D> update_bounded_lane_best(
-    D d,
-    hn::Vec<D> pair_scores,
-    hn::Vec<D> predecessor_scores,
-    hn::Mask<D> valid,
+template<class descriptor_type>
+HWY_INLINE hn::Mask<descriptor_type> update_bounded_lane_best(
+    descriptor_type d,
+    hn::Vec<descriptor_type> pair_scores,
+    hn::Vec<descriptor_type> predecessor_scores,
+    hn::Mask<descriptor_type> valid,
     std::int32_t load_start,
-    hn::Vec<D>& lane_best_scores,
-    hn::Vec<D>& lane_best_predecessors)
+    hn::Vec<descriptor_type>& lane_best_scores,
+    hn::Vec<descriptor_type>& lane_best_predecessors)
 {
     const auto invalid_score = hn::Set(
         d, std::numeric_limits<std::int32_t>::min());
@@ -877,23 +877,23 @@ HWY_INLINE hn::Mask<D> update_bounded_lane_best(
     return improved;
 }
 
-template<bool TrackProof, bool FullBatch, bool HasSkipPenalty, class D>
-HWY_INLINE hn::Mask<D> score_bounded_candidate_batch(
-    D d,
+template<bool collect_stats, bool full_batch, bool has_skip_penalty, class descriptor_type>
+HWY_INLINE hn::Mask<descriptor_type> score_bounded_candidate_batch(
+    descriptor_type d,
     std::size_t active_lanes,
     std::int32_t load_start,
     std::int32_t current_idx,
-    const SoaAnchors& soa,
+    const soa_anchors& soa,
     std::span<const std::int32_t> best_scores,
     std::int32_t max_ref_dist,
     std::int32_t max_query_dist,
-    const ChainingParams& params,
-    hn::Vec<D>& lane_best_scores,
-    hn::Vec<D>& lane_best_predecessors,
-    SimdChainingExecutionProof* proof)
+    const chaining_parameters& params,
+    hn::Vec<descriptor_type>& lane_best_scores,
+    hn::Vec<descriptor_type>& lane_best_predecessors,
+    simd_chaining_execution_stats* stats)
 {
     const auto pair_scores = score_candidate_batch_specialized<
-        TrackProof, FullBatch, HasSkipPenalty>(
+        collect_stats, full_batch, has_skip_penalty>(
         d,
         active_lanes,
         load_start,
@@ -902,10 +902,10 @@ HWY_INLINE hn::Mask<D> score_bounded_candidate_batch(
         max_ref_dist,
         max_query_dist,
         params,
-        proof);
+        stats);
     const auto invalid_score = hn::Set(
         d, std::numeric_limits<std::int32_t>::min());
-    if constexpr (FullBatch) {
+    if constexpr (full_batch) {
         const auto predecessor_scores = hn::LoadU(
             d, best_scores.data() + load_start);
         const auto valid = hn::Ne(pair_scores, invalid_score);
@@ -934,17 +934,17 @@ HWY_INLINE hn::Mask<D> score_bounded_candidate_batch(
     }
 }
 
-template<bool TrackProof, bool HasSkipPenalty, class D>
+template<bool collect_stats, bool has_skip_penalty, class descriptor_type>
 void simd_dp_forward_pass_bounded_impl(
-    D d,
-    std::span<const Anchor> anchors,
-    const SoaAnchors& soa,
+    descriptor_type d,
+    std::span<const anchor> anchors,
+    const soa_anchors& soa,
     std::span<std::int32_t> best_scores,
     std::span<std::int32_t> predecessors,
     std::span<std::int32_t> peak_scores,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
     const std::int32_t anchor_count =
         static_cast<std::int32_t>(anchors.size());
@@ -977,10 +977,10 @@ void simd_dp_forward_pass_bounded_impl(
          current_idx < anchor_count; ++current_idx)
     {
         while (window_start < current_idx
-               && (anchors[current_idx].ref_chromosome_key()
-                       != anchors[window_start].ref_chromosome_key()
-                   || anchors[current_idx].ref_bits()
-                       > anchors[window_start].ref_bits()
+               && (anchors[current_idx].strand_partition_key()
+                       != anchors[window_start].strand_partition_key()
+                   || anchors[current_idx].reference_sort_key()
+                       > anchors[window_start].reference_sort_key()
                            + static_cast<std::uint64_t>(max_ref_dist)))
         {
             ++window_start;
@@ -998,7 +998,7 @@ void simd_dp_forward_pass_bounded_impl(
         // strictly greater than window_start.
         std::int32_t unscanned_end_exclusive = window_start;
 
-        auto record_batch = [&](hn::Mask<D> improved,
+        auto record_batch = [&](hn::Mask<descriptor_type> improved,
                                 std::int32_t active_lanes,
                                 std::int32_t load_start) {
             ++route_score_vector_batches;
@@ -1007,9 +1007,9 @@ void simd_dp_forward_pass_bounded_impl(
             route_score_masked_lanes +=
                 static_cast<std::uint64_t>(lanes - active_lanes);
             ++bounded_score_batches;
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::descending_candidate_steps,
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::descending_candidate_steps,
                 static_cast<std::uint64_t>(active_lanes));
 
             if (!hn::AllFalse(d, improved)) {
@@ -1039,7 +1039,7 @@ void simd_dp_forward_pass_bounded_impl(
             route_score_vector_work = true;
             const std::int32_t load_start = candidate_end - lanes;
             const auto improved = score_bounded_candidate_batch<
-                TrackProof, true, HasSkipPenalty>(
+                collect_stats, true, has_skip_penalty>(
                 d,
                 static_cast<std::size_t>(lanes),
                 load_start,
@@ -1051,7 +1051,7 @@ void simd_dp_forward_pass_bounded_impl(
                 params,
                 lane_best_scores,
                 lane_best_predecessors,
-                proof);
+                stats);
             cutoff = record_batch(improved, lanes, load_start);
             if (cutoff) {
                 break;
@@ -1064,7 +1064,7 @@ void simd_dp_forward_pass_bounded_impl(
                 candidate_end - window_start;
             const std::int32_t load_start = window_start;
             const auto improved = score_bounded_candidate_batch<
-                TrackProof, false, HasSkipPenalty>(
+                collect_stats, false, has_skip_penalty>(
                 d,
                 static_cast<std::size_t>(active_lanes),
                 load_start,
@@ -1076,7 +1076,7 @@ void simd_dp_forward_pass_bounded_impl(
                 params,
                 lane_best_scores,
                 lane_best_predecessors,
-                proof);
+                stats);
             (void)record_batch(
                 improved, active_lanes, load_start);
         }
@@ -1100,8 +1100,8 @@ void simd_dp_forward_pass_bounded_impl(
         bool global_best_invalid = global_best_idx < window_start;
         if (!global_best_invalid) {
             global_best_invalid =
-                anchors[global_best_idx].ref_chromosome_key()
-                    != anchors[current_idx].ref_chromosome_key()
+                anchors[global_best_idx].strand_partition_key()
+                    != anchors[current_idx].strand_partition_key()
                 || anchors[current_idx].ref_position
                         - anchors[global_best_idx].ref_position
                     > static_cast<std::uint64_t>(max_ref_dist);
@@ -1110,12 +1110,12 @@ void simd_dp_forward_pass_bounded_impl(
             route_global_best_vector_work =
                 route_global_best_vector_work
                 || window_start < current_idx;
-            global_best_idx = exact_global_best<TrackProof>(
+            global_best_idx = exact_global_best<collect_stats>(
                 d,
                 best_scores.data(),
                 window_start,
                 current_idx,
-                proof);
+                stats);
         }
 
         if (global_best_idx >= window_start
@@ -1128,7 +1128,7 @@ void simd_dp_forward_pass_bounded_impl(
                 static_cast<std::uint64_t>(lanes - 1);
             ++global_best_rescue_probes;
             const std::int32_t global_pair_score =
-                score_one_candidate<TrackProof, HasSkipPenalty>(
+                score_one_candidate<collect_stats, has_skip_penalty>(
                     d,
                     global_best_idx,
                     current_idx,
@@ -1136,7 +1136,7 @@ void simd_dp_forward_pass_bounded_impl(
                     max_ref_dist,
                     max_query_dist,
                     params,
-                    proof);
+                    stats);
             if (global_pair_score
                     != std::numeric_limits<std::int32_t>::min()
                 && global_pair_score + best_scores[global_best_idx]
@@ -1167,8 +1167,8 @@ void simd_dp_forward_pass_bounded_impl(
         }
     }
 
-    if constexpr (TrackProof) {
-        SimdChainingPolicyEvidence bounded_evidence{
+    if constexpr (collect_stats) {
+        simd_chaining_policy_stats bounded_stats{
             .bounded_score_batches = bounded_score_batches,
             .bounded_improving_batches = bounded_improving_batches,
             .bounded_nonimproving_batches =
@@ -1178,7 +1178,7 @@ void simd_dp_forward_pass_bounded_impl(
             .global_best_rescue_probes = global_best_rescue_probes,
             .global_best_rescue_wins = global_best_rescue_wins,
         };
-        proof->policy.combine(bounded_evidence);
+        stats->policy.merge(bounded_stats);
     }
     if (route_summary != nullptr) {
         route_summary->score_vector_work = route_score_vector_work;
@@ -1203,23 +1203,23 @@ void simd_dp_forward_pass_bounded_impl(
     }
 }
 
-template<bool TrackProof, class D>
+template<bool collect_stats, class descriptor_type>
 void simd_dp_forward_pass_bounded(
-    D d,
-    std::span<const Anchor> anchors,
-    const SoaAnchors& soa,
+    descriptor_type d,
+    std::span<const anchor> anchors,
+    const soa_anchors& soa,
     std::span<std::int32_t> best_scores,
     std::span<std::int32_t> predecessors,
     std::span<std::int32_t> peak_scores,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
     // Select the arithmetic policy once, outside every anchor/candidate loop.
     // The zero-penalty specialization removes gap-length float work while the
     // nonzero specialization preserves the general scoring formula.
     if (params.skip_penalty == 0.0F) {
-        simd_dp_forward_pass_bounded_impl<TrackProof, false>(
+        simd_dp_forward_pass_bounded_impl<collect_stats, false>(
             d,
             anchors,
             soa,
@@ -1227,10 +1227,10 @@ void simd_dp_forward_pass_bounded(
             predecessors,
             peak_scores,
             params,
-            proof,
+            stats,
             route_summary);
     } else {
-        simd_dp_forward_pass_bounded_impl<TrackProof, true>(
+        simd_dp_forward_pass_bounded_impl<collect_stats, true>(
             d,
             anchors,
             soa,
@@ -1238,27 +1238,27 @@ void simd_dp_forward_pass_bounded(
             predecessors,
             peak_scores,
             params,
-            proof,
+            stats,
             route_summary);
     }
 }
 
 /// Compile-time forward dispatch keeps the policy test outside the candidate
 /// loop while sharing allocation, SoA conversion, and backtracking.
-template<SimdChainingPolicy Policy, bool TrackProof, class D>
+template<simd_chaining_policy policy, bool collect_stats, class descriptor_type>
 void simd_dp_forward_pass(
-    D d,
-    std::span<const Anchor> anchors,
-    const SoaAnchors& soa,
+    descriptor_type d,
+    std::span<const anchor> anchors,
+    const soa_anchors& soa,
     std::span<std::int32_t> best_scores,
     std::span<std::int32_t> predecessors,
     std::span<std::int32_t> peak_scores,
-    const ChainingParams& params,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    const chaining_parameters& params,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
-    if constexpr (Policy == SimdChainingPolicy::exact_visited) {
-        simd_dp_forward_pass_exact<TrackProof>(
+    if constexpr (policy == simd_chaining_policy::exact_visited) {
+        simd_dp_forward_pass_exact<collect_stats>(
             d,
             anchors,
             soa,
@@ -1266,13 +1266,13 @@ void simd_dp_forward_pass(
             predecessors,
             peak_scores,
             params,
-            proof,
+            stats,
             route_summary);
     } else {
         static_assert(
-            Policy
-                == SimdChainingPolicy::bounded_batch_approximate);
-        simd_dp_forward_pass_bounded<TrackProof>(
+            policy
+                == simd_chaining_policy::bounded_batch_approximate);
+        simd_dp_forward_pass_bounded<collect_stats>(
             d,
             anchors,
             soa,
@@ -1280,21 +1280,21 @@ void simd_dp_forward_pass(
             predecessors,
             peak_scores,
             params,
-            proof,
+            stats,
             route_summary);
     }
 }
 
-struct ScoredAnchorIndex {
+struct scored_anchor_index {
     std::int32_t score;
     std::int32_t anchor_index;
 };
-static_assert(sizeof(ScoredAnchorIndex) == 8u);
+static_assert(sizeof(scored_anchor_index) == 8u);
 
-struct ScoreAscending {
+struct score_ascending {
     [[nodiscard]] bool operator()(
-        const ScoredAnchorIndex& lhs,
-        const ScoredAnchorIndex& rhs) const noexcept
+        const scored_anchor_index& lhs,
+        const scored_anchor_index& rhs) const noexcept
     {
         return lhs.score != rhs.score
             ? lhs.score < rhs.score
@@ -1302,18 +1302,18 @@ struct ScoreAscending {
     }
 };
 
-template<bool TrackProof, class D>
+template<bool collect_stats, class descriptor_type>
 void backtrack_chains_simd(
-    D d,
-    std::span<const Anchor> anchors,
+    descriptor_type d,
+    std::span<const anchor> anchors,
     std::span<const std::int32_t> best_scores,
     std::span<const std::int32_t> predecessors,
     std::int32_t min_score,
     std::int32_t min_seed_count,
-    ArenaSlab<Chain>& chains_out,
-    ArenaSlab<Anchor>& reordered_anchors_out,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    arena_slab<chain>& chains_out,
+    arena_slab<anchor>& reordered_anchors_out,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
     const std::int32_t anchor_count =
         static_cast<std::int32_t>(anchors.size());
@@ -1321,18 +1321,18 @@ void backtrack_chains_simd(
         static_cast<std::int32_t>(hn::Lanes(d));
     auto& ctx = context::current();
 
-    auto scored = ctx.alloc_chain_array<ScoredAnchorIndex>(
+    auto scored = ctx.alloc_chain_array<scored_anchor_index>(
         anchors.size());
     std::size_t scored_count = 0;
     for (std::int32_t i = 0; i < anchor_count; ++i) {
         if (best_scores[i] >= min_score) {
             scored[scored_count++] =
-                ScoredAnchorIndex{best_scores[i], i};
+                scored_anchor_index{best_scores[i], i};
         }
     }
     std::sort(
         scored.data(), scored.data() + scored_count,
-        ScoreAscending{});
+        score_ascending{});
 
     auto visited = ctx.alloc_chain_array<std::int32_t>(
         anchors.size());
@@ -1420,22 +1420,22 @@ void backtrack_chains_simd(
                         ? hn::Set(d, primary_current)
                         : minus_one;
 
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             backtrack_path_vector_batches);
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             backtrack_commit_vector_batches);
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             backtrack_vector_lanes,
                         static_cast<std::uint64_t>(lanes));
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             backtrack_primary_contiguous_batches);
                     ++route_primary_contiguous_batches;
                     continue;
@@ -1456,34 +1456,34 @@ void backtrack_chains_simd(
             primary_current = hn::GetLane(next);
             ++primary_length;
 
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::
                     backtrack_path_vector_batches);
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::
                     backtrack_commit_vector_batches);
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::backtrack_vector_lanes);
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::backtrack_vector_lanes);
         }
         if (!hn::AllFalse(d, active)) {
             reject(
-                proof,
-                SimdChainingStatus::cyclic_predecessors,
+                stats,
+                simd_chaining_status::cyclic_predecessors,
                 "primary predecessor path exceeds anchor count");
         }
 
-        proof_add<TrackProof>(
-            proof,
-            &SimdChainingExecutionProof::backtrack_rank_batches);
+        stats_add<collect_stats>(
+            stats,
+            &simd_chaining_execution_stats::backtrack_rank_batches);
         route_rank_work = true;
         const std::int32_t primary_score = scored[highest_rank].score;
         if (primary_score >= min_score
             && primary_length >= min_seed_count)
         {
-            chains_out.push_back(Chain{
+            chains_out.push_back(chain{
                 .score = primary_score,
                 .anchor_count = primary_length,
                 .anchor_start = static_cast<std::int32_t>(
@@ -1533,32 +1533,32 @@ void backtrack_chains_simd(
             const std::uint64_t visited_hit_count =
                 static_cast<std::uint64_t>(
                     hn::CountTrue(d, hit_visited));
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::backtrack_overlap_stops,
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::backtrack_overlap_stops,
                 visited_hit_count);
 
             // After the primary chain is claimed, a ranked batch commonly
             // starts entirely inside that chain.  The exact path below would
             // stop all lanes at depth zero, then reject each zero-length,
             // zero-score chain.  When either threshold rejects that outcome,
-            // preserve the same proof-visible rank/path work and skip the
+            // preserve the same stats-visible rank/path work and skip the
             // otherwise empty per-lane commit loop.
             if (depth == 0
                 && visited_hit_count
                     == static_cast<std::uint64_t>(batch_count)
                 && (min_score > 0 || min_seed_count > 0))
             {
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         backtrack_path_vector_batches);
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::backtrack_rank_batches);
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::backtrack_rank_batches);
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         backtrack_all_starts_visited_fast_batches);
                 ++route_all_starts_visited_fast_batches;
                 route_rank_work = true;
@@ -1587,13 +1587,13 @@ void backtrack_chains_simd(
                 next_active, next, minus_one);
             active = next_active;
 
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::
                     backtrack_path_vector_batches);
-            proof_add<TrackProof>(
-                proof,
-                &SimdChainingExecutionProof::backtrack_vector_lanes,
+            stats_add<collect_stats>(
+                stats,
+                &simd_chaining_execution_stats::backtrack_vector_lanes,
                 hn::CountTrue(d, append));
         }
         if (all_starts_visited_batch_rejected) {
@@ -1601,16 +1601,16 @@ void backtrack_chains_simd(
         }
         if (!hn::AllFalse(d, active)) {
             reject(
-                proof,
-                SimdChainingStatus::cyclic_predecessors,
+                stats,
+                simd_chaining_status::cyclic_predecessors,
                 "predecessor path exceeds anchor count");
         }
 
         hn::Store(lengths, d, length_lanes);
         hn::Store(terminals, d, terminal_lanes);
-        proof_add<TrackProof>(
-            proof,
-            &SimdChainingExecutionProof::backtrack_rank_batches);
+        stats_add<collect_stats>(
+            stats,
+            &simd_chaining_execution_stats::backtrack_rank_batches);
         route_rank_work = true;
 
         // Rank order is semantically observable when paths overlap.  Each
@@ -1652,19 +1652,19 @@ void backtrack_chains_simd(
                     one, commit, d, visited.data(), safe_indices);
 
                 committed_length += commit_count;
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::
                         backtrack_commit_vector_batches);
-                proof_add<TrackProof>(
-                    proof,
-                    &SimdChainingExecutionProof::scalar_orchestration_steps);
+                stats_add<collect_stats>(
+                    stats,
+                    &simd_chaining_execution_stats::scalar_orchestration_steps);
                 ++route_scalar_orchestration_steps;
                 if (first_hit >= 0) {
                     terminal = lane_path[offset + first_hit];
-                    proof_add<TrackProof>(
-                        proof,
-                        &SimdChainingExecutionProof::
+                    stats_add<collect_stats>(
+                        stats,
+                        &simd_chaining_execution_stats::
                             backtrack_overlap_stops);
                     break;
                 }
@@ -1679,7 +1679,7 @@ void backtrack_chains_simd(
             if (chain_score >= min_score
                 && committed_length >= min_seed_count)
             {
-                chains_out.push_back(Chain{
+                chains_out.push_back(chain{
                     .score = chain_score,
                     .anchor_count = committed_length,
                     .anchor_start = static_cast<std::int32_t>(
@@ -1708,15 +1708,15 @@ void backtrack_chains_simd(
     }
 }
 
-template<bool TrackProof, class D>
+template<bool collect_stats, class descriptor_type>
 void run_simd_chaining(
-    D d,
-    std::span<const Anchor> anchors,
-    const ChainingParams& params,
-    ArenaSlab<Chain>& chains_out,
-    ArenaSlab<Anchor>& reordered_anchors_out,
-    SimdChainingExecutionProof* proof,
-    SimdChainingRouteSummary* route_summary)
+    descriptor_type d,
+    std::span<const anchor> anchors,
+    const chaining_parameters& params,
+    arena_slab<chain>& chains_out,
+    arena_slab<anchor>& reordered_anchors_out,
+    simd_chaining_execution_stats* stats,
+    simd_chaining_route_stats* route_summary)
 {
     const std::size_t count = anchors.size();
     auto soa = create_soa_anchors(d, anchors);
@@ -1731,9 +1731,9 @@ void run_simd_chaining(
         count * sizeof(std::int32_t));
 
     switch (params.simd_policy) {
-        case SimdChainingPolicy::exact_visited:
+        case simd_chaining_policy::exact_visited:
             simd_dp_forward_pass<
-                SimdChainingPolicy::exact_visited, TrackProof>(
+                simd_chaining_policy::exact_visited, collect_stats>(
                     d,
                     anchors,
                     soa,
@@ -1741,12 +1741,12 @@ void run_simd_chaining(
                     predecessors,
                     peak_scores,
                     params,
-                    proof,
+                    stats,
                     route_summary);
             break;
-        case SimdChainingPolicy::bounded_batch_approximate:
+        case simd_chaining_policy::bounded_batch_approximate:
             simd_dp_forward_pass<
-                SimdChainingPolicy::bounded_batch_approximate, TrackProof>(
+                simd_chaining_policy::bounded_batch_approximate, collect_stats>(
                     d,
                     anchors,
                     soa,
@@ -1754,13 +1754,13 @@ void run_simd_chaining(
                     predecessors,
                     peak_scores,
                     params,
-                    proof,
+                    stats,
                     route_summary);
             break;
         default:
             reject(
-                proof,
-                SimdChainingStatus::invalid_policy,
+                stats,
+                simd_chaining_status::invalid_policy,
                 "unknown SIMD chaining policy reached forward dispatch");
     }
     {
@@ -1768,10 +1768,10 @@ void run_simd_chaining(
         // backtracker. A surrounding orchestration scope would preserve the
         // label while timing unrelated work and could conceal a fallback.
         static const auto* backtrack_region_desc =
-            bioseq::instr::register_region_static("backtrack_chains");
+            bioseq::instrumentation::register_static_region("backtrack_chains");
         auto backtrack_region_scope =
-            bioseq::instr::region(backtrack_region_desc);
-        backtrack_chains_simd<TrackProof>(
+            bioseq::instrumentation::region(backtrack_region_desc);
+        backtrack_chains_simd<collect_stats>(
             d,
             anchors,
             best_scores,
@@ -1780,7 +1780,7 @@ void run_simd_chaining(
             params.min_seed_count,
             chains_out,
             reordered_anchors_out,
-            proof,
+            stats,
             route_summary);
     }
 }
@@ -1788,39 +1788,39 @@ void run_simd_chaining(
 }  // namespace chaining_simd_detail
 
 /**
- * Named SIMD DP chaining. Supplying proof is optional and does not alter the
+ * Named SIMD DP chaining. Supplying stats is optional and does not alter the
  * requested policy. Unsupported inputs throw; this entry point never calls a
  * scalar scoring or backtracking implementation.
  */
 void chain_anchors_simd(
-    std::span<const Anchor> anchors,
-    const ChainingParams& params,
-    ArenaSlab<Chain>& chains_out,
-    ArenaSlab<Anchor>& reordered_anchors_out,
-    SimdChainingExecutionProof* proof = nullptr,
-    bool aggregate_proof = false)
+    std::span<const anchor> anchors,
+    const chaining_parameters& params,
+    arena_slab<chain>& chains_out,
+    arena_slab<anchor>& reordered_anchors_out,
+    simd_chaining_execution_stats* stats = nullptr,
+    bool aggregate_stats = false)
 {
-    if (proof != nullptr) {
-        *proof = {};
-        proof->anchors_consumed = anchors.size();
+    if (stats != nullptr) {
+        *stats = {};
+        stats->anchors_consumed = anchors.size();
     }
 
     hn::ScalableTag<std::int32_t> d;
     const std::size_t lanes = hn::Lanes(d);
     switch (params.simd_policy) {
-        case SimdChainingPolicy::exact_visited:
-        case SimdChainingPolicy::bounded_batch_approximate:
+        case simd_chaining_policy::exact_visited:
+        case simd_chaining_policy::bounded_batch_approximate:
             break;
         default:
             chaining_simd_detail::reject(
-                proof,
-                SimdChainingStatus::invalid_policy,
+                stats,
+                simd_chaining_status::invalid_policy,
                 "unknown SIMD chaining policy");
     }
     if (lanes < 2) {
         chaining_simd_detail::reject(
-            proof,
-            SimdChainingStatus::unsupported_simd_target,
+            stats,
+            simd_chaining_status::unsupported_simd_target,
             "the selected Highway target has fewer than two int32 lanes");
     }
     if (params.max_gap < 0
@@ -1834,22 +1834,22 @@ void chain_anchors_simd(
         || params.skip_penalty < 0.0F)
     {
         chaining_simd_detail::reject(
-            proof,
-            SimdChainingStatus::invalid_parameters,
+            stats,
+            simd_chaining_status::invalid_parameters,
             "distances, iteration limits, seed count, and penalties must "
             "be finite and non-negative");
     }
     if (params.simd_policy
-            == SimdChainingPolicy::bounded_batch_approximate
+            == simd_chaining_policy::bounded_batch_approximate
         && (params.max_chain_skip <= 0
             || params.max_chain_iter <= 0))
     {
-        if (proof != nullptr) {
-            ++proof->policy.policy_rejections;
+        if (stats != nullptr) {
+            ++stats->policy.policy_rejections;
         }
         chaining_simd_detail::reject(
-            proof,
-            SimdChainingStatus::invalid_parameters,
+            stats,
+            simd_chaining_status::invalid_parameters,
             "bounded SIMD chaining requires positive max_chain_skip and "
             "max_chain_iter");
     }
@@ -1858,8 +1858,8 @@ void chain_anchors_simd(
             std::numeric_limits<std::int32_t>::max()))
     {
         chaining_simd_detail::reject(
-            proof,
-            SimdChainingStatus::anchor_count_overflow,
+            stats,
+            simd_chaining_status::anchor_count_overflow,
             "anchor indices do not fit the exact int32 SIMD ABI");
     }
     if (!anchors.empty()
@@ -1869,24 +1869,24 @@ void chain_anchors_simd(
                   / lanes)
     {
         chaining_simd_detail::reject(
-            proof,
-            SimdChainingStatus::workspace_overflow,
+            stats,
+            simd_chaining_status::workspace_overflow,
             "lane-batched backtracking workspace exceeds int32 gather ABI");
     }
-    if (proof != nullptr) {
+    if (stats != nullptr) {
         switch (params.simd_policy) {
-            case SimdChainingPolicy::exact_visited:
-                ++proof->policy.exact_visited_calls;
+            case simd_chaining_policy::exact_visited:
+                ++stats->policy.exact_visited_calls;
                 break;
-            case SimdChainingPolicy::bounded_batch_approximate:
-                ++proof->policy.bounded_batch_approximate_calls;
+            case simd_chaining_policy::bounded_batch_approximate:
+                ++stats->policy.bounded_batch_approximate_calls;
                 break;
             default:
                 // The policy was validated before all allocation/workspace
                 // checks, so this branch is intentionally unreachable.
                 chaining_simd_detail::reject(
-                    proof,
-                    SimdChainingStatus::invalid_policy,
+                    stats,
+                    simd_chaining_status::invalid_policy,
                     "unknown SIMD chaining policy after validation");
         }
     }
@@ -1895,13 +1895,13 @@ void chain_anchors_simd(
     }
 
     static const auto* region_desc =
-        bioseq::instr::register_region_static("mg_lchain_simd");
-    auto region_scope = bioseq::instr::region(region_desc);
+        bioseq::instrumentation::register_static_region("mg_lchain_simd");
+    auto region_scope = bioseq::instrumentation::region(region_desc);
     auto chain_scope =
-        context::current().push<context::Arena::Chain>();
+        context::current().push<context::arena::chain>();
 
-    if (proof != nullptr && aggregate_proof) {
-        chaining_simd_detail::SimdChainingRouteSummary route_summary{};
+    if (stats != nullptr && aggregate_stats) {
+        chaining_simd_detail::simd_chaining_route_stats route_summary{};
         chaining_simd_detail::run_simd_chaining<false>(
             d,
             anchors,
@@ -1910,39 +1910,39 @@ void chain_anchors_simd(
             reordered_anchors_out,
             nullptr,
             &route_summary);
-        proof->score_vector_batches =
+        stats->score_vector_batches =
             route_summary.score_vector_batches;
-        proof->score_vector_lanes = route_summary.score_vector_lanes;
-        proof->score_masked_lanes = route_summary.score_masked_lanes;
-        proof->no_improvement_fast_batches =
+        stats->score_vector_lanes = route_summary.score_vector_lanes;
+        stats->score_masked_lanes = route_summary.score_masked_lanes;
+        stats->no_improvement_fast_batches =
             route_summary.no_improvement_fast_batches;
-        proof->improvement_replay_batches =
+        stats->improvement_replay_batches =
             route_summary.improvement_replay_batches;
-        proof->improvement_replay_lanes =
+        stats->improvement_replay_lanes =
             route_summary.improvement_replay_lanes;
-        proof->contiguous_predecessor_store_batches =
+        stats->contiguous_predecessor_store_batches =
             route_summary.contiguous_predecessor_store_batches;
-        proof->scalar_orchestration_steps =
+        stats->scalar_orchestration_steps =
             route_summary.scalar_orchestration_steps;
-        proof->global_best_vector_batches =
+        stats->global_best_vector_batches =
             route_summary.global_best_vector_work ? 1u : 0u;
-        proof->global_best_vector_lanes =
+        stats->global_best_vector_lanes =
             route_summary.global_best_vector_work ? 1u : 0u;
-        proof->backtrack_rank_batches = route_summary.backtrack_rank_work ? 1u : 0u;
-        proof->backtrack_path_vector_batches =
+        stats->backtrack_rank_batches = route_summary.backtrack_rank_work ? 1u : 0u;
+        stats->backtrack_path_vector_batches =
             route_summary.backtrack_path_vector_work ? 1u : 0u;
-        proof->backtrack_commit_vector_batches =
+        stats->backtrack_commit_vector_batches =
             route_summary.backtrack_commit_vector_work ? 1u : 0u;
-        proof->backtrack_vector_lanes =
+        stats->backtrack_vector_lanes =
             route_summary.backtrack_path_vector_work ? 1u : 0u;
-        proof->backtrack_primary_contiguous_batches =
+        stats->backtrack_primary_contiguous_batches =
             route_summary.backtrack_primary_contiguous_batches;
-        proof->backtrack_all_starts_visited_fast_batches =
+        stats->backtrack_all_starts_visited_fast_batches =
             route_summary.backtrack_all_starts_visited_fast_batches;
         if (params.simd_policy
-            == SimdChainingPolicy::bounded_batch_approximate)
+            == simd_chaining_policy::bounded_batch_approximate)
         {
-            SimdChainingPolicyEvidence bounded_evidence{
+            simd_chaining_policy_stats bounded_stats{
                 .bounded_score_batches =
                     route_summary.bounded_score_batches,
                 .bounded_improving_batches =
@@ -1958,16 +1958,16 @@ void chain_anchors_simd(
                 .global_best_rescue_wins =
                     route_summary.global_best_rescue_wins,
             };
-            proof->policy.combine(bounded_evidence);
+            stats->policy.merge(bounded_stats);
         }
-    } else if (proof != nullptr) {
+    } else if (stats != nullptr) {
         chaining_simd_detail::run_simd_chaining<true>(
             d,
             anchors,
             params,
             chains_out,
             reordered_anchors_out,
-            proof,
+            stats,
             nullptr);
     } else {
         chaining_simd_detail::run_simd_chaining<false>(
@@ -1979,7 +1979,7 @@ void chain_anchors_simd(
             nullptr,
             nullptr);
     }
-    bioseq_log<DBG>(
+    bioseq_log<logging_level::debug>(
         "[chaining_simd] {} SIMD chaining complete for {} anchors",
         bioseq::chaining::simd_chaining_policy_name(
             params.simd_policy),

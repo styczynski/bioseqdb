@@ -1,10 +1,14 @@
+/**
+ * @file annotation_parser.cppm
+ * @brief cppast-backed extraction of registered external-codegen annotations.
+ */
 module;
 
 #include <filesystem>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <cppast/cpp_attribute.hpp>
@@ -28,93 +32,123 @@ namespace bioseq::codegen::external {
 
 /// @brief Extracts source text from a supported cppast expression.
 /// @param expression Parsed initializer expression.
-/// @return Expression spelling.
-[[nodiscard]] std::string expression_text(const cppast::cpp_expression& expression) {
+/// @return Exact expression spelling retained by cppast.
+/// @throws std::runtime_error When cppast exposes an unsupported expression kind.
+[[nodiscard]] std::string extract_expression_source(
+    const cppast::cpp_expression& expression) {
     if (expression.kind() == cppast::cpp_expression_kind::literal_t) {
         return static_cast<const cppast::cpp_literal_expression&>(expression).value();
     }
     if (expression.kind() == cppast::cpp_expression_kind::unexposed_t) {
         return static_cast<const cppast::cpp_unexposed_expression&>(expression)
-            .expression().as_string();
+            .expression()
+            .as_string();
     }
     throw std::runtime_error("unsupported cppast expression kind");
 }
 
-/// @brief Uses cppast/libclang to resolve one registered annotation and its spec.
-/// @param source Original descriptor path.
-/// @param shadow Normalized parser input path.
+/// @brief Uses cppast/libclang to resolve one registered annotation and its specification.
+/// @param source_path Original descriptor path used in diagnostics.
+/// @param parser_source_path Normalized parser input path.
 /// @param clang_binary Clang binary used by cppast.
-/// @param handlers Registered annotation contracts.
-/// @return Resolved annotation request.
-[[nodiscard]] annotation_request parse_annotation(
-    const fs::path& source,
-    const fs::path& shadow,
+/// @param registry Registered annotation processors.
+/// @return The single resolved annotation request.
+/// @throws std::runtime_error When parsing fails or the annotation contract is ambiguous.
+[[nodiscard]] annotation_request parse_source_annotation(
+    const fs::path& source_path,
+    const fs::path& parser_source_path,
     const std::string& clang_binary,
-    const annotation_handlers& handlers) {
-    cppast::cpp_entity_index index;
-    cppast::libclang_compile_config config(clang_binary);
-    config.set_flags(cppast::cpp_standard::cpp_20);
-    config.fast_preprocessing(false);
+    const annotation_registry& registry) {
+    cppast::cpp_entity_index entity_index;
+    cppast::libclang_compile_config compile_config(clang_binary);
+    compile_config.set_flags(cppast::cpp_standard::cpp_20);
+    compile_config.fast_preprocessing(false);
+
     cppast::libclang_parser parser;
-    auto file = parser.parse(index, shadow.string(), config);
-    if (!file || parser.error()) {
-        throw std::runtime_error("cppast/libclang failed to parse " + source.string());
+    auto parsed_file = parser.parse(
+        entity_index,
+        parser_source_path.string(),
+        compile_config);
+    if (!parsed_file || parser.error()) {
+        throw std::runtime_error(
+            "cppast/libclang failed to parse " + source_path.string());
     }
 
-    std::unordered_map<std::string, std::string> initializers;
-    struct annotated_class {
+    std::map<std::string, std::string, std::less<>> initializers;
+
+    /// @brief One annotated class discovered during source traversal.
+    struct annotation_match {
+        /// @brief Registered attribute spelling.
         std::string annotation_name;
+        /// @brief Annotated class name.
         std::string declared_type;
-        std::string argument;
+        /// @brief Attribute argument expression spelling.
+        std::string argument_expression;
     };
-    std::vector<annotated_class> annotated_classes;
-    cppast::visit(*file, [&initializers, &annotated_classes, &handlers](
-                             const cppast::cpp_entity& entity,
-                             cppast::visitor_info info) {
-        if (!info.is_new_entity()) {
-            return;
-        }
-        if (entity.kind() == cppast::cpp_entity_kind::variable_t) {
-            const auto& variable = static_cast<const cppast::cpp_variable&>(entity);
-            if (const auto value = variable.default_value()) {
-                initializers.emplace(variable.name(), expression_text(value.value()));
+
+    std::vector<annotation_match> annotation_matches;
+    cppast::visit(
+        *parsed_file,
+        [&initializers, &annotation_matches, &registry](
+            const cppast::cpp_entity& entity,
+            cppast::visitor_info visitor_state) {
+            if (!visitor_state.is_new_entity()) {
+                return;
             }
-        }
-        if (entity.kind() == cppast::cpp_entity_kind::class_t) {
-            for (const auto& [annotation_name, handler] : handlers) {
-                (void)handler;
-                if (const auto attribute = cppast::has_attribute(entity, annotation_name)) {
-                    if (!attribute.value().arguments()) {
-                        throw std::runtime_error(annotation_name + " requires one argument");
-                    }
-                    annotated_classes.push_back(annotated_class{
-                        .annotation_name = annotation_name,
-                        .declared_type = entity.name(),
-                        .argument = trim(attribute.value().arguments().value().as_string()),
-                    });
+
+            if (entity.kind() == cppast::cpp_entity_kind::variable_t) {
+                const auto& variable = static_cast<const cppast::cpp_variable&>(entity);
+                if (const auto initializer = variable.default_value()) {
+                    initializers.emplace(
+                        variable.name(),
+                        extract_expression_source(initializer.value()));
                 }
             }
-        }
-    });
 
-    if (annotated_classes.size() != 1) {
+            if (entity.kind() != cppast::cpp_entity_kind::class_t) {
+                return;
+            }
+            for (const auto& registry_entry : registry) {
+                const std::string& annotation_name = registry_entry.first;
+                const auto attribute = cppast::has_attribute(entity, annotation_name);
+                if (!attribute) {
+                    continue;
+                }
+                if (!attribute.value().arguments()) {
+                    throw std::runtime_error(
+                        annotation_name + " requires one argument");
+                }
+                annotation_matches.push_back(annotation_match{
+                    .annotation_name = annotation_name,
+                    .declared_type = entity.name(),
+                    .argument_expression = trim_ascii_whitespace(
+                        attribute.value().arguments().value().as_string()),
+                });
+            }
+        });
+
+    if (annotation_matches.size() != 1) {
         throw std::runtime_error(
-            source.string() + " must contain exactly one registered Bioseq annotation");
+            source_path.string()
+            + " must contain exactly one registered Bioseq annotation");
     }
-    const auto& matched = annotated_classes.front();
-    const auto initializer = initializers.find(matched.argument);
+
+    const annotation_match& match = annotation_matches.front();
+    const auto initializer = initializers.find(match.argument_expression);
     if (initializer == initializers.end()) {
         throw std::runtime_error(
-            "cannot resolve annotation argument '" + matched.argument + "' in " + source.string());
+            "cannot resolve annotation argument '" + match.argument_expression
+            + "' in " + source_path.string());
     }
+
     return annotation_request{
-        .source = source,
-        .shadow_source = shadow,
-        .annotation_name = matched.annotation_name,
-        .declared_type = matched.declared_type,
-        .argument_expression = matched.argument,
-        .spec = decode_raw_string(initializer->second),
+        .source_path = source_path,
+        .parser_source_path = parser_source_path,
+        .annotation_name = match.annotation_name,
+        .declared_type = match.declared_type,
+        .argument_expression = match.argument_expression,
+        .specification = decode_cpp_raw_string(initializer->second),
     };
 }
 
-}
+} // namespace bioseq::codegen::external

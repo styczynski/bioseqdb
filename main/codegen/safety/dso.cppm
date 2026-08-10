@@ -1,14 +1,11 @@
 module;
 
-#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <map>
 #include <set>
-#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 export module bioseq.codegen.safety:dso;
@@ -18,29 +15,31 @@ import :validation;
 
 export namespace bioseq::codegen::safety {
 
-[[nodiscard]] inline dso_contract make_doc0388_dso_contract(
-    std::vector<std::string> retired_symbols,
-    std::vector<std::string> legacy_macro_symbols,
-    bool require_complete_codegen = true) {
+/// Returns the exact current production DSO ownership contract.
+///
+/// The contract describes live generated wrappers and the separately owned
+/// external handler. Only current ABI ownership contributes to validation.
+[[nodiscard]] inline dso_contract current_dso_contract() {
     return {
-        .expected_main_identity_count = 272,
-        .expected_main_symbol_count = 270,
-        .expected_external_symbol_count = 1,
-        .expected_retired_symbol_count = 117,
-        .expected_shared_symbols = {
+        .main_identity_count = 272,
+        .main_symbol_count = 270,
+        .external_symbol_count = 1,
+        .shared_symbols = {
             "from_array",
             "mmsearch",
         },
         .external_symbols = {
             "bioseq_external_handler",
         },
-        .retired_symbols = std::move(retired_symbols),
-        .legacy_macro_symbols = std::move(legacy_macro_symbols),
-        .require_complete_codegen = require_complete_codegen,
     };
 }
 
-namespace detail {
+namespace dso_detail {
+
+using dynamic_export_index = std::map<
+    std::string,
+    std::vector<const dso_symbol_occurrence*>,
+    std::less<>>;
 
 [[nodiscard]] inline std::string dso_routine_leaf(
     std::string_view identity) {
@@ -56,16 +55,9 @@ namespace detail {
             : qualified.substr(separator + 1)};
 }
 
-[[nodiscard]] inline std::map<
-    std::string,
-    std::vector<const dso_symbol_occurrence*>,
-    std::less<>>
-defined_dynamic_symbols(const dso_inventory& inventory) {
-    std::map<
-        std::string,
-        std::vector<const dso_symbol_occurrence*>,
-        std::less<>>
-        result;
+[[nodiscard]] inline dynamic_export_index
+index_dynamic_exports(const dso_inventory& inventory) {
+    dynamic_export_index result;
     for (const dso_symbol_occurrence& symbol : inventory.symbols) {
         if (symbol.defined && symbol.dynamic_visible) {
             result[symbol.name].push_back(&symbol);
@@ -74,39 +66,44 @@ defined_dynamic_symbols(const dso_inventory& inventory) {
     return result;
 }
 
-inline void require_one_export(
-    const std::map<
-        std::string,
-        std::vector<const dso_symbol_occurrence*>,
-        std::less<>>& symbols,
+inline void require_unique_global_export(
+    const dynamic_export_index& symbols,
     std::string_view name) {
-    const auto found = symbols.find(name);
+    const dynamic_export_index::const_iterator found =
+        symbols.find(name);
     if (found == symbols.end() || found->second.size() != 1) {
-        safety_failure(
+        detail::safety_failure(
             name,
             "DSO symbol must be defined and dynamically visible exactly once");
     }
     const dso_symbol_occurrence& occurrence = *found->second.front();
     if (occurrence.binding != "GLOBAL"
         || occurrence.source_tool.empty()) {
-        safety_failure(name, "DSO symbol does not have global provenance");
+        detail::safety_failure(
+            name, "DSO symbol does not have global provenance");
     }
 }
 
-}  // namespace detail
+}  // namespace dso_detail
 
-inline void validate_dso_closure(
+/// Validates live SQL, wrapper, and dynamic-library symbol ownership.
+///
+/// Every production SQL owner must have generated boundary code, while the
+/// external handler remains the sole symbol owned outside the main extension.
+/// Each public symbol and its `pg_finfo_` companion must be a unique global
+/// dynamic export with tool provenance.
+inline void validate_dso_ownership(
     const safety_ledger& production,
     const dso_inventory& inventory,
     const dso_contract& contract) {
     if (production.profile != compilation_profile::production) {
         detail::safety_failure(
-            "DSO", "closure must use the production SQL manifest");
+            "DSO", "ownership validation requires the production ledger");
     }
     if (production.parents.size()
-            != contract.expected_main_identity_count
+            != contract.main_identity_count
         || production.symbol_groups.size()
-            != contract.expected_main_symbol_count) {
+            != contract.main_symbol_count) {
         detail::safety_failure(
             "DSO", "main SQL identity/symbol totals are not exact");
     }
@@ -132,7 +129,7 @@ inline void validate_dso_closure(
         }
         for (const std::string& identity : group.sql_identities) {
             if (!main_identities.insert(identity).second
-                || detail::dso_routine_leaf(identity)
+                || dso_detail::dso_routine_leaf(identity)
                     != group.public_symbol) {
                 detail::safety_failure(
                     group.public_symbol,
@@ -141,14 +138,14 @@ inline void validate_dso_closure(
         }
     }
     if (main_identities.size()
-        != contract.expected_main_identity_count) {
+        != contract.main_identity_count) {
         detail::safety_failure(
             "DSO", "main symbol groups do not cover every SQL identity");
     }
     const std::set<std::string, std::less<>>
         expected_shared_symbols{
-            contract.expected_shared_symbols.begin(),
-            contract.expected_shared_symbols.end()};
+            contract.shared_symbols.begin(),
+            contract.shared_symbols.end()};
     if (shared_symbols != expected_shared_symbols) {
         detail::safety_failure(
             "DSO",
@@ -162,7 +159,7 @@ inline void validate_dso_closure(
         "bioseq_external_handler",
     };
     if (external_symbols.size()
-            != contract.expected_external_symbol_count
+            != contract.external_symbol_count
         || external_symbols != required_external) {
         detail::safety_failure(
             "DSO",
@@ -175,54 +172,21 @@ inline void validate_dso_closure(
                 "bioseq and bioseq_external symbol ownership overlaps");
         }
     }
-    if (contract.retired_symbols.size()
-        != contract.expected_retired_symbol_count) {
-        detail::safety_failure(
-            "DSO", "retired-symbol ownership ledger is incomplete");
-    }
-
-    const std::set<std::string, std::less<>> legacy_macro_symbols{
-        contract.legacy_macro_symbols.begin(),
-        contract.legacy_macro_symbols.end()};
-    if (legacy_macro_symbols.size()
-        != contract.legacy_macro_symbols.size()) {
-        detail::safety_failure(
-            "DSO", "legacy fmgr macro inventory contains duplicates");
-    }
-    for (const std::string& legacy : legacy_macro_symbols) {
-        if (!main_symbols.contains(legacy)) {
-            detail::safety_failure(
-                legacy,
-                "legacy fmgr macro is not owned by the main extension");
-        }
-        if (generated_symbols.contains(legacy)) {
-            detail::safety_failure(
-                legacy,
-                "generated and legacy fmgr ownership overlap");
-        }
-    }
-    std::set<std::string, std::less<>> owned_main_symbols =
-        generated_symbols;
-    owned_main_symbols.insert(
-        legacy_macro_symbols.begin(), legacy_macro_symbols.end());
-    if (owned_main_symbols != main_symbols) {
+    if (generated_symbols != main_symbols) {
         detail::safety_failure(
             "DSO",
-            "generated plus legacy fmgr ownership does not exactly cover "
-            "the main-extension symbols");
-    }
-    if (contract.require_complete_codegen
-        && (!legacy_macro_symbols.empty()
-            || generated_symbols != main_symbols)) {
-        detail::safety_failure(
-            "DSO",
-            "final code-generation closure still contains legacy fmgr "
-            "owners");
+            "generated wrappers do not exactly own the main-extension "
+            "symbols");
     }
 
-    const auto symbols = detail::defined_dynamic_symbols(inventory);
+    const dso_detail::dynamic_export_index symbols =
+        dso_detail::index_dynamic_exports(inventory);
     std::set<std::string, std::less<>> actual_fmgr_symbols;
-    for (const auto& [name, occurrences] : symbols) {
+    for (const dso_detail::dynamic_export_index::value_type& entry :
+         symbols) {
+        const std::string& name = entry.first;
+        const std::vector<const dso_symbol_occurrence*>& occurrences =
+            entry.second;
         if (!name.starts_with("pg_finfo_")) continue;
         if (occurrences.size() != 1) {
             detail::safety_failure(
@@ -238,64 +202,13 @@ inline void validate_dso_closure(
     if (actual_fmgr_symbols != expected_fmgr_symbols) {
         detail::safety_failure(
             "DSO",
-            "fmgr/finfo exports are not exactly 270 bioseq symbols plus "
-            "the bioseq_external handler");
+            "FMGR/finfo exports differ from current main/external "
+            "symbol ownership");
     }
     for (const std::string& symbol : expected_fmgr_symbols) {
-        detail::require_one_export(symbols, symbol);
-        detail::require_one_export(symbols, "pg_finfo_" + symbol);
-    }
-
-    std::set<std::string, std::less<>> retired{
-        contract.retired_symbols.begin(),
-        contract.retired_symbols.end()};
-    if (retired.size() != contract.retired_symbols.size()) {
-        detail::safety_failure(
-            "DSO", "retired-symbol ledger contains duplicates");
-    }
-    for (const std::string& symbol : retired) {
-        if (symbols.contains(symbol)
-            || symbols.contains("pg_finfo_" + symbol)) {
-            detail::safety_failure(
-                symbol, "retired symbol remains exported");
-        }
-    }
-    for (const std::string_view symbol : {
-             "vchareq",
-             "vcharne",
-             "vchargt",
-             "vcharlt",
-             "vcharle",
-             "vcharge",
-         }) {
-        if (symbols.contains(symbol)
-            || symbols.contains("pg_finfo_" + std::string{symbol})) {
-            detail::safety_failure(
-                symbol, "legacy VARCHAR comparison export remains");
-        }
-    }
-    for (const std::string_view symbol : {
-             "vbpchareq",
-             "vbpcharne",
-             "vbpchargt",
-             "vbpcharlt",
-             "vbpcharle",
-             "vbpcharge",
-         }) {
-        if (!main_symbols.contains(symbol)) {
-            detail::safety_failure(
-                symbol, "BPCHAR comparison owner is absent");
-        }
-        detail::require_one_export(symbols, symbol);
-        detail::require_one_export(
-            symbols, "pg_finfo_" + std::string{symbol});
-    }
-    for (const std::string_view symbol :
-         {"seq_concat", "array_cat"}) {
-        if (!main_symbols.contains(symbol)) {
-            detail::safety_failure(
-                symbol, "distinct concat entrypoint is absent");
-        }
+        dso_detail::require_unique_global_export(symbols, symbol);
+        dso_detail::require_unique_global_export(
+            symbols, "pg_finfo_" + symbol);
     }
 }
 

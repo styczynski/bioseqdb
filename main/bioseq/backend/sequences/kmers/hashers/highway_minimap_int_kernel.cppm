@@ -1,11 +1,14 @@
-/** Canonical generator input for the exact minimap integer hasher. */
+/**
+ * @file highway_minimap_int_kernel.cppm
+ * @brief Fixed-target Highway minimap2 integer hasher.
+ */
 module;
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_minimap_int;
 
 import std;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.minimap_int;
@@ -17,82 +20,100 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-template<sequence_alphabet alphabet_t>
+template<sequence_alphabet p_alphabet>
 struct minimap_int_hasher
-    : ::bioseq::simd::minimap_int_hasher<alphabet_t> {
+    : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
 public:
-	using base_hasher_t = lexic_hasher<alphabet_t>;
+    using base_hasher_type = lexic_hasher<p_alphabet>;
 
-	template<typename input_t, typename d_t>
-	class simd_hash : public simd_hasher_base<
-        simd_hash<input_t, d_t>,
-        alphabet_t,
-        input_t,
-		d_t
-    >{
-	public:
-        using traits = simd_hash<input_t, d_t>::simd_hasher_base::traits;
-	private:
-		typename base_hasher_t::template simd_hash<input_t, d_t> base_hasher;
-		const traits::input_vec_t mask;
-	public:
-		explicit simd_hash(
-			const traits::input_d_t& d,
-			const size_t& kmer_length
-		): base_hasher(d, kmer_length),
-		  mask(
-			hn::Set(d, (static_cast<traits::input_t>(1)<<2*kmer_length) - 1)
-		)
-		{}
+    /** Stateful SIMD minimap2 integer hash. */
+    template<typename p_input_type, typename p_simd_tag>
+    class simd_hash
+        : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
+    public:
+        using base_type =
+            simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
+        using traits = typename base_type::traits;
 
-		template<size_t offset>
-        static constexpr size_t shift = std::min(offset, sizeof(input_t) * 8 - 1);
+    private:
+        typename base_hasher_type::template simd_hash<
+            p_input_type, p_simd_tag> base_hasher_;
+        const typename traits::input_vector_type mask_;
 
-		HWY_INLINE traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
-			auto key = base_hasher.next(d, std::move(incoming), std::move(outgoing));
-			key = hn::And(hn::Add(hn::Not(key), hn::ShiftLeft<shift<21>>(key)), mask);
-			key = hn::Xor(key, hn::ShiftRight<shift<24>>(key));
-			key = hn::And(hn::Add(hn::Add(key, hn::ShiftLeft<shift<3>>(key)), hn::ShiftLeft<shift<8>>(key)), mask);
-			key = hn::Xor(key, hn::ShiftRight<shift<14>>(key));
-			key = hn::And(hn::Add(hn::Add(key, hn::ShiftLeft<shift<2>>(key)), hn::ShiftLeft<shift<4>>(key)), mask);
-			key = hn::Xor(key, hn::ShiftRight<shift<28>>(key));
-			key = hn::And(hn::Add(key, hn::ShiftLeft<shift<31>>(key)), mask);
+    public:
+        /** Initialize the lexicographic state and k-mer mask. */
+        explicit simd_hash(
+            const typename traits::input_simd_tag_type& simd_tag,
+            std::size_t kmer_length)
+            : base_hasher_(simd_tag, kmer_length),
+              mask_(hn::Set(
+                  simd_tag,
+                  (static_cast<typename traits::input_type>(1)
+                      << (2u * kmer_length)) - 1u)) {}
 
-			return key;
-		}
+        /** Clamp a fixed scramble shift to the selected storage width. */
+        template<std::size_t p_offset>
+        static constexpr std::size_t k_shift =
+            std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
+
+        /** Consume one vector and apply the minimap2 integer permutation. */
+        HWY_INLINE typename traits::hasher_return_type next(
+            const typename traits::input_simd_tag_type& simd_tag,
+            typename traits::input_vector_type incoming,
+            typename traits::input_vector_type outgoing) {
+            auto key = base_hasher_.next(
+                simd_tag, std::move(incoming), std::move(outgoing));
+            key = hn::And(
+                hn::Add(hn::Not(key), hn::ShiftLeft<k_shift<21>>(key)), mask_);
+            key = hn::Xor(key, hn::ShiftRight<k_shift<24>>(key));
+            key = hn::And(
+                hn::Add(
+                    hn::Add(key, hn::ShiftLeft<k_shift<3>>(key)),
+                    hn::ShiftLeft<k_shift<8>>(key)),
+                mask_);
+            key = hn::Xor(key, hn::ShiftRight<k_shift<14>>(key));
+            key = hn::And(
+                hn::Add(
+                    hn::Add(key, hn::ShiftLeft<k_shift<2>>(key)),
+                    hn::ShiftLeft<k_shift<4>>(key)),
+                mask_);
+            key = hn::Xor(key, hn::ShiftRight<k_shift<28>>(key));
+            return hn::And(
+                hn::Add(key, hn::ShiftLeft<k_shift<31>>(key)), mask_);
+        }
 
 		// Forward to the underlying lexic hasher — `minimap_int_hasher` is a
 		// deterministic post-hash on the lexic result, so its per-lane palindrome
 		// status is exactly whatever the base hasher reports.
-		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_palindrome_mask(const d_t& d) const {
-			return base_hasher.get_palindrome_mask(d);
-		}
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> palindrome_mask(
+            const p_simd_tag& simd_tag) const {
+            return base_hasher_.palindrome_mask(simd_tag);
+        }
 
 		// Same forwarding rationale as get_palindrome_mask: the integer scramble is
 		// applied to whichever of (forward, reverse_complement) the base hasher's
 		// `Min` selected, so the per-lane strand decision is determined entirely by
 		// the lexic state.
-		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_strand_mask(const d_t& d) const {
-			return base_hasher.get_strand_mask(d);
-		}
-
-
-	};
+        [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag> reverse_strand_mask(
+            const p_simd_tag& simd_tag) const {
+            return base_hasher_.reverse_strand_mask(simd_tag);
+        }
+    };
 
 	// Highway sibling of `scramble`: the exact same seven-step integer mix,
 	// applied to every canonical-kmer lane before two-stack window selection.
 	// Keeping this beside the scalar definition makes scalar/SIMD drift visible
 	// and removes the old per-emitted-minimizer scalar hash tail.
-	template<class D>
-	[[nodiscard, gnu::always_inline]] static HWY_INLINE hn::Vec<D> scramble_simd(
-		D d,
-		hn::Vec<D> key,
-		hn::Vec<D> mask)
+	template<class p_simd_tag>
+	[[nodiscard, gnu::always_inline]] static HWY_INLINE hn::Vec<p_simd_tag> scramble_simd(
+		p_simd_tag simd_tag,
+		hn::Vec<p_simd_tag> key,
+		hn::Vec<p_simd_tag> mask)
 	{
-		using lane_t = hn::TFromD<D>;
-		constexpr size_t storage_max_shift = sizeof(lane_t) * 8 - 1;
+		using lane_type = hn::TFromD<p_simd_tag>;
+		constexpr size_t k_max_storage_shift = sizeof(lane_type) * 8 - 1;
 		constexpr auto clamp = [](size_t shift) constexpr -> size_t {
-			return shift > storage_max_shift ? storage_max_shift : shift;
+			return shift > k_max_storage_shift ? k_max_storage_shift : shift;
 		};
 		key = hn::And(
 			hn::Add(hn::Not(key), hn::ShiftLeft<clamp(21)>(key)), mask);
@@ -111,14 +132,9 @@ public:
 		key = hn::Xor(key, hn::ShiftRight<clamp(28)>(key));
 		key = hn::And(
 			hn::Add(key, hn::ShiftLeft<clamp(31)>(key)), mask);
-		(void)d;
+		(void)simd_tag;
 		return key;
 	}
-
-	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
-	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
-
-
 };
 static_assert(
     ::bioseq::simd::supports_scalar_hash<minimap_int_hasher, seq::dna4>);

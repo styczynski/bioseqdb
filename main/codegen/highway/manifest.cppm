@@ -42,7 +42,7 @@ namespace detail {
 [[nodiscard]] inline std::vector<std::vector<std::string>> manifest_lines(
     const std::filesystem::path& path,
     std::string_view expected_header) {
-    const std::string document = read_file(path);
+    const std::string document = read_artifact_bytes(path);
     if (document.contains('\0')) {
         throw std::runtime_error(
             path.string() + ": manifest contains a NUL byte");
@@ -228,10 +228,8 @@ inline void require_field_count(
         case artifact_kind::test_support: return "test_support";
         case artifact_kind::unit_probe_implementation:
             return "unit_probe_implementation";
-        case artifact_kind::bench_probe_implementation:
-            return "bench_probe_implementation";
-        case artifact_kind::minimizer_repr_instantiation:
-            return "minimizer_repr_instantiation";
+        case artifact_kind::minimizer_representation_instantiation:
+            return "minimizer_representation_instantiation";
     }
     return "unknown";
 }
@@ -278,7 +276,7 @@ inline void require_field_count(
                 .platform = std::string{fields[1]},
                 .slug = std::string{fields[2]},
                 .token = std::string{fields[3]},
-                .name_space = std::string{fields[4]},
+                .target_namespace = std::string{fields[4]},
                 .bit = detail::parse_target_bit(fields[5], path),
             };
             result.targets.push_back(std::move(target));
@@ -299,20 +297,6 @@ inline void require_field_count(
             + ": target manifest requires policy, highway, static-target, "
               "and target records");
     }
-    std::ranges::sort(
-        result.targets,
-        {},
-        [](const target_spec& target) {
-            return target.platform + "/" + target.slug + "/" + target.token;
-        });
-    const auto unique_target_end = std::ranges::unique(
-        result.targets,
-        {},
-        [](const target_spec& target) {
-            return target.platform + "/" + target.slug + "/" + target.token
-                + "/" + target.name_space + "/" + std::to_string(target.bit);
-        });
-    result.targets.erase(unique_target_end.begin(), unique_target_end.end());
     std::ranges::sort(
         result.policy_definitions,
         {},
@@ -375,21 +359,16 @@ inline void require_field_count(
                 .family_field = std::string{fields[1]},
                 .slot_field = std::string{fields[2]},
             });
-        } else if (fields.front() == "unit-probe"
-                   || fields.front() == "bench-probe") {
+        } else if (fields.front() == "unit-probe") {
             detail::require_field_count(path, fields.front(), fields.size(), 3);
-            probe_spec probe{
+            result.unit_probes.push_back(probe_spec{
                 .key = std::string{fields[1]},
                 .path = std::filesystem::path{fields[2]},
-            };
-            (fields.front() == "unit-probe"
-                 ? result.unit_probes
-                 : result.bench_probes)
-                .push_back(std::move(probe));
+            });
         } else if (fields.front() == "minimizer-repr-instance") {
             detail::require_field_count(path, fields.front(), fields.size(), 6);
-            result.minimizer_repr_instances.push_back(
-                minimizer_repr_instance_spec{
+            result.minimizer_representation_instances.push_back(
+                minimizer_representation_instance_spec{
                     .owner_key = std::string{fields[1]},
                     .algorithm = std::string{fields[2]},
                     .source_key = std::string{fields[3]},
@@ -435,11 +414,10 @@ inline void require_field_count(
             probes, {}, [](const probe_spec& probe) { return probe.key; });
     };
     sort_probes(result.unit_probes);
-    sort_probes(result.bench_probes);
     std::ranges::sort(
-        result.minimizer_repr_instances,
+        result.minimizer_representation_instances,
         {},
-        [](const minimizer_repr_instance_spec& instance) {
+        [](const minimizer_representation_instance_spec& instance) {
             return instance.owner_key;
         });
     return result;
@@ -458,12 +436,12 @@ inline void require_field_count(
     const std::size_t expected_artifact_count =
         plan.target_inventory.targets.size()
             * (2u + plan.extracted_sources.size() + slot_owners.size()
-               + plan.source_inventory.minimizer_repr_instances.size())
-        + 3u + plan.source_inventory.unit_probes.size()
-        + plan.source_inventory.bench_probes.size();
+               + plan.source_inventory.minimizer_representation_instances
+                     .size())
+        + 3u + plan.source_inventory.unit_probes.size();
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count
-        || plan.clang_version.empty()
+        || plan.clang_release.empty()
         || plan.compilation_signature.empty()) {
         throw std::runtime_error(
             "Highway policy evidence does not describe the complete "
@@ -482,8 +460,9 @@ inline void require_field_count(
         });
     std::string previous_path;
     for (const generated_artifact* artifact : ordered) {
-        const std::filesystem::path relative = checked_owned_output_path(
-            artifact->relative_path, "Highway policy-evidence artifact");
+        const std::filesystem::path relative = validate_owned_artifact_path(
+            artifact->relative_path,
+            artifact_owner_view{"Highway policy-evidence artifact"});
         const std::string path = relative.generic_string();
         if ((!previous_path.empty() && previous_path >= path)
             || relative.extension() != ".cppm"
@@ -509,7 +488,7 @@ inline void require_field_count(
            << detail::json_escape(
                   plan.target_inventory.static_target_token) << "\",\n"
            << "  \"clang_version\": \""
-           << detail::json_escape(plan.clang_version) << "\",\n"
+           << detail::json_escape(plan.clang_release) << "\",\n"
            << "  \"compilation_signature\": \""
            << detail::json_escape(plan.compilation_signature) << "\",\n"
            << "  \"domain_topologies\": [\n";
@@ -537,7 +516,8 @@ inline void require_field_count(
         output << "    {\"platform\":\"" << detail::json_escape(target.platform)
                << "\",\"slug\":\"" << detail::json_escape(target.slug)
                << "\",\"token\":\"" << detail::json_escape(target.token)
-               << "\",\"namespace\":\"" << detail::json_escape(target.name_space)
+               << "\",\"namespace\":\""
+               << detail::json_escape(target.target_namespace)
                << "\",\"bit\":\"" << target.bit << "\"}"
                << (index + 1 == plan.target_inventory.targets.size() ? "\n" : ",\n");
     }
@@ -585,7 +565,7 @@ inline void require_field_count(
                << "\",\"module\":\"" << detail::json_escape(artifact.module_name)
                << "\",\"target\":\"" << detail::json_escape(artifact.target_token)
                << "\",\"source\":\"" << detail::json_escape(artifact.source_key)
-               << "\",\"sha256\":\"" << sha256_hex(artifact.content) << "\"}"
+               << "\",\"sha256\":\"" << bioseq::common::sha256_hex(artifact.content) << "\"}"
                << (index + 1 == ordered.size() ? "\n" : ",\n");
     }
     output << "  ]\n}\n";

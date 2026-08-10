@@ -1,4 +1,4 @@
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <algorithm>
 #include <array>

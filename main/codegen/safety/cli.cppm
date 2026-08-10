@@ -1,7 +1,8 @@
 module;
 
-#include <exception>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <map>
 #include <print>
@@ -9,8 +10,6 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <utility>
 
 export module bioseq.codegen.safety:cli;
 
@@ -75,41 +74,62 @@ struct emit_inventory_options {
     std::filesystem::path stamp;
 };
 
-inline void assign_once(
-    std::string& destination,
-    std::string_view value,
-    std::string_view option) {
-    if (!destination.empty()) {
-        throw std::runtime_error(
-            "duplicate safety analyzer option "
-            + std::string{option});
-    }
-    destination = value;
-}
+struct parsed_option {
+    std::string_view name;
+    std::string_view value;
+};
 
+class option_reader {
+  public:
+    option_reader(
+        std::span<std::string_view const> arguments,
+        std::string_view command) noexcept
+        : arguments_{arguments}, command_{command} {}
+
+    [[nodiscard]] bool empty() const noexcept {
+        return offset_ == arguments_.size();
+    }
+
+    [[nodiscard]] parsed_option take() {
+        const std::string_view name = arguments_[offset_++];
+        if (offset_ == arguments_.size()) {
+            throw std::runtime_error(
+                std::string{command_} + " option has no value: "
+                + std::string{name});
+        }
+        return {
+            .name = name,
+            .value = arguments_[offset_++],
+        };
+    }
+
+  private:
+    std::span<std::string_view const> arguments_;
+    std::string_view command_;
+    std::size_t offset_{};
+};
+
+template <typename destination_type>
 inline void assign_once(
-    std::filesystem::path& destination,
+    destination_type& destination,
     std::string_view value,
     std::string_view option) {
     if (!destination.empty()) {
         throw std::runtime_error(
-            "duplicate safety analyzer option "
+            "duplicate safety option "
             + std::string{option});
     }
-    destination = value;
+    destination = destination_type{value};
 }
 
 [[nodiscard]] inline analyze_facts_options parse_analyze_facts(
     std::span<std::string_view const> args) {
     analyze_facts_options result;
-    for (std::size_t index = 0; index < args.size(); ++index) {
-        const std::string_view option = args[index];
-        if (index + 1 == args.size()) {
-            throw std::runtime_error(
-                "safety analyzer option has no value: "
-                + std::string{option});
-        }
-        const std::string_view value = args[++index];
+    option_reader reader{args, "safety analyzer"};
+    while (!reader.empty()) {
+        const parsed_option parsed = reader.take();
+        const std::string_view option = parsed.name;
+        const std::string_view value = parsed.value;
         if (option == "--sql-manifest") {
             assign_once(result.sql_manifest, value, option);
         } else if (option == "--compiler-facts") {
@@ -161,14 +181,11 @@ inline void assign_once(
     std::span<std::string_view const> args) {
     emit_facts_options result;
     std::string schema_version;
-    for (std::size_t index = 0; index < args.size(); ++index) {
-        const std::string_view option = args[index];
-        if (index + 1 == args.size()) {
-            throw std::runtime_error(
-                "safety fact-producer option has no value: "
-                + std::string{option});
-        }
-        const std::string_view value = args[++index];
+    option_reader reader{args, "safety fact producer"};
+    while (!reader.empty()) {
+        const parsed_option parsed = reader.take();
+        const std::string_view option = parsed.name;
+        const std::string_view value = parsed.value;
         if (option == "--schema-version") {
             assign_once(schema_version, value, option);
         } else if (option == "--profile") {
@@ -252,14 +269,11 @@ inline void assign_once(
 [[nodiscard]] inline emit_inventory_options parse_emit_inventory(
     std::span<std::string_view const> args) {
     emit_inventory_options result;
-    for (std::size_t index = 0; index < args.size(); ++index) {
-        const std::string_view option = args[index];
-        if (index + 1 == args.size()) {
-            throw std::runtime_error(
-                "safety inventory option has no value: "
-                + std::string{option});
-        }
-        const std::string_view value = args[++index];
+    option_reader reader{args, "safety inventory"};
+    while (!reader.empty()) {
+        const parsed_option parsed = reader.take();
+        const std::string_view option = parsed.name;
+        const std::string_view value = parsed.value;
         if (option == "--profile") {
             assign_once(result.profile, value, option);
         } else if (option == "--ledger") {
@@ -308,14 +322,11 @@ inline void assign_once(
 [[nodiscard]] inline validate_pair_options parse_validate_pair(
     std::span<std::string_view const> args) {
     validate_pair_options result;
-    for (std::size_t index = 0; index < args.size(); ++index) {
-        const std::string_view option = args[index];
-        if (index + 1 == args.size()) {
-            throw std::runtime_error(
-                "safety pair option has no value: "
-                + std::string{option});
-        }
-        const std::string_view value = args[++index];
+    option_reader reader{args, "safety pair"};
+    while (!reader.empty()) {
+        const parsed_option parsed = reader.take();
+        const std::string_view option = parsed.name;
+        const std::string_view value = parsed.value;
         if (option == "--production-ledger") {
             assign_once(result.production_ledger, value, option);
         } else if (option == "--test-indexes-ledger") {
@@ -350,16 +361,16 @@ inline void assign_once(
     return result;
 }
 
-struct pair_parent {
+struct profile_pair_parent {
     std::string owner_usr;
     std::string qualified_declaration;
     std::string generated_wrapper;
     std::string public_symbol;
 
-    bool operator==(const pair_parent&) const = default;
+    bool operator==(const profile_pair_parent&) const = default;
 };
 
-struct pair_ledger {
+struct profile_pair_ledger {
     std::string profile;
     std::string postgresql_revision;
     std::string provenance_sha256;
@@ -368,10 +379,10 @@ struct pair_ledger {
     std::string analyzer_version;
     std::string generator_revision;
     std::string symbol_groups;
-    std::map<std::string, pair_parent, std::less<>> parents;
+    std::map<std::string, profile_pair_parent, std::less<>> parents;
 };
 
-[[nodiscard]] inline pair_ledger parse_pair_ledger(
+[[nodiscard]] inline profile_pair_ledger parse_profile_pair_ledger(
     std::string_view text,
     std::string_view context) {
     const json_value document = parse_json(text);
@@ -389,7 +400,7 @@ struct pair_ledger {
             std::string{context}
             + " is not a schema-v2 PostgreSQL-17 safety ledger");
     }
-    pair_ledger result{
+    profile_pair_ledger result{
         .profile = serialization_detail::string_field(
             root, "profile", context),
         .postgresql_revision =
@@ -431,7 +442,7 @@ struct pair_ledger {
         if (parent_profile != result.profile
             || !result.parents.emplace(
                     identity,
-                    pair_parent{
+                    profile_pair_parent{
                         .owner_usr =
                             serialization_detail::string_field(
                                 parent,
@@ -470,9 +481,7 @@ inline int run_emit_facts(
     std::span<std::string_view const> args) {
     const emit_facts_options options = parse_emit_facts(args);
     const compilation_profile profile =
-        options.profile == "production"
-        ? compilation_profile::production
-        : compilation_profile::test_indexes;
+        serialization_detail::parse_profile(options.profile);
     compiler_fact_product product =
         produce_compiler_analysis_facts({
             .schema_version = options.schema_version,
@@ -488,38 +497,38 @@ inline int run_emit_facts(
             .producer_executable =
                 options.producer_executable,
         });
-    bioseq::codegen::write_if_different(
+    bioseq::codegen::publish_artifact_if_changed(
         options.compile_graph_output,
         product.compile_graph_json);
     const std::string persisted_graph =
-        bioseq::codegen::read_file(
+        bioseq::codegen::read_artifact_bytes(
             options.compile_graph_output);
     if (persisted_graph != product.compile_graph_json
         || product.facts.compile_graph_sha256
-            != bioseq::codegen::sha256_hex(persisted_graph)) {
+            != bioseq::common::sha256_hex(persisted_graph)) {
         throw std::runtime_error(
             "persisted canonical compile graph differs from the "
             "analyzed graph");
     }
     if (product.facts.source_list_sha256
-            != bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(
+            != bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(
                     options.source_list))
         || product.facts.compile_database_sha256
-            != bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(
+            != bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(
                     options.compile_database))
         || product.facts.pcm_manifest_sha256
-            != bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(
+            != bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(
                     options.pcm_manifest))
         || product.facts.sql_manifest_sha256
-            != bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(
+            != bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(
                     options.sql_manifest))
         || product.facts.producer_executable_sha256
-            != bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(
+            != bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(
                     options.producer_executable))) {
         throw std::runtime_error(
             "a compiler-fact input changed during analysis");
@@ -533,13 +542,14 @@ inline int run_emit_facts(
         throw std::runtime_error(
             "schema-v2 compiler facts are not canonical");
     }
-    bioseq::codegen::write_if_different(
+    bioseq::codegen::publish_artifact_if_changed(
         options.output, rendered);
-    if (bioseq::codegen::read_file(options.output) != rendered) {
+    if (bioseq::codegen::read_artifact_bytes(options.output)
+        != rendered) {
         throw std::runtime_error(
             "persisted compiler facts differ from emitted bytes");
     }
-    bioseq::codegen::touch_stamp(options.stamp);
+    bioseq::codegen::mark_artifact_complete(options.stamp);
     return 0;
 }
 
@@ -548,13 +558,13 @@ inline int run_analyze_facts(
     const analyze_facts_options options =
         parse_analyze_facts(args);
     const std::string manifest_text =
-        bioseq::codegen::read_file(options.sql_manifest);
+        bioseq::codegen::read_artifact_bytes(options.sql_manifest);
     const std::string facts_text =
-        bioseq::codegen::read_file(options.compiler_facts);
+        bioseq::codegen::read_artifact_bytes(options.compiler_facts);
     const std::string compile_graph_text =
-        bioseq::codegen::read_file(options.compile_graph);
+        bioseq::codegen::read_artifact_bytes(options.compile_graph);
     const std::string provenance_text =
-        bioseq::codegen::read_file(options.provenance);
+        bioseq::codegen::read_artifact_bytes(options.provenance);
     const safety_manifest manifest =
         parse_safety_manifest(manifest_text);
     const compiler_analysis_facts facts =
@@ -565,21 +575,21 @@ inline int run_analyze_facts(
             "compiler facts profile differs from --profile");
     }
     if (facts.sql_manifest_sha256
-        != bioseq::codegen::sha256_hex(manifest_text)) {
+        != bioseq::common::sha256_hex(manifest_text)) {
         throw std::runtime_error(
             "compiler facts were produced for a different SQL "
             "manifest");
     }
     if (facts.compile_graph_sha256
-        != bioseq::codegen::sha256_hex(
+        != bioseq::common::sha256_hex(
             compile_graph_text)) {
         throw std::runtime_error(
             "compiler facts were produced for a different canonical "
             "compile graph");
     }
     if (facts.producer_executable_sha256
-        != bioseq::codegen::sha256_hex(
-            bioseq::codegen::read_file(
+        != bioseq::common::sha256_hex(
+            bioseq::codegen::read_artifact_bytes(
                 options.producer_executable))) {
         throw std::runtime_error(
             "compiler facts were emitted by a different codegen "
@@ -593,13 +603,13 @@ inline int run_analyze_facts(
             manifest,
             facts,
             provenance,
-            bioseq::codegen::sha256_hex(provenance_text),
-            bioseq::codegen::sha256_hex(facts_text),
+            bioseq::common::sha256_hex(provenance_text),
+            bioseq::common::sha256_hex(facts_text),
             options.generator_revision);
-    bioseq::codegen::write_if_different(
+    bioseq::codegen::publish_artifact_if_changed(
         options.output, render_safety_ledger_json(ledger));
     if (!options.stamp.empty()) {
-        bioseq::codegen::touch_stamp(options.stamp);
+        bioseq::codegen::mark_artifact_complete(options.stamp);
     }
     return 0;
 }
@@ -609,15 +619,15 @@ inline int run_emit_inventory(
     const emit_inventory_options options =
         parse_emit_inventory(args);
     const std::string ledger_text =
-        bioseq::codegen::read_file(options.ledger);
+        bioseq::codegen::read_artifact_bytes(options.ledger);
     const std::string facts_text =
-        bioseq::codegen::read_file(options.compiler_facts);
+        bioseq::codegen::read_artifact_bytes(options.compiler_facts);
     const std::string compile_graph_text =
-        bioseq::codegen::read_file(options.compile_graph);
+        bioseq::codegen::read_artifact_bytes(options.compile_graph);
     const std::string sql_manifest_text =
-        bioseq::codegen::read_file(options.sql_manifest);
+        bioseq::codegen::read_artifact_bytes(options.sql_manifest);
     const std::string producer_bytes =
-        bioseq::codegen::read_file(
+        bioseq::codegen::read_artifact_bytes(
             options.producer_executable);
     const safety_ledger ledger =
         parse_safety_ledger_json(ledger_text);
@@ -648,15 +658,15 @@ inline int run_emit_inventory(
         throw std::runtime_error(
             "schema-v1 runtime inventory is not canonical");
     }
-    bioseq::codegen::write_if_different(
+    bioseq::codegen::publish_artifact_if_changed(
         options.output, rendered);
-    if (bioseq::codegen::read_file(options.output)
+    if (bioseq::codegen::read_artifact_bytes(options.output)
         != rendered) {
         throw std::runtime_error(
             "persisted runtime inventory differs from emitted "
             "bytes");
     }
-    bioseq::codegen::touch_stamp(options.stamp);
+    bioseq::codegen::mark_artifact_complete(options.stamp);
     return 0;
 }
 
@@ -665,20 +675,21 @@ inline int run_validate_pair(
     const validate_pair_options options =
         parse_validate_pair(args);
     const std::string production_text =
-        bioseq::codegen::read_file(options.production_ledger);
+        bioseq::codegen::read_artifact_bytes(
+            options.production_ledger);
     const std::string test_indexes_text =
-        bioseq::codegen::read_file(
+        bioseq::codegen::read_artifact_bytes(
             options.test_indexes_ledger);
     const std::string provenance_text =
-        bioseq::codegen::read_file(options.provenance);
+        bioseq::codegen::read_artifact_bytes(options.provenance);
     const std::string producer_bytes =
-        bioseq::codegen::read_file(
+        bioseq::codegen::read_artifact_bytes(
             options.producer_executable);
     const provenance_bundle provenance =
         parse_provenance_bundle_json(provenance_text);
     validate_provenance_bundle(provenance);
     const std::string provenance_sha256 =
-        bioseq::codegen::sha256_hex(provenance_text);
+        bioseq::common::sha256_hex(provenance_text);
     const safety_ledger production_ledger =
         parse_safety_ledger_json(production_text);
     const safety_ledger test_indexes_ledger =
@@ -688,12 +699,14 @@ inline int run_validate_pair(
         test_indexes_ledger,
         provenance,
         provenance_sha256);
-    const pair_ledger production = parse_pair_ledger(
-        production_text, "production safety ledger");
-    const pair_ledger test_indexes = parse_pair_ledger(
-        test_indexes_text, "test-indexes safety ledger");
+    const profile_pair_ledger production =
+        parse_profile_pair_ledger(
+            production_text, "production safety ledger");
+    const profile_pair_ledger test_indexes =
+        parse_profile_pair_ledger(
+            test_indexes_text, "test-indexes safety ledger");
     const std::string producer_sha256 =
-        bioseq::codegen::sha256_hex(producer_bytes);
+        bioseq::common::sha256_hex(producer_bytes);
     if (production.profile != "production"
         || test_indexes.profile != "test_indexes"
         || production.postgresql_revision
@@ -726,19 +739,21 @@ inline int run_validate_pair(
          production.postgresql_revision},
         {"producer_executable_sha256", producer_sha256},
         {"production_ledger_sha256",
-         bioseq::codegen::sha256_hex(production_text)},
+         bioseq::common::sha256_hex(production_text)},
         {"provenance_bundle_sha256", provenance_sha256},
         {"schema", "bioseq_safety_profile_pair/v1"},
         {"test_indexes_ledger_sha256",
-         bioseq::codegen::sha256_hex(test_indexes_text)},
+         bioseq::common::sha256_hex(test_indexes_text)},
     });
-    bioseq::codegen::write_if_different(options.output, report);
-    if (bioseq::codegen::read_file(options.output) != report) {
+    bioseq::codegen::publish_artifact_if_changed(
+        options.output, report);
+    if (bioseq::codegen::read_artifact_bytes(options.output)
+        != report) {
         throw std::runtime_error(
             "persisted safety profile-pair report differs from "
             "validated bytes");
     }
-    bioseq::codegen::touch_stamp(options.stamp);
+    bioseq::codegen::mark_artifact_complete(options.stamp);
     return 0;
 }
 
@@ -749,7 +764,7 @@ inline int run_validate_pair(
 /// `emit-facts` performs the authoritative Clang AST/CFG/lifetime pass and
 /// `analyze-facts` consumes only those sealed facts. Neither command falls
 /// back to scanning source text.
-[[nodiscard]] inline int run_safety_cli(
+[[nodiscard]] inline int run_cli(
     std::span<std::string_view const> args) {
     try {
         if (args.empty()) {

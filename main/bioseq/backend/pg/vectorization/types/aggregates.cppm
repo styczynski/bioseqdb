@@ -8,7 +8,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "nodes/execnodes.h"
@@ -25,13 +25,13 @@ extern "C" {
 #include <string_view>
 #include <utility>
 
-export module bioseq.vector.types.aggregates;
+export module bioseq.postgres.vectorization.types.aggregates;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_utils;
-import bioseq.pg_utils.sql_boundary;
-import bioseq.vector.types;
-import bioseq.vector.types.numeric;
+import bioseq.postgres.support;
+import bioseq.postgres.support.sql_boundary;
+import bioseq.postgres.vectorization.types;
+import bioseq.postgres.vectorization.types.numeric;
 
 namespace {
 
@@ -75,11 +75,11 @@ inline void note_aggregate_owner_visit(
         aggregate_owner_runtime_id) noexcept {}
 #endif
 
-template<class State, class Column, class Fold>
-[[nodiscard]] std::optional<State> fold_vector(
-        std::optional<State> state,
-        const std::optional<Column>& input,
-        Fold&& fold) {
+template<class p_state, class p_column, class p_fold>
+[[nodiscard]] std::optional<p_state> fold_vector(
+        std::optional<p_state> state,
+        const std::optional<p_column>& input,
+        p_fold&& fold) {
     if (!state.has_value() || !input.has_value()) {
         return state;
     }
@@ -91,37 +91,59 @@ template<class State, class Column, class Fold>
     return state;
 }
 
-[[nodiscard]] bioseq::pg_utils::numeric_result numeric_average(
-        std::int64_t count,
-        std::int64_t sum) {
-    Numeric count_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
-        [count] { return int64_to_numeric(count); });
-    Numeric sum_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
-        [sum] { return int64_to_numeric(sum); });
-    Numeric result = bioseq::pg_utils::invoke_pg_as_cpp(
-        [sum_numeric, count_numeric] {
-            return numeric_div_opt_error(
-                sum_numeric, count_numeric, nullptr);
-        });
-    return bioseq::pg_utils::numeric_result::from_numeric(result);
+template<class p_sql_type, class p_value_type>
+[[nodiscard]] std::optional<
+    bioseq::postgres::support::int64_array_aggregate_state>
+accumulate_integer_average_state(
+    std::optional<
+        bioseq::postgres::support::int64_array_aggregate_state> state,
+    const std::optional<bioseq::postgres::support::vector_column<
+        p_sql_type, p_value_type>>& input) {
+    if (!state.has_value() || !input.has_value()) {
+        return state;
+    }
+    int64_aggregate_state_storage& accumulator = state->value();
+    for (std::size_t lane = 0; lane < input->size(); ++lane) {
+        if (!input->is_null(lane)) {
+            ++accumulator.count;
+            accumulator.sum += static_cast<std::int64_t>(
+                input->value(lane));
+        }
+    }
+    return state;
 }
 
-[[nodiscard]] bioseq::pg_utils::numeric_result numeric_average(
-        const Int128AggState& state) {
-    Numeric sum_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
-        [sum = state.sumX] {
-            return int128_to_numeric(sum);
-        });
-    Numeric count_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
-        [count = state.N] {
-            return int128_to_numeric(count);
-        });
-    Numeric result = bioseq::pg_utils::invoke_pg_as_cpp(
+[[nodiscard]] bioseq::postgres::support::numeric_result numeric_average(
+        std::int64_t count,
+        std::int64_t sum) {
+    Numeric count_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+        [count] { return int64_to_numeric(count); });
+    Numeric sum_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+        [sum] { return int64_to_numeric(sum); });
+    Numeric result = bioseq::postgres::support::invoke_pg_as_cpp(
         [sum_numeric, count_numeric] {
             return numeric_div_opt_error(
                 sum_numeric, count_numeric, nullptr);
         });
-    return bioseq::pg_utils::numeric_result::from_numeric(result);
+    return bioseq::postgres::support::numeric_result::from_numeric(result);
+}
+
+[[nodiscard]] bioseq::postgres::support::numeric_result numeric_average(
+        const int128_aggregate_state_storage& state) {
+    Numeric sum_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+        [sum = state.sum] {
+            return int128_to_numeric(sum);
+        });
+    Numeric count_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+        [count = state.count] {
+            return int128_to_numeric(count);
+        });
+    Numeric result = bioseq::postgres::support::invoke_pg_as_cpp(
+        [sum_numeric, count_numeric] {
+            return numeric_div_opt_error(
+                sum_numeric, count_numeric, nullptr);
+        });
+    return bioseq::postgres::support::numeric_result::from_numeric(result);
 }
 
 }  // namespace
@@ -148,7 +170,7 @@ std::optional<std::int64_t> vanycount(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::quoted_any,
     })]]
-    std::optional<bioseq::pg_utils::vector_null_mask> input) {
+    std::optional<bioseq::postgres::support::vector_null_mask> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vanycount);
@@ -169,7 +191,7 @@ std::optional<std::int64_t> vint2sum(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::smallint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::smallint, std::int16_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -188,34 +210,23 @@ std::optional<std::int64_t> vint2sum(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
-std::optional<bioseq::pg_utils::int64_array_aggregate_state>
+std::optional<bioseq::postgres::support::int64_array_aggregate_state>
 vint2acc(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
     std::optional<
-        bioseq::pg_utils::int64_array_aggregate_state> state,
+        bioseq::postgres::support::int64_array_aggregate_state> state,
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::smallint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::smallint, std::int16_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint2acc);
 #endif
-    if (!state.has_value() || !input.has_value()) {
-        return state;
-    }
-    Int64AggState& value = state->value();
-    for (std::size_t lane = 0; lane < input->size(); ++lane) {
-        if (!input->is_null(lane)) {
-            ++value.N;
-            value.sumX += static_cast<std::int64_t>(
-                input->value(lane));
-        }
-    }
-    return state;
+    return accumulate_integer_average_state(std::move(state), input);
 }
 
 [[bioseq_sql::function({
@@ -226,7 +237,7 @@ std::optional<std::int16_t> vint2larger(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::smallint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::smallint, std::int16_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -247,7 +258,7 @@ std::optional<std::int16_t> vint2smaller(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::smallint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::smallint, std::int16_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -268,7 +279,7 @@ std::optional<std::int64_t> vint4sum(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::integer,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::integer, std::int32_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -287,34 +298,23 @@ std::optional<std::int64_t> vint4sum(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
-std::optional<bioseq::pg_utils::int64_array_aggregate_state>
+std::optional<bioseq::postgres::support::int64_array_aggregate_state>
 vint4acc(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
     std::optional<
-        bioseq::pg_utils::int64_array_aggregate_state> state,
+        bioseq::postgres::support::int64_array_aggregate_state> state,
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::integer,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::integer, std::int32_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint4acc);
 #endif
-    if (!state.has_value() || !input.has_value()) {
-        return state;
-    }
-    Int64AggState& value = state->value();
-    for (std::size_t lane = 0; lane < input->size(); ++lane) {
-        if (!input->is_null(lane)) {
-            ++value.N;
-            value.sumX += static_cast<std::int64_t>(
-                input->value(lane));
-        }
-    }
-    return state;
+    return accumulate_integer_average_state(std::move(state), input);
 }
 
 [[bioseq_sql::function({
@@ -325,7 +325,7 @@ std::optional<std::int32_t> vint4larger(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::integer,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::integer, std::int32_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -346,7 +346,7 @@ std::optional<std::int32_t> vint4smaller(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::integer,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::integer, std::int32_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -365,22 +365,22 @@ std::optional<std::int32_t> vint4smaller(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::numeric,
 })]]
-std::optional<bioseq::pg_utils::numeric_result>
+std::optional<bioseq::postgres::support::numeric_result>
 vint2int4avg(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
     std::optional<
-        bioseq::pg_utils::int64_array_aggregate_state> state) {
+        bioseq::postgres::support::int64_array_aggregate_state> state) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint2int4avg);
 #endif
-    if (!state.has_value() || state->value().N == 0) {
+    if (!state.has_value() || state->value().count == 0) {
         return std::nullopt;
     }
     return numeric_average(
-        state->value().N, state->value().sumX);
+        state->value().count, state->value().sum);
 }
 
 [[bioseq_sql::function({
@@ -389,18 +389,18 @@ vint2int4avg(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
-std::optional<bioseq::pg_utils::int128_aggregate_state>
+std::optional<bioseq::postgres::support::int128_aggregate_state>
 vint8acc(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
-    std::optional<bioseq::pg_utils::int128_aggregate_state> state,
+    std::optional<bioseq::postgres::support::int128_aggregate_state> state,
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::bigint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::bigint, std::int64_t>> input,
-    bioseq::pg_utils::sql_call_context context) {
+    bioseq::postgres::support::function_call_context context) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint8acc);
@@ -411,25 +411,23 @@ vint8acc(
     if (!state.has_value()) {
         const MemoryContext aggregate_context =
             context.aggregate_memory_context();
-        Int128AggState* const allocated =
-            bioseq::pg_utils::invoke_pg_as_cpp(
+        int128_aggregate_state_storage* const allocated =
+            bioseq::postgres::support::invoke_pg_as_cpp(
                 [aggregate_context] {
-                    MemoryContext previous =
-                        MemoryContextSwitchTo(aggregate_context);
-                    Int128AggState* const result =
-                        make0<Int128AggState>();
-                    MemoryContextSwitchTo(previous);
-                    return result;
+                    return static_cast<int128_aggregate_state_storage*>(
+                        MemoryContextAllocZero(
+                            aggregate_context,
+                            sizeof(int128_aggregate_state_storage)));
                 });
-        allocated->calcSumX2 = false;
-        state = bioseq::pg_utils::int128_aggregate_state::from_new(
+        allocated->calculate_sum_of_squares = false;
+        state = bioseq::postgres::support::int128_aggregate_state::from_new(
             allocated);
     }
-    Int128AggState& value = state->value();
+    int128_aggregate_state_storage& value = state->value();
     for (std::size_t lane = 0; lane < input->size(); ++lane) {
         if (!input->is_null(lane)) {
-            ++value.N;
-            value.sumX += static_cast<int128>(
+            ++value.count;
+            value.sum += static_cast<int128>(
                 input->value(lane));
         }
     }
@@ -442,24 +440,24 @@ vint8acc(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::numeric,
 })]]
-std::optional<bioseq::pg_utils::numeric_result>
+std::optional<bioseq::postgres::support::numeric_result>
 vint8sum(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
-    std::optional<bioseq::pg_utils::int128_aggregate_state> state) {
+    std::optional<bioseq::postgres::support::int128_aggregate_state> state) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint8sum);
 #endif
-    if (!state.has_value() || state->value().N == 0) {
+    if (!state.has_value() || state->value().count == 0) {
         return std::nullopt;
     }
-    Numeric numeric = bioseq::pg_utils::invoke_pg_as_cpp(
-        [sum = state->value().sumX] {
+    Numeric numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+        [sum = state->value().sum] {
             return int128_to_numeric(sum);
         });
-    return bioseq::pg_utils::numeric_result::from_numeric(numeric);
+    return bioseq::postgres::support::numeric_result::from_numeric(numeric);
 }
 
 [[bioseq_sql::function({
@@ -468,17 +466,17 @@ vint8sum(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::numeric,
 })]]
-std::optional<bioseq::pg_utils::numeric_result>
+std::optional<bioseq::postgres::support::numeric_result>
 vint8avg(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
-    std::optional<bioseq::pg_utils::int128_aggregate_state> state) {
+    std::optional<bioseq::postgres::support::int128_aggregate_state> state) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
         aggregate_owner_runtime_id::vint8avg);
 #endif
-    if (!state.has_value() || state->value().N == 0) {
+    if (!state.has_value() || state->value().count == 0) {
         return std::nullopt;
     }
     return numeric_average(state->value());
@@ -492,7 +490,7 @@ std::optional<std::int64_t> vint8larger(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::bigint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::bigint, std::int64_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -513,7 +511,7 @@ std::optional<std::int64_t> vint8smaller(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::bigint,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::bigint, std::int64_t>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -540,7 +538,7 @@ std::optional<DateADT> vdatelarger(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::date,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::date, DateADT>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -567,7 +565,7 @@ std::optional<DateADT> vdatesmaller(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::date,
     })]]
-    std::optional<bioseq::pg_utils::vector_column<
+    std::optional<bioseq::postgres::support::vector_column<
         bioseq::sql::pg::date, DateADT>> input) {
 #if defined(BIOSEQ_TEST_INDEXES)
     note_aggregate_owner_visit(
@@ -623,8 +621,8 @@ void validate_runtime_owner_visits() {
 }
 
 /**
- * Execute PostgreSQL's exact int8 aggregate serialization pair with an
- * aggregate call context and verify the full-width state round trip.
+ * Exercise PostgreSQL's int8 aggregate serialization pair with one state
+ * containing a sum wider than 64 bits.
  */
 void validate_int8_serial_roundtrip() {
     ExprContext expression_context{};
@@ -635,15 +633,15 @@ void validate_int8_serial_roundtrip() {
     NodeSetTag(&aggregate_context, T_AggState);
     aggregate_context.curaggcontext = &expression_context;
 
-    Int128AggState source{};
-    source.calcSumX2 = false;
-    source.N = 3;
-    source.sumX =
+    int128_aggregate_state_storage source{};
+    source.calculate_sum_of_squares = false;
+    source.count = 3;
+    source.sum =
         (static_cast<int128>(1) << 80)
         + static_cast<int128>(388);
 
     const Datum serialized =
-        bioseq::pg_utils::invoke_pg_as_cpp(
+        bioseq::postgres::support::invoke_pg_as_cpp(
             [&aggregate_context, &source] {
                 FmgrInfo function{};
                 fmgr_info(
@@ -673,8 +671,8 @@ void validate_int8_serial_roundtrip() {
                 }
                 return result;
             });
-    Int128AggState* const decoded =
-        bioseq::pg_utils::invoke_pg_as_cpp(
+    int128_aggregate_state_storage* const decoded =
+        bioseq::postgres::support::invoke_pg_as_cpp(
             [&aggregate_context, serialized] {
                 FmgrInfo function{};
                 fmgr_info(
@@ -705,16 +703,16 @@ void validate_int8_serial_roundtrip() {
                              "int8_avg_deserialize returned "
                              "NULL")));
                 }
-                return reinterpret_cast<Int128AggState*>(
+                return reinterpret_cast<int128_aggregate_state_storage*>(
                     DatumGetPointer(result));
             });
 
     const bool matches =
         decoded != nullptr
-        && decoded->calcSumX2 == source.calcSumX2
-        && decoded->N == source.N
-        && decoded->sumX == source.sumX;
-    bioseq::pg_utils::invoke_pg_as_cpp(
+        && decoded->calculate_sum_of_squares == source.calculate_sum_of_squares
+        && decoded->count == source.count
+        && decoded->sum == source.sum;
+    bioseq::postgres::support::invoke_pg_as_cpp(
         [serialized, decoded] {
             if (decoded != nullptr)
                 pfree(decoded);

@@ -1,6 +1,6 @@
 // DOC0377 §§7.1-7.6/17.4: shared source-domain ownership and lifetime matrix.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <algorithm>
 #include <array>

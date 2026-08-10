@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -21,24 +21,24 @@ import bioseq.postgres.table.alignment_execution;
 namespace bioseq::pg::detail {
 
 namespace {
-namespace alignment_exec = bioseq::pg::alignment_execution;
+namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
-std::optional<alignment_exec::AlignmentExecutionSnapshot>
+std::optional<alignment_exec::alignment_execution_snapshot>
 	last_alignment_execution_snapshot{};
-/* Evidence publication is stricter than the diagnostic v1/v2 SRFs: partial
- * roots remain visible there, but must not replace the last completed
- * operation ledger. Completed non-GPU roots deliberately publish an exact
- * empty ledger so stale GPU proof cannot survive a later successful query. */
-std::optional<alignment_exec::AlignmentExecutionSnapshot>
-	last_completed_alignment_evidence_snapshot{};
+/* Completed-operation publication is stricter than the diagnostic SRFs:
+ * partial roots remain visible there, but must not replace the last completed
+ * operation ledger. Completed non-GPU roots publish an empty ledger so a
+ * prior GPU operation cannot survive a later successful query. */
+std::optional<alignment_exec::alignment_execution_snapshot>
+	last_completed_alignment_snapshot{};
 std::int64_t last_alignment_execution_id = 0;
 
 } // namespace
 
-void publish_alignment_root(AlignmentExecutorFrame* frame)
+void publish_alignment_root(alignment_executor_frame* frame)
 {
 	if (frame == nullptr || frame->nested
-		|| frame->collector.root != &frame->collector
+		|| frame->collector.root_collector != &frame->collector
 		|| frame->collector.alignment_nodes.empty()) {
 		return;
 	}
@@ -55,36 +55,36 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 			 errmsg("bioseq alignment execution id exhausted")));
 	}
 
-	bioseq::pipeline_stats::PipelineExecutionStats statement_stats{};
+	bioseq::pipeline_stats::pipeline_execution_stats statement_stats{};
 	bool fully_drained = frame->query_output_fully_drained;
-	for (const alignment_exec::AlignmentNodeStats& node :
+	for (const alignment_exec::alignment_node_stats& node :
 		 frame->collector.alignment_nodes) {
 		statement_stats.merge(node.pipeline);
 		fully_drained = fully_drained
-			&& node.current_pass_fully_drained
-			&& !node.incomplete_pass_seen;
+			&& node.is_current_pass_fully_drained
+			&& !node.has_incomplete_pass;
 	}
-	if (frame->collector.lifecycle_counter_saturated) {
-		statement_stats.operational.stats_saturated = true;
+	if (frame->collector.is_lifecycle_counter_saturated) {
+		statement_stats.operational.are_stats_saturated = true;
 	}
-	frame->collector.persisted_gpu_operation_evidence.freeze();
-	const bool persisted_gpu_evidence_required =
+	frame->collector.persisted_gpu_operations.freeze();
+	const bool are_persisted_gpu_stats_required =
 		statement_stats.actual_backend
-			== bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu
+			== bioseq::pipeline_stats::executed_backend::vulkan_gpu
 		&& statement_stats.actual_target_index_source
-			== bioseq::pipeline_stats::TargetIndexSource::persisted
+			== bioseq::pipeline_stats::target_index_source::persisted
 		&& statement_stats.fully_attested_alignment_jobs != 0;
-	if (persisted_gpu_evidence_required
-		&& !frame->collector.persisted_gpu_operation_evidence.
+	if (are_persisted_gpu_stats_required
+		&& !frame->collector.persisted_gpu_operations.
 			matches_pipeline(statement_stats)) {
-		statement_stats.operational.stats_saturated = true;
+		statement_stats.operational.are_stats_saturated = true;
 		statement_stats.reclassify_all_attempted_jobs();
 	}
 
 	const std::int64_t execution_id = last_alignment_execution_id + 1;
 	if (fully_drained) {
-		last_completed_alignment_evidence_snapshot =
-			alignment_exec::AlignmentExecutionSnapshot{
+		last_completed_alignment_snapshot =
+			alignment_exec::alignment_execution_snapshot{
 				.execution_id = execution_id,
 				.backend_pid = static_cast<std::int32_t>(MyProcPid),
 				.database_oid = MyDatabaseId,
@@ -92,16 +92,16 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 					frame->collector.alignment_nodes.size()),
 				.nested_alignment_executor_count = static_cast<std::int32_t>(
 					frame->collector.nested_alignment_executor_count),
-				.completed = true,
-				.partial = false,
-				.fully_drained = true,
+				.is_completed = true,
+				.is_partial = false,
+				.is_fully_drained = true,
 				.pipeline = statement_stats,
-				.persisted_gpu_operation_evidence = std::move(
-					frame->collector.persisted_gpu_operation_evidence),
+				.persisted_gpu_operations = std::move(
+					frame->collector.persisted_gpu_operations),
 			};
 	}
 	last_alignment_execution_snapshot =
-		alignment_exec::AlignmentExecutionSnapshot{
+		alignment_exec::alignment_execution_snapshot{
 			.execution_id = execution_id,
 			.backend_pid = static_cast<std::int32_t>(MyProcPid),
 			.database_oid = MyDatabaseId,
@@ -109,26 +109,26 @@ void publish_alignment_root(AlignmentExecutorFrame* frame)
 				frame->collector.alignment_nodes.size()),
 			.nested_alignment_executor_count = static_cast<std::int32_t>(
 				frame->collector.nested_alignment_executor_count),
-			.completed = fully_drained,
-			.partial = !fully_drained,
-			.fully_drained = fully_drained,
+			.is_completed = fully_drained,
+			.is_partial = !fully_drained,
+			.is_fully_drained = fully_drained,
 			.pipeline = statement_stats,
 		};
 	last_alignment_execution_id = execution_id;
 }
 
 [[nodiscard]] const std::optional<
-    bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
+    bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_alignment_execution_snapshot_ref() noexcept
 {
     return last_alignment_execution_snapshot;
 }
 
 [[nodiscard]] const std::optional<
-    bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
-last_completed_alignment_evidence_snapshot_ref() noexcept
+    bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
+last_completed_alignment_snapshot_ref() noexcept
 {
-    return last_completed_alignment_evidence_snapshot;
+    return last_completed_alignment_snapshot;
 }
 
 } // namespace bioseq::pg::detail

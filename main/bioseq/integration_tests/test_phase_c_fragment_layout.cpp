@@ -5,7 +5,7 @@
 // design. We verify via `pg_relation_size(sub_table_relid)` — a larger
 // number of fragment rows produces a larger relation size.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

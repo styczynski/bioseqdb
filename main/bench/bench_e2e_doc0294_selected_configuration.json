@@ -5,7 +5,7 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0294 scheduler mode for the bioseq SQL recompute path"
+        "description": "Scheduler mode for the bioseq SQL recompute path"
       }
     },
     "bioseq_load_only": {
@@ -13,7 +13,7 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0296 split: timed TRUNCATE + bioseq.load only"
+        "description": "Split measurement: timed TRUNCATE + bioseq.load only"
       }
     },
     "bioseq_recompute_only": {
@@ -21,13 +21,13 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0296 split: timed mmsearch recompute over an untimed loaded table"
+        "description": "Split measurement: timed mmsearch recompute over an untimed loaded table"
       },
       "recompute_async_persist": {
         "type": "string",
         "default": "off",
         "enum": ["off", "on"],
-        "description": "DOC0296: stage a no-index recompute fragment index for async persistence"
+        "description": "stage a no-index recompute fragment index for async persistence"
       }
     },
     "bioseq_just_index": {
@@ -35,7 +35,7 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0294 scheduler mode for the bioseq SQL persisted-index read path"
+        "description": "Scheduler mode for the bioseq SQL persisted-index read path"
       }
     },
     "minimap2_no_index": {
@@ -75,13 +75,13 @@
         "minimap2_split_bp": 2000000352,
         "seed": 3219876
       },
-      "description": "DOC0294 selected dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
+      "description": "Selected dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
     }
   },
 
   "bench_e2e": {
     "tags": ["e2e", "selected"],
-    "description": "DOC0294 selected e2e SQL timing matrix: dna4 2 Gbp only, bioseq scheduler modes plus parallel minimap2.",
+    "description": "Selected e2e SQL timing matrix: dna4 2 Gbp only, bioseq scheduler modes plus parallel minimap2.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {

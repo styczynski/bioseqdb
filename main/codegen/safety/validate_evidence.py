@@ -526,7 +526,6 @@ GUC_GENERATION_FIELDS = frozenset(
     {
         "description_authority",
         "owner_facets",
-        "parity_ledger",
         "profile",
         "profile_delta_proof",
         "registration_count",
@@ -617,7 +616,6 @@ GUC_PROPERTY_FIELDS = frozenset(
 GUC_PROFILE_PROJECTION_FIELDS = frozenset(
     {
         "profile",
-        "parity_ledger_sha256",
         "registry_module",
         "registry_content_sha256",
         "profile_delta_proof_sha256",
@@ -2448,63 +2446,70 @@ def _validate_site(
             evidence_context,
         )
         if bridge == "invoke_pg_as_cpp":
-            expected_implementation = "bioseq::pg_utils::invoke_pg_as_cpp"
-            expected_module = "bioseq.pg_support:error_boundary"
+            expected_implementation = (
+                "bioseq::postgres::support::invoke_pg_as_cpp"
+            )
+            expected_module = (
+                "bioseq.postgres.support:error_boundary"
+            )
             expected_source_suffix = (
-                "/main/common/pg_support/error_boundary.cppm"
+                "/main/common/postgres/support/error_boundary.cppm"
             )
             expected_region = (
-                "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp"
+                "bioseq.postgres.support.error_boundary/"
+                "invoke_pg_as_cpp"
             )
             expected_target = ""
             expected_contract_id = (
-                "bioseq.pg_utils.error_bridge/error_capture/v1"
+                "bioseq.postgres.support.error_boundary/error_capture"
             )
             expected_contract_sha256 = (
-                "cbf583abe710257bf2a1999718c076fa"
-                "2d70e203ae424bbba083eee0b4fcc83c"
+                "f217b3f824a03a5d3cf977fb25c8ace"
+                "4a8765904e13e46dcfcc0fbd8c67f3099"
             )
         elif bridge == "sql_call_context":
             expected_implementation = (
-                "bioseq::pg_utils::"
+                "bioseq::postgres::support::"
                 "invoke_pg_across_transactions_as_cpp"
             )
-            expected_module = "bioseq.pg_support:error_boundary"
+            expected_module = (
+                "bioseq.postgres.support:error_boundary"
+            )
             expected_source_suffix = (
-                "/main/common/pg_support/error_boundary.cppm"
+                "/main/common/postgres/support/error_boundary.cppm"
             )
             expected_region = (
-                "bioseq.pg_utils.error_bridge/"
+                "bioseq.postgres.support.error_boundary/"
                 "invoke_pg_across_transactions_as_cpp"
             )
             expected_target = ""
             expected_contract_id = (
-                "bioseq.pg_utils.error_bridge/error_capture/v1"
+                "bioseq.postgres.support.error_boundary/error_capture"
             )
             expected_contract_sha256 = (
-                "cbf583abe710257bf2a1999718c076fa"
-                "2d70e203ae424bbba083eee0b4fcc83c"
+                "f217b3f824a03a5d3cf977fb25c8ace"
+                "4a8765904e13e46dcfcc0fbd8c67f3099"
             )
         elif bridge == "sql_subtransaction":
             exact_regions = {
-                "bioseq::pg_utils::sql_subtransaction::begin": (
+                "bioseq::postgres::support::subtransaction::begin": (
                     "BeginInternalSubTransaction",
                     "begin",
                 ),
-                "bioseq::pg_utils::sql_subtransaction::commit": (
+                "bioseq::postgres::support::subtransaction::commit": (
                     "ReleaseCurrentSubTransaction",
                     "commit",
                 ),
-                "bioseq::pg_utils::sql_subtransaction::rollback": (
+                "bioseq::postgres::support::subtransaction::rollback": (
                     "RollbackAndReleaseCurrentSubTransaction",
                     "rollback",
                 ),
                 (
-                    "bioseq::pg_utils::sql_subtransaction::"
-                    "~sql_subtransaction"
+                    "bioseq::postgres::support::subtransaction::"
+                    "~subtransaction"
                 ): (
                     "RollbackAndReleaseCurrentSubTransaction",
-                    "~sql_subtransaction",
+                    "~subtransaction",
                 ),
             }
             region = exact_regions.get(implementation_name)
@@ -2517,24 +2522,26 @@ def _validate_site(
             expected_implementation = implementation_name
             expected_module = "bioseq.pg_sql_boundary"
             expected_source_suffix = (
-                "/main/common/pg_sql_boundary/call_context_implementation.cpp"
+                "/main/common/pg_sql_boundary/"
+                "call_context_implementation.cppm"
             )
             expected_region = (
-                "bioseq.pg_utils.sql_boundary.context/" + region[1]
+                "bioseq.postgres.support.sql_boundary.context/"
+                + region[1]
             )
             expected_target = region[0]
             expected_contract_id = ""
             expected_contract_sha256 = ""
         elif bridge == "generated_boundary_tail":
             expected_implementation = (
-                "bioseq::pg_utils::invoke_sql_boundary"
+                "bioseq::postgres::support::invoke_postgres_callback"
             )
             expected_module = "bioseq.pg_sql_boundary"
             expected_source_suffix = (
                 "/main/common/pg_sql_boundary/index.cppm"
             )
             expected_region = (
-                "bioseq.pg_utils.sql_boundary/rethrow_tail"
+                "bioseq.postgres.support.sql_boundary/rethrow_tail"
             )
             expected_target = ""
             expected_contract_id = ""
@@ -4677,28 +4684,34 @@ def validate_ledger_manifest_closure(
             "ledger-manifest",
             "generated wrapper entity count differs from symbol owners",
         )
-    legacy_symbols = set(
+    handwritten_fmgr_export_symbols = set(
         _string_list(
-            _field(manifest, "legacy_macro_symbols", "ledger-manifest"),
-            "ledger-manifest.legacy_macro_symbols",
+            _field(
+                manifest,
+                "handwritten_fmgr_export_symbols",
+                "ledger-manifest",
+            ),
+            "ledger-manifest.handwritten_fmgr_export_symbols",
         )
     )
     if (
         _integer(
             _field(
                 manifest,
-                "legacy_macro_symbol_count",
+                "handwritten_fmgr_export_symbol_count",
                 "ledger-manifest",
             ),
-            "ledger-manifest.legacy_macro_symbol_count",
+            "ledger-manifest.handwritten_fmgr_export_symbol_count",
         )
-        != len(legacy_symbols)
-        or generated_symbols & legacy_symbols
-        or generated_symbols | legacy_symbols != set(symbols)
+        != len(handwritten_fmgr_export_symbols)
+        or generated_symbols & handwritten_fmgr_export_symbols
+        or generated_symbols | handwritten_fmgr_export_symbols
+        != set(symbols)
     ):
         _fail(
             "ledger-manifest",
-            "generated and legacy ownership partitions are inconsistent",
+            "generated and handwritten ownership partitions are "
+            "inconsistent",
         )
     if require_complete_codegen and generated_symbols != set(symbols):
         _fail(
@@ -5014,23 +5027,6 @@ def _validate_guc_manifest_contract(
         ),
         f"{generation_context}.registry_content_sha256",
     )
-    parity_context = f"{generation_context}.parity_ledger"
-    parity = _object(
-        _field(generation, "parity_ledger", generation_context),
-        parity_context,
-    )
-    _require_exact_fields(
-        parity,
-        frozenset({"path", "sha256"}),
-        parity_context,
-    )
-    if (
-        _field(parity, "path", parity_context)
-        != "main/bioseq/testdata/doc0388_guc_parity_ledger.json"
-    ):
-        _fail(parity_context, "parity-ledger path differs")
-    _sha256(_field(parity, "sha256", parity_context), parity_context)
-
     owner_order = ("bioseq", "scheduler", "storage", "aligner")
     base_counts = {"bioseq": 29, "scheduler": 3, "storage": 1, "aligner": 43}
     facets: dict[str, dict[str, Any]] = {}
@@ -5363,11 +5359,6 @@ def _validate_guc_property_receipt(
     delta = _field(generation, "profile_delta_proof", context)
     projection_base = {
         "profile": profile,
-        "parity_ledger_sha256": _field(
-            _field(generation, "parity_ledger", context),
-            "sha256",
-            context,
-        ),
         "registry_module": _field(
             generation, "registry_module", context
         ),
@@ -9737,9 +9728,9 @@ def validate_dso_closure(
 ) -> dict[str, int]:
     """Join the SQL manifest to the live DSO dynamic-symbol closure.
 
-    During migration, each main symbol must have exactly one generated or
-    source-macro owner. Final evidence additionally requires every owner to
-    be generated. The Bioseq contract retains its reviewed fixed inventory;
+    Each main symbol must have exactly one generated or handwritten FMGR
+    export owner. Complete evidence additionally requires every owner to be
+    generated. The Bioseq contract retains its reviewed fixed inventory;
     the manifest contract derives extension-specific counts and ownership
     partitions from the authenticated generated manifest and closes the
     entire export surface over its explicit non-fmgr ABI allowlist.
@@ -9796,10 +9787,10 @@ def validate_dso_closure(
             _string_list(
                 _field(
                     manifest,
-                    "external_legacy_macro_symbols",
+                    "handwritten_fmgr_export_external_symbols",
                     "DSO-manifest",
                 ),
-                "DSO-manifest.external_legacy_macro_symbols",
+                "DSO-manifest.handwritten_fmgr_export_external_symbols",
             )
         )
         required_absent_symbols = frozenset()
@@ -9986,25 +9977,33 @@ def validate_dso_closure(
         or len(retired_symbols) != expected_retired_symbol_count
     ):
         _fail("DSO", "retired-symbol ownership ledger is incomplete")
-    legacy_macro_symbols = set(
-        _string_list(
-            _field(manifest, "legacy_macro_symbols", "DSO-manifest"),
-            "DSO-manifest.legacy_macro_symbols",
-        )
-    )
-    if _integer(
-        _field(manifest, "legacy_macro_symbol_count", "DSO-manifest"),
-        "DSO-manifest.legacy_macro_symbol_count",
-    ) != len(legacy_macro_symbols):
-        _fail("DSO", "legacy fmgr macro total is inconsistent")
-    external_legacy_macro_symbols = set(
+    handwritten_fmgr_export_symbols = set(
         _string_list(
             _field(
                 manifest,
-                "external_legacy_macro_symbols",
+                "handwritten_fmgr_export_symbols",
                 "DSO-manifest",
             ),
-            "DSO-manifest.external_legacy_macro_symbols",
+            "DSO-manifest.handwritten_fmgr_export_symbols",
+        )
+    )
+    if _integer(
+        _field(
+            manifest,
+            "handwritten_fmgr_export_symbol_count",
+            "DSO-manifest",
+        ),
+        "DSO-manifest.handwritten_fmgr_export_symbol_count",
+    ) != len(handwritten_fmgr_export_symbols):
+        _fail("DSO", "handwritten FMGR export total is inconsistent")
+    handwritten_fmgr_export_external_symbols = set(
+        _string_list(
+            _field(
+                manifest,
+                "handwritten_fmgr_export_external_symbols",
+                "DSO-manifest",
+            ),
+            "DSO-manifest.handwritten_fmgr_export_external_symbols",
             allow_empty=manifest_contract,
         )
     )
@@ -10012,40 +10011,45 @@ def validate_dso_closure(
         _integer(
             _field(
                 manifest,
-                "external_legacy_macro_symbol_count",
+                "handwritten_fmgr_export_external_symbol_count",
                 "DSO-manifest",
             ),
-            "DSO-manifest.external_legacy_macro_symbol_count",
+            "DSO-manifest.handwritten_fmgr_export_external_symbol_count",
         )
         != len(external_symbols)
-        or external_legacy_macro_symbols != set(external_symbols)
+        or handwritten_fmgr_export_external_symbols
+        != set(external_symbols)
     ):
         if manifest_contract:
             _fail(
                 "DSO",
-                "external source-macro inventory is inconsistent",
+                "external handwritten FMGR export inventory is inconsistent",
             )
         _fail(
             "DSO",
-            "source macro scan must contain exactly the reviewed "
-            "bioseq_external handler",
+            "handwritten FMGR export scan must contain exactly the "
+            "reviewed bioseq_external handler",
         )
-    macro_owners = _array(
-        _field(manifest, "legacy_fmgr_macro_owners", "DSO-manifest"),
-        "DSO-manifest.legacy_fmgr_macro_owners",
+    handwritten_fmgr_export_owners = _array(
+        _field(
+            manifest,
+            "handwritten_fmgr_export_owners",
+            "DSO-manifest",
+        ),
+        "DSO-manifest.handwritten_fmgr_export_owners",
     )
     if _integer(
         _field(
             manifest,
-            "legacy_fmgr_macro_owner_count",
+            "handwritten_fmgr_export_owner_count",
             "DSO-manifest",
         ),
-        "DSO-manifest.legacy_fmgr_macro_owner_count",
-    ) != len(macro_owners):
-        _fail("DSO", "source fmgr macro owner total is inconsistent")
-    scanned_macro_symbols: set[str] = set()
-    for index, raw_owner in enumerate(macro_owners):
-        context = f"DSO-manifest.legacy_fmgr_macro_owners[{index}]"
+        "DSO-manifest.handwritten_fmgr_export_owner_count",
+    ) != len(handwritten_fmgr_export_owners):
+        _fail("DSO", "handwritten FMGR export owner total is inconsistent")
+    scanned_handwritten_fmgr_export_symbols: set[str] = set()
+    for index, raw_owner in enumerate(handwritten_fmgr_export_owners):
+        context = f"DSO-manifest.handwritten_fmgr_export_owners[{index}]"
         owner = _object(raw_owner, context)
         symbol = _string(
             _field(owner, "symbol", context),
@@ -10057,10 +10061,13 @@ def validate_dso_closure(
         )
         if (
             macro not in FMGR_OWNER_MACROS
-            or symbol in scanned_macro_symbols
+            or symbol in scanned_handwritten_fmgr_export_symbols
         ):
-            _fail(context, "source fmgr macro owner is invalid or duplicated")
-        scanned_macro_symbols.add(symbol)
+            _fail(
+                context,
+                "handwritten FMGR export owner is invalid or duplicated",
+            )
+        scanned_handwritten_fmgr_export_symbols.add(symbol)
         _string(
             _field(owner, "source_module", context),
             f"{context}.source_module",
@@ -10073,33 +10080,39 @@ def validate_dso_closure(
             _field(owner, "source_line", context),
             f"{context}.source_line",
         ) == 0:
-            _fail(context, "source fmgr macro owner line is zero")
-    if scanned_macro_symbols != (
-        legacy_macro_symbols | external_legacy_macro_symbols
+            _fail(context, "handwritten FMGR export owner line is zero")
+    if scanned_handwritten_fmgr_export_symbols != (
+        handwritten_fmgr_export_symbols
+        | handwritten_fmgr_export_external_symbols
     ):
         _fail(
             "DSO",
-            "source fmgr macro owners disagree with the ownership "
-            "partitions",
+            "handwritten FMGR export owners disagree with the "
+            "ownership partitions",
         )
-    if not legacy_macro_symbols <= main_symbols:
-        _fail("DSO", "legacy fmgr macro is not a main-extension owner")
-    if generated_wrapper_symbols & legacy_macro_symbols:
-        _fail("DSO", "generated and legacy fmgr ownership overlap")
+    if not handwritten_fmgr_export_symbols <= main_symbols:
+        _fail(
+            "DSO",
+            "handwritten FMGR export is not a main-extension owner",
+        )
+    if generated_wrapper_symbols & handwritten_fmgr_export_symbols:
+        _fail("DSO", "generated and handwritten FMGR ownership overlap")
     if (
-        generated_wrapper_symbols | legacy_macro_symbols
+        generated_wrapper_symbols | handwritten_fmgr_export_symbols
     ) != main_symbols:
         _fail(
             "DSO",
-            "generated plus legacy fmgr ownership does not exactly cover "
-            "the main-extension symbols",
+            "generated plus handwritten FMGR ownership does not exactly "
+            "cover the main-extension symbols",
         )
     if require_complete_codegen and (
-        legacy_macro_symbols or generated_wrapper_symbols != main_symbols
+        handwritten_fmgr_export_symbols
+        or generated_wrapper_symbols != main_symbols
     ):
         _fail(
             "DSO",
-            "final code-generation closure still contains legacy fmgr owners",
+            "final code-generation closure still contains handwritten "
+            "FMGR export owners",
         )
     if retired_symbols & (main_symbols | set(external_symbols)):
         _fail("DSO", "retired symbol is still assigned to an owner")
@@ -10182,7 +10195,9 @@ def validate_dso_closure(
         "external_symbol_count": len(external_symbols),
         "retired_symbol_count": len(retired_symbols),
         "generated_wrapper_symbol_count": len(generated_wrapper_symbols),
-        "legacy_macro_symbol_count": len(legacy_macro_symbols),
+        "handwritten_fmgr_export_symbol_count": len(
+            handwritten_fmgr_export_symbols
+        ),
         "dynamic_fmgr_symbol_count": len(actual_fmgr_symbols),
         "allowed_dso_export_count": len(
             normalized_allowed_dso_exports
@@ -10597,7 +10612,6 @@ def _run_runtime_artifact_graph_self_tests(
             )
             for profile in ("production", "test_indexes")
         }
-        parity_sha256 = _artifact_sha256(b"runtime-guc-parity-ledger")
         source_hashes = {
             owner: _artifact_sha256(
                 f"runtime-guc-source:{owner}".encode()
@@ -10807,13 +10821,6 @@ def _run_runtime_artifact_graph_self_tests(
                 "guc_generation": {
                     "description_authority": "cleaned_doxygen_only",
                     "owner_facets": facets,
-                    "parity_ledger": {
-                        "path": (
-                            "main/bioseq/testdata/"
-                            "doc0388_guc_parity_ledger.json"
-                        ),
-                        "sha256": parity_sha256,
-                    },
                     "profile": profile,
                     "profile_delta_proof": profile_delta_proof,
                     "registration_count": len(registrations),
@@ -10873,7 +10880,6 @@ def _run_runtime_artifact_graph_self_tests(
                         ),
                         "profile_projection": {
                             "profile": profile,
-                            "parity_ledger_sha256": parity_sha256,
                             "registry_module": generation[
                                 "registry_module"
                             ],
@@ -14435,9 +14441,11 @@ def run_python_self_tests() -> None:
         "c_wrapper_entity_count": 2,
         "retired_c_symbol_count": 1,
         "generated_wrapper_symbol_count": 2,
-        "legacy_macro_symbol_count": 0,
-        "external_legacy_macro_symbol_count": len(EXTERNAL_SYMBOLS),
-        "legacy_fmgr_macro_owner_count": len(EXTERNAL_SYMBOLS),
+        "handwritten_fmgr_export_symbol_count": 0,
+        "handwritten_fmgr_export_external_symbol_count": len(
+            EXTERNAL_SYMBOLS
+        ),
+        "handwritten_fmgr_export_owner_count": len(EXTERNAL_SYMBOLS),
         "c_symbol_sharing_group_count": 0,
         "c_routine_identities": identities,
         "c_link_symbols": main_symbols,
@@ -14457,9 +14465,11 @@ def run_python_self_tests() -> None:
         ],
         "retired_c_symbols": ["retired_fixture"],
         "generated_wrapper_symbols": main_symbols,
-        "legacy_macro_symbols": [],
-        "external_legacy_macro_symbols": sorted(EXTERNAL_SYMBOLS),
-        "legacy_fmgr_macro_owners": [
+        "handwritten_fmgr_export_symbols": [],
+        "handwritten_fmgr_export_external_symbols": sorted(
+            EXTERNAL_SYMBOLS
+        ),
+        "handwritten_fmgr_export_owners": [
             {
                 "symbol": symbol,
                 "macro": "CXX_PG_FUNCTION_INFO_V1",
@@ -15218,8 +15228,10 @@ def run_python_self_tests() -> None:
     incomplete_manifest["generated_wrapper_symbols"].remove(main_symbols[0])
     incomplete_manifest["generated_wrapper_symbol_count"] = 1
     incomplete_manifest["c_wrapper_entity_count"] = 1
-    incomplete_manifest["legacy_macro_symbols"] = [main_symbols[0]]
-    incomplete_manifest["legacy_macro_symbol_count"] = 1
+    incomplete_manifest["handwritten_fmgr_export_symbols"] = [
+        main_symbols[0]
+    ]
+    incomplete_manifest["handwritten_fmgr_export_symbol_count"] = 1
     try:
         validate_ledger_manifest_closure(
             incomplete_manifest,
@@ -15401,9 +15413,9 @@ def run_python_self_tests() -> None:
         "c_wrapper_entity_count": 1,
         "retired_c_symbol_count": 0,
         "generated_wrapper_symbol_count": 1,
-        "legacy_macro_symbol_count": 0,
-        "external_legacy_macro_symbol_count": 0,
-        "legacy_fmgr_macro_owner_count": 0,
+        "handwritten_fmgr_export_symbol_count": 0,
+        "handwritten_fmgr_export_external_symbol_count": 0,
+        "handwritten_fmgr_export_owner_count": 0,
         "c_symbol_sharing_group_count": 0,
         "c_routine_identities": [
             "bioseq_cache.cache_lookup(text)",
@@ -15425,9 +15437,9 @@ def run_python_self_tests() -> None:
         ],
         "retired_c_symbols": [],
         "generated_wrapper_symbols": [cache_symbol],
-        "legacy_macro_symbols": [],
-        "external_legacy_macro_symbols": [],
-        "legacy_fmgr_macro_owners": [],
+        "handwritten_fmgr_export_symbols": [],
+        "handwritten_fmgr_export_external_symbols": [],
+        "handwritten_fmgr_export_owners": [],
     }
     cache_abi_exports = (
         "Pg_magic_func",
@@ -15540,12 +15552,14 @@ def run_python_self_tests() -> None:
     incremental_manifest["c_wrapper_entity_count"] = 1
     incremental_manifest["generated_wrapper_symbol_count"] = 1
     incremental_manifest["generated_wrapper_symbols"] = ["array_cat"]
-    incremental_manifest["legacy_macro_symbol_count"] = 1
-    incremental_manifest["legacy_macro_symbols"] = ["seq_concat"]
-    incremental_manifest["legacy_fmgr_macro_owner_count"] = (
+    incremental_manifest["handwritten_fmgr_export_symbol_count"] = 1
+    incremental_manifest["handwritten_fmgr_export_symbols"] = [
+        "seq_concat"
+    ]
+    incremental_manifest["handwritten_fmgr_export_owner_count"] = (
         len(EXTERNAL_SYMBOLS) + 1
     )
-    incremental_manifest["legacy_fmgr_macro_owners"].append(
+    incremental_manifest["handwritten_fmgr_export_owners"].append(
         {
             "symbol": "seq_concat",
             "macro": "CXX_PG_FUNCTION_INFO_V1",
@@ -15602,18 +15616,22 @@ def run_python_self_tests() -> None:
             require_complete_codegen=False,
         )
     except EvidenceError as error:
-        if "generated and legacy fmgr ownership overlap" not in str(error):
+        if "generated and handwritten FMGR ownership overlap" not in str(
+            error
+        ):
             raise
     else:
         _fail("self-test", "overlapping fmgr ownership was accepted")
 
     bad_manifest = json.loads(json.dumps(incremental_manifest))
-    bad_manifest["legacy_macro_symbol_count"] = 0
-    bad_manifest["legacy_macro_symbols"] = []
-    bad_manifest["legacy_fmgr_macro_owner_count"] = len(EXTERNAL_SYMBOLS)
-    bad_manifest["legacy_fmgr_macro_owners"] = [
+    bad_manifest["handwritten_fmgr_export_symbol_count"] = 0
+    bad_manifest["handwritten_fmgr_export_symbols"] = []
+    bad_manifest["handwritten_fmgr_export_owner_count"] = len(
+        EXTERNAL_SYMBOLS
+    )
+    bad_manifest["handwritten_fmgr_export_owners"] = [
         owner
-        for owner in bad_manifest["legacy_fmgr_macro_owners"]
+        for owner in bad_manifest["handwritten_fmgr_export_owners"]
         if owner["symbol"] != "seq_concat"
     ]
     try:
@@ -15646,7 +15664,9 @@ def run_python_self_tests() -> None:
             required_present_symbols=frozenset(),
         )
     except EvidenceError as error:
-        if "still contains legacy fmgr owners" not in str(error):
+        if "still contains handwritten FMGR export owners" not in str(
+            error
+        ):
             raise
     else:
         _fail("self-test", "incomplete final codegen closure was accepted")

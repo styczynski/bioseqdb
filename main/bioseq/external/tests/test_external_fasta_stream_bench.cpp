@@ -7,7 +7,7 @@
 // libcurl `remote_byte_source` peak is measured separately by the live streaming
 // tests (a real 4.64 Mbp NCBI genome, peak carry <= 256 KiB).
 //
-// Tag: [external][streaming][bench].
+// The fixture requires filesystem access and a deliberately large allocation.
 
 #include <chrono>
 #include <cstddef>
@@ -158,7 +158,7 @@ run_metrics run_full_body(const std::string& path) {
 }  // namespace
 
 TEST_CASE("external_fasta_stream: production emitter stays bounded vs full-body",
-          "[external][streaming][bench]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:filesystem][resource:large_memory]") {
     const std::uint64_t bp = 16u * 1024u * 1024u;  // 16 Mbp fixture
     const std::uint64_t chunk_bases = 1048572;
     const std::string path = write_fixture(bp);

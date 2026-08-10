@@ -8,13 +8,12 @@
  * orchestrator keeps calling `crc32_update`. A separate A/B PR flips
  * the switch.
  *
- * Coefficients (`kIsoHdlcReflectedKeys`) and constants (`kIsoHdlcInit`,
- * `kIsoHdlcXorOut`) are sourced from
+ * Coefficients (`iso_hdlc_reflected_keys`) and constants (`iso_hdlc_initial_value`,
+ * `iso_hdlc_final_xor`) are sourced from
  * `crc-fast-rust-main/src/crc32/consts.rs:489-513`.
  */
 module;
 
-#include "common.h"
 
 #include <zlib.h>
 
@@ -24,7 +23,6 @@ module;
 
 export module bioseq.io.compression.crc32;
 
-import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 
@@ -32,7 +30,7 @@ export namespace bioseq::io::compression {
 /// from `crc-fast-rust-main/src/crc32/consts.rs:489-513`. Index 0 is
 /// unused (1-based to match the Rust port's comments). Indices 7-8 are
 /// Barrett's `mu` and `P(x)`.
-inline constexpr std::array<std::uint64_t, 23> kIsoHdlcReflectedKeys = {
+inline constexpr std::array<std::uint64_t, 23> iso_hdlc_reflected_keys = {
     0x0000000000000000ULL,
     0x00000000ccaa009eULL, 0x00000001751997d0ULL, 0x000000014a7fe880ULL,
     0x00000001e88ef372ULL, 0x00000000ccaa009eULL, 0x0000000163cd6124ULL,
@@ -45,9 +43,9 @@ inline constexpr std::array<std::uint64_t, 23> kIsoHdlcReflectedKeys = {
 };
 
 /// Initial state for a fresh gzip member: 0xFFFFFFFF (RFC 1952).
-inline constexpr std::uint32_t kIsoHdlcInit  = 0xFFFFFFFFu;
+inline constexpr std::uint32_t iso_hdlc_initial_value  = 0xFFFFFFFFu;
 /// Output xor: 0xFFFFFFFF (RFC 1952).
-inline constexpr std::uint32_t kIsoHdlcXorOut = 0xFFFFFFFFu;
+inline constexpr std::uint32_t iso_hdlc_final_xor = 0xFFFFFFFFu;
 
 /// Cast helpers — bridge bioseq's `std::uint*_t` / `std::size_t` types
 /// to zlib's `uLong` / `z_size_t` / `z_off_t` without scattering casts
@@ -93,7 +91,7 @@ namespace detail {
 }
 
 /// Highway-acceleration entry point. Implementation lives in
-/// `simd_kernels.cppm`. **Not wired** by default: the orchestrator
+/// `simd.cppm`. **Not wired** by default: the orchestrator
 /// continues to call `crc32_update` (which routes to zlib's crc32_z).
 [[nodiscard]] std::uint32_t crc32_iso_hdlc_simd(
     std::uint32_t running, const std::uint8_t* bytes, std::size_t size) noexcept;

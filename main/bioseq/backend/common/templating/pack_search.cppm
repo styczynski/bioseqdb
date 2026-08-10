@@ -1,18 +1,6 @@
 /**
  * @file pack_search.cppm
- * @brief Compile-time predicates over template parameter packs and tuples.
- *
- * Provides `contains_type` / `index_of_type` / `contains_value` /
- * `index_of_value` plus a `unique_types_in_tuple_v` invariant probe.
- * Used by `supported_alphabets<...>` and by `entry_for<A>`.
- *
- * `index_of_type_pack` (unchecked) returns `sizeof...(Hay)` when the
- * needle is absent — callers using the alias under a `requires` guard
- * never observe the out-of-bounds index because the guard removes the
- * specialisation from overload resolution first.
- *
- * `index_of_type_pack_checked` is the asserting wrapper for callers
- * where absence is a hard build failure.
+ * @brief Compile-time membership, position, and uniqueness queries for packs.
  */
 module;
 
@@ -25,114 +13,182 @@ export module bioseq.common.templating.pack_search;
 
 export namespace bioseq::common::templating {
 
-template <class Needle, class... Hay>
+/**
+ * @brief Reports whether a type occurs in a type pack.
+ * @tparam needle_type Type to find.
+ * @tparam haystack_types Types to search.
+ */
+template <class needle_type, class... haystack_types>
 [[nodiscard]] consteval bool contains_type_pack() noexcept {
-    return (std::is_same_v<Needle, Hay> || ...);
+    return (std::is_same_v<needle_type, haystack_types> || ...);
 }
 
-template <class Needle, class Tuple>
+/**
+ * @brief Type trait reporting whether a tuple contains a type.
+ * @tparam needle_type Type to find.
+ * @tparam tuple_type Tuple type to search.
+ */
+template <class needle_type, class tuple_type>
 struct contains_type_in_tuple : std::false_type {};
 
-template <class Needle, class... Ts>
-struct contains_type_in_tuple<Needle, std::tuple<Ts...>>
-    : std::bool_constant<(std::is_same_v<Needle, Ts> || ...)> {};
+/// Specialization of `contains_type_in_tuple` for `std::tuple`.
+template <class needle_type, class... element_types>
+struct contains_type_in_tuple<needle_type, std::tuple<element_types...>>
+    : std::bool_constant<
+          (std::is_same_v<needle_type, element_types> || ...)> {};
 
-template <class Needle, class Tuple>
-inline constexpr bool contains_type_v = contains_type_in_tuple<Needle, Tuple>::value;
+/**
+ * @brief Value form of `contains_type_in_tuple`.
+ * @tparam needle_type Type to find.
+ * @tparam tuple_type Tuple type to search.
+ */
+template <class needle_type, class tuple_type>
+inline constexpr bool contains_type_v =
+    contains_type_in_tuple<needle_type, tuple_type>::value;
 
-template <class Needle, class... Hay>
+/**
+ * @brief Finds the first index of a type in a pack.
+ * @tparam needle_type Type to find.
+ * @tparam haystack_types Types to search.
+ * @return First matching index, or the pack size when absent.
+ */
+template <class needle_type, class... haystack_types>
 [[nodiscard]] consteval std::size_t index_of_type_pack() noexcept {
     std::size_t result = 0;
     bool found = false;
-    ((std::is_same_v<Needle, Hay> && !found
-        ? (found = true, true)
-        : (++result, false)) || ...);
-    return found ? result : sizeof...(Hay);
+    ((std::is_same_v<needle_type, haystack_types> && !found
+          ? (found = true, true)
+          : (++result, false))
+     || ...);
+    return found ? result : sizeof...(haystack_types);
 }
 
-template <class Needle, class... Hay>
+/**
+ * @brief Finds the first index of a required type in a pack.
+ * @tparam needle_type Type to find.
+ * @tparam haystack_types Types to search.
+ * @return First matching index.
+ */
+template <class needle_type, class... haystack_types>
 [[nodiscard]] consteval std::size_t index_of_type_pack_checked() noexcept {
-    static_assert(contains_type_pack<Needle, Hay...>(),
-                  "index_of_type_pack_checked: Needle is not in Hay");
-    return index_of_type_pack<Needle, Hay...>();
+    static_assert(
+        contains_type_pack<needle_type, haystack_types...>(),
+        "index_of_type_pack_checked: needle type is absent");
+    return index_of_type_pack<needle_type, haystack_types...>();
 }
 
-template <class Needle, class Tuple>
+/**
+ * @brief Type trait holding the first index of a type in a tuple.
+ * @tparam needle_type Type to find.
+ * @tparam tuple_type Tuple type to search.
+ */
+template <class needle_type, class tuple_type>
 struct index_of_type_in_tuple;
 
-template <class Needle, class... Ts>
-struct index_of_type_in_tuple<Needle, std::tuple<Ts...>> {
-    static constexpr std::size_t value = index_of_type_pack_checked<Needle, Ts...>();
+/// Specialization of `index_of_type_in_tuple` for `std::tuple`.
+template <class needle_type, class... element_types>
+struct index_of_type_in_tuple<needle_type, std::tuple<element_types...>> {
+    /// First matching tuple index.
+    static constexpr std::size_t value =
+        index_of_type_pack_checked<needle_type, element_types...>();
 };
 
-template <class Needle, class Tuple>
+/**
+ * @brief Value form of `index_of_type_in_tuple`.
+ * @tparam needle_type Type to find.
+ * @tparam tuple_type Tuple type to search.
+ */
+template <class needle_type, class tuple_type>
 inline constexpr std::size_t index_of_type_v =
-    index_of_type_in_tuple<Needle, Tuple>::value;
+    index_of_type_in_tuple<needle_type, tuple_type>::value;
 
-template <auto Needle, auto... Hay>
+/**
+ * @brief Reports whether a structural value occurs in a value pack.
+ * @tparam needle_value Value to find.
+ * @tparam haystack_values Values to search.
+ */
+template <auto needle_value, auto... haystack_values>
 [[nodiscard]] consteval bool contains_value_pack() noexcept {
-    return ((Needle == Hay) || ...);
+    return ((needle_value == haystack_values) || ...);
 }
 
-template <auto Needle, auto... Hay>
+/**
+ * @brief Finds the first index of a required structural value in a pack.
+ * @tparam needle_value Value to find.
+ * @tparam haystack_values Values to search.
+ * @return First matching index.
+ */
+template <auto needle_value, auto... haystack_values>
 [[nodiscard]] consteval std::size_t index_of_value_pack() noexcept {
-    static_assert(contains_value_pack<Needle, Hay...>(),
-                  "index_of_value_pack: Needle is not in Hay");
+    static_assert(
+        contains_value_pack<needle_value, haystack_values...>(),
+        "index_of_value_pack: needle value is absent");
     std::size_t result = 0;
     bool found = false;
-    (((Needle == Hay) && !found
-        ? (found = true, true)
-        : (++result, false)) || ...);
+    (((needle_value == haystack_values) && !found
+          ? (found = true, true)
+          : (++result, false))
+     || ...);
     return result;
 }
 
 namespace detail_pack_search {
 
-template <std::size_t I, class Tuple, std::size_t... Js>
-[[nodiscard]] consteval bool ith_unique(std::index_sequence<Js...>) noexcept {
-    using Ti = std::tuple_element_t<I, Tuple>;
-    return ((!std::is_same_v<Ti, std::tuple_element_t<I + 1u + Js, Tuple>>) && ...);
+/** Reports whether one tuple element differs from every following element. */
+template <std::size_t element_index, class tuple_type,
+          std::size_t... following_offsets>
+[[nodiscard]] consteval bool element_differs_from_following(
+    std::index_sequence<following_offsets...>) noexcept
+{
+    using element_type = std::tuple_element_t<element_index, tuple_type>;
+    return ((!std::is_same_v<
+        element_type,
+        std::tuple_element_t<
+            element_index + 1u + following_offsets,
+            tuple_type>>) && ...);
 }
 
-template <class Tuple, std::size_t... Is>
+/** Reports whether all tuple elements have distinct types. */
+template <class tuple_type, std::size_t... element_indices>
 [[nodiscard]] consteval bool unique_types_in_tuple_impl(
-    std::index_sequence<Is...>) noexcept
+    std::index_sequence<element_indices...>) noexcept
 {
-    constexpr std::size_t N = std::tuple_size_v<Tuple>;
-    return (ith_unique<Is, Tuple>(std::make_index_sequence<
-              (N > Is + 1u ? N - Is - 1u : 0u)>{}) && ...);
+    constexpr std::size_t tuple_size = std::tuple_size_v<tuple_type>;
+    return (element_differs_from_following<element_indices, tuple_type>(
+        std::make_index_sequence<
+            tuple_size > element_indices + 1u
+                ? tuple_size - element_indices - 1u
+                : 0u>{}) && ...);
 }
 
 } // namespace detail_pack_search
 
-template <class Tuple>
+/**
+ * @brief Reports whether every element of a tuple has a distinct type.
+ * @tparam tuple_type Tuple type to inspect.
+ */
+template <class tuple_type>
 inline constexpr bool unique_types_in_tuple_v =
-    detail_pack_search::unique_types_in_tuple_impl<Tuple>(
-        std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+    detail_pack_search::unique_types_in_tuple_impl<tuple_type>(
+        std::make_index_sequence<std::tuple_size_v<tuple_type>>{});
 
-// All-distinct check over a value pack — the value-side twin of
-// unique_types_in_tuple_v. Reuses index_of_value_pack: a key is a duplicate iff
-// its first-occurrence index does not equal its own position.
-template <auto... Vs>
+/**
+ * @brief Reports whether every value in a pack is distinct.
+ * @tparam values Structural values to inspect.
+ */
+template <auto... values>
 [[nodiscard]] consteval bool unique_values_pack() noexcept {
-    if constexpr (sizeof...(Vs) <= 1u) {
+    if constexpr (sizeof...(values) <= 1u) {
         return true;
     } else {
-        std::size_t pos = 0;
-        bool ok = true;
-        (((index_of_value_pack<Vs, Vs...>() == pos++) ? true : (ok = false)), ...);
-        return ok;
+        std::size_t position = 0;
+        bool unique = true;
+        (((index_of_value_pack<values, values...>() == position++)
+              ? true
+              : (unique = false)),
+         ...);
+        return unique;
     }
 }
 
-static_assert(contains_type_pack<int, char, short, int, long>());
-static_assert(!contains_type_pack<int, char, short, long>());
-static_assert(index_of_type_pack<int, char, short, int, long>() == 2u);
-static_assert(contains_value_pack<3u, 1u, 2u, 3u>());
-static_assert(index_of_value_pack<3u, 1u, 2u, 3u>() == 2u);
-static_assert(unique_types_in_tuple_v<std::tuple<int, char, short>>);
-static_assert(!unique_types_in_tuple_v<std::tuple<int, char, int>>);
-static_assert(unique_values_pack<1u, 2u, 3u>());
-static_assert(!unique_values_pack<1u, 2u, 1u>());
-
-} // namespace
+} // namespace bioseq::common::templating

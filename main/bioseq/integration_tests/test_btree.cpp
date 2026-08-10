@@ -8,7 +8,7 @@
 //     custom-scan path entirely; the result set is therefore unaffected by
 //     `bioseq.enable_bioseq_index_scan`.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

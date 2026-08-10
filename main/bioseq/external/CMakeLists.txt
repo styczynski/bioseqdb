@@ -193,34 +193,17 @@ set(OATPP_LINK_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OATPP_LINK_ATOMIC ON CACHE BOOL "" FORCE)
 
 # Every static archive that reaches the extension shared object must be PIC.
-# Seed the directory default before either the repo-local or fetched Oat++
-# source is added.
+# Seed the directory default before the pinned Oat++ source is added.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(_bioseq_oatpp_root "${BIOSEQ_REPOSITORY_ROOT}/oatpp-master")
-if(NOT EXISTS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp")
-  include(FetchContent)
-  FetchContent_Declare(bioseq_oatpp
-    GIT_REPOSITORY "https://github.com/oatpp/oatpp.git"
-    GIT_TAG "f83d648fd82dc222ef88aabbafb68efbd7d7bf50"
-    GIT_SHALLOW FALSE
-    EXCLUDE_FROM_ALL)
-  FetchContent_MakeAvailable(bioseq_oatpp)
-  set(_bioseq_oatpp_root "${bioseq_oatpp_SOURCE_DIR}")
-endif()
+include(FetchContent)
+FetchContent_Declare(bioseq_oatpp
+  GIT_REPOSITORY "https://github.com/oatpp/oatpp.git"
+  GIT_TAG "f83d648fd82dc222ef88aabbafb68efbd7d7bf50"
+  GIT_SHALLOW FALSE
+  EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(bioseq_oatpp)
 
-file(STRINGS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp"
-  _bioseq_oatpp_version_line
-  REGEX "^#define OATPP_VERSION \"1\\.4\\.[0-9]+\"$")
-if(NOT _bioseq_oatpp_version_line)
-  message(FATAL_ERROR
-    "The repo-local oatpp-master dependency must provide Oat++ 1.4.x")
-endif()
-
-if(NOT TARGET oatpp)
-  add_subdirectory("${_bioseq_oatpp_root}"
-    "${CMAKE_CURRENT_BINARY_DIR}/oatpp" EXCLUDE_FROM_ALL)
-endif()
 if(TARGET oatpp)
   set_target_properties(oatpp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -242,10 +225,10 @@ target_sources(bioseq_external_https
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     FILES
-      "${CMAKE_CURRENT_SOURCE_DIR}/http_validation.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/runtime.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/https.cppm")
 target_link_libraries(bioseq_external_https PUBLIC
+  bioseq_http_validation_core
   oatpp::oatpp
   OpenSSL::SSL
   OpenSSL::Crypto)
@@ -261,7 +244,7 @@ foreach(_bioseq_descriptor IN LISTS _bioseq_external_descriptors_api_client)
 endforeach()
 
 # ---------------------------------------------------------------------------
-# DOC0372 — PostgreSQL-independent provider core (concepts + structs only). No
+# PostgreSQL-independent provider core (concepts + structs only). No
 # Datum/tuple/palloc/SPI/PostgreSQL header, no alphabet, no libarchive edge.
 # Owns bioseq.external.provider.* and links only the runtime/leaf/templating
 # cores so metadata provider clients never schedule the sequence graph.
@@ -289,7 +272,7 @@ target_sources(bioseq_external_provider_core
     FILES ${_bioseq_provider_core_modules})
 
 # ---------------------------------------------------------------------------
-# DOC0372 — provider metadata adapters (NCBI/UCSC/UniProt/EBI) + configured pack.
+# Provider metadata adapters (NCBI/UCSC/UniProt/EBI) + configured pack.
 # Each adapter normalizes one provider's generated GET client into the common
 # owning-row model. Links the generated clients + provider core + simdjson; no
 # PostgreSQL, alphabet, or transfer edge.
@@ -297,12 +280,6 @@ target_sources(bioseq_external_provider_core
 find_package(simdjson CONFIG REQUIRED)
 file(GLOB _bioseq_provider_adapter_modules CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/providers/*.cppm")
-# Classic (non-module) helper TUs for the adapters. simdjson's amalgamated
-# header exposes a TU-local serializer entity that GCC refuses to write into a
-# module CMI, so all simdjson use is confined to these plain translation units
-# (json_dom.cpp), matching the repo's existing simdjson usage in io_bench.
-file(GLOB _bioseq_provider_adapter_sources CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/providers/*.cpp")
 if(_bioseq_provider_adapter_modules)
   add_library(bioseq_external_provider_adapters STATIC)
   set_target_properties(bioseq_external_provider_adapters PROPERTIES
@@ -319,20 +296,24 @@ if(_bioseq_provider_adapter_modules)
     bioseq_external_api_ucsc
     bioseq_external_api_uniprot
     bioseq_external_api_ebi
-    bioseq_external_https
+    bioseq_external_https)
+  target_link_libraries(bioseq_external_provider_adapters PRIVATE
     simdjson::simdjson)
   target_sources(bioseq_external_provider_adapters
     PUBLIC FILE_SET CXX_MODULES
       BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-      FILES ${_bioseq_provider_adapter_modules})
-  if(_bioseq_provider_adapter_sources)
-    target_sources(bioseq_external_provider_adapters
-      PRIVATE ${_bioseq_provider_adapter_sources})
-  endif()
+      FILES
+        ${_bioseq_provider_adapter_modules}
+        "${CMAKE_CURRENT_SOURCE_DIR}/json/index.cppm")
+  target_sources(bioseq_external_provider_adapters PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/json/simdjson.cppm")
+  set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/json/simdjson.cppm"
+    PROPERTIES COMPILE_OPTIONS "-x;c++")
 endif()
 
 # ---------------------------------------------------------------------------
-# DOC0372 — external streaming IO/transfer bundle. Owns the libcurl pull source,
+# External streaming IO/transfer bundle. Owns the libcurl pull source,
 # the locator SSRF firewall, the serial gzip decode source, the bounded channel
 # glue, and the provider-neutral sequence streaming executor. It links the
 # non-PostgreSQL IO modules (io_source concept + shared FASTA/stream parser) and
@@ -361,32 +342,34 @@ target_sources(bioseq_external_io
       "${CMAKE_CURRENT_SOURCE_DIR}/transport/transfer_service.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/io/gzip_decode_source.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/io/sequence_stream.cppm"
-      "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/index.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/io/datasets_stream.cppm")
-# Classic (non-module) TU: owns all OpenSSL usage so <openssl/evp.h> never enters
-# a module global module fragment (would clash with import std). See archive_md5.h.
 target_sources(bioseq_external_io PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_md5.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/openssl_md5.cppm")
+set_source_files_properties(
+  "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/openssl_md5.cppm"
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 target_link_libraries(bioseq_external_io PUBLIC
   bioseq_external_provider_core
   bioseq_modules_nopg
   CURL::libcurl
   c-ares::cares
   LibArchive::LibArchive
-  OpenSSL::Crypto
   ZLIB::ZLIB)
+target_link_libraries(bioseq_external_io PRIVATE
+  OpenSSL::Crypto)
 
 # Provider-core + adapter tests run inside the existing external integration exec
 # so the `external-api` MCP mode builds and runs them without a sequence/PG target.
 if(TARGET bioseq_external_integration_tests_exec)
-  # DOC0377 §17.3 — this target is the compile/link proof that the reusable
-  # rank-pack core, checked fixed-span writer, and admitted-region adapter stay
-  # outside PostgreSQL. Keep the checked closure explicit: broad globbing would
-  # make an unrelated PG-facing source weaken the value of this denylist.
+  # This target keeps the reusable rank-pack core, checked fixed-span writer,
+  # and admitted-region adapter outside PostgreSQL. Keep the checked closure
+  # explicit so an unrelated PostgreSQL-facing source cannot weaken the
+  # denylist.
   set(_bioseq_pg_free_pack_sources
     "${_bioseq_external_source_root}/backend/sequences/rank_pack_core.cppm"
     "${_bioseq_external_source_root}/backend/sequences/rank_pack.cppm"
-    "${_bioseq_external_source_root}/backend/storage/lazy_compact_sequence.cppm")
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence.cppm")
   set(_bioseq_forbidden_pack_source_regexes
     "#[ \t]*include[ \t]*[<\"](postgres(\\.h)?|fmgr\\.h|headers/pg_compat\\.h|pg_compat\\.h|access/|catalog/|commands/|executor/|nodes/|utils/)"
     "(^|[^A-Za-z0-9_])(ereport|elog|palloc|palloc0|pfree)[ \t]*\\("
@@ -402,7 +385,7 @@ if(TARGET bioseq_external_integration_tests_exec)
         "${_bioseq_pg_free_pack_source_contents}")
       if(NOT "${_bioseq_forbidden_pack_source_match}" STREQUAL "")
         message(FATAL_ERROR
-          "DOC0377 PostgreSQL dependency '${_bioseq_pg_free_pack_source_match}' "
+          "PostgreSQL dependency '${_bioseq_pg_free_pack_source_match}' "
           "entered PG-free packing source ${_bioseq_pg_free_pack_source}")
       endif()
     endforeach()

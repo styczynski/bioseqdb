@@ -20,7 +20,7 @@
 // path actually executed (not a silent decline).
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <cstdint>

@@ -19,11 +19,11 @@ export namespace bioseq::common {
  * consumers. The final two values let a consumer preserve its public
  * range/decoding diagnostics without defining a second arithmetic error type.
  */
-enum class CheckedArithmeticError : std::uint8_t {
-    Overflow,
-    OutOfBounds,
-    InvalidAlignment,
-    Truncated,
+enum class checked_arithmetic_error : std::uint8_t {
+    overflow,
+    out_of_bounds,
+    invalid_alignment,
+    truncated,
 };
 
 /** Add two unsigned integers without wrapping. */
@@ -67,18 +67,46 @@ std::optional<std::common_type_t<Left, Right>> checked_mul(
     return converted_left * converted_right;
 }
 
+/**
+ * Divide two unsigned integers and round toward positive infinity.
+ *
+ * A zero divisor returns zero. The quotient/remainder formulation avoids the
+ * overflow possible in `(dividend + divisor - 1) / divisor`.
+ */
+template <class p_dividend_type, class p_divisor_type>
+    requires(
+        std::is_unsigned_v<p_dividend_type>
+        && std::is_unsigned_v<p_divisor_type>)
+[[nodiscard]] constexpr
+std::common_type_t<p_dividend_type, p_divisor_type> ceil_div(
+    p_dividend_type dividend,
+    p_divisor_type divisor) noexcept {
+    using integer_type =
+        std::common_type_t<p_dividend_type, p_divisor_type>;
+    const integer_type converted_divisor =
+        static_cast<integer_type>(divisor);
+    if (converted_divisor == 0) {
+        return integer_type{0};
+    }
+    const integer_type converted_dividend =
+        static_cast<integer_type>(dividend);
+    const integer_type quotient = converted_dividend / converted_divisor;
+    const integer_type remainder = converted_dividend % converted_divisor;
+    return quotient + static_cast<integer_type>(remainder != 0);
+}
+
 /** Round a byte offset up to a power-of-two alignment without wrapping. */
 [[nodiscard]] constexpr
-std::expected<std::uint64_t, CheckedArithmeticError> checked_align_up(
+std::expected<std::uint64_t, checked_arithmetic_error> checked_align_up(
     std::uint64_t value,
     std::uint64_t alignment) noexcept {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
         return std::unexpected(
-            CheckedArithmeticError::InvalidAlignment);
+            checked_arithmetic_error::invalid_alignment);
     }
     const auto adjusted = checked_add(value, alignment - 1);
     if (!adjusted.has_value()) {
-        return std::unexpected(CheckedArithmeticError::Overflow);
+        return std::unexpected(checked_arithmetic_error::overflow);
     }
     return *adjusted & ~(alignment - 1);
 }

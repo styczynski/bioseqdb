@@ -9,7 +9,7 @@ module;
 #include <string>
 #include <type_traits>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "catalog/pg_attribute.h"
 #include "common/hashfn.h"
@@ -26,10 +26,11 @@ extern "C" {
 #include "utils/lsyscache.h"
 }
 
-export module bioseq.types.pg_compact_sequence:letter;
+export module bioseq.postgres.types.compact_sequence:letter;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.pg_utils.sql_boundary;
+import bioseq.postgres.support;
+import bioseq.postgres.support.sql_boundary;
 import :flat_abi;
 import :io;
 
@@ -726,14 +727,14 @@ export [[nodiscard]] inline bioseq::pg_types::letter validate_letter_datum(Datum
     return value;
 }
 
-export namespace bioseq::pg_utils::detail {
+export namespace bioseq::postgres::support::detail {
 
 template<>
-struct sql_scalar_conversion<bioseq::pg_types::letter> final {
+struct scalar_codec<bioseq::pg_types::letter> final {
     static constexpr const char* key = "bioseq.letter/by_value";
 
     [[nodiscard]] static bioseq::pg_types::letter read(Datum value) {
-        return bioseq::pg_utils::invoke_pg_as_cpp([value] {
+        return bioseq::postgres::support::invoke_pg_as_cpp([value] {
             return ::validate_letter_datum(value);
         });
     }
@@ -746,7 +747,7 @@ struct sql_scalar_conversion<bioseq::pg_types::letter> final {
 };
 
 template<>
-struct sql_scalar_conversion<
+struct scalar_codec<
     bioseq::pg_types::letter_typmod_input> final {
     static constexpr const char* key =
         "bioseq.letter/raw_typmod_input";
@@ -765,7 +766,7 @@ struct sql_scalar_conversion<
     }
 };
 
-}  // namespace bioseq::pg_utils::detail
+}  // namespace bioseq::postgres::support::detail
 
 [[nodiscard]] inline std::uint16_t letter_key(bioseq::pg_types::letter value) noexcept
 {

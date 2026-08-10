@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -19,7 +19,7 @@ import :alignment_hook_contract;
 
 namespace bioseq::pg::detail {
 
-void unlink_alignment_frame(AlignmentExecutorFrame* frame) noexcept
+void unlink_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
 		return;
@@ -30,14 +30,14 @@ void unlink_alignment_frame(AlignmentExecutorFrame* frame) noexcept
 	alignment_query_registry.erase(
 		std::remove_if(
 			alignment_query_registry.begin(), alignment_query_registry.end(),
-			[frame](const AlignmentQueryRegistryEntry& entry) noexcept {
+			[frame](const alignment_query_registry_entry& entry) noexcept {
 				return entry.frame == frame;
 			}),
 		alignment_query_registry.end());
 	alignment_estate_registry.erase(
 		std::remove_if(
 			alignment_estate_registry.begin(), alignment_estate_registry.end(),
-			[frame](const AlignmentEstateRegistryEntry& entry) noexcept {
+			[frame](const alignment_estate_registry_entry& entry) noexcept {
 				return entry.frame == frame;
 			}),
 		alignment_estate_registry.end());

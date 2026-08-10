@@ -1,31 +1,28 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Stripe and row traversal for the Bioseq column format.
  *
- * table/io/columnar_reader.cppm
- *
- * Reader side of the bioseq columnar table format. Owns the
- * BioseqColumnReadState lifecycle: locating stripes via the metadata
+ * Owns the
+ * column_read_state lifecycle: locating stripes via the metadata
  * tables, decompressing chunk groups, applying chunk-group filter
  * pushdowns, and yielding tuples (or vectorised slots) to the
- * executor. Pairs with columnar_writer.cppm.
- *
- *-------------------------------------------------------------------------
+ * executor.
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include "safe_lib.h"
 
 #include <cstdint>
 #include <limits>
 
-export module bioseq.table.io:reader;
+export module bioseq.postgres.table.io:reader;
 
-import bioseq.common.mlogging;
-import bioseq.vector.types;
-import bioseq.storage.metadata;
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::enable_dml, bioseq::settings::enable_column_cache GUCs
+import bioseq.common.logging;
+import bioseq.postgres.vectorization.types;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.support;
+import bioseq.postgres.configuration.core;
 import :cache;
 import :pruning;
 import :read_chunk;
@@ -35,197 +32,197 @@ import :read_chunk;
  * yet the read path tries to consume it. Kept as a `const char*` rather
  * than an inline string so call sites use the same wording.
  */
-static constexpr const char* UNEXPECTED_STRIPE_READ_ERR_MSG =
+inline constexpr const char* k_unexpected_stripe_read_error_message =
 	"attempted to read an unexpected stripe while reading columnar "
 	"table {}, stripe with id={} is not flushed";
 
 
 export int64_t
-BioseqColumnReadChunkGroupsFiltered(BioseqColumnReadState *state);
+read_chunk_groups_filtered(column_read_state *state);
 export bool
-BioseqColumnSetStripeReadState(BioseqColumnReadState *readState,
-						   StripeMetadata *startStripeMetadata);
+set_stripe_read_state(column_read_state *read_state,
+						   stripe_metadata *start_stripe_metadata);
 export bool
-BioseqColumnReadNextRow(BioseqColumnReadState *readState, Datum *columnValues, bool *columnNulls,
-					uint64_t *rowNumber);
-export BioseqColumnReadState *
-BioseqColumnBeginRead(Relation relation, TupleDesc tupleDescriptor,
-				  List *projectedColumnList, List *whereClauseList,
-				  MemoryContext scanContext, Snapshot snapshot,
-				  bool randomAccess,
-				  ParallelBioseqColumnScan parallelBioseqColumnScan);
+read_next_column_row(column_read_state *read_state, Datum *column_values, bool *column_nulls,
+					uint64_t *row_number);
+export column_read_state *
+begin_column_read(Relation relation, TupleDesc tuple_descriptor,
+				  List *projected_columns, List *filter_clauses,
+				  MemoryContext scan_context, Snapshot snapshot,
+				  bool random_access,
+				  parallel_column_scan_handle parallel_scan);
 export bool
-BioseqColumnReadNextVector(BioseqColumnReadState *readState,  Datum *columnValues,
-					   bool *columnNulls, uint64 *rowNumber, int *newVectorSize);
+read_next_column_vector(column_read_state *read_state,  Datum *column_values,
+					   bool *column_nulls, uint64 *row_number, int *new_vector_size);
 export void
-BioseqColumnRescan(BioseqColumnReadState *readState, List *scanQual);
+rescan_column_reader(column_read_state *read_state, List *scan_qual);
 export void
-BioseqColumnEndRead(BioseqColumnReadState *readState);
+end_column_read(column_read_state *read_state);
 export void
-BioseqColumnReadRowByRowNumberOrError(BioseqColumnReadState *readState,
-								  uint64_t rowNumber, Datum *columnValues,
-								  bool *columnNulls);
+read_column_row_by_number_or_error(column_read_state *read_state,
+								  uint64_t row_number, Datum *column_values,
+								  bool *column_nulls);
 export void
-BioseqColumnReadFlushPendingWrites(BioseqColumnReadState *readState);
+flush_pending_writes_for_read(column_read_state *read_state);
 export bool
-BioseqColumnReadRowByRowNumber(BioseqColumnReadState *readState,
-						   uint64_t rowNumber, Datum *columnValues,
-						   bool *columnNulls);
+read_column_row_by_number(column_read_state *read_state,
+						   uint64_t row_number, Datum *column_values,
+						   bool *column_nulls);
 void
-BioseqColumnResetRead(BioseqColumnReadState *readState);
+reset_column_read(column_read_state *read_state);
 
 
 /* static function declarations */
-static MemoryContext CreateStripeReadMemoryContext(void);
-static bool BioseqColumnReadIsCurrentStripe(BioseqColumnReadState *readState,
-										uint64_t rowNumber);
-static StripeMetadata * BioseqColumnReadGetCurrentStripe(BioseqColumnReadState *readState);
-static bool ReadStripeRowByRowNumber(BioseqColumnReadState *readState,
-									 uint64_t rowNumber, Datum *columnValues,
-									 bool *columnNulls);
-static bool StripeReadIsCurrentChunkGroup(StripeReadState *stripeReadState,
-										  int chunkGroupIndex);
-static bool ReadChunkGroupRowByRowOffset(ChunkGroupReadState *chunkGroupReadState,
-										 StripeMetadata *stripeMetadata,
-										 uint64_t stripeRowOffset, Datum *columnValues,
-										 bool *columnNulls);
-static bool StripeReadInProgress(BioseqColumnReadState *readState);
-static bool HasUnreadStripe(BioseqColumnReadState *readState);
-static StripeReadState * BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel,
-										 TupleDesc tupleDesc, List *projectedColumnList,
-										 List *whereClauseList, List *whereClauseVars,
-										 MemoryContext stripeReadContext,
+static MemoryContext create_stripe_read_memory_context(void);
+static bool is_current_read_stripe(column_read_state *read_state,
+										uint64_t row_number);
+static stripe_metadata * get_current_read_stripe(column_read_state *read_state);
+static bool read_stripe_row_by_number(column_read_state *read_state,
+									 uint64_t row_number, Datum *column_values,
+									 bool *column_nulls);
+static bool is_current_chunk_group(stripe_read_state *stripe_state,
+										  int chunk_group_index);
+static bool read_chunk_group_row_by_offset(chunk_group_read_state *chunk_group_state,
+										 stripe_metadata *stripe_metadata_value,
+										 uint64_t stripe_row_offset, Datum *column_values,
+										 bool *column_nulls);
+static bool stripe_read_in_progress(column_read_state *read_state);
+static bool has_unread_stripe(column_read_state *read_state);
+static stripe_read_state * begin_stripe_read(stripe_metadata *stripe_metadata_value, Relation rel,
+										 TupleDesc tuple_desc, List *projected_columns,
+										 List *filter_clauses, List *filter_variables,
+										 MemoryContext stripe_read_context,
 										 Snapshot snapshot);
-static void AdvanceStripeRead(BioseqColumnReadState *readState);
-static bool SnapshotMightSeeUnflushedStripes(Snapshot snapshot);
-static bool ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
-							  bool *columnNulls,
-							  uint64_t stripeFirstRowNumber,
-							  Snapshot snapshot, uint64_t stripeId);
+static void advance_stripe_read(column_read_state *read_state);
+static bool snapshot_might_see_unflushed_stripes(Snapshot snapshot);
+static bool read_next_stripe_row(stripe_read_state *stripe_state, Datum *column_values,
+								  bool *column_nulls,
+								  uint64_t stripe_first_row_number,
+								  Snapshot snapshot, uint64_t stripe_id);
 
 /* Vectorization */
-static bool ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
-								 bool *columnNulls, int *newVectorSize,
-								 uint64 stripeId,
+static bool read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
+								 bool *column_nulls, int *new_vector_size,
+								 uint64 stripe_id,
 								 Snapshot snapshot,
-								 uint64 *rowNumber,
-								 uint64 stripeFirstRowNumber);
+								 uint64 *row_number,
+								 uint64 stripe_first_row_number);
 
 /*
- * BioseqColumnBeginRead initializes a columnar read operation. This function returns a
+ * begin_column_read initializes a columnar read operation. This function returns a
  * read handle that's used during reading rows and finishing the read operation.
  *
- * projectedColumnList is an integer list of attribute numbers (1-indexed).
+ * projected_columns is an integer list of attribute numbers (1-indexed).
  */
-BioseqColumnReadState *
-BioseqColumnBeginRead(Relation relation, TupleDesc tupleDescriptor,
-				  List *projectedColumnList, List *whereClauseList,
-				  MemoryContext scanContext, Snapshot snapshot,
-				  bool randomAccess,
-				  ParallelBioseqColumnScan parallelBioseqColumnScan)
+column_read_state *
+begin_column_read(Relation relation, TupleDesc tuple_descriptor,
+				  List *projected_columns, List *filter_clauses,
+				  MemoryContext scan_context, Snapshot snapshot,
+				  bool random_access,
+				  parallel_column_scan_handle parallel_scan)
 {
 	/*
-	 * We allocate all stripe specific data in the stripeReadContext, and reset
+	 * We allocate all stripe specific data in the stripe_read_context, and reset
 	 * this memory context before loading a new stripe. This is to avoid memory
 	 * leaks.
 	 */
-	MemoryContext stripeReadContext = CreateStripeReadMemoryContext();
+	MemoryContext stripe_read_context = create_stripe_read_memory_context();
 
-	BioseqColumnReadState *readState = make0<BioseqColumnReadState>();
-	readState->relation = relation;
-	readState->projectedColumnList = projectedColumnList;
-	readState->whereClauseList = whereClauseList;
-	readState->whereClauseVars = GetClauseVars(whereClauseList, tupleDescriptor->natts);
-	readState->chunkGroupsFiltered = 0;
-	readState->tupleDescriptor = tupleDescriptor;
-	readState->stripeReadContext = stripeReadContext;
-	readState->stripeReadState = NULL;
-	readState->scanContext = scanContext;
+	column_read_state *read_state = bioseq::postgres::support::allocate_zeroed_object<column_read_state>();
+	read_state->relation = relation;
+	read_state->projected_columns = projected_columns;
+	read_state->filter_clauses = filter_clauses;
+	read_state->filter_variables = collect_clause_variables(filter_clauses, tuple_descriptor->natts);
+	read_state->filtered_chunk_groups = 0;
+	read_state->tuple_descriptor = tuple_descriptor;
+	read_state->stripe_read_context = stripe_read_context;
+	read_state->stripe_state = NULL;
+	read_state->scan_context = scan_context;
 
 	/*
-	 * Note that BioseqColumnReadFlushPendingWrites might update those two by
+	 * Note that flush_pending_writes_for_read might update those two by
 	 * registering a new snapshot.
 	 */
-	readState->snapshot = snapshot;
-	readState->snapshotRegisteredByUs = false;
+	read_state->snapshot = snapshot;
+	read_state->owns_snapshot_registration = false;
 
 	/* Parallel execution */
-	readState->parallelBioseqColumnScan = parallelBioseqColumnScan;
+	read_state->parallel_scan = parallel_scan;
 
-	if (!randomAccess)
+	if (!random_access)
 	{
 		/*
 		 * If have parallel columnar scan we don't flush states.
 		 */
-		if (readState->parallelBioseqColumnScan == NULL)
+		if (read_state->parallel_scan == NULL)
 		{
 			/*
 			* Flush any pending in-memory changes to row_mask metadata
 			* for next scan.
 			*/
-			RowMaskFlushWriteStateForRelfilenode(readState->relation->rd_locator.relNumber,
-												 GetCurrentSubTransactionId());
+			flush_row_mask_write_state_for_relation_file(read_state->relation->rd_locator.relNumber,
+											 GetCurrentSubTransactionId());
 
 			/*
 			* When doing random access (i.e.: index scan), we don't need to flush
 			* pending writes until we need to read them.
 			* bioseq_index_fetch_tuple would do so when needed.
 			*/
-			BioseqColumnReadFlushPendingWrites(readState);
+			flush_pending_writes_for_read(read_state);
 		}
 
 		/*
-		 * AdvanceStripeRead sets currentStripeMetadata for the first stripe
+		 * advance_stripe_read sets current_stripe for the first stripe
 		 * to read if not doing random access. Otherwise, reader (i.e.:
-		 * BioseqColumnReadRowByRowNumber) would already decide the stripe to read
+		 * read_column_row_by_number) would already decide the stripe to read
 		 * on-the-fly.
 		 *
 		 * Moreover, Since we don't flush pending writes for random access,
-		 * AdvanceStripeRead might encounter with stripe metadata entries due
+		 * advance_stripe_read might encounter with stripe metadata entries due
 		 * to current transaction's pending writes even when using an MVCC
-		 * snapshot, but AdvanceStripeRead would throw an error for that.
+		 * snapshot, but advance_stripe_read would throw an error for that.
 		 * Note that this is not the case with for plain table scan methods
 		 * (i.e.: SeqScan and BioseqColumn CustomScan).
 		 *
-		 * For those reasons, we don't call AdvanceStripeRead if we will do
+		 * For those reasons, we don't call advance_stripe_read if we will do
 		 * random access.
 		 */
-		AdvanceStripeRead(readState);
+		advance_stripe_read(read_state);
 	}
 
-	return readState;
+	return read_state;
 }
 
 
 /*
- * BioseqColumnReadFlushPendingWrites flushes pending writes for read operation
+ * flush_pending_writes_for_read flushes pending writes for read operation
  * and sets a new (registered) snapshot if necessary.
  *
- * If it sets a new snapshot, then sets snapshotRegisteredByUs to true to
+ * If it sets a new snapshot, then sets owns_snapshot_registration to true to
  * indicate that caller should unregister the snapshot after finishing read
  * operation.
  *
- * Note that this function assumes that readState's relation and snapshot
+ * Note that this function assumes that read_state's relation and snapshot
  * fields are already set.
  */
 void
-BioseqColumnReadFlushPendingWrites(BioseqColumnReadState *readState)
+flush_pending_writes_for_read(column_read_state *read_state)
 {
-	Assert(!readState->snapshotRegisteredByUs);
+	Assert(!read_state->owns_snapshot_registration);
 
-	Oid relfilelocator = readState->relation->rd_locator.relNumber;
+	Oid relfilelocator = read_state->relation->rd_locator.relNumber;
 
-	FlushWriteStateWithNewSnapshot(relfilelocator, &readState->snapshot,
-								   &readState->snapshotRegisteredByUs);
+	flush_write_state_with_fresh_snapshot(relfilelocator, &read_state->snapshot,
+								   &read_state->owns_snapshot_registration);
 }
 
 
 /*
- * CreateStripeReadMemoryContext creates a memory context to be used when
+ * create_stripe_read_memory_context creates a memory context to be used when
  * reading a stripe.
  */
 static MemoryContext
-CreateStripeReadMemoryContext()
+create_stripe_read_memory_context()
 {
 	return AllocSetContextCreate(CurrentMemoryContext, "Stripe Read Memory Context",
 								 ALLOCSET_DEFAULT_SIZES);
@@ -233,47 +230,47 @@ CreateStripeReadMemoryContext()
 
 
 /*
- * BioseqColumnReadNextRow tries to read a row from the columnar table. On success, it sets
- * column values, column nulls and rowNumber (if passed to be non-NULL), and returns true.
+ * read_next_column_row tries to read a row from the columnar table. On success, it sets
+ * column values, column nulls and row_number (if passed to be non-NULL), and returns true.
  * If there are no more rows to read, the function returns false.
  */
 bool
-BioseqColumnReadNextRow(BioseqColumnReadState *readState, Datum *columnValues, bool *columnNulls,
-					uint64_t *rowNumber)
+read_next_column_row(column_read_state *read_state, Datum *column_values, bool *column_nulls,
+					uint64_t *row_number)
 {
 	while (true)
 	{
-		if (!StripeReadInProgress(readState))
+		if (!stripe_read_in_progress(read_state))
 		{
-			if (!HasUnreadStripe(readState))
+			if (!has_unread_stripe(read_state))
 			{
 				return false;
 			}
 
-			readState->stripeReadState = BeginStripeRead(readState->currentStripeMetadata,
-														 readState->relation,
-														 readState->tupleDescriptor,
-														 readState->projectedColumnList,
-														 readState->whereClauseList,
-														 readState->whereClauseVars,
-														 readState->stripeReadContext,
-														 readState->snapshot);
+			read_state->stripe_state = begin_stripe_read(read_state->current_stripe,
+												 read_state->relation,
+												 read_state->tuple_descriptor,
+												 read_state->projected_columns,
+												 read_state->filter_clauses,
+												 read_state->filter_variables,
+												 read_state->stripe_read_context,
+												 read_state->snapshot);
 		}
 
-		if (!ReadStripeNextRow(readState->stripeReadState, columnValues, columnNulls,
-							   readState->currentStripeMetadata->firstRowNumber,
-							   readState->snapshot,
-								 readState->currentStripeMetadata->id))
+		if (!read_next_stripe_row(read_state->stripe_state, column_values, column_nulls,
+								   read_state->current_stripe->first_row_number,
+								   read_state->snapshot,
+									 read_state->current_stripe->id))
 		{
-			AdvanceStripeRead(readState);
+			advance_stripe_read(read_state);
 			continue;
 		}
 
-		if (rowNumber)
+		if (row_number)
 		{
-			*rowNumber = readState->currentStripeMetadata->firstRowNumber +
-						 readState->stripeReadState->chunkGroupReadState->chunkStripeRowOffset +
-						 readState->stripeReadState->chunkGroupReadState->currentRow  - 1;
+			*row_number = read_state->current_stripe->first_row_number +
+						 read_state->stripe_state->chunk_group_state->stripe_row_offset +
+						 read_state->stripe_state->chunk_group_state->current_row  - 1;
 		}
 
 		return true;
@@ -282,151 +279,151 @@ BioseqColumnReadNextRow(BioseqColumnReadState *readState, Datum *columnValues, b
 
 
 /*
- * BioseqColumnReadRowByRowNumberOrError is a wrapper around
- * BioseqColumnReadRowByRowNumber that throws an error if tuple
- * with rowNumber does not exist.
+ * read_column_row_by_number_or_error is a wrapper around
+ * read_column_row_by_number that throws an error if tuple
+ * with row_number does not exist.
  */
 void
-BioseqColumnReadRowByRowNumberOrError(BioseqColumnReadState *readState,
-								  uint64_t rowNumber, Datum *columnValues,
-								  bool *columnNulls)
+read_column_row_by_number_or_error(column_read_state *read_state,
+								  uint64_t row_number, Datum *column_values,
+								  bool *column_nulls)
 {
-	if (!BioseqColumnReadRowByRowNumber(readState, rowNumber,
-									columnValues, columnNulls))
+	if (!read_column_row_by_number(read_state, row_number,
+									column_values, column_nulls))
 	{
-		bioseq_log<ERR, PG>( "cannot read from columnar table {}, tuple with "
+		bioseq_log<logging_level::error, logging_target::postgres>( "cannot read from columnar table {}, tuple with "
 					  "row number {} does not exist",
-					  RelationGetRelationName(readState->relation),
-					  rowNumber);
+					  RelationGetRelationName(read_state->relation),
+					  row_number);
 	}
 }
 
 
 /*
- * BioseqColumnReadRowByRowNumber reads row with rowNumber from given relation
- * into columnValues and columnNulls, and returns true. If no such row
+ * read_column_row_by_number reads row with row_number from given relation
+ * into column_values and column_nulls, and returns true. If no such row
  * exists, then returns false.
  */
 bool
-BioseqColumnReadRowByRowNumber(BioseqColumnReadState *readState,
-						   uint64_t rowNumber, Datum *columnValues,
-						   bool *columnNulls)
+read_column_row_by_number(column_read_state *read_state,
+						   uint64_t row_number, Datum *column_values,
+						   bool *column_nulls)
 {
-	if (!BioseqColumnReadIsCurrentStripe(readState, rowNumber))
+	if (!is_current_read_stripe(read_state, row_number))
 	{
-		Relation bioseqColumnRelation = readState->relation;
-		Snapshot snapshot = readState->snapshot;
-		StripeMetadata *stripeMetadata = FindStripeByRowNumber(bioseqColumnRelation,
-															   rowNumber, snapshot);
-		if (stripeMetadata == NULL)
+		Relation bioseq_column_relation = read_state->relation;
+		Snapshot snapshot = read_state->snapshot;
+		stripe_metadata *stripe_metadata_value = find_stripe_by_row_number(bioseq_column_relation,
+																   row_number, snapshot);
+		if (stripe_metadata_value == NULL)
 		{
 			/* no such row exists */
 			return false;
 		}
 
-		if (StripeWriteState(stripeMetadata) != STRIPE_WRITE_FLUSHED)
+		if (stripe_write_state_for(stripe_metadata_value) != stripe_write_state::flushed)
 		{
 			/*
 			 * Callers are expected to skip stripes that are not flushed to
 			 * disk yet or should wait for the writer xact to commit or abort,
 			 * but let's be on the safe side.
 			 */
-			bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
-				   RelationGetRelationName(bioseqColumnRelation),
-				   stripeMetadata->id);
+			bioseq_log<logging_level::error, logging_target::postgres>( k_unexpected_stripe_read_error_message,
+				   RelationGetRelationName(bioseq_column_relation),
+				   stripe_metadata_value->id);
 		}
 
 		/* do the cleanup before reading a new stripe */
-		BioseqColumnResetRead(readState);
+		reset_column_read(read_state);
 
-		TupleDesc relationTupleDesc = RelationGetDescr(bioseqColumnRelation);
-		List *whereClauseList = NIL;
-		List *whereClauseVars = NIL;
-		MemoryContext stripeReadContext = readState->stripeReadContext;
-		readState->stripeReadState = BeginStripeRead(stripeMetadata,
-													 bioseqColumnRelation,
-													 relationTupleDesc,
-													 readState->projectedColumnList,
-													 whereClauseList,
-													 whereClauseVars,
-													 stripeReadContext,
-													 snapshot);
+		TupleDesc relation_tuple_desc = RelationGetDescr(bioseq_column_relation);
+		List *filter_clauses = NIL;
+		List *filter_variables = NIL;
+		MemoryContext stripe_read_context = read_state->stripe_read_context;
+		read_state->stripe_state = begin_stripe_read(stripe_metadata_value,
+												 bioseq_column_relation,
+												 relation_tuple_desc,
+												 read_state->projected_columns,
+												 filter_clauses,
+												 filter_variables,
+												 stripe_read_context,
+												 snapshot);
 
-		readState->currentStripeMetadata = stripeMetadata;
+		read_state->current_stripe = stripe_metadata_value;
 	}
 
-	return ReadStripeRowByRowNumber(readState, rowNumber, columnValues, columnNulls);
+	return read_stripe_row_by_number(read_state, row_number, column_values, column_nulls);
 }
 
 /*
- * BioseqColumnSetStripeReadState 
+ * set_stripe_read_state
  */
 bool
-BioseqColumnSetStripeReadState(BioseqColumnReadState *readState,
-						   StripeMetadata *startStripeMetadata)
+set_stripe_read_state(column_read_state *read_state,
+						   stripe_metadata *start_stripe_metadata)
 {
-	if (!BioseqColumnReadIsCurrentStripe(readState, startStripeMetadata->firstRowNumber))
+	if (!is_current_read_stripe(read_state, start_stripe_metadata->first_row_number))
 	{
-		Relation bioseqColumnRelation = readState->relation;
-		Snapshot snapshot = readState->snapshot;
-		StripeMetadata *stripeMetadata = 
-			FindStripeByRowNumber(bioseqColumnRelation,
-								  startStripeMetadata->firstRowNumber, snapshot);
-		if (stripeMetadata == NULL)
+		Relation bioseq_column_relation = read_state->relation;
+		Snapshot snapshot = read_state->snapshot;
+		stripe_metadata *stripe_metadata_value =
+			find_stripe_by_row_number(bioseq_column_relation,
+								  start_stripe_metadata->first_row_number, snapshot);
+		if (stripe_metadata_value == NULL)
 		{
 			/* no such row exists */
 			return false;
 		}
 
-		if (StripeWriteState(stripeMetadata) != STRIPE_WRITE_FLUSHED)
+		if (stripe_write_state_for(stripe_metadata_value) != stripe_write_state::flushed)
 		{
 			/*
 			 * Callers are expected to skip stripes that are not flushed to
 			 * disk yet or should wait for the writer xact to commit or abort,
 			 * but let's be on the safe side.
 			 */
-			bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
-				   RelationGetRelationName(bioseqColumnRelation),
-				   stripeMetadata->id);
+			bioseq_log<logging_level::error, logging_target::postgres>( k_unexpected_stripe_read_error_message,
+				   RelationGetRelationName(bioseq_column_relation),
+				   stripe_metadata_value->id);
 		}
 
 		/* do the cleanup before reading a new stripe */
-		BioseqColumnResetRead(readState);
+		reset_column_read(read_state);
 
-		TupleDesc relationTupleDesc = RelationGetDescr(bioseqColumnRelation);
-		List *whereClauseList = NIL;
-		List *whereClauseVars = NIL;
-		MemoryContext stripeReadContext = readState->stripeReadContext;
-		readState->stripeReadState = BeginStripeRead(stripeMetadata,
-													 bioseqColumnRelation,
-													 relationTupleDesc,
-													 readState->projectedColumnList,
-													 whereClauseList,
-													 whereClauseVars,
-													 stripeReadContext,
-													 snapshot);
+		TupleDesc relation_tuple_desc = RelationGetDescr(bioseq_column_relation);
+		List *filter_clauses = NIL;
+		List *filter_variables = NIL;
+		MemoryContext stripe_read_context = read_state->stripe_read_context;
+		read_state->stripe_state = begin_stripe_read(stripe_metadata_value,
+												 bioseq_column_relation,
+												 relation_tuple_desc,
+												 read_state->projected_columns,
+												 filter_clauses,
+												 filter_variables,
+												 stripe_read_context,
+												 snapshot);
 
-		readState->currentStripeMetadata = stripeMetadata;
+		read_state->current_stripe = stripe_metadata_value;
 	}
 
 	return true;
 }
 
 /*
- * BioseqColumnReadIsCurrentStripe returns true if stripe being read contains
- * row with given rowNumber.
+ * is_current_read_stripe returns true if stripe being read contains
+ * row with given row_number.
  */
 static bool
-BioseqColumnReadIsCurrentStripe(BioseqColumnReadState *readState, uint64_t rowNumber)
+is_current_read_stripe(column_read_state *read_state, uint64_t row_number)
 {
-	if (!StripeReadInProgress(readState))
+	if (!stripe_read_in_progress(read_state))
 	{
 		return false;
 	}
 
-	StripeMetadata *currentStripeMetadata = readState->currentStripeMetadata;
-	if (rowNumber >= currentStripeMetadata->firstRowNumber &&
-		rowNumber <= StripeGetHighestRowNumber(currentStripeMetadata))
+	stripe_metadata *current_stripe = read_state->current_stripe;
+	if (row_number >= current_stripe->first_row_number &&
+		row_number <= stripe_highest_row_number(current_stripe))
 	{
 		return true;
 	}
@@ -436,170 +433,170 @@ BioseqColumnReadIsCurrentStripe(BioseqColumnReadState *readState, uint64_t rowNu
 
 
 /*
- * BioseqColumnReadGetCurrentStripe returns StripeMetadata for the stripe that is
+ * get_current_read_stripe returns stripe_metadata for the stripe that is
  * being read.
  */
-static StripeMetadata *
-BioseqColumnReadGetCurrentStripe(BioseqColumnReadState *readState)
+static stripe_metadata *
+get_current_read_stripe(column_read_state *read_state)
 {
-	return readState->currentStripeMetadata;
+	return read_state->current_stripe;
 }
 
 
 /*
- * ReadStripeRowByRowNumber reads row with rowNumber from given
- * stripeReadState into columnValues and columnNulls.
+ * read_stripe_row_by_number reads row with row_number from given
+ * stripe_state into column_values and column_nulls.
  * Errors out if no such row exists in the stripe being read.
  */
 static bool
-ReadStripeRowByRowNumber(BioseqColumnReadState *readState,
-						 uint64_t rowNumber, Datum *columnValues,
-						 bool *columnNulls)
+read_stripe_row_by_number(column_read_state *read_state,
+						 uint64_t row_number, Datum *column_values,
+						 bool *column_nulls)
 {
-	StripeMetadata *stripeMetadata = BioseqColumnReadGetCurrentStripe(readState);
-	StripeReadState *stripeReadState = readState->stripeReadState;
+	stripe_metadata *stripe_metadata_value = get_current_read_stripe(read_state);
+	stripe_read_state *stripe_state = read_state->stripe_state;
 
-	if (rowNumber < stripeMetadata->firstRowNumber)
+	if (row_number < stripe_metadata_value->first_row_number)
 	{
 		/* not expected but be on the safe side */
-		bioseq_log<ERR, PG>( "row offset cannot be negative");
+		bioseq_log<logging_level::error, logging_target::postgres>( "row offset cannot be negative");
 	}
 
 	/* find the exact chunk group to be read */
-	uint64_t stripeRowOffset = rowNumber - stripeMetadata->firstRowNumber;
-	int chunkGroupIndex = stripeRowOffset / stripeMetadata->chunkGroupRowCount;
-	if (!StripeReadIsCurrentChunkGroup(stripeReadState, chunkGroupIndex))
+	uint64_t stripe_row_offset = row_number - stripe_metadata_value->first_row_number;
+	int chunk_group_index = stripe_row_offset / stripe_metadata_value->chunk_group_row_count;
+	if (!is_current_chunk_group(stripe_state, chunk_group_index))
 	{
-		if (stripeReadState->chunkGroupReadState)
+		if (stripe_state->chunk_group_state)
 		{
-			EndChunkGroupRead(stripeReadState->chunkGroupReadState);
+			end_chunk_group_read(stripe_state->chunk_group_state);
 		}
 
-		stripeReadState->chunkGroupIndex = chunkGroupIndex;
-		stripeReadState->chunkGroupReadState = BeginChunkGroupRead(
-			stripeReadState->stripeBuffers,
-			stripeReadState->chunkGroupIndex,
-			stripeReadState->tupleDescriptor,
-			stripeReadState->projectedColumnList,
-			stripeReadState->stripeReadContext,
-			stripeReadState,
-			readState->currentStripeMetadata->id
+		stripe_state->chunk_group_index = chunk_group_index;
+		stripe_state->chunk_group_state = begin_chunk_group_read(
+			stripe_state->buffers,
+			stripe_state->chunk_group_index,
+			stripe_state->tuple_descriptor,
+			stripe_state->projected_columns,
+			stripe_state->stripe_read_context,
+			stripe_state,
+			read_state->current_stripe->id
 			);
 
-		uint64_t chunkFirstRowNumber =
-			stripeMetadata->firstRowNumber +
-			stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
+		uint64_t chunk_first_row_number =
+			stripe_metadata_value->first_row_number +
+			stripe_state->chunk_group_state->stripe_row_offset;
 
-		if (bioseq::settings::enable_dml)
+		if (bioseq::settings::storage::dml::enabled)
 		{
-			row_mask_row *rowMaskEntry =
-				RowMaskFindWriteState(stripeReadState->relation->rd_locator.relNumber,
-									  GetCurrentSubTransactionId(), rowNumber);
-			if (rowMaskEntry != NULL)
+			row_mask_row *row_mask_entry =
+				find_pending_row_mask(stripe_state->relation->rd_locator.relNumber,
+									  GetCurrentSubTransactionId(), row_number);
+			if (row_mask_entry != NULL)
 			{
-				Assert(rowMaskEntry->mask.has_value());
-				stripeReadState->chunkGroupReadState->rowMask =
-					*rowMaskEntry->mask;
-				stripeReadState->chunkGroupReadState->rowMaskCached = true;
+				Assert(row_mask_entry->mask.has_value());
+				stripe_state->chunk_group_state->row_mask =
+					*row_mask_entry->mask;
+				stripe_state->chunk_group_state->row_mask_cached = true;
 			}
-			else if (stripeReadState->chunkGroupReadState->chunkGroupDeletedRows > 0)
+			else if (stripe_state->chunk_group_state->chunk_group_deleted_rows > 0)
 			{
-				stripeReadState->chunkGroupReadState->rowMask =
-					ReadChunkRowMask(stripeReadState->relation->rd_locator,
-										readState->snapshot,
-										stripeReadState->stripeReadContext,
-										chunkFirstRowNumber,
-										stripeReadState->chunkGroupReadState->rowCount);
-				stripeReadState->chunkGroupReadState->rowMaskCached = false;
+				stripe_state->chunk_group_state->row_mask =
+					read_chunk_row_mask(stripe_state->relation->rd_locator,
+										read_state->snapshot,
+										stripe_state->stripe_read_context,
+										chunk_first_row_number,
+										stripe_state->chunk_group_state->row_count);
+				stripe_state->chunk_group_state->row_mask_cached = false;
 			}
 		}
 		else
 		{
-			stripeReadState->chunkGroupReadState->rowMask = NULL;
+			stripe_state->chunk_group_state->row_mask = NULL;
 		}
 	}
 
-	return ReadChunkGroupRowByRowOffset(stripeReadState->chunkGroupReadState,
-										stripeMetadata, stripeRowOffset,
-										columnValues, columnNulls);
+	return read_chunk_group_row_by_offset(stripe_state->chunk_group_state,
+										stripe_metadata_value, stripe_row_offset,
+										column_values, column_nulls);
 }
 
 
 /*
- * StripeReadIsCurrentChunkGroup returns true if chunk group being read is
- * the has given chunkGroupIndex in its stripe.
+ * is_current_chunk_group returns true if chunk group being read is
+ * the has given chunk_group_index in its stripe.
  */
 static bool
-StripeReadIsCurrentChunkGroup(StripeReadState *stripeReadState, int chunkGroupIndex)
+is_current_chunk_group(stripe_read_state *stripe_state, int chunk_group_index)
 {
-	if (!stripeReadState->chunkGroupReadState)
+	if (!stripe_state->chunk_group_state)
 	{
 		return false;
 	}
 
-	return (stripeReadState->chunkGroupIndex == chunkGroupIndex);
+	return (stripe_state->chunk_group_index == chunk_group_index);
 }
 
 
 /*
- * ReadChunkGroupRowByRowOffset reads row with stripeRowOffset from given
- * chunkGroupReadState into columnValues and columnNulls.
+ * read_chunk_group_row_by_offset reads row with stripe_row_offset from given
+ * chunk_group_state into column_values and column_nulls.
  * Errors out if no such row exists in the chunk group being read.
  */
 static bool
-ReadChunkGroupRowByRowOffset(ChunkGroupReadState *chunkGroupReadState,
-							 StripeMetadata *stripeMetadata,
-							 uint64_t stripeRowOffset, Datum *columnValues,
-							 bool *columnNulls)
+read_chunk_group_row_by_offset(chunk_group_read_state *chunk_group_state,
+							 stripe_metadata *stripe_metadata_value,
+							 uint64_t stripe_row_offset, Datum *column_values,
+							 bool *column_nulls)
 {
 	/* set the exact row number to be read from given chunk roup */
-	chunkGroupReadState->currentRow = stripeRowOffset %
-									  stripeMetadata->chunkGroupRowCount;
-	int isDeleted = 0;
-	ReadChunkGroupNextRow(chunkGroupReadState, columnValues, columnNulls,
-						  &isDeleted);
-	return !isDeleted;
+	chunk_group_state->current_row = stripe_row_offset %
+									  stripe_metadata_value->chunk_group_row_count;
+	int is_deleted = 0;
+	read_next_chunk_group_row(chunk_group_state, column_values, column_nulls,
+						  &is_deleted);
+	return !is_deleted;
 }
 
 
 /*
- * StripeReadInProgress returns true if we already started reading a stripe.
+ * stripe_read_in_progress returns true if we already started reading a stripe.
  */
 static bool
-StripeReadInProgress(BioseqColumnReadState *readState)
+stripe_read_in_progress(column_read_state *read_state)
 {
-	return readState->stripeReadState != NULL;
+	return read_state->stripe_state != NULL;
 }
 
 
 /*
- * HasUnreadStripe returns true if we still have stripes to read during current
+ * has_unread_stripe returns true if we still have stripes to read during current
  * read operation.
  */
 static bool
-HasUnreadStripe(BioseqColumnReadState *readState)
+has_unread_stripe(column_read_state *read_state)
 {
-	return readState->currentStripeMetadata != NULL;
+	return read_state->current_stripe != NULL;
 }
 
 
 /*
- * BioseqColumnRescan clears the position where we were scanning so that the next read starts at
+ * rescan_column_reader clears the position where we were scanning so that the next read starts at
  * the beginning again
  */
 void
-BioseqColumnRescan(BioseqColumnReadState *readState, List *scanQual)
+rescan_column_reader(column_read_state *read_state, List *scan_qual)
 {
-	bioseq::pg_support::MemoryContextScope ctx_guard{readState->scanContext};
+	bioseq::postgres::support::memory_context_scope ctx_guard{read_state->scan_context};
 
-	BioseqColumnResetRead(readState);
+	reset_column_read(read_state);
 
-	/* set currentStripeMetadata for the first stripe to read */
-	AdvanceStripeRead(readState);
+	/* set current_stripe for the first stripe to read */
+	advance_stripe_read(read_state);
 
-	readState->chunkGroupsFiltered = 0;
+	read_state->filtered_chunk_groups = 0;
 
-	readState->whereClauseList = copyObject(scanQual);
+	read_state->filter_clauses = copyObject(scan_qual);
 }
 
 
@@ -607,115 +604,115 @@ BioseqColumnRescan(BioseqColumnReadState *readState, List *scanQual)
  * Finishes a columnar read operation.
  */
 void
-BioseqColumnEndRead(BioseqColumnReadState *readState)
+end_column_read(column_read_state *read_state)
 {
-	if (readState->snapshotRegisteredByUs)
+	if (read_state->owns_snapshot_registration)
 	{
 		/*
 		 * init_bioseq_read_state created a new snapshot and registered it,
 		 * so now forget it.
 		 */
-		UnregisterSnapshot(readState->snapshot);
+		UnregisterSnapshot(read_state->snapshot);
 	}
 
-	MemoryContextDelete(readState->stripeReadContext);
-	if (readState->currentStripeMetadata)
+	MemoryContextDelete(read_state->stripe_read_context);
+	if (read_state->current_stripe)
 	{
-		pfree(readState->currentStripeMetadata);
+		pfree(read_state->current_stripe);
 	}
 
-	pfree(readState);
+	pfree(read_state);
 }
 
 
 /*
- * BioseqColumnResetRead resets the stripe and the chunk group that is
+ * reset_column_read resets the stripe and the chunk group that is
  * being read currently (if any).
  */
 void
-BioseqColumnResetRead(BioseqColumnReadState *readState)
+reset_column_read(column_read_state *read_state)
 {
-	if (StripeReadInProgress(readState))
+	if (stripe_read_in_progress(read_state))
 	{
-		pfree(readState->currentStripeMetadata);
-		readState->currentStripeMetadata = NULL;
+		pfree(read_state->current_stripe);
+		read_state->current_stripe = NULL;
 
-		readState->stripeReadState = NULL;
-		MemoryContextReset(readState->stripeReadContext);
+		read_state->stripe_state = NULL;
+		MemoryContextReset(read_state->stripe_read_context);
 	}
 }
 
 
 /*
- * BeginStripeRead allocates state for reading a stripe.
+ * begin_stripe_read allocates state for reading a stripe.
  */
-static StripeReadState *
-BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDesc,
-				List *projectedColumnList, List *whereClauseList, List *whereClauseVars,
-				MemoryContext stripeReadContext, Snapshot snapshot)
+static stripe_read_state *
+begin_stripe_read(stripe_metadata *stripe_metadata_value, Relation rel, TupleDesc tuple_desc,
+				List *projected_columns, List *filter_clauses, List *filter_variables,
+				MemoryContext stripe_read_context, Snapshot snapshot)
 {
-	bioseq::pg_support::MemoryContextScope ctx_guard{stripeReadContext};
+	bioseq::postgres::support::memory_context_scope ctx_guard{stripe_read_context};
 
-	StripeReadState *stripeReadState = make0<StripeReadState>();
+	stripe_read_state *stripe_state = bioseq::postgres::support::allocate_zeroed_object<stripe_read_state>();
 
-	stripeReadState->relation = rel;
-	stripeReadState->tupleDescriptor = tupleDesc;
-	stripeReadState->columnCount = tupleDesc->natts;
-	stripeReadState->chunkGroupReadState = NULL;
-	stripeReadState->projectedColumnList = projectedColumnList;
-	stripeReadState->stripeReadContext = stripeReadContext;
+	stripe_state->relation = rel;
+	stripe_state->tuple_descriptor = tuple_desc;
+	stripe_state->column_count = tuple_desc->natts;
+	stripe_state->chunk_group_state = NULL;
+	stripe_state->projected_columns = projected_columns;
+	stripe_state->stripe_read_context = stripe_read_context;
 
-	stripeReadState->stripeBuffers = LoadFilteredStripeBuffers(rel,
-															   stripeMetadata,
-															   tupleDesc,
-															   projectedColumnList,
-															   whereClauseList,
-															   whereClauseVars,
-															   &stripeReadState->
-															   chunkGroupsFiltered,
+	stripe_state->buffers = load_filtered_stripe_buffers(rel,
+														   stripe_metadata_value,
+														   tuple_desc,
+															   projected_columns,
+															   filter_clauses,
+															   filter_variables,
+															   &stripe_state->
+															   filtered_chunk_groups,
 															   snapshot);
 
-	stripeReadState->rowCount = stripeReadState->stripeBuffers->rowCount;
+	stripe_state->row_count = stripe_state->buffers->row_count;
 
-	return stripeReadState;
+	return stripe_state;
 }
 
 
 /*
- * AdvanceStripeRead updates chunkGroupsFiltered and sets
- * currentStripeMetadata for next stripe read.
+ * advance_stripe_read updates filtered_chunk_groups and sets
+ * current_stripe for next stripe read.
  */
 static void
-AdvanceStripeRead(BioseqColumnReadState *readState)
+advance_stripe_read(column_read_state *read_state)
 {
-	bioseq::pg_support::MemoryContextScope ctx_guard{readState->scanContext};
+	bioseq::postgres::support::memory_context_scope ctx_guard{read_state->scan_context};
 
-	if (readState->parallelBioseqColumnScan == 0)
+	if (read_state->parallel_scan == 0)
 	{
 		/* if not read any stripes yet, start from the first one .. */
-		uint64_t lastReadRowNumber = BIOSEQ_COLUMN_INVALID_ROW_NUMBER;
-		if (StripeReadInProgress(readState))
+		uint64_t last_read_row_number = invalid_column_row_number;
+		if (stripe_read_in_progress(read_state))
 		{
 			/* .. otherwise, continue with the next stripe */
-			lastReadRowNumber = StripeGetHighestRowNumber(readState->currentStripeMetadata);
+			last_read_row_number = stripe_highest_row_number(read_state->current_stripe);
 
-			readState->chunkGroupsFiltered +=
-				readState->stripeReadState->chunkGroupsFiltered;
+			read_state->filtered_chunk_groups +=
+				read_state->stripe_state->filtered_chunk_groups;
 		}
 
-		readState->currentStripeMetadata = FindNextStripeByRowNumber(readState->relation,
-																	lastReadRowNumber,
-																	readState->snapshot);
+		read_state->current_stripe = find_next_stripe_by_row_number(read_state->relation,
+																		last_read_row_number,
+																		read_state->snapshot);
 	}
 	else
 	{
-		if (StripeReadInProgress(readState))
+		if (stripe_read_in_progress(read_state))
 		{
-			readState->chunkGroupsFiltered +=
-				readState->stripeReadState->chunkGroupsFiltered;
+			read_state->filtered_chunk_groups +=
+				read_state->stripe_state->filtered_chunk_groups;
 		}
 
-		auto *parallel_scan = readState->parallelBioseqColumnScan;
+		auto *parallel_scan = read_state->parallel_scan;
 		for (;;)
 		{
 			/* Stripe ids are relation-local, and aborted reservations may leave
@@ -723,29 +720,29 @@ AdvanceStripeRead(BioseqColumnReadState *readState)
 			 * spinlock: the catalog/index scan is interruptible, and a parallel
 			 * worker terminated while holding a spinlock would poison the DSM
 			 * lock for every peer. */
-			uint64 claimed_id = pg_atomic_read_u64(&parallel_scan->nextStripeId);
+			uint64 claimed_id = pg_atomic_read_u64(&parallel_scan->next_stripe_id);
 			constexpr uint64 max_stripe_id = static_cast<uint64>(
 				std::numeric_limits<std::int64_t>::max());
 			constexpr uint64 eof_sentinel = max_stripe_id + 1u;
 			if (claimed_id == eof_sentinel)
 			{
-				readState->currentStripeMetadata = nullptr;
+				read_state->current_stripe = nullptr;
 				break;
 			}
 			if (claimed_id == 0u || claimed_id > max_stripe_id)
 			{
-				bioseq_log<ERR, PG>(
+				bioseq_log<logging_level::error, logging_target::postgres>(
 					"bioseq parallel scan cursor is outside the stripe-id domain");
 			}
 
 			std::uint64_t lookup_found_id = claimed_id;
-			StripeMetadata *candidate = FindNextStripeForParallelWorker(
-				readState->relation, readState->snapshot, claimed_id,
+			stripe_metadata *candidate = find_next_stripe_for_parallel_worker(
+				read_state->relation, read_state->snapshot, claimed_id,
 				&lookup_found_id);
 
 			if (candidate == nullptr)
 			{
-				readState->currentStripeMetadata = nullptr;
+				read_state->current_stripe = nullptr;
 				break;
 			}
 
@@ -753,7 +750,7 @@ AdvanceStripeRead(BioseqColumnReadState *readState)
 				|| lookup_found_id > max_stripe_id)
 			{
 				pfree(candidate);
-				bioseq_log<ERR, PG>(
+				bioseq_log<logging_level::error, logging_target::postgres>(
 					"bioseq parallel scan returned an invalid stripe id");
 			}
 
@@ -764,9 +761,9 @@ AdvanceStripeRead(BioseqColumnReadState *readState)
 			const uint64 successor = found_id + 1;
 			uint64 expected = claimed_id;
 			if (pg_atomic_compare_exchange_u64(
-					&parallel_scan->nextStripeId, &expected, successor))
+					&parallel_scan->next_stripe_id, &expected, successor))
 			{
-				readState->currentStripeMetadata = candidate;
+				read_state->current_stripe = candidate;
 				break;
 			}
 
@@ -777,41 +774,41 @@ AdvanceStripeRead(BioseqColumnReadState *readState)
 		}
 	}
 
-	if (readState->currentStripeMetadata &&
-		StripeWriteState(readState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED &&
-		!SnapshotMightSeeUnflushedStripes(readState->snapshot))
+	if (read_state->current_stripe &&
+		stripe_write_state_for(read_state->current_stripe) != stripe_write_state::flushed &&
+		!snapshot_might_see_unflushed_stripes(read_state->snapshot))
 	{
 		/*
 		 * To be on the safe side, error out if we don't expect to encounter
 		 * with an un-flushed stripe. Otherwise, we will skip such stripes
 		 * until finding a flushed one.
 		 */
-		bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
-			   RelationGetRelationName(readState->relation),
-			   readState->currentStripeMetadata->id);
+		bioseq_log<logging_level::error, logging_target::postgres>( k_unexpected_stripe_read_error_message,
+			   RelationGetRelationName(read_state->relation),
+			   read_state->current_stripe->id);
 	}
 
-	while (readState->currentStripeMetadata &&
-		   StripeWriteState(readState->currentStripeMetadata) != STRIPE_WRITE_FLUSHED)
+	while (read_state->current_stripe &&
+		   stripe_write_state_for(read_state->current_stripe) != stripe_write_state::flushed)
 	{
-		readState->currentStripeMetadata =
-			FindNextStripeByRowNumber(readState->relation,
-									  readState->currentStripeMetadata->firstRowNumber,
-									  readState->snapshot);
+		read_state->current_stripe =
+			find_next_stripe_by_row_number(read_state->relation,
+										  read_state->current_stripe->first_row_number,
+										  read_state->snapshot);
 	}
 
-	readState->stripeReadState = NULL;
-	MemoryContextReset(readState->stripeReadContext);
+	read_state->stripe_state = NULL;
+	MemoryContextReset(read_state->stripe_read_context);
 }
 
 
 /*
- * SnapshotMightSeeUnflushedStripes returns true if given snapshot is
+ * snapshot_might_see_unflushed_stripes returns true if given snapshot is
  * expected to see un-flushed stripes either because of other backends'
  * pending writes or aborted transactions.
  */
 static bool
-SnapshotMightSeeUnflushedStripes(Snapshot snapshot)
+snapshot_might_see_unflushed_stripes(Snapshot snapshot)
 {
 	if (snapshot == InvalidSnapshot)
 	{
@@ -834,139 +831,139 @@ SnapshotMightSeeUnflushedStripes(Snapshot snapshot)
 
 
 /*
- * ReadStripeNextRow: If more rows can be read from the current stripe, fill
- * in non-NULL columnValues and return true. Otherwise, return false.
+ * read_next_stripe_row: If more rows can be read from the current stripe, fill
+ * in non-NULL column_values and return true. Otherwise, return false.
  *
- * On entry, all entries in columnNulls should be true; this function only
+ * On entry, all entries in column_nulls should be true; this function only
  * sets non-NULL entries.
  *
  */
 static bool
-ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
-				  bool *columnNulls,
-				  uint64_t stripeFirstRowNumber,
-				  Snapshot snapshot, uint64_t stripeId)
+read_next_stripe_row(stripe_read_state *stripe_state, Datum *column_values,
+				  bool *column_nulls,
+				  uint64_t stripe_first_row_number,
+				  Snapshot snapshot, uint64_t stripe_id)
 {
-	if (stripeReadState->currentRow >= stripeReadState->rowCount)
+	if (stripe_state->current_row >= stripe_state->row_count)
 	{
-		Assert(stripeReadState->currentRow == stripeReadState->rowCount);
+		Assert(stripe_state->current_row == stripe_state->row_count);
 		return false;
 	}
 
 	while (true)
 	{
-		if (stripeReadState->chunkGroupReadState == NULL)
+		if (stripe_state->chunk_group_state == NULL)
 		{
-			stripeReadState->chunkGroupReadState = BeginChunkGroupRead(
-				stripeReadState->stripeBuffers,
-				stripeReadState->
-				chunkGroupIndex,
-				stripeReadState->
-				tupleDescriptor,
-				stripeReadState->
-				projectedColumnList,
-				stripeReadState->
-				stripeReadContext,
-				stripeReadState,
-				stripeId
+			stripe_state->chunk_group_state = begin_chunk_group_read(
+				stripe_state->buffers,
+				stripe_state->
+				chunk_group_index,
+				stripe_state->
+				tuple_descriptor,
+				stripe_state->
+				projected_columns,
+				stripe_state->
+				stripe_read_context,
+				stripe_state,
+				stripe_id
 				);
-			
-			if (bioseq::settings::enable_dml &&
-				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
+
+			if (bioseq::settings::storage::dml::enabled &&
+				stripe_state->chunk_group_state->chunk_group_deleted_rows != 0)
 			{
-				uint64_t chunkFirstRowNumber = 
-					stripeFirstRowNumber + 
-					stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
-				stripeReadState->chunkGroupReadState->rowMask = 
-					ReadChunkRowMask(stripeReadState->relation->rd_locator,
+				uint64_t chunk_first_row_number =
+					stripe_first_row_number +
+					stripe_state->chunk_group_state->stripe_row_offset;
+				stripe_state->chunk_group_state->row_mask =
+					read_chunk_row_mask(stripe_state->relation->rd_locator,
 									 snapshot,
-									 stripeReadState->stripeReadContext,
-									 chunkFirstRowNumber,
-									 stripeReadState->chunkGroupReadState->rowCount);
-				stripeReadState->chunkGroupReadState->rowMaskCached = false;
+									 stripe_state->stripe_read_context,
+									 chunk_first_row_number,
+									 stripe_state->chunk_group_state->row_count);
+				stripe_state->chunk_group_state->row_mask_cached = false;
 			}
 			else
 			{
-				stripeReadState->chunkGroupReadState->rowMask = NULL;
+				stripe_state->chunk_group_state->row_mask = NULL;
 			}
 		}
 
-		int32_t deletedColumnsNumber = 0;
-		if (!ReadChunkGroupNextRow(stripeReadState->chunkGroupReadState, columnValues,
-								   columnNulls, &deletedColumnsNumber))
+		int32_t deleted_columns_number = 0;
+		if (!read_next_chunk_group_row(stripe_state->chunk_group_state, column_values,
+								   column_nulls, &deleted_columns_number))
 		{
 			/* if this chunk group is exhausted, fetch the next one and loop */
 
-			stripeReadState->currentRow += deletedColumnsNumber;
+			stripe_state->current_row += deleted_columns_number;
 
-			bool isStripeExhausted = stripeReadState->currentRow >= stripeReadState->rowCount;
+			bool is_stripe_exhausted = stripe_state->current_row >= stripe_state->row_count;
 
-			EndChunkGroupRead(stripeReadState->chunkGroupReadState);
-			stripeReadState->chunkGroupReadState = NULL;
+			end_chunk_group_read(stripe_state->chunk_group_state);
+			stripe_state->chunk_group_state = NULL;
 
-			if (isStripeExhausted)
+			if (is_stripe_exhausted)
 				return false;
 
-			stripeReadState->chunkGroupIndex++;
-				
+			stripe_state->chunk_group_index++;
+
 			continue;
 		}
 
-		stripeReadState->currentRow += 1 + deletedColumnsNumber;
+		stripe_state->current_row += 1 + deleted_columns_number;
 		return true;
 	}
 }
 
 
 /*
- * BioseqColumnReadChunkGroupsFiltered
+ * read_chunk_groups_filtered
  *
  * Return the number of chunk groups filtered during this read operation.
  */
 int64_t
-BioseqColumnReadChunkGroupsFiltered(BioseqColumnReadState *state)
+read_chunk_groups_filtered(column_read_state *state)
 {
-	return state->chunkGroupsFiltered;
+	return state->filtered_chunk_groups;
 }
 
 	/* Vectorization */
 
 bool
-BioseqColumnReadNextVector(BioseqColumnReadState *readState,  Datum *columnValues,
-					   bool *columnNulls, uint64 *rowNumber, int *newVectorSize)
+read_next_column_vector(column_read_state *read_state,  Datum *column_values,
+					   bool *column_nulls, uint64 *row_number, int *new_vector_size)
 {
 	while (true)
 	{
-		if (!StripeReadInProgress(readState))
+		if (!stripe_read_in_progress(read_state))
 		{
-			if (!HasUnreadStripe(readState))
+			if (!has_unread_stripe(read_state))
 			{
 				return false;
 			}
 
-			readState->stripeReadState = BeginStripeRead(readState->currentStripeMetadata,
-														 readState->relation,
-														 readState->tupleDescriptor,
-														 readState->projectedColumnList,
-														 readState->whereClauseList,
-														 readState->whereClauseVars,
-														 readState->stripeReadContext,
-														 readState->snapshot);
+			read_state->stripe_state = begin_stripe_read(read_state->current_stripe,
+												 read_state->relation,
+												 read_state->tuple_descriptor,
+												 read_state->projected_columns,
+												 read_state->filter_clauses,
+												 read_state->filter_variables,
+												 read_state->stripe_read_context,
+												 read_state->snapshot);
 		}
 
-		if (!ReadStripeNextVector(readState->stripeReadState, columnValues, columnNulls, 
-								  newVectorSize,
-								  readState->currentStripeMetadata->id,
-								  readState->snapshot,
-								  rowNumber,
-								  readState->currentStripeMetadata->firstRowNumber))
+		if (!read_next_stripe_vector(read_state->stripe_state, column_values, column_nulls,
+								  new_vector_size,
+								  read_state->current_stripe->id,
+								  read_state->snapshot,
+								  row_number,
+								  read_state->current_stripe->first_row_number))
 		{
-			AdvanceStripeRead(readState);
-			
+			advance_stripe_read(read_state);
+
 			// We have collected rows from last stripe, break loop
-			if (*newVectorSize)
+			if (*new_vector_size)
 				return true;
-			
+
 			continue;
 		}
 
@@ -976,91 +973,91 @@ BioseqColumnReadNextVector(BioseqColumnReadState *readState,  Datum *columnValue
 
 
 static bool
-ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
-					 bool *columnNulls, int *newVectorSize,
-					 uint64 stripeId,
+read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
+					 bool *column_nulls, int *new_vector_size,
+					 uint64 stripe_id,
 					 Snapshot snapshot,
-					 uint64 *rowNumber,
-					 uint64 stripeFirstRowNumber)
+					 uint64 *row_number,
+					 uint64 stripe_first_row_number)
 {
-	if (stripeReadState->currentRow >= stripeReadState->rowCount)
+	if (stripe_state->current_row >= stripe_state->row_count)
 	{
-		Assert(stripeReadState->currentRow == stripeReadState->rowCount);
+		Assert(stripe_state->current_row == stripe_state->row_count);
 		return false;
 	}
 
-	int32_t *columnValueOffset = make_array<int32_t>(stripeReadState->tupleDescriptor->natts);
-	memset(columnValueOffset, 0, sizeof(int32_t) * stripeReadState->tupleDescriptor->natts);
+	int32_t *column_value_offset = bioseq::postgres::support::allocate_zeroed_array<int32_t>(stripe_state->tuple_descriptor->natts);
+	memset(column_value_offset, 0, sizeof(int32_t) * stripe_state->tuple_descriptor->natts);
 
 	while (true)
 	{
-		uint64_t chunkFirstRowNumber = 0;
+		uint64_t chunk_first_row_number = 0;
 
-		if (stripeReadState->chunkGroupReadState == NULL)
+		if (stripe_state->chunk_group_state == NULL)
 		{
-			stripeReadState->chunkGroupReadState = BeginChunkGroupRead(
-				stripeReadState->stripeBuffers,
-				stripeReadState->
-				chunkGroupIndex,
-				stripeReadState->
-				tupleDescriptor,
-				stripeReadState->
-				projectedColumnList,
-				stripeReadState->
-				stripeReadContext,
-				stripeReadState,
-				stripeId);
+			stripe_state->chunk_group_state = begin_chunk_group_read(
+				stripe_state->buffers,
+				stripe_state->
+				chunk_group_index,
+				stripe_state->
+				tuple_descriptor,
+				stripe_state->
+				projected_columns,
+				stripe_state->
+				stripe_read_context,
+				stripe_state,
+				stripe_id);
 
-			chunkFirstRowNumber = stripeFirstRowNumber +
-								  stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
+			chunk_first_row_number = stripe_first_row_number +
+								  stripe_state->chunk_group_state->stripe_row_offset;
 
-			if (bioseq::settings::enable_dml &&
-				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
+			if (bioseq::settings::storage::dml::enabled &&
+				stripe_state->chunk_group_state->chunk_group_deleted_rows != 0)
 			{
-				stripeReadState->chunkGroupReadState->rowMask =
-					ReadChunkRowMask(stripeReadState->relation->rd_locator,
+				stripe_state->chunk_group_state->row_mask =
+					read_chunk_row_mask(stripe_state->relation->rd_locator,
 									 snapshot,
-									 stripeReadState->stripeReadContext,
-									 chunkFirstRowNumber,
-									 stripeReadState->chunkGroupReadState->rowCount);
+									 stripe_state->stripe_read_context,
+									 chunk_first_row_number,
+									 stripe_state->chunk_group_state->row_count);
 			}
 			else
 			{
-				stripeReadState->chunkGroupReadState->rowMask = NULL;
+				stripe_state->chunk_group_state->row_mask = NULL;
 			}
 		}
 		else
 		{
-			chunkFirstRowNumber = stripeFirstRowNumber +
-						stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
+			chunk_first_row_number = stripe_first_row_number +
+						stripe_state->chunk_group_state->stripe_row_offset;
 		}
 
-		if (!ReadChunkGroupNextVector(stripeReadState->chunkGroupReadState,
-									  columnValues, columnNulls, 
-									  stripeReadState->tupleDescriptor,
-									  columnValueOffset, 
-									  newVectorSize,
-									  rowNumber,
-									  chunkFirstRowNumber))
+		if (!read_next_chunk_group_vector(stripe_state->chunk_group_state,
+									  column_values, column_nulls,
+									  stripe_state->tuple_descriptor,
+									  column_value_offset,
+									  new_vector_size,
+									  row_number,
+									  chunk_first_row_number))
 		{
 			/*
-			 * if *newVectorSize is non-zero, it means there might be some data in
-			 * chunkGroupReadState->chunkGroupData referenced by VectorColumn.  In
-			 * this case, do NOT release ChunkGroupReadState.
+			 * if *new_vector_size is non-zero, it means there might be some data in
+			 * chunk_group_state->chunk_group_data referenced by vector_column.  In
+			 * this case, do NOT release chunk_group_read_state.
 			 */
-			if (*newVectorSize == 0)
+			if (*new_vector_size == 0)
 			{
 				/* if this chunk group is exhausted, fetch the next one and loop */
-				EndChunkGroupRead(stripeReadState->chunkGroupReadState);
-				stripeReadState->chunkGroupReadState = NULL;
-				stripeReadState->chunkGroupIndex++;
+				end_chunk_group_read(stripe_state->chunk_group_state);
+				stripe_state->chunk_group_state = NULL;
+				stripe_state->chunk_group_index++;
 				continue;
 			}
 		}
 		else
-			stripeReadState->currentRow += stripeReadState->chunkGroupReadState->rowCount;
+			stripe_state->current_row += stripe_state->chunk_group_state->row_count;
 
-		pfree(columnValueOffset);
+		pfree(column_value_offset);
 		return true;
 	}
 }

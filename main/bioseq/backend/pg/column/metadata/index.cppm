@@ -1,19 +1,18 @@
 /*-------------------------------------------------------------------------
  *
- * storage_metadata.cppm
+ * index.cppm
  *
  * Primary interface unit for the `storage_metadata` module. It is a tiny
  * umbrella that re-exports the partitions making up the module: the
  * metadata core, the columnar/row-mask write-state machinery, the
  * write-state lifecycle dispatchers and the read-state cache.
  *
- * DOC0322 §7.1 — folding the former standalone write-state trio and the
- * read-state cache into partitions of this module dissolves the
- * `extern "C++"` cross-module cycle that previously connected them.
+ * The partitions share one ownership boundary, avoiding dependency cycles
+ * between catalog access and transaction-state lifecycle code.
  *
  *-------------------------------------------------------------------------
  */
-export module bioseq.storage.metadata;
+export module bioseq.postgres.storage.metadata;
 
 export import :types;
 export import :options;

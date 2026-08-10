@@ -13,7 +13,7 @@ module;
 #include <string>
 #include <variant>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "catalog/pg_type_d.h"
 #include "utils/array.h"
@@ -21,7 +21,7 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:array_string;
+export module bioseq.postgres.types.compact_sequence:array_string;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -646,7 +646,7 @@ ArrayType* to_array(
                 const std::size_t chunk = static_cast<std::size_t>(
                     std::min<int>(static_cast<int>(scratch.size()),
                                   count - position));
-                view.template to_encoded_into<false, false>(
+                view.template copy_ranks<false, false>(
                     std::span<std::uint8_t>{scratch.data(), chunk},
                     static_cast<std::size_t>(position),
                     static_cast<std::size_t>(position) + chunk);

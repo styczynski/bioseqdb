@@ -509,62 +509,67 @@ inline void validate_bridge_evidence(
     std::string expected_contract_sha256;
     if (site.bridge == bridge_kind::invoke_pg_as_cpp) {
         expected_implementation =
-            "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
+            "bioseq::postgres::support::invoke_pg_as_cpp";
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
         expected_source_suffix =
-            "/main/common/pg_support/error_boundary.cppm";
+            "/main/common/postgres/support/error_boundary.cppm";
         expected_region =
-            "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
+            "bioseq.postgres.support.error_boundary/"
+            "invoke_pg_as_cpp";
         expected_contract_id =
-            "bioseq.pg_utils.error_bridge/error_capture/v1";
+            "bioseq.postgres.support.error_boundary/error_capture";
         expected_contract_sha256 =
-            "cbf583abe710257bf2a1999718c076fa"
-            "2d70e203ae424bbba083eee0b4fcc83c";
-    } else if (site.bridge == bridge_kind::sql_call_context) {
+            "f217b3f824a03a5d3cf977fb25c8ace"
+            "4a8765904e13e46dcfcc0fbd8c67f3099";
+    } else if (
+        site.bridge == bridge_kind::cross_transaction_callback) {
         expected_implementation =
-            "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
+            "bioseq::postgres::support::"
+            "invoke_pg_across_transactions_as_cpp";
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
         expected_source_suffix =
-            "/main/common/pg_support/error_boundary.cppm";
+            "/main/common/postgres/support/error_boundary.cppm";
         expected_region =
-            "bioseq.pg_utils.error_bridge/"
+            "bioseq.postgres.support.error_boundary/"
             "invoke_pg_across_transactions_as_cpp";
         expected_contract_id =
-            "bioseq.pg_utils.error_bridge/error_capture/v1";
+            "bioseq.postgres.support.error_boundary/error_capture";
         expected_contract_sha256 =
-            "cbf583abe710257bf2a1999718c076fa"
-            "2d70e203ae424bbba083eee0b4fcc83c";
-    } else if (site.bridge == bridge_kind::sql_subtransaction) {
+            "f217b3f824a03a5d3cf977fb25c8ace"
+            "4a8765904e13e46dcfcc0fbd8c67f3099";
+    } else if (site.bridge == bridge_kind::subtransaction) {
         static const std::map<
             std::string,
             std::pair<std::string, std::string>,
             std::less<>> exact_regions{
                 {
-                    "bioseq::pg_utils::sql_subtransaction::begin",
+                    "bioseq::postgres::support::subtransaction::begin",
                     {
                         "BeginInternalSubTransaction",
                         "begin",
                     },
                 },
                 {
-                    "bioseq::pg_utils::sql_subtransaction::commit",
+                    "bioseq::postgres::support::subtransaction::commit",
                     {
                         "ReleaseCurrentSubTransaction",
                         "commit",
                     },
                 },
                 {
-                    "bioseq::pg_utils::sql_subtransaction::rollback",
+                    "bioseq::postgres::support::subtransaction::rollback",
                     {
                         "RollbackAndReleaseCurrentSubTransaction",
                         "rollback",
                     },
                 },
                 {
-                    "bioseq::pg_utils::sql_subtransaction::~sql_subtransaction",
+                    "bioseq::postgres::support::subtransaction::~subtransaction",
                     {
                         "RollbackAndReleaseCurrentSubTransaction",
-                        "~sql_subtransaction",
+                        "~subtransaction",
                     },
                 },
             };
@@ -580,20 +585,21 @@ inline void validate_bridge_evidence(
             evidence.implementation_qualified_name;
         expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/main/common/pg_sql_boundary/call_context_implementation.cpp";
+            "/main/common/pg_sql_boundary/"
+            "call_context_implementation.cppm";
         expected_region =
-            "bioseq.pg_utils.sql_boundary.context/"
+            "bioseq.postgres.support.sql_boundary.context/"
             + region->second.second;
         expected_target = region->second.first;
     } else if (
         site.bridge == bridge_kind::generated_boundary_tail) {
         expected_implementation =
-            "bioseq::pg_utils::invoke_sql_boundary";
+            "bioseq::postgres::support::invoke_postgres_callback";
         expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
             "/main/common/pg_sql_boundary/index.cppm";
         expected_region =
-            "bioseq.pg_utils.sql_boundary/rethrow_tail";
+            "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
         safety_failure(
             site.site_id,
@@ -729,11 +735,13 @@ inline void validate_error_site(
             }
             break;
         case site_classification::specialized_bridge:
-            if ((site.bridge != bridge_kind::sql_subtransaction
-                 && site.bridge != bridge_kind::sql_call_context)
-                || (site.bridge == bridge_kind::sql_subtransaction
+            if ((site.bridge != bridge_kind::subtransaction
+                 && site.bridge
+                     != bridge_kind::cross_transaction_callback)
+                || (site.bridge == bridge_kind::subtransaction
                     && site.analyzer_entered_bridge_callable)
-                || (site.bridge == bridge_kind::sql_call_context
+                || (site.bridge
+                        == bridge_kind::cross_transaction_callback
                     && !site.analyzer_entered_bridge_callable)
                 || site.generated_boundary_tail) {
                 safety_failure(

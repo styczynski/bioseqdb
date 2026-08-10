@@ -2,8 +2,8 @@
 // LSB-first packing core and all non-PG adapters.
 
 #include "common_simd.h"
-#include "common_tests.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/common.hpp>
+#include <bioseq/pg_build_profile.h>
 
 #include <algorithm>
 #include <array>

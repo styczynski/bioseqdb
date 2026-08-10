@@ -1,6 +1,6 @@
 // Reduced real-wire differential tests for the Format-5 compact-H32 adapter.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>

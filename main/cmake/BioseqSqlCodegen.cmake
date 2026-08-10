@@ -1,13 +1,13 @@
 include_guard(GLOBAL)
 
-# DOC0388 SQL code generation is driven only by owners registered through this
-# file.  The registry is intentionally strict: a source cannot be inferred from
-# a build target, shared by two owners, or silently added to only one profile.
+# SQL generation is driven only by owners registered through this file. The
+# registry is intentionally strict: a source cannot be inferred from a build
+# target, shared by two owners, or silently added to only one profile.
 
 function(_bioseq_sql_registry_fail message_text)
   string(JOIN "" _full_message "${message_text}" ${ARGN})
   message(FATAL_ERROR
-    "DOC0388 SQL owner registry: ${_full_message}")
+    "SQL owner registry: ${_full_message}")
 endfunction()
 
 # Instantiates the owner-derived FINAL collection/render/validation pipeline for
@@ -17,7 +17,7 @@ endfunction()
 function(bioseq_add_sql_codegen_context)
   cmake_parse_arguments(
     ARG
-    "PUBLISH_PHYSICAL_LEDGER;REQUIRE_COMPLETE_CODEGEN"
+    "REQUIRE_COMPLETE_CODEGEN"
     "EXTENSION;EXTENSION_NAME;EXTENSION_SCHEMA;GENERATED_MODULE_PREFIX;FMGR_BOUNDARY_MODULE;FMGR_PRELUDE;OUTPUT_DIR;GENERATED_CPP_DIR;VERSION;RAW_COMPILE_DATABASE"
     "PROFILES"
     ${ARGN})
@@ -129,16 +129,6 @@ function(bioseq_add_sql_codegen_context)
       "${_profile_sql_dir}/${ARG_EXTENSION_NAME}.manifest.json")
     set(_render_stamp "${_profile_sql_dir}/render.stamp")
     set(_validate_stamp "${_profile_sql_dir}/validate.stamp")
-    set(_physical_ledger_arguments)
-    set(_physical_ledger_outputs)
-    if(ARG_PUBLISH_PHYSICAL_LEDGER)
-      set(_physical_ledger
-        "${_profile_sql_dir}/${ARG_EXTENSION_NAME}.physical-ledger.tsv")
-      list(APPEND _physical_ledger_arguments
-        --physical-ledger-output "${_physical_ledger}")
-      list(APPEND _physical_ledger_outputs "${_physical_ledger}")
-    endif()
-
     set(_fmgr_arguments)
     set(_fmgr_outputs)
     foreach(_owner_key IN LISTS _fmgr_owner_keys)
@@ -203,7 +193,7 @@ function(bioseq_add_sql_codegen_context)
         "${_generated_install}"
         "${_generated_manifest}"
         "${_render_stamp}"
-      BYPRODUCTS ${_physical_ledger_outputs} ${_fmgr_outputs}
+      BYPRODUCTS ${_fmgr_outputs}
       COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${_profile_sql_dir}" "${_profile_cpp_dir}"
       COMMAND "${CMAKE_COMMAND}" -E env
@@ -229,7 +219,6 @@ function(bioseq_add_sql_codegen_context)
         --output "${_generated_install}"
         --manifest "${_generated_manifest}"
         --stamp "${_render_stamp}"
-        ${_physical_ledger_arguments}
         ${_fmgr_arguments}
         ${_completion_arguments}
         ${_identity_arguments}
@@ -354,7 +343,8 @@ function(_bioseq_sql_dependency_only_support_source
   set(${output_variable} "${_authorized}" PARENT_SCOPE)
 endfunction()
 
-function(_bioseq_sql_legacy_fmgr_contract_authorized output_variable)
+function(_bioseq_sql_reviewed_handwritten_fmgr_contract_authorized
+    output_variable)
   cmake_parse_arguments(
     PARSE_ARGV 1 ARG
     ""
@@ -363,8 +353,8 @@ function(_bioseq_sql_legacy_fmgr_contract_authorized output_variable)
   set(_authorized TRUE)
   if(ARG_SYMBOL)
     set(_authorized FALSE)
-    if(ARG_OWNER_KEY STREQUAL "external_relation_legacy_fmgr"
-        AND ARG_MODULE STREQUAL "bioseq.pg.external.relation"
+    if(ARG_OWNER_KEY STREQUAL "external_relation_fmgr_export"
+        AND ARG_MODULE STREQUAL "bioseq.postgres.external.relation"
         AND ARG_SOURCE STREQUAL
           "backend/pg/external/relation.cppm"
         AND ARG_PROFILES STREQUAL "production;test_indexes"
@@ -438,11 +428,12 @@ function(_bioseq_sql_run_annotation_authority_contracts)
   endif()
 
   _bioseq_sql_annotation_authorized(
-    _explicit_legacy_fmgr_scan
+    _explicit_reviewed_handwritten_fmgr_export
     "/fixture/external/relation.cppm" -1 TRUE)
-  if(NOT _explicit_legacy_fmgr_scan)
+  if(NOT _explicit_reviewed_handwritten_fmgr_export)
     _bioseq_sql_registry_fail(
-      "annotation authority contract rejected an explicit legacy-fmgr facet")
+      "annotation authority contract rejected an explicit reviewed "
+      "handwritten FMGR export facet")
   endif()
 
   _bioseq_sql_annotation_authorized(
@@ -453,42 +444,43 @@ function(_bioseq_sql_run_annotation_authority_contracts)
       "annotation authority contract rejected an annotated owner")
   endif()
 
-  _bioseq_sql_legacy_fmgr_contract_authorized(
+  _bioseq_sql_reviewed_handwritten_fmgr_contract_authorized(
     _natural_external_rows
     OWNER_KEY external_sql_catalog
-    MODULE bioseq.pg.external.sql_catalog
+    MODULE bioseq.postgres.external.sql_catalog
     SOURCE backend/pg/external/sql_catalog.cppm
     PROFILES "production;test_indexes"
     AUTHORITIES FINAL)
   if(NOT _natural_external_rows)
     _bioseq_sql_registry_fail(
-      "legacy-fmgr contract rejected a natural FINAL external SQL owner")
+      "reviewed handwritten FMGR contract rejected a natural FINAL "
+      "external SQL owner")
   endif()
 
-  _bioseq_sql_legacy_fmgr_contract_authorized(
-    _accidental_external_legacy_scan
+  _bioseq_sql_reviewed_handwritten_fmgr_contract_authorized(
+    _accidental_reviewed_handwritten_fmgr_export
     OWNER_KEY external_sql_catalog
-    MODULE bioseq.pg.external.sql_catalog
+    MODULE bioseq.postgres.external.sql_catalog
     SOURCE backend/pg/external/sql_catalog.cppm
     PROFILES "production;test_indexes"
     AUTHORITIES FINAL
     SYMBOL accidental_external_handler)
-  if(_accidental_external_legacy_scan)
+  if(_accidental_reviewed_handwritten_fmgr_export)
     _bioseq_sql_registry_fail(
-      "legacy-fmgr contract accepted an accidental external scan")
+      "reviewed handwritten FMGR contract accepted an accidental export")
   endif()
 
-  _bioseq_sql_legacy_fmgr_contract_authorized(
-    _reviewed_external_legacy_scan
-    OWNER_KEY external_relation_legacy_fmgr
-    MODULE bioseq.pg.external.relation
+  _bioseq_sql_reviewed_handwritten_fmgr_contract_authorized(
+    _reviewed_handwritten_fmgr_export
+    OWNER_KEY external_relation_fmgr_export
+    MODULE bioseq.postgres.external.relation
     SOURCE backend/pg/external/relation.cppm
     PROFILES "production;test_indexes"
     AUTHORITIES FINAL
     SYMBOL bioseq_external_handler)
-  if(NOT _reviewed_external_legacy_scan)
+  if(NOT _reviewed_handwritten_fmgr_export)
     _bioseq_sql_registry_fail(
-      "legacy-fmgr contract rejected the reviewed external handler")
+      "reviewed handwritten FMGR contract rejected the external handler")
   endif()
 endfunction()
 
@@ -598,7 +590,7 @@ function(bioseq_register_sql_owner)
     ARG
     ""
     "EXTENSION;OWNER_KEY;MODULE"
-    "SOURCES;PROFILES;AUTHORITIES;ROW_CODECS;ENTITY_HANDLES;FMGR_ENTRYPOINTS;GUC_OWNERS;ANNOTATION_FREE_RESULT_ROWS;LEGACY_FMGR_SCANS"
+    "SOURCES;PROFILES;AUTHORITIES;ROW_CODECS;ENTITY_HANDLES;FMGR_ENTRYPOINTS;GUC_OWNERS;ANNOTATION_FREE_RESULT_ROWS;HANDWRITTEN_FMGR_EXPORTS"
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     _bioseq_sql_registry_fail(
@@ -710,7 +702,7 @@ function(bioseq_register_sql_owner)
 
   foreach(_facet_type IN ITEMS
       ROW_CODECS ENTITY_HANDLES FMGR_ENTRYPOINTS GUC_OWNERS
-      ANNOTATION_FREE_RESULT_ROWS LEGACY_FMGR_SCANS)
+      ANNOTATION_FREE_RESULT_ROWS HANDWRITTEN_FMGR_EXPORTS)
     set(_facet_values ${ARG_${_facet_type}})
     _bioseq_sql_require_unique_values(
       "${_facet_type} facets for ${ARG_OWNER_KEY}" ${_facet_values})
@@ -762,43 +754,49 @@ function(bioseq_register_sql_owner)
         "own row-codec or GUC facets")
     endif()
   endif()
-  if(ARG_LEGACY_FMGR_SCANS)
-    list(LENGTH ARG_LEGACY_FMGR_SCANS _legacy_fmgr_scan_count)
-    list(LENGTH ARG_SOURCES _legacy_fmgr_source_count)
-    if(NOT _legacy_fmgr_scan_count EQUAL 1
-        OR NOT _legacy_fmgr_source_count EQUAL 1)
+  if(ARG_HANDWRITTEN_FMGR_EXPORTS)
+    list(LENGTH ARG_HANDWRITTEN_FMGR_EXPORTS
+      _reviewed_handwritten_fmgr_export_count)
+    list(LENGTH ARG_SOURCES _reviewed_handwritten_fmgr_source_count)
+    if(NOT _reviewed_handwritten_fmgr_export_count EQUAL 1
+        OR NOT _reviewed_handwritten_fmgr_source_count EQUAL 1)
       _bioseq_sql_registry_fail(
-        "legacy-fmgr scan owner ${ARG_OWNER_KEY} must register exactly one "
+        "reviewed handwritten FMGR export owner ${ARG_OWNER_KEY} must "
+        "register "
+        "exactly one "
         "reviewed symbol and one source")
     endif()
     if(_final_index EQUAL -1)
       _bioseq_sql_registry_fail(
-        "legacy-fmgr scan owner ${ARG_OWNER_KEY} must have FINAL authority")
+        "reviewed handwritten FMGR export owner ${ARG_OWNER_KEY} must have "
+        "FINAL authority")
     endif()
     if(ARG_ROW_CODECS OR ARG_ENTITY_HANDLES OR ARG_FMGR_ENTRYPOINTS
         OR ARG_GUC_OWNERS OR ARG_ANNOTATION_FREE_RESULT_ROWS)
       _bioseq_sql_registry_fail(
-        "legacy-fmgr scan owner ${ARG_OWNER_KEY} cannot own generated SQL "
-        "facets")
+        "reviewed handwritten FMGR export owner ${ARG_OWNER_KEY} cannot own "
+        "generated SQL facets")
     endif()
-    list(GET ARG_SOURCES 0 _legacy_fmgr_source)
-    list(GET ARG_LEGACY_FMGR_SCANS 0 _legacy_fmgr_symbol)
-    set(_legacy_fmgr_profiles ${ARG_PROFILES})
-    list(SORT _legacy_fmgr_profiles)
-    set(_legacy_fmgr_authorities ${ARG_AUTHORITIES})
-    list(SORT _legacy_fmgr_authorities)
-    _bioseq_sql_legacy_fmgr_contract_authorized(
-      _legacy_fmgr_contract_authorized
+    list(GET ARG_SOURCES 0 _reviewed_handwritten_fmgr_source)
+    list(GET ARG_HANDWRITTEN_FMGR_EXPORTS 0
+      _reviewed_handwritten_fmgr_symbol)
+    set(_reviewed_handwritten_fmgr_profiles ${ARG_PROFILES})
+    list(SORT _reviewed_handwritten_fmgr_profiles)
+    set(_reviewed_handwritten_fmgr_authorities ${ARG_AUTHORITIES})
+    list(SORT _reviewed_handwritten_fmgr_authorities)
+    _bioseq_sql_reviewed_handwritten_fmgr_contract_authorized(
+      _reviewed_handwritten_fmgr_contract_authorized
       OWNER_KEY "${ARG_OWNER_KEY}"
       MODULE "${ARG_MODULE}"
-      SOURCE "${_legacy_fmgr_source}"
-      PROFILES "${_legacy_fmgr_profiles}"
-      AUTHORITIES "${_legacy_fmgr_authorities}"
-      SYMBOL "${_legacy_fmgr_symbol}")
-    if(NOT _legacy_fmgr_contract_authorized)
+      SOURCE "${_reviewed_handwritten_fmgr_source}"
+      PROFILES "${_reviewed_handwritten_fmgr_profiles}"
+      AUTHORITIES "${_reviewed_handwritten_fmgr_authorities}"
+      SYMBOL "${_reviewed_handwritten_fmgr_symbol}")
+    if(NOT _reviewed_handwritten_fmgr_contract_authorized)
       _bioseq_sql_registry_fail(
-        "legacy-fmgr scan authority is restricted to "
-        "external_relation_legacy_fmgr / bioseq.pg.external.relation / "
+        "reviewed handwritten FMGR export authority is restricted to "
+        "external_relation_fmgr_export / "
+        "bioseq.postgres.external.relation / "
         "backend/pg/external/relation.cppm / bioseq_external_handler in "
         "both profiles with FINAL-only authority")
     endif()
@@ -880,12 +878,12 @@ function(bioseq_register_sql_owner)
       # convention. Its row contract is derived from the matching FINAL
       # routine's structural return type.
       set(_explicit_annotation_free_authority TRUE)
-    elseif(ARG_LEGACY_FMGR_SCANS
+    elseif(ARG_HANDWRITTEN_FMGR_EXPORTS
         AND _annotation_index EQUAL -1)
-      # A legacy scan can authorize an otherwise annotation-free compatibility
-      # source.  The reviewed external handler now also owns natural SQL
-      # annotations, in which case those annotations provide source authority
-      # and the exact legacy facet independently closes wrapper ownership.
+      # A reviewed handwritten FMGR export can authorize an otherwise
+      # annotation-free source. The external handler now also owns natural
+      # SQL annotations, in which case those annotations provide source
+      # authority and the export facet independently closes wrapper ownership.
       set(_explicit_annotation_free_authority TRUE)
     endif()
     _bioseq_sql_annotation_authorized(
@@ -966,9 +964,9 @@ function(bioseq_register_sql_owner)
     list(APPEND _facets_for_record
       "annotation_free_result_row=${_facet_key}")
   endforeach()
-  foreach(_facet_key IN LISTS ARG_LEGACY_FMGR_SCANS)
+  foreach(_facet_key IN LISTS ARG_HANDWRITTEN_FMGR_EXPORTS)
     list(APPEND _facets_for_record
-      "legacy_fmgr_scan=${_facet_key}")
+      "handwritten_fmgr_export=${_facet_key}")
   endforeach()
   list(SORT _facets_for_record)
   string(JOIN "," _facet_record ${_facets_for_record})
@@ -1020,7 +1018,7 @@ function(bioseq_finalize_sql_owner_registry)
     ARG
     ""
     "EXTENSION;OUTPUT_DIR;INSTALL_PROFILE;TEST_PROFILE"
-    "EXPECTED_ROW_CODECS;EXPECTED_ENTITY_HANDLES;EXPECTED_FMGR_ENTRYPOINTS;EXPECTED_GUC_OWNERS;EXPECTED_ANNOTATION_FREE_RESULT_ROWS;EXPECTED_LEGACY_FMGR_SCANS"
+    "EXPECTED_ROW_CODECS;EXPECTED_ENTITY_HANDLES;EXPECTED_FMGR_ENTRYPOINTS;EXPECTED_GUC_OWNERS;EXPECTED_ANNOTATION_FREE_RESULT_ROWS;EXPECTED_HANDWRITTEN_FMGR_EXPORTS"
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     _bioseq_sql_registry_fail(
@@ -1061,7 +1059,7 @@ function(bioseq_finalize_sql_owner_registry)
 
   foreach(_facet_type IN ITEMS
       ROW_CODECS ENTITY_HANDLES FMGR_ENTRYPOINTS GUC_OWNERS
-      ANNOTATION_FREE_RESULT_ROWS LEGACY_FMGR_SCANS)
+      ANNOTATION_FREE_RESULT_ROWS HANDWRITTEN_FMGR_EXPORTS)
     set(_expected_argument "ARG_EXPECTED_${_facet_type}")
     set(_expected_facets ${${_expected_argument}})
     _bioseq_sql_require_unique_values(

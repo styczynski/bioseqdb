@@ -5,7 +5,7 @@
         "type": "string",
         "default": "single",
         "enum": ["single", "parallel", "task_parallel"],
-        "description": "DOC0294 scheduler mode for the bioseq SQL persisted-index read path"
+        "description": "Scheduler mode for the bioseq SQL persisted-index read path"
       },
       "minimizer_index": {
         "type": "string",
@@ -36,12 +36,12 @@
         "minimap2_split_bp": 2000000352,
         "seed": 3219876
       },
-      "description": "DOC0296 per-sequence just-index focus: dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
+      "description": "Per-sequence just-index focus: dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
     }
   },
   "bench_e2e": {
     "tags": ["e2e", "per_sequence", "just_index"],
-    "description": "DOC0296 focused per-sequence just-index task_parallel 2Gbp dna4 measurement",
+    "description": "Focused per-sequence just-index task_parallel 2Gbp dna4 measurement",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "matrix": {

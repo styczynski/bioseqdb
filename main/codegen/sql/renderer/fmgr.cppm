@@ -26,8 +26,6 @@ export namespace bioseq::codegen::sql {
 
 struct rendered_fmgr_overload final {
     std::string sql_identity;
-    std::string boundary_probe_site_id;
-    std::string boundary_fault_key;
     std::string cpp_declaration;
     std::filesystem::path source_path;
     std::size_t source_line{};
@@ -53,9 +51,6 @@ struct rendered_fmgr_entrypoint_module final {
 };
 
 namespace fmgr_detail {
-
-inline constexpr std::string_view generated_boundary_fault_key{
-    "generated_boundary_tail.std_exception"};
 
 /**
  * Return the PostgreSQL regprocedure spelling used by runtime consumers.
@@ -143,17 +138,6 @@ inline constexpr std::string_view generated_boundary_fault_key{
             + "' did not normalize to a runtime SQL identity");
     }
     return identity;
-}
-
-[[nodiscard]] inline std::string generated_boundary_probe_site_id(
-        std::string_view sql_identity) {
-    std::string material{
-        "bioseq.safety_runtime_probe.site.v2\n"};
-    material += sql_identity;
-    material += '\n';
-    material += generated_boundary_fault_key;
-    material += '\n';
-    return "probe:v2:" + sha256_hex(material);
 }
 
 struct normalized_cpp_type final {
@@ -417,37 +401,38 @@ struct cpp_template_binding final {
             .canonical_cpp_type = normalized.canonical,
             .key = "result.numeric.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_jsonb"
+    } else if (cpp_leaf(normalized.canonical) == "jsonb_value"
                && sql_type_is(sql_type, {"jsonb"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
             .key = direction + "jsonb.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_bytea"
+    } else if (cpp_leaf(normalized.canonical) == "bytea_value"
                && sql_type_is(sql_type, {"bytea"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
             .key = direction + "bytea.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_interval"
+    } else if (cpp_leaf(normalized.canonical) == "interval_value"
                && sql_type_is(sql_type, {"interval"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
             .key = direction + "interval.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_int64_array"
+    } else if (cpp_leaf(normalized.canonical) == "bigint_array"
                && sql_type_is(sql_type, {"bigint[]"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
-            .key = direction + "int64_array.owning",
+            .key = direction + "bigint_array.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_timestamptz"
+    } else if (cpp_leaf(normalized.canonical)
+                   == "timestamp_with_time_zone"
                && sql_type_is(sql_type, {"timestamptz"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
             .key = direction + "timestamptz.owning",
         };
-    } else if (cpp_leaf(normalized.canonical) == "sql_tid"
+    } else if (cpp_leaf(normalized.canonical) == "tuple_identifier"
                && !result
                && sql_type_is(sql_type, {"tid"})) {
         binding = {
@@ -552,21 +537,21 @@ struct cpp_template_binding final {
             .key = direction + "internal.pointer",
         };
     } else if (cpp_leaf(normalized.canonical)
-                   == "table_am_handler_context"
+                   == "table_access_method_handler"
                && !result
                && sql_type_is(sql_type, {"internal"})) {
         binding = {
             .canonical_cpp_type =
-                "bioseq::pg_utils::table_am_handler_context",
+                "bioseq::postgres::support::table_access_method_handler",
             .key = "argument.table_am_handler.context",
         };
     } else if (cpp_leaf(normalized.canonical)
-                   == "subscript_handler_context"
+                   == "subscript_handler"
                && !result
                && sql_type_is(sql_type, {"internal"})) {
         binding = {
             .canonical_cpp_type =
-                "bioseq::pg_utils::subscript_handler_context",
+                "bioseq::postgres::support::subscript_handler",
             .key = "argument.subscript_handler.context",
         };
     } else if ((cpp_leaf(normalized.canonical)
@@ -639,8 +624,9 @@ struct cpp_template_binding final {
 [[nodiscard]] inline bool call_context_type(
         std::string_view cpp_type) {
     const std::string compact = compact_cpp_type(cpp_type);
-    return compact == "bioseq::pg_utils::sql_call_context"
-        || compact == "sql_call_context";
+    return compact
+            == "bioseq::postgres::support::function_call_context"
+        || compact == "function_call_context";
 }
 
 [[nodiscard]] inline bool compact_sequence_owner_module(
@@ -742,15 +728,14 @@ struct cpp_template_binding final {
     return std::string{source_module};
 }
 
-[[nodiscard]] inline bool reviewed_handwritten_external_routine(
+[[nodiscard]] inline bool reviewed_handwritten_fmgr_export_routine(
         const normalized_entity& entity) noexcept {
-    return !entity.source.typed_install_owner
-        && entity.source.kind == entity_kind::function
+    return entity.source.kind == entity_kind::function
         && entity.source.name == "bioseq_external_handler"
         && entity.source.source_module
-            == "bioseq.pg.external.relation"
+            == "bioseq.postgres.external.relation"
         && entity.source.cpp_qualified_name
-            == "bioseq::external::sql_routines::"
+            == "bioseq::postgres::external::sql_routines::"
                "bioseq_external_handler"
         && entity.source.schema == "bioseq"
         && entity.source.result_sql_type == "table_am_handler";
@@ -758,8 +743,7 @@ struct cpp_template_binding final {
 
 [[nodiscard]] inline bool generated_c_routine(
         const normalized_entity& entity) noexcept {
-    return !reviewed_handwritten_external_routine(entity)
-        && !entity.source.typed_install_owner
+    return !reviewed_handwritten_fmgr_export_routine(entity)
         && (entity.source.kind == entity_kind::function
             || entity.source.kind == entity_kind::procedure);
 }
@@ -780,9 +764,9 @@ struct cpp_template_binding final {
 
 [[nodiscard]] inline bool row_result(
         routine_result_form form) noexcept {
-    return form == routine_result_form::returns_table
-        || form == routine_result_form::named_out
-        || form == routine_result_form::setof_named_out;
+    return form == routine_result_form::table_rows
+        || form == routine_result_form::named_output
+        || form == routine_result_form::named_output_set;
 }
 
 [[nodiscard]] inline const collected_result_row* result_row_for(
@@ -816,18 +800,18 @@ struct cpp_template_binding final {
 [[nodiscard]] inline std::string result_form_key(
         routine_result_form form) {
     switch (form) {
-        case routine_result_form::returns_table:
-            return "returns_table";
-        case routine_result_form::named_out:
-            return "named_out";
-        case routine_result_form::setof_named_out:
-            return "setof_named_out";
+        case routine_result_form::table_rows:
+            return "table_rows";
+        case routine_result_form::named_output:
+            return "named_output";
+        case routine_result_form::named_output_set:
+            return "named_output_set";
         case routine_result_form::scalar:
             return "scalar";
         case routine_result_form::void_:
             return "void";
-        case routine_result_form::setof:
-            return "setof";
+        case routine_result_form::set_of:
+            return "set_of";
     }
     throw std::runtime_error("unknown generated fmgr result form");
 }
@@ -877,7 +861,7 @@ struct cpp_template_binding final {
 [[nodiscard]] inline std::string render_argument_expression(
         const converter_binding& converter,
         std::size_t sql_index) {
-    return "bioseq::pg_utils::sql_argument<"
+    return "bioseq::postgres::support::read_argument<"
         + converter.canonical_cpp_type + ">(fcinfo, "
         + std::to_string(sql_index) + ")";
 }
@@ -906,17 +890,17 @@ struct cpp_template_binding final {
             if (injected_context) {
                 throw std::runtime_error(
                     "SQL owner '" + entity.source.cpp_qualified_name
-                    + "' has more than one injected sql_call_context");
+                    + "' has more than one injected function_call_context");
             }
             injected_context = true;
             arguments.push_back(
-                "bioseq::pg_utils::sql_context_argument(fcinfo)");
+                "bioseq::postgres::support::read_call_context(fcinfo)");
             continue;
         }
         if (call_context_type(parameter.cpp_type)) {
             throw std::runtime_error(
                 "SQL owner '" + entity.source.cpp_qualified_name
-                + "' has an unmarked sql_call_context parameter");
+                + "' has an unmarked function_call_context parameter");
         }
         converter_binding converter =
             parameter_converter(parameter);
@@ -927,13 +911,14 @@ struct cpp_template_binding final {
                 converter.canonical_cpp_type
                 == "std::optional<ArrayType*>";
             const std::string local =
-                "sql_array_argument_"
+                "array_argument_"
                 + std::to_string(sql_index);
+            const std::string_view reader = nullable
+                ? "bioseq::postgres::support::read_nullable_array_argument"
+                : "bioseq::postgres::support::read_array_argument";
             argument_initializers.push_back(
                 "    auto " + local
-                + " = bioseq::pg_utils::sql_"
-                + (nullable ? "nullable_array_argument"
-                            : "array_argument")
+                + " = " + std::string{reader}
                 + "(fcinfo, "
                 + std::to_string(sql_index) + ");\n");
             argument_capture_names.push_back(local);
@@ -1004,7 +989,7 @@ struct cpp_template_binding final {
         << "    [[nodiscard]] auto operator()(\n"
         << "            const ::" << row.cpp_qualified_name
         << "& row) const {\n"
-        << "        return bioseq::pg_utils::sql_result_row(\n";
+        << "        return bioseq::postgres::support::encode_result_row(\n";
     for (std::size_t index = 0; index < row.fields.size(); ++index) {
         output << "            row." << row.fields[index].name;
         output << (index + 1 == row.fields.size() ? ");\n" : ",\n");
@@ -1043,7 +1028,7 @@ struct cpp_template_binding final {
         }
         captures += "]";
         owner_call =
-            "bioseq::pg_utils::invoke_pg_as_cpp(" + captures
+            "bioseq::postgres::support::invoke_pg_as_cpp(" + captures
             + " { return "
             + owner_call + "; })";
     }
@@ -1055,10 +1040,6 @@ struct cpp_template_binding final {
         relocatable_routine_identity(entity);
     artifact = {
         .sql_identity = sql_identity,
-        .boundary_probe_site_id =
-            generated_boundary_probe_site_id(sql_identity),
-        .boundary_fault_key =
-            std::string{generated_boundary_fault_key},
         .cpp_declaration = entity.source.cpp_qualified_name,
         .source_path = entity.source.source_path,
         .source_line = entity.source.source_range.begin.line,
@@ -1085,10 +1066,10 @@ struct cpp_template_binding final {
     if (entity.source.result.form == routine_result_form::void_) {
         output
             << "    " << owner_call << ";\n"
-            << "    return bioseq::pg_utils::sql_void_result(fcinfo);\n";
+            << "    return bioseq::postgres::support::encode_void_result(fcinfo);\n";
     } else {
         output
-            << "    return bioseq::pg_utils::sql_result_to_datum(\n"
+            << "    return bioseq::postgres::support::encode_result(\n"
             << "        fcinfo, " << owner_call;
         if (row != nullptr) {
             output << ",\n        "
@@ -1100,31 +1081,6 @@ struct cpp_template_binding final {
     }
     output << "}\n\n";
     return output.str();
-}
-
-[[nodiscard]] inline std::string render_boundary_probe_descriptor(
-        std::string_view site_id,
-        std::string_view fault_key,
-        std::string_view indentation) {
-    std::ostringstream output;
-    output
-        << indentation
-        << "bioseq::pg_utils::sql_boundary_probe_descriptor{\n"
-        << indentation << "    .site_id = \""
-        << site_id << "\",\n"
-        << indentation << "    .fault_key = \""
-        << fault_key << "\",\n"
-        << indentation << "}";
-    return output.str();
-}
-
-[[nodiscard]] inline std::string render_boundary_probe_descriptor(
-        const rendered_fmgr_overload& overload,
-        std::string_view indentation) {
-    return render_boundary_probe_descriptor(
-        overload.boundary_probe_site_id,
-        overload.boundary_fault_key,
-        indentation);
 }
 
 [[nodiscard]] inline std::string render_public_wrapper(
@@ -1143,10 +1099,7 @@ struct cpp_template_binding final {
             output
                 << "        case " << overload.sql_arity << ":\n"
                 << "            return "
-                   "bioseq::pg_utils::invoke_sql_boundary(\n"
-                << render_boundary_probe_descriptor(
-                       overload, "                ")
-                << ",\n"
+                   "bioseq::postgres::support::invoke_postgres_callback(\n"
                 << "                [fcinfo] -> Datum {\n"
                 << "                    return "
                 << overload_helper_name(
@@ -1173,11 +1126,8 @@ struct cpp_template_binding final {
         return output.str();
     }
     output
-        << "    return bioseq::pg_utils::invoke_sql_boundary(\n";
-    output
-        << render_boundary_probe_descriptor(
-               wrapper.overloads.front(), "        ")
-        << ",\n";
+        << "    return "
+           "bioseq::postgres::support::invoke_postgres_callback(\n";
     output << "        [fcinfo] -> Datum {\n";
     const rendered_fmgr_overload& overload =
         wrapper.overloads.front();
@@ -1575,7 +1525,7 @@ render_vector_comparison_registry_from_associations(
         .module_name = module_name,
     };
     module.content = output.str();
-    module.content_sha256 = sha256_hex(module.content);
+    module.content_sha256 = bioseq::common::sha256_hex(module.content);
     return module;
 }
 
@@ -1903,7 +1853,7 @@ render_vector_aggregate_registry_from_associations(
         .module_name = module_name,
     };
     module.content = output.str();
-    module.content_sha256 = sha256_hex(module.content);
+    module.content_sha256 = bioseq::common::sha256_hex(module.content);
     return module;
 }
 
@@ -2074,7 +2024,7 @@ render_fmgr_entrypoint_modules(
         };
         module.content =
             fmgr_detail::render_module(module, symbols, graph);
-        module.content_sha256 = sha256_hex(module.content);
+        module.content_sha256 = bioseq::common::sha256_hex(module.content);
         result.push_back(std::move(module));
     }
     if (std::optional<rendered_fmgr_entrypoint_module> registry =

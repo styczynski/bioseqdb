@@ -4,26 +4,12 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
 #include <expected>
 #include <fcntl.h>
-#include <filesystem>
-#include <limits>
-#include <span>
 #include <string>
-#include <string_view>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
 #include <unistd.h>
 #include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:namespace_publish;
 import :types;
@@ -34,32 +20,32 @@ import :sync;
 import :path;
 import :cleanup;
 
-namespace bioseq::durable_file_io::detail {
+namespace bioseq::common::durable_file_io::detail {
 
-[[nodiscard]] inline std::expected<publication_state, file_io_error>
+[[nodiscard]] inline std::expected<publication_state, file_error>
 link_name_no_replace_at(
     int source_directory,
     const std::string& source_name,
     int destination_directory,
     const std::string& destination_name,
-    const file_io_hooks& hooks,
+    const fault_injection_hooks& hooks,
     const regular_file_identity* expected_source = nullptr) {
     if (source_directory < 0 || destination_directory < 0
         || !valid_leaf_name(source_name)
         || !valid_leaf_name(destination_name)) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::publish_link,
+            file_error_code::invalid_argument,
+            file_operation::link_destination,
             EINVAL));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::publish_link);
+    if (const int injected = injected_errno(
+            hooks, file_operation::link_destination);
         injected != 0) {
         return std::unexpected(make_error(
             injected == EEXIST
-                ? file_io_errc::destination_exists
-                : file_io_errc::rename_failed,
-            file_io_operation::publish_link,
+                ? file_error_code::destination_exists
+                : file_error_code::namespace_update_failed,
+            file_operation::link_destination,
             injected));
     }
     file_descriptor pinned_source{};
@@ -68,30 +54,30 @@ link_name_no_replace_at(
         source_directory,
         source_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         {});
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     pinned_source = std::move(*opened);
-    auto current = capture_identity(
-        pinned_source.get(), file_io_operation::stat_after, {});
+    auto current = capture_regular_file_identity_snapshot(
+        pinned_source.get(), file_operation::inspect_after_io, {});
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
     if (expected_source != nullptr && *current != *expected_source) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     pinned_identity = *current;
-    if (const int injected = injected_error(
-            hooks, file_io_operation::stat_after);
+    if (const int injected = injected_errno(
+            hooks, file_operation::inspect_after_io);
         injected != 0) {
         return std::unexpected(make_error(
-            file_io_errc::stat_failed,
-            file_io_operation::stat_after,
+            file_error_code::file_status_failed,
+            file_operation::inspect_after_io,
             injected));
     }
     if (::linkat(
@@ -103,34 +89,35 @@ link_name_no_replace_at(
         const int saved = errno;
         return std::unexpected(make_error(
             saved == EEXIST
-                ? file_io_errc::destination_exists
-                : file_io_errc::rename_failed,
-            file_io_operation::publish_link,
+                ? file_error_code::destination_exists
+                : file_error_code::namespace_update_failed,
+            file_operation::link_destination,
             saved));
     }
     auto destination_opened = open_regular_file_at(
         destination_directory,
         destination_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         {});
     if (!destination_opened.has_value()) {
-        file_io_error error = destination_opened.error();
+        file_error error = destination_opened.error();
         error.publication = publication_state::visible_not_durable;
         return std::unexpected(error);
     }
     file_descriptor destination_descriptor =
         std::move(*destination_opened);
-    auto published = capture_identity(
+    auto published = capture_regular_file_identity_snapshot(
         destination_descriptor.get(),
-        file_io_operation::stat_after,
+        file_operation::inspect_after_io,
         {});
     if (!published.has_value()) {
-        file_io_error error = published.error();
+        file_error error = published.error();
         error.publication = publication_state::visible_not_durable;
         return std::unexpected(error);
     }
-    if (!same_published_identity(*published, pinned_identity)) {
+    if (!matches_published_file_identity(
+            *published, pinned_identity)) {
         if (auto removed = remove_name_if_same_inode_at(
                 destination_directory,
                 destination_name,
@@ -142,50 +129,50 @@ link_name_no_replace_at(
         } else if (*removed
                    == conditional_remove_disposition::identity_mismatch) {
             return std::unexpected(make_error(
-                file_io_errc::identity_changed,
-                file_io_operation::remove_temporary,
+                file_error_code::identity_changed,
+                file_operation::remove_staging_file,
                 ESTALE,
                 0,
                 publication_state::visible_not_durable));
         }
-        if (auto synced = sync_descriptor(
+        if (auto synced = fsync_descriptor(
                 destination_directory,
-                file_io_operation::sync_directory,
+                file_operation::fsync_directory,
                 hooks,
                 publication_state::visible_not_durable);
             !synced.has_value()) {
             return std::unexpected(synced.error());
         }
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     return publication_state::visible_not_durable;
 }
 
-[[nodiscard]] inline std::expected<publication_state, file_io_error>
+[[nodiscard]] inline std::expected<publication_state, file_error>
 rename_name_at(
     int source_directory,
     const std::string& source_name,
     int destination_directory,
     const std::string& destination_name,
-    const file_io_hooks& hooks,
+    const fault_injection_hooks& hooks,
     const regular_file_identity* expected_source = nullptr) {
     if (source_directory < 0 || destination_directory < 0
         || !valid_leaf_name(source_name)
         || !valid_leaf_name(destination_name)) {
         return std::unexpected(make_error(
-            file_io_errc::invalid_argument,
-            file_io_operation::publish_rename,
+            file_error_code::invalid_argument,
+            file_operation::rename_destination,
             EINVAL));
     }
-    if (const int injected = injected_error(
-            hooks, file_io_operation::publish_rename);
+    if (const int injected = injected_errno(
+            hooks, file_operation::rename_destination);
         injected != 0) {
         return std::unexpected(make_error(
-            file_io_errc::rename_failed,
-            file_io_operation::publish_rename,
+            file_error_code::namespace_update_failed,
+            file_operation::rename_destination,
             injected));
     }
     file_descriptor pinned_source{};
@@ -194,30 +181,30 @@ rename_name_at(
         source_directory,
         source_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         {});
     if (!opened.has_value()) {
         return std::unexpected(opened.error());
     }
     pinned_source = std::move(*opened);
-    auto current = capture_identity(
-        pinned_source.get(), file_io_operation::stat_after, {});
+    auto current = capture_regular_file_identity_snapshot(
+        pinned_source.get(), file_operation::inspect_after_io, {});
     if (!current.has_value()) {
         return std::unexpected(current.error());
     }
     if (expected_source != nullptr && *current != *expected_source) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0));
     }
     pinned_identity = *current;
-    if (const int injected = injected_error(
-            hooks, file_io_operation::stat_after);
+    if (const int injected = injected_errno(
+            hooks, file_operation::inspect_after_io);
         injected != 0) {
         return std::unexpected(make_error(
-            file_io_errc::stat_failed,
-            file_io_operation::stat_after,
+            file_error_code::file_status_failed,
+            file_operation::inspect_after_io,
             injected));
     }
     if (::renameat(
@@ -226,36 +213,37 @@ rename_name_at(
             destination_directory,
             destination_name.c_str()) != 0) {
         return std::unexpected(make_error(
-            file_io_errc::rename_failed,
-            file_io_operation::publish_rename,
+            file_error_code::namespace_update_failed,
+            file_operation::rename_destination,
             errno));
     }
     auto destination_opened = open_regular_file_at(
         destination_directory,
         destination_name,
         O_RDONLY,
-        file_io_operation::open_file,
+        file_operation::open_regular_file,
         {});
     if (!destination_opened.has_value()) {
-        file_io_error error = destination_opened.error();
+        file_error error = destination_opened.error();
         error.publication = publication_state::visible_not_durable;
         return std::unexpected(error);
     }
     file_descriptor destination_descriptor =
         std::move(*destination_opened);
-    auto published = capture_identity(
+    auto published = capture_regular_file_identity_snapshot(
         destination_descriptor.get(),
-        file_io_operation::stat_after,
+        file_operation::inspect_after_io,
         {});
     if (!published.has_value()) {
-        file_io_error error = published.error();
+        file_error error = published.error();
         error.publication = publication_state::visible_not_durable;
         return std::unexpected(error);
     }
-    if (!same_published_identity(*published, pinned_identity)) {
+    if (!matches_published_file_identity(
+            *published, pinned_identity)) {
         return std::unexpected(make_error(
-            file_io_errc::identity_changed,
-            file_io_operation::stat_after,
+            file_error_code::identity_changed,
+            file_operation::inspect_after_io,
             0,
             0,
             publication_state::visible_not_durable));
@@ -264,4 +252,4 @@ rename_name_at(
 }
 
 
-}  // namespace bioseq::durable_file_io::detail
+}  // namespace bioseq::common::durable_file_io::detail

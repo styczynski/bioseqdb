@@ -1,36 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * external/row_writer.cppm
- *
- * Materialize a normalized owning provider message into a virtual
- * TupleTableSlot for one of the six logical bioseq_external relations.
- *
- * The CustomScan (scan_state.cppm) drives a stream of owning_provider_message
- * values out of provider core. Each message can "explode" into 0..N output
- * rows depending on the relation shape (e.g. one catalog message yields one
- * catalog row but genes.size() record_genes rows). This translation unit owns
- * the two pieces of that mapping:
- *
- *   - bioseq_external_message_row_count(): how many rows a message yields for
- *     a given entity (explode sizing), and
- *   - bioseq_external_fill_slot(): fill slot->tts_values[]/tts_isnull[] for one
- *     sub-row.
- *
- * The natural SQL catalog descriptors in external/sql_catalog.cppm own the column
- * order. The per-entity fillers below use that same 0-based order and Assert()
- * the expected natts to catch drift in assert-enabled builds. Every palloc'd
- * value (text, jsonb, arrays) is allocated in CurrentMemoryContext — the
- * executor's per-tuple context — because ExecStoreVirtualTuple (done by the
- * caller) keeps the pointers; nothing is freed here.
- *
- * The sequence / sequence_chunk relations materialize an owning_sequence_payload
- * (the retrieved nucleotide letters + region metadata) into the bioseq.seq
- * column via the active pgseq unconstrained-input alphabet + pg_alloc.
- *
- *-------------------------------------------------------------------------
- */
+/// @brief Materializes normalized provider messages into virtual tuples.
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "utils/builtins.h"     /* cstring_to_text_with_len, CStringGetTextDatum */
@@ -51,55 +21,63 @@ extern "C" {
 #include <variant>
 #include <vector>
 
-export module bioseq.pg.external.row_writer;
+export module bioseq.postgres.external.row_writer;
 
-import bioseq.pg.external.relation;   /* BioseqExternalEntityKind */
+import bioseq.postgres.external.relation;
 import bioseq.external.provider.base;
 import bioseq.external.provider.model;
 import bioseq.external.provider.messages;
-import bioseq.common.sequan_compat;   /* seq::dna5 */
-import bioseq.sequences.simd;         /* ::bioseq::simd::active_target::stdc_convert_from_cstr */
-import bioseq.types.pg_compact_sequence; /* bioseq::pg_types::seq, pg_alloc — the bioseq.seq varlena */
+import bioseq.common.seqan_adapter;
+import bioseq.sequences.simd;
+import bioseq.postgres.types.compact_sequence;
 
-namespace prov = bioseq::external::provider;
+namespace bioseq::postgres::external {
+namespace provider = bioseq::external::provider;
+}
 
-/* ======================================================================== */
-/* Public entry points                                                       */
-/* ======================================================================== */
+export namespace bioseq::postgres::external {
 
-/*
- * How many output rows a message yields for `entity` (explode sizing). A
- * message whose active variant does not match the entity yields 0 rows; so do
- * retrieval plans and diagnostics for every relational entity.
+/**
+ * @brief Returns the number of SQL rows emitted from one provider message.
+ *
+ * Catalog messages expand into gene or location rows for the corresponding
+ * relation. Non-row messages and mismatched variants return zero.
  */
-export std::size_t bioseq_external_message_row_count(
-	BioseqExternalEntityKind entity, const prov::owning_provider_message& msg);
+[[nodiscard]] std::size_t message_row_count(
+	relation_entity entity,
+	const provider::owning_provider_message &message) noexcept;
 
-/*
- * Fill `slot`'s tts_values[]/tts_isnull[] for the sub-row `sub_index` of `msg`
- * under `entity`. The caller does ExecClearTuple + ExecStoreVirtualTuple.
- * Returns true if a row was written (msg matched entity and sub_index is in
- * range), false to skip. Fills ALL slot->tts_tupleDescriptor->natts columns
- * (each column gets a value or isnull=true).
+/**
+ * @brief Materializes one message sub-row into a cleared virtual tuple slot.
+ * @return `true` when the message and row index match the relation entity.
+ *
+ * On success every attribute is assigned either a datum or SQL null. Allocated
+ * values use PostgreSQL's current memory context and remain valid for
+ * `ExecStoreVirtualTuple`.
  */
-export bool bioseq_external_fill_slot(
-	BioseqExternalEntityKind entity, const prov::owning_provider_message& msg,
-	std::size_t sub_index, TupleTableSlot* slot);
+bool materialize_message_row(
+	relation_entity entity,
+	const provider::owning_provider_message &message,
+	std::size_t row_index, TupleTableSlot *slot);
+
+} // namespace bioseq::postgres::external
 
 /* ======================================================================== */
 /* Column counts (authoritative: external/sql_catalog.cppm)                 */
 /* ======================================================================== */
 
+namespace bioseq::postgres::external {
+
 namespace {
 
 /* [[maybe_unused]]: Assert() is a no-op in non-assert PG builds, which would
  * otherwise leave these unreferenced under -Wunused-const-variable. */
-[[maybe_unused]] constexpr int TAXONOMY_NATTS = 13;
-[[maybe_unused]] constexpr int CATALOG_NATTS = 35;
-[[maybe_unused]] constexpr int RECORD_GENES_NATTS = 17;
-[[maybe_unused]] constexpr int RECORD_LOCATIONS_NATTS = 17;
-[[maybe_unused]] constexpr int SEQUENCE_NATTS = 18;
-[[maybe_unused]] constexpr int SEQUENCE_CHUNK_NATTS = 21;
+[[maybe_unused]] constexpr int taxonomy_column_count = 13;
+[[maybe_unused]] constexpr int catalog_column_count = 35;
+[[maybe_unused]] constexpr int record_gene_column_count = 17;
+[[maybe_unused]] constexpr int record_location_column_count = 17;
+[[maybe_unused]] constexpr int sequence_column_count = 18;
+[[maybe_unused]] constexpr int sequence_chunk_column_count = 21;
 
 /* ======================================================================== */
 /* Datum construction helpers (all allocate in CurrentMemoryContext)         */
@@ -111,7 +89,7 @@ namespace {
 inline void
 append_json_escaped(std::string& out, std::string_view sv)
 {
-	static constexpr char hex[] = "0123456789abcdef";
+	static constexpr char hex_digits[] = "0123456789abcdef";
 	for (unsigned char c : sv)
 	{
 		switch (c)
@@ -125,8 +103,8 @@ append_json_escaped(std::string& out, std::string_view sv)
 				if (c < 0x20)
 				{
 					out += "\\u00";
-					out += hex[(c >> 4) & 0x0F];
-					out += hex[c & 0x0F];
+					out += hex_digits[(c >> 4) & 0x0F];
+					out += hex_digits[c & 0x0F];
 				}
 				else
 				{
@@ -156,7 +134,7 @@ set_text(TupleTableSlot* slot, std::size_t i, std::string_view sv)
 template <std::size_t N>
 inline void
 set_text_opt(TupleTableSlot* slot, std::size_t i,
-			 const std::optional<prov::bounded_string<N>>& v)
+			 const std::optional<provider::bounded_string<N>>& v)
 {
 	if (v)
 		set_text(slot, i, v->view());
@@ -235,7 +213,7 @@ set_bool_opt(TupleTableSlot* slot, std::size_t i, const std::optional<bool>& v)
 /* external_timestamp is microseconds since 1970-01-01; PG TimestampTz is
  * microseconds since 2000-01-01. 946684800000000 = us between the two epochs. */
 inline void
-set_timestamptz(TupleTableSlot* slot, std::size_t i, prov::external_timestamp ts)
+set_timestamptz(TupleTableSlot* slot, std::size_t i, provider::external_timestamp ts)
 {
 	const std::int64_t us_1970 = ts.time_since_epoch().count();
 	const TimestampTz pg_ts =
@@ -247,7 +225,7 @@ set_timestamptz(TupleTableSlot* slot, std::size_t i, prov::external_timestamp ts
 /* external_date{year:int16, month:uint8, day:uint8} -> PG DateADT (days since
  * 2000-01-01), null when absent. */
 inline void
-set_date_opt(TupleTableSlot* slot, std::size_t i, const std::optional<prov::external_date>& d)
+set_date_opt(TupleTableSlot* slot, std::size_t i, const std::optional<provider::external_date>& d)
 {
 	if (!d)
 	{
@@ -277,10 +255,9 @@ set_jsonb_from_string(TupleTableSlot* slot, std::size_t i, const std::string& js
 	slot->tts_isnull[i] = false;
 }
 
-/* provenance is NOT NULL: always emit at least a minimal object identifying
- * the provider. Full provenance-hop serialization is a later refinement. */
+/* The SQL provenance column always carries the provider identity. */
 inline void
-set_provenance(TupleTableSlot* slot, std::size_t i, prov::provider_id provider)
+set_provenance(TupleTableSlot* slot, std::size_t i, provider::provider_id provider)
 {
 	std::string json = "{\"provider\":\"";
 	append_json_escaped(json, provider.value);
@@ -294,7 +271,7 @@ set_provenance(TupleTableSlot* slot, std::size_t i, prov::provider_id provider)
 template <std::size_t N>
 inline void
 set_provider_attributes(TupleTableSlot* slot, std::size_t i,
-						const std::optional<prov::bounded_string<N>>& v)
+						const std::optional<provider::bounded_string<N>>& v)
 {
 	if (!v)
 	{
@@ -336,7 +313,7 @@ set_bigint_array_opt(TupleTableSlot* slot, std::size_t i,
 template <std::size_t N>
 inline void
 set_text_array_opt(TupleTableSlot* slot, std::size_t i,
-				   const std::optional<std::vector<prov::bounded_string<N>>>& v)
+				   const std::optional<std::vector<provider::bounded_string<N>>>& v)
 {
 	if (!v)
 	{
@@ -358,145 +335,169 @@ set_text_array_opt(TupleTableSlot* slot, std::size_t i,
 	slot->tts_isnull[i] = false;
 }
 
-/* ------------------------------------------------------------------------ */
-/* jsonb array builders (catalog aliases / genes / locations)               */
-/* ------------------------------------------------------------------------ */
+template <class value_type, class append_value_type>
+void
+set_json_array_opt(TupleTableSlot *slot, std::size_t index,
+				   const std::optional<std::vector<value_type>> &values,
+				   append_value_type append_value)
+{
+	if (!values)
+	{
+		set_null(slot, index);
+		return;
+	}
+
+	std::string json{"["};
+	bool needs_separator = false;
+	for (const value_type &value : *values)
+	{
+		if (needs_separator)
+		{
+			json += ',';
+		}
+		needs_separator = true;
+		append_value(json, value);
+	}
+	json += ']';
+	set_jsonb_from_string(slot, index, json);
+}
 
 inline void
 set_aliases_jsonb(TupleTableSlot* slot, std::size_t i,
-				  const std::optional<std::vector<prov::owning_record_key>>& aliases)
+				  const std::optional<std::vector<provider::owning_record_key>>& aliases)
 {
-	if (!aliases)
-	{
-		set_null(slot, i);
-		return;
-	}
-	std::string json = "[";
-	bool first = true;
-	for (const auto& alias : *aliases)
-	{
-		if (!first)
-			json += ',';
-		first = false;
-		json += "{\"domain\":\"";
-		append_json_escaped(json, alias.domain.view());
-		json += "\",\"accession\":\"";
-		append_json_escaped(json, alias.accession.view());
-		json += "\"";
-		if (alias.name_space)
+	set_json_array_opt(
+		slot, i, aliases,
+		[](std::string &json, const provider::owning_record_key &alias)
 		{
-			json += ",\"namespace\":\"";
-			append_json_escaped(json, alias.name_space->view());
-			json += "\"";
-		}
-		json += "}";
-	}
-	json += "]";
-	set_jsonb_from_string(slot, i, json);
+			json += "{\"domain\":\"";
+			append_json_escaped(json, alias.domain.view());
+			json += "\",\"accession\":\"";
+			append_json_escaped(json, alias.accession.view());
+			json += '"';
+			if (alias.name_space)
+			{
+				json += ",\"namespace\":\"";
+				append_json_escaped(json, alias.name_space->view());
+				json += '"';
+			}
+			json += '}';
+		});
 }
 
 inline void
 set_genes_jsonb(TupleTableSlot* slot, std::size_t i,
-				const std::optional<std::vector<prov::owning_gene_reference>>& genes)
+				const std::optional<std::vector<provider::owning_gene_reference>>& genes)
 {
-	if (!genes)
-	{
-		set_null(slot, i);
-		return;
-	}
-	std::string json = "[";
-	bool first = true;
-	for (const auto& gene : *genes)
-	{
-		if (!first)
-			json += ',';
-		first = false;
-		json += "{\"namespace\":\"";
-		append_json_escaped(json, gene.name_space.view());
-		json += "\",\"id\":\"";
-		append_json_escaped(json, gene.identifier.view());
-		json += "\"";
-		if (gene.symbol)
+	set_json_array_opt(
+		slot, i, genes,
+		[](std::string &json, const provider::owning_gene_reference &gene)
 		{
-			json += ",\"symbol\":\"";
-			append_json_escaped(json, gene.symbol->view());
-			json += "\"";
-		}
-		if (gene.name)
-		{
-			json += ",\"name\":\"";
-			append_json_escaped(json, gene.name->view());
-			json += "\"";
-		}
-		if (gene.type)
-		{
-			json += ",\"type\":\"";
-			append_json_escaped(json, gene.type->view());
-			json += "\"";
-		}
-		if (gene.locus_tag)
-		{
-			json += ",\"locus_tag\":\"";
-			append_json_escaped(json, gene.locus_tag->view());
-			json += "\"";
-		}
-		json += "}";
-	}
-	json += "]";
-	set_jsonb_from_string(slot, i, json);
+			json += "{\"namespace\":\"";
+			append_json_escaped(json, gene.name_space.view());
+			json += "\",\"id\":\"";
+			append_json_escaped(json, gene.identifier.view());
+			json += '"';
+			const auto append_optional = [&json](
+				std::string_view name, const auto &value)
+			{
+				if (value)
+				{
+					json += ",\"";
+					json += name;
+					json += "\":\"";
+					append_json_escaped(json, value->view());
+					json += '"';
+				}
+			};
+			append_optional("symbol", gene.symbol);
+			append_optional("name", gene.name);
+			append_optional("type", gene.type);
+			append_optional("locus_tag", gene.locus_tag);
+			json += '}';
+		});
 }
 
 inline void
 set_locations_jsonb(TupleTableSlot* slot, std::size_t i,
-					const std::optional<std::vector<prov::owning_genomic_interval>>& locations)
+					const std::optional<std::vector<provider::owning_genomic_interval>>& locations)
 {
-	if (!locations)
-	{
-		set_null(slot, i);
-		return;
-	}
-	std::string json = "[";
-	bool first = true;
-	for (const auto& loc : *locations)
-	{
-		if (!first)
-			json += ',';
-		first = false;
-		json += "{\"sequence_alias\":\"";
-		append_json_escaped(json, loc.sequence_alias.view());
-		json += "\",\"start0\":";
-		json += std::to_string(loc.start0);
-		json += ",\"end0\":";
-		json += std::to_string(loc.end0);
-		json += ",\"strand\":";
-		json += std::to_string(static_cast<int>(loc.orientation));
-		if (loc.assembly_accession)
+	set_json_array_opt(
+		slot, i, locations,
+		[](std::string &json,
+		   const provider::owning_genomic_interval &location)
 		{
-			json += ",\"assembly_accession\":\"";
-			append_json_escaped(json, loc.assembly_accession->view());
-			json += "\"";
-		}
-		if (loc.assembly_database)
-		{
-			json += ",\"assembly_database\":\"";
-			append_json_escaped(json, loc.assembly_database->view());
-			json += "\"";
-		}
-		json += "}";
-	}
-	json += "]";
-	set_jsonb_from_string(slot, i, json);
+			json += "{\"sequence_alias\":\"";
+			append_json_escaped(json, location.sequence_alias.view());
+			json += "\",\"start0\":";
+			json += std::to_string(location.start0);
+			json += ",\"end0\":";
+			json += std::to_string(location.end0);
+			json += ",\"strand\":";
+			json += std::to_string(static_cast<int>(location.orientation));
+			const auto append_optional = [&json](
+				std::string_view name, const auto &value)
+			{
+				if (value)
+				{
+					json += ",\"";
+					json += name;
+					json += "\":\"";
+					append_json_escaped(json, value->view());
+					json += '"';
+				}
+			};
+			append_optional("assembly_accession",
+							location.assembly_accession);
+			append_optional("assembly_database", location.assembly_database);
+			json += '}';
+		});
 }
 
-/* ======================================================================== */
-/* Per-entity fillers. Column order mirrors external/sql_catalog.cppm.      */
-/* ======================================================================== */
+template <class row_type>
+void
+set_record_identity(TupleTableSlot *slot, const row_type &row)
+{
+	set_text(slot, 0, row.provider.value);
+	set_text(slot, 1, row.key.domain.view());
+	set_text_opt(slot, 2, row.key.name_space);
+	set_text(slot, 3, row.key.original_identifier.view());
+	set_text(slot, 4, row.key.accession.view());
+	set_uint32_opt_as_int32(slot, 5, row.key.version);
+}
+
+template <class row_type>
+void
+set_audit_columns(TupleTableSlot *slot, const row_type &row,
+				  std::size_t version_column,
+				  std::size_t provenance_column,
+				  std::size_t retrieved_at_column)
+{
+	set_text_opt(slot, version_column, row.audit.logical_provider_version);
+	set_provenance(slot, provenance_column, row.provider);
+	set_timestamptz(slot, retrieved_at_column, row.audit.completed_at);
+}
+
+void
+set_sequence_region(TupleTableSlot *slot,
+					const provider::owning_sequence_payload &row)
+{
+	set_record_identity(slot, row);
+	set_text(slot, 6, provider::to_string(row.molecule));
+	set_null(slot, 7);
+	set_text_opt(slot, 8, row.assembly_accession);
+	set_text_opt(slot, 9, row.assembly_database);
+	set_text_opt(slot, 10, row.chromosome);
+	set_uint64_opt_as_int64(slot, 11, row.start0);
+	set_uint64_opt_as_int64(slot, 12, row.end0);
+	set_int16(slot, 13, static_cast<std::int16_t>(row.strand));
+}
 
 /* taxonomy (13). */
 void
-fill_taxonomy(const prov::owning_taxonomy_row& row, TupleTableSlot* slot)
+fill_taxonomy(const provider::owning_taxonomy_row& row, TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == TAXONOMY_NATTS);
+	Assert(slot->tts_tupleDescriptor->natts == taxonomy_column_count);
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_int64_opt(slot, 1, row.taxon_id);                           /* taxon_id */
@@ -508,22 +509,20 @@ fill_taxonomy(const prov::owning_taxonomy_row& row, TupleTableSlot* slot)
 	set_bigint_array_opt(slot, 7, row.lineage);                     /* lineage bigint[] */
 	set_text_array_opt(slot, 8, row.synonyms);                      /* synonyms text[] */
 	set_provider_attributes(slot, 9, row.provider_attributes_json); /* provider_attributes */
-	set_text_opt(slot, 10, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 11, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 12, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_audit_columns(slot, row, 10, 11, 12);
 }
 
 /* catalog (35). */
 void
-fill_catalog(const prov::owning_catalog_row& row, TupleTableSlot* slot)
+fill_catalog(const provider::owning_catalog_row& row, TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == CATALOG_NATTS);
+	Assert(slot->tts_tupleDescriptor->natts == catalog_column_count);
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text(slot, 2, prov::to_string(row.kind));                   /* entity_kind */
+	set_text(slot, 2, provider::to_string(row.kind));                   /* entity_kind */
 	if (row.molecule)                                               /* molecule_kind */
-		set_text(slot, 3, prov::to_string(*row.molecule));
+		set_text(slot, 3, provider::to_string(*row.molecule));
 	else
 		set_null(slot, 3);
 	set_text_opt(slot, 4, row.key.name_space);                      /* namespace_name */
@@ -554,25 +553,18 @@ fill_catalog(const prov::owning_catalog_row& row, TupleTableSlot* slot)
 	set_bool_opt(slot, 29, row.is_fragment);                        /* is_fragment */
 	set_bool(slot, 30, row.retrievable);                            /* retrievable NOT NULL */
 	set_provider_attributes(slot, 31, row.provider_attributes_json);/* provider_attributes */
-	set_text_opt(slot, 32, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 33, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 34, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_audit_columns(slot, row, 32, 33, 34);
 }
 
 /* record_genes (17). One row per gene in the parent catalog row. */
 void
-fill_record_gene(const prov::owning_catalog_row& row, std::size_t sub_index,
+fill_record_gene(const provider::owning_catalog_row& row, std::size_t sub_index,
 				 TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == RECORD_GENES_NATTS);
-	const prov::owning_gene_reference& gene = (*row.genes)[sub_index];
+	Assert(slot->tts_tupleDescriptor->natts == record_gene_column_count);
+	const provider::owning_gene_reference& gene = (*row.genes)[sub_index];
 
-	set_text(slot, 0, row.provider.value);                          /* provider */
-	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
-	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
-	set_text(slot, 4, row.key.accession.view());                    /* accession */
-	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
+	set_record_identity(slot, row);
 	set_int32(slot, 6, static_cast<std::int32_t>(sub_index));       /* gene_index NOT NULL */
 	set_int32(slot, 7, static_cast<std::int32_t>(row.genes->size()));/* gene_count NOT NULL */
 	set_text(slot, 8, gene.name_space.view());                      /* gene_namespace NOT NULL */
@@ -581,25 +573,18 @@ fill_record_gene(const prov::owning_catalog_row& row, std::size_t sub_index,
 	set_text_opt(slot, 11, gene.name);                              /* gene_name */
 	set_text_opt(slot, 12, gene.type);                              /* gene_type */
 	set_text_opt(slot, 13, gene.locus_tag);                         /* locus_tag */
-	set_text_opt(slot, 14, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 15, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 16, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_audit_columns(slot, row, 14, 15, 16);
 }
 
 /* record_locations (17). One row per genomic interval in the parent catalog. */
 void
-fill_record_location(const prov::owning_catalog_row& row, std::size_t sub_index,
+fill_record_location(const provider::owning_catalog_row& row, std::size_t sub_index,
 					 TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == RECORD_LOCATIONS_NATTS);
-	const prov::owning_genomic_interval& loc = (*row.locations)[sub_index];
+	Assert(slot->tts_tupleDescriptor->natts == record_location_column_count);
+	const provider::owning_genomic_interval& loc = (*row.locations)[sub_index];
 
-	set_text(slot, 0, row.provider.value);                          /* provider */
-	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
-	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
-	set_text(slot, 4, row.key.accession.view());                    /* accession */
-	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
+	set_record_identity(slot, row);
 	set_int32(slot, 6, static_cast<std::int32_t>(sub_index));       /* location_index NOT NULL */
 	set_int32(slot, 7, static_cast<std::int32_t>(row.locations->size()));/* location_count NOT NULL */
 	set_text_opt(slot, 8, loc.assembly_accession);                  /* assembly_accession */
@@ -608,17 +593,13 @@ fill_record_location(const prov::owning_catalog_row& row, std::size_t sub_index,
 	set_int64(slot, 11, static_cast<std::int64_t>(loc.start0));     /* start0 NOT NULL */
 	set_int64(slot, 12, static_cast<std::int64_t>(loc.end0));       /* end0 NOT NULL */
 	set_int16(slot, 13, static_cast<std::int16_t>(loc.orientation));/* strand NOT NULL */
-	set_text_opt(slot, 14, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 15, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 16, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_audit_columns(slot, row, 14, 15, 16);
 }
 
-/* Build a bioseq.seq varlena Datum from raw nucleotide letters. Production
- * profiles use dna5 (A/C/G/T/N; U->T); the level-0 iteration profile uses
- * dna4 and intentionally rejects non-dna4 input. The factory pallocs in
- * CurrentMemoryContext and writes the varlena header, mirroring bioseq.seq_in. */
+/* Builds a bioseq.seq datum with the configured unconstrained-input alphabet. */
 inline void
-set_seq(TupleTableSlot* slot, std::size_t i, std::string_view bases)
+set_sequence_value(TupleTableSlot* slot, std::size_t i,
+				   std::string_view bases)
 {
 	bioseq::pg_types::seq* header =
 		::bioseq::simd::active_target::stdc_convert_from_cstr<
@@ -637,58 +618,28 @@ set_seq(TupleTableSlot* slot, std::size_t i, std::string_view bases)
 
 /* sequences (18). */
 void
-fill_sequence(const prov::owning_sequence_payload& row, TupleTableSlot* slot)
+fill_sequence(const provider::owning_sequence_payload& row, TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == SEQUENCE_NATTS);
+	Assert(slot->tts_tupleDescriptor->natts == sequence_column_count);
 
-	set_text(slot, 0, row.provider.value);                          /* provider */
-	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
-	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
-	set_text(slot, 4, row.key.accession.view());                    /* accession */
-	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
-	set_text(slot, 6, prov::to_string(row.molecule));               /* molecule_kind NOT NULL */
-	set_null(slot, 7);                                              /* taxon_id */
-	set_text_opt(slot, 8, row.assembly_accession);                  /* assembly_accession */
-	set_text_opt(slot, 9, row.assembly_database);                   /* assembly_database */
-	set_text_opt(slot, 10, row.chromosome);                         /* chromosome */
-	set_uint64_opt_as_int64(slot, 11, row.start0);                  /* start0 */
-	set_uint64_opt_as_int64(slot, 12, row.end0);                    /* end0 */
-	set_int16(slot, 13, static_cast<std::int16_t>(row.strand));     /* strand NOT NULL */
-	set_seq(slot, 14, row.bases);                                   /* sequence bioseq.seq NOT NULL */
-	set_text_opt(slot, 15, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 16, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 17, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_sequence_region(slot, row);
+	set_sequence_value(slot, 14, row.bases);
+	set_audit_columns(slot, row, 15, 16, 17);
 }
 
 /* sequence_chunks (21). */
 void
-fill_sequence_chunk(const prov::owning_sequence_payload& row,
+fill_sequence_chunk(const provider::owning_sequence_payload& row,
 					TupleTableSlot* slot)
 {
-	Assert(slot->tts_tupleDescriptor->natts == SEQUENCE_CHUNK_NATTS);
+	Assert(slot->tts_tupleDescriptor->natts == sequence_chunk_column_count);
 
-	set_text(slot, 0, row.provider.value);                          /* provider */
-	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
-	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
-	set_text(slot, 4, row.key.accession.view());                    /* accession */
-	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
-	set_text(slot, 6, prov::to_string(row.molecule));               /* molecule_kind NOT NULL */
-	set_null(slot, 7);                                              /* taxon_id */
-	set_text_opt(slot, 8, row.assembly_accession);                  /* assembly_accession */
-	set_text_opt(slot, 9, row.assembly_database);                   /* assembly_database */
-	set_text_opt(slot, 10, row.chromosome);                         /* chromosome */
-	set_uint64_opt_as_int64(slot, 11, row.start0);                  /* start0 */
-	set_uint64_opt_as_int64(slot, 12, row.end0);                    /* end0 */
-	set_int16(slot, 13, static_cast<std::int16_t>(row.strand));     /* strand NOT NULL */
+	set_sequence_region(slot, row);
 	set_int64(slot, 14, static_cast<std::int64_t>(row.chunk_index));/* chunk_index NOT NULL */
 	set_int64(slot, 15, static_cast<std::int64_t>(row.base_offset));/* base_offset NOT NULL */
-	set_seq(slot, 16, row.bases);                                   /* sequence_chunk NOT NULL */
+	set_sequence_value(slot, 16, row.bases);
 	set_bool(slot, 17, row.end_of_record);                          /* end_of_record NOT NULL */
-	set_text_opt(slot, 18, row.audit.logical_provider_version);     /* provider_version */
-	set_provenance(slot, 19, row.provider);                         /* provenance NOT NULL */
-	set_timestamptz(slot, 20, row.audit.completed_at);              /* retrieved_at NOT NULL */
+	set_audit_columns(slot, row, 18, 19, 20);
 }
 
 } // namespace
@@ -698,102 +649,117 @@ fill_sequence_chunk(const prov::owning_sequence_payload& row,
 /* ======================================================================== */
 
 std::size_t
-bioseq_external_message_row_count(BioseqExternalEntityKind entity,
-								  const prov::owning_provider_message& msg)
+message_row_count(relation_entity entity,
+				  const provider::owning_provider_message &message) noexcept
 {
 	switch (entity)
 	{
-		case EXTERNAL_ENTITY_TAXONOMY:
-			return std::get_if<prov::owning_taxonomy_row>(&msg) != nullptr ? 1u : 0u;
-
-		case EXTERNAL_ENTITY_CATALOG:
-			return std::get_if<prov::owning_catalog_row>(&msg) != nullptr ? 1u : 0u;
-
-		case EXTERNAL_ENTITY_RECORD_GENE:
-			if (const auto* row = std::get_if<prov::owning_catalog_row>(&msg))
-				return row->genes ? row->genes->size() : 0u;
-			return 0u;
-
-		case EXTERNAL_ENTITY_RECORD_LOCATION:
-			if (const auto* row = std::get_if<prov::owning_catalog_row>(&msg))
-				return row->locations ? row->locations->size() : 0u;
-			return 0u;
-
-		case EXTERNAL_ENTITY_SEQUENCE:
-		case EXTERNAL_ENTITY_SEQUENCE_CHUNK:
-			return std::get_if<prov::owning_sequence_payload>(&msg) != nullptr
+		case relation_entity::taxonomy:
+			return std::get_if<provider::owning_taxonomy_row>(&message) != nullptr
 					   ? 1u
 					   : 0u;
 
-		case EXTERNAL_ENTITY_UNSPECIFIED:
+		case relation_entity::catalog:
+			return std::get_if<provider::owning_catalog_row>(&message) != nullptr
+					   ? 1u
+					   : 0u;
+
+		case relation_entity::record_gene:
+			if (const auto *row =
+					std::get_if<provider::owning_catalog_row>(&message))
+				return row->genes ? row->genes->size() : 0u;
+			return 0u;
+
+		case relation_entity::record_location:
+			if (const auto *row =
+					std::get_if<provider::owning_catalog_row>(&message))
+				return row->locations ? row->locations->size() : 0u;
+			return 0u;
+
+		case relation_entity::sequence:
+		case relation_entity::sequence_chunk:
+			return std::get_if<provider::owning_sequence_payload>(&message) != nullptr
+					   ? 1u
+					   : 0u;
+
+		case relation_entity::unspecified:
 		default:
 			return 0u;
 	}
 }
 
 bool
-bioseq_external_fill_slot(BioseqExternalEntityKind entity,
-						  const prov::owning_provider_message& msg,
-						  std::size_t sub_index, TupleTableSlot* slot)
+materialize_message_row(relation_entity entity,
+						const provider::owning_provider_message &message,
+						std::size_t row_index, TupleTableSlot *slot)
 {
 	switch (entity)
 	{
-		case EXTERNAL_ENTITY_TAXONOMY:
+		case relation_entity::taxonomy:
 		{
-			const auto* row = std::get_if<prov::owning_taxonomy_row>(&msg);
+			const auto *row =
+				std::get_if<provider::owning_taxonomy_row>(&message);
 			if (row == nullptr)
 				return false;
 			fill_taxonomy(*row, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_CATALOG:
+		case relation_entity::catalog:
 		{
-			const auto* row = std::get_if<prov::owning_catalog_row>(&msg);
+			const auto *row =
+				std::get_if<provider::owning_catalog_row>(&message);
 			if (row == nullptr)
 				return false;
 			fill_catalog(*row, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_RECORD_GENE:
+		case relation_entity::record_gene:
 		{
-			const auto* row = std::get_if<prov::owning_catalog_row>(&msg);
-			if (row == nullptr || !row->genes || sub_index >= row->genes->size())
+			const auto *row =
+				std::get_if<provider::owning_catalog_row>(&message);
+			if (row == nullptr || !row->genes || row_index >= row->genes->size())
 				return false;
-			fill_record_gene(*row, sub_index, slot);
+			fill_record_gene(*row, row_index, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_RECORD_LOCATION:
+		case relation_entity::record_location:
 		{
-			const auto* row = std::get_if<prov::owning_catalog_row>(&msg);
-			if (row == nullptr || !row->locations || sub_index >= row->locations->size())
+			const auto *row =
+				std::get_if<provider::owning_catalog_row>(&message);
+			if (row == nullptr || !row->locations ||
+				row_index >= row->locations->size())
 				return false;
-			fill_record_location(*row, sub_index, slot);
+			fill_record_location(*row, row_index, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_SEQUENCE:
+		case relation_entity::sequence:
 		{
-			const auto* row = std::get_if<prov::owning_sequence_payload>(&msg);
-			if (row == nullptr || sub_index != 0)
+			const auto *row =
+				std::get_if<provider::owning_sequence_payload>(&message);
+			if (row == nullptr || row_index != 0)
 				return false;
 			fill_sequence(*row, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_SEQUENCE_CHUNK:
+		case relation_entity::sequence_chunk:
 		{
-			const auto* row = std::get_if<prov::owning_sequence_payload>(&msg);
-			if (row == nullptr || sub_index != 0)
+			const auto *row =
+				std::get_if<provider::owning_sequence_payload>(&message);
+			if (row == nullptr || row_index != 0)
 				return false;
 			fill_sequence_chunk(*row, slot);
 			return true;
 		}
 
-		case EXTERNAL_ENTITY_UNSPECIFIED:
+		case relation_entity::unspecified:
 		default:
 			return false;
 	}
 }
+
+} // namespace bioseq::postgres::external

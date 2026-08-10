@@ -13,7 +13,7 @@ import :model;
 
 export namespace bioseq::codegen::safety {
 
-/// Immutable inputs for one post-FINAL compiler-fact pass.
+/// Immutable inputs for one prepared compiler-fact pass.
 ///
 /// The owned compile database and PCM manifest must have been prepared with
 /// the `safety` authority for the same exact source list and profile.

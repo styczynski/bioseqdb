@@ -8,7 +8,7 @@ module;
 
 export module bioseq.codegen.website;
 
-import :site_builder;
+import :build_pipeline;
 import :contract_tests;
 
 export namespace bioseq::codegen::website {
@@ -30,7 +30,7 @@ inline int self_test() {
 /// @return The phase exit code, or one on an unexpected exception.
 inline int run(std::span<std::string_view const> args) {
     try {
-        return dispatch_website(args);
+        return dispatch_website_command(args);
     } catch (const std::exception& error) {
         std::println(stderr, "bioseq_website_codegen: {}", error.what());
         return 1;

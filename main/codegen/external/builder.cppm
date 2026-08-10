@@ -1,6 +1,11 @@
+/**
+ * @file builder.cppm
+ * @brief Incremental orchestration for generated external API clients.
+ */
 module;
 
 #include <algorithm>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -9,18 +14,16 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 module bioseq.codegen.external:builder;
 
 import :annotation_parser;
-import :openapi_parser;
-import :client_renderer;
 import :artifact_handler;
 import :incremental_state;
 import :model;
+import :openapi_parser;
 import bioseq.codegen.support;
 import bioseq.common.hashing;
 
@@ -28,16 +31,64 @@ namespace fs = std::filesystem;
 
 namespace bioseq::codegen::external {
 
+/// @brief Artifact prepared during source traversal and emitted after validation.
+struct pending_artifact {
+    /// @brief Annotation spelling used as the primary deterministic sort key.
+    std::string annotation_name;
+    /// @brief Deferred artifact set and its output identity.
+    generated_artifact artifact;
+};
+
+/// @brief Collision-resistant identity of one annotation-owned output.
+struct annotation_output_identity {
+    /// @brief Registered annotation spelling.
+    std::string annotation_name;
+    /// @brief Processor-derived output identity.
+    std::string output_name;
+
+    /// @brief Orders identities by annotation spelling and then output name.
+    auto operator<=>(const annotation_output_identity&) const = default;
+};
+
+/// @brief Current owner and processor for one registered output identity.
+struct registered_annotation_output {
+    /// @brief Processor responsible for existence checks and inventory emission.
+    const annotation_processor* processor{};
+    /// @brief Relative annotated source path.
+    std::string source_path;
+    /// @brief Validated generator-owned output path.
+    std::string owned_output_path;
+};
+
+/// @brief Owner of one concrete path beneath the generator artifact root.
+struct owned_output_owner {
+    /// @brief Annotation and output identity claiming the path.
+    annotation_output_identity identity;
+    /// @brief Relative annotated source path used in collision diagnostics.
+    std::string source_path;
+};
+
+/// @brief Cross-indexed ownership accumulated during one source traversal.
+struct generation_inventory {
+    /// @brief Outputs keyed by annotation and processor-derived name.
+    std::map<annotation_output_identity, registered_annotation_output> outputs;
+    /// @brief Concrete owned paths mapped to their logical owners.
+    std::map<std::string, owned_output_owner, std::less<>> owned_paths;
+    /// @brief Annotated source paths mapped to their single output identity.
+    std::map<std::string, annotation_output_identity, std::less<>> source_outputs;
+};
+
 /// @brief Lowers an API annotation into renderer-ready metadata.
 /// @param request Resolved annotation and embedded specification.
 /// @return Validated generated API model.
-[[nodiscard]] generated_api generate_api_client(const annotation_request& request) {
-    auto document = parse_openapi(request.spec);
-    const std::string client_name = request.source.stem().string();
-    if (identifier(client_name) != client_name || identifier(request.declared_type) != request.declared_type) {
+[[nodiscard]] generated_api build_client_model(const annotation_request& request) {
+    openapi_document document = parse_openapi(request.specification);
+    const std::string client_name = request.source_path.stem().string();
+    if (make_cpp_identifier(client_name) != client_name
+        || make_cpp_identifier(request.declared_type) != request.declared_type) {
         throw std::runtime_error(
             "API descriptor stem and annotated class must be simple C++ identifiers: "
-            + request.source.string());
+            + request.source_path.string());
     }
     return generated_api{
         .client_name = client_name,
@@ -46,287 +97,474 @@ namespace bioseq::codegen::external {
     };
 }
 
-/// @brief Wraps API metadata in the registry's type-erased emitter.
+/// @brief Wraps client metadata in the registry's type-erased artifact emitter.
 /// @param request Resolved API annotation.
-/// @return Named deferred output emitter.
-[[nodiscard]] generated_output generate_api_output(const annotation_request& request) {
-    generated_api api = generate_api_client(request);
-    const std::string name = api.client_name;
-    return generated_output{
-        .name = name,
-        .emit = [api = std::move(api)](
-                    const fs::path& output_root,
-                    std::string_view compiler_id) {
-            emit_api(api, output_root, compiler_id);
+/// @return Named deferred artifact set.
+[[nodiscard]] generated_artifact prepare_client_artifact(
+    const annotation_request& request) {
+    generated_api api = build_client_model(request);
+    const std::string output_name = api.client_name;
+    return generated_artifact{
+        .output_name = output_name,
+        .emit_artifacts = [api = std::move(api)](
+                              const fs::path& output_root,
+                              std::string_view compiler_id) {
+            emit_client_artifacts(api, output_root, compiler_id);
         },
     };
 }
 
-/// @brief Parses and validates generator command-line options.
-/// @param argc Argument count.
-/// @param argv Argument vector.
-/// @return Normalized command configuration.
-[[nodiscard]] command_line parse_command_line(int argc, char** argv) {
-    command_line result{.generator_binary = fs::absolute(argv[0])};
-    for (int index = 1; index < argc; ++index) {
-        const std::string_view argument = argv[index];
-        if (index + 1 >= argc) {
-            throw std::runtime_error("missing value for " + std::string(argument));
-        }
-        const std::string value = argv[++index];
-        if (argument == "--generator-binary") result.generator_binary = fs::absolute(value);
-        else if (argument == "--source-root") result.source_root = value;
-        else if (argument == "--output-root") result.output_root = value;
-        else if (argument == "--clang-binary") result.clang_binary = value;
-        else if (argument == "--compiler-id") result.compiler_id = value;
-        else if (argument == "--stamp") result.stamp = value;
-        else throw std::runtime_error("unknown argument: " + std::string(argument));
+/// @brief Constructs the complete current annotation processor registry.
+/// @return Deterministically ordered processors keyed by attribute spelling.
+[[nodiscard]] annotation_registry make_annotation_registry() {
+    return annotation_registry{
+        {"bioseq::api_client",
+         annotation_processor{
+             .prepare_artifact = &prepare_client_artifact,
+             .derive_output_name = &derive_client_output_name,
+             .derive_owned_output_path = &derive_client_owned_output_path,
+             .has_complete_output = &has_complete_client_output,
+             .append_build_inventory = &append_client_build_inventory,
+         }},
+    };
+}
+
+/// @brief Parses and validates external-client generator command-line options.
+/// @param argument_count Argument count including the executable name.
+/// @param argument_values Mutable C argument vector supplied by the launcher.
+/// @return Normalized generation options.
+/// @throws std::runtime_error For missing, unknown, or incomplete options.
+[[nodiscard]] generation_options parse_generation_options(
+    int argument_count,
+    char** argument_values) {
+    if (argument_count < 1 || argument_values == nullptr || argument_values[0] == nullptr) {
+        throw std::runtime_error("generator executable path is unavailable");
     }
-    if (result.source_root.empty() || result.output_root.empty()
-        || result.clang_binary.empty() || result.compiler_id.empty()
-        || result.stamp.empty()) {
+
+    generation_options options{
+        .generator_binary = fs::absolute(argument_values[0]),
+    };
+    for (int argument_index = 1; argument_index < argument_count; ++argument_index) {
+        const std::string_view option = argument_values[argument_index];
+        if (argument_index + 1 >= argument_count) {
+            throw std::runtime_error("missing value for " + std::string(option));
+        }
+        const std::string option_value = argument_values[++argument_index];
+        if (option == "--generator-binary") {
+            options.generator_binary = fs::absolute(option_value);
+        } else if (option == "--source-root") {
+            options.source_root = option_value;
+        } else if (option == "--output-root") {
+            options.output_root = option_value;
+        } else if (option == "--clang-binary") {
+            options.clang_binary = option_value;
+        } else if (option == "--compiler-id") {
+            options.compiler_id = option_value;
+        } else if (option == "--stamp") {
+            options.stamp = option_value;
+        } else {
+            throw std::runtime_error("unknown argument: " + std::string(option));
+        }
+    }
+    if (options.source_root.empty() || options.output_root.empty()
+        || options.clang_binary.empty() || options.compiler_id.empty()
+        || options.stamp.empty()) {
         throw std::runtime_error(
             "required arguments: --source-root --output-root --clang-binary "
             "--compiler-id --stamp");
     }
-    return result;
+    return options;
 }
 
-/// @brief Scans descriptors, incrementally emits outputs, and removes stale artifacts.
-/// @param command Validated generator configuration.
-/// @return Zero after successful generation.
-[[nodiscard]] int execute(const command_line& command) {
-    const annotation_handlers handlers{
-        {"bioseq::api_client", annotation_handler{
-            .generate = &generate_api_output,
-            .output_name = &api_output_name,
-            .owned_output_path = &api_owned_output_path,
-            .outputs_exist = &api_outputs_exist,
-            .append_cmake_inventory = &append_api_cmake_inventory,
-        }},
-    };
+/// @brief Discovers module descriptors beneath the configured source root.
+/// @param source_root Root directory to scan recursively.
+/// @return Regular `.cppm` paths in deterministic lexical order.
+[[nodiscard]] std::vector<fs::path> discover_descriptor_sources(
+    const fs::path& source_root) {
     std::vector<fs::path> sources;
-    for (const auto& entry : fs::recursive_directory_iterator(command.source_root)) {
+    for (const fs::directory_entry& entry : fs::recursive_directory_iterator(source_root)) {
         if (entry.is_regular_file() && entry.path().extension() == ".cppm") {
             sources.push_back(entry.path());
         }
     }
     std::ranges::sort(sources);
+    return sources;
+}
 
-    struct pending_output {
-        std::string annotation_name;
-        generated_output output;
+/// @brief Registers one annotation output across identity, path, and source indexes.
+/// @param registry Active annotation processors.
+/// @param inventory Mutable ownership inventory for this invocation.
+/// @param annotation_name Registered annotation spelling.
+/// @param output_name Processor-derived output identity.
+/// @param relative_source Relative annotated source path.
+/// @return Validated generator-owned output path as a generic string.
+/// @throws std::runtime_error For unregistered annotations or ownership collisions.
+[[nodiscard]] std::string register_annotation_output(
+    const annotation_registry& registry,
+    generation_inventory& inventory,
+    std::string_view annotation_name,
+    std::string_view output_name,
+    std::string_view relative_source) {
+    const auto processor_position = registry.find(annotation_name);
+    if (processor_position == registry.end()) {
+        throw std::runtime_error(
+            "source state references unregistered annotation '"
+            + std::string(annotation_name) + "': " + std::string(relative_source));
+    }
+    if (output_name.empty() || output_name.find_first_of("\t\r\n") != std::string_view::npos) {
+        throw std::runtime_error(
+            "annotation processor produced an invalid output name for "
+            + std::string(relative_source));
+    }
+
+    const fs::path owned_path = validate_owned_artifact_path(
+        processor_position->second.derive_owned_output_path(output_name),
+        artifact_owner_view{relative_source});
+    const std::string owned_path_text = owned_path.generic_string();
+    const annotation_output_identity identity{
+        .annotation_name = std::string(annotation_name),
+        .output_name = std::string(output_name),
     };
-    struct registered_output {
-        const annotation_handler* handler{};
-        std::string annotation_name;
-        std::string name;
-        std::string source;
-        std::string owned_output_path;
-    };
-    std::vector<pending_output> generated;
-    std::map<std::string, registered_output> output_inventory;
-    std::map<std::string, std::pair<std::string, std::string>> owned_output_owners;
-    std::map<std::string, std::string> source_outputs;
-    std::ostringstream state;
-    const fs::path state_path = command.output_root / "generation_state.tsv";
-    const std::string signature = state_signature(command, handlers);
-    state << "#signature\t" << signature << '\n';
-    bool state_cache_valid = false;
-    const auto stored_state = load_source_state(state_path, signature, state_cache_valid);
-    const std::unordered_map<std::string, source_state> empty_state;
-    const auto& previous_state = state_cache_valid ? stored_state : empty_state;
-    const auto output_key = [](std::string_view annotation_name, std::string_view output_name) {
-        std::string key(annotation_name);
-        key.push_back('\n');
-        key += output_name;
-        return key;
-    };
-    const auto register_output = [
-                                     &handlers,
-                                     &owned_output_owners,
-                                     &output_inventory,
-                                     &output_key,
-                                     &source_outputs](
-                                     std::string_view annotation_name,
-                                     std::string_view name,
-                                     const std::string& relative) {
-        const auto handler = handlers.find(std::string(annotation_name));
-        if (handler == handlers.end()) {
-            throw std::runtime_error(
-                "source state references unregistered annotation '"
-                + std::string(annotation_name) + "': " + relative);
+
+    const auto [path_owner_position, owns_path] = inventory.owned_paths.emplace(
+        owned_path_text,
+        owned_output_owner{
+            .identity = identity,
+            .source_path = std::string(relative_source),
+        });
+    if (!owns_path && path_owner_position->second.identity != identity) {
+        throw std::runtime_error(
+            "annotation outputs collide at '" + owned_path_text + "': "
+            + path_owner_position->second.source_path + " and "
+            + std::string(relative_source));
+    }
+
+    const auto [output_position, output_inserted] = inventory.outputs.emplace(
+        identity,
+        registered_annotation_output{
+            .processor = &processor_position->second,
+            .source_path = std::string(relative_source),
+            .owned_output_path = owned_path_text,
+        });
+    if (!output_inserted && output_position->second.source_path != relative_source) {
+        throw std::runtime_error(
+            "annotated sources produce duplicate output '" + std::string(output_name)
+            + "' for " + std::string(annotation_name) + ": "
+            + output_position->second.source_path + " and "
+            + std::string(relative_source));
+    }
+
+    const auto [source_position, source_inserted] = inventory.source_outputs.emplace(
+        std::string(relative_source),
+        identity);
+    if (!source_inserted && source_position->second != identity) {
+        throw std::runtime_error(
+            "source contains multiple registered annotations: "
+            + std::string(relative_source));
+    }
+    return owned_path_text;
+}
+
+/// @brief Checks whether an annotated snapshot's generated and staged outputs are reusable.
+/// @param snapshot Previous current-schema source snapshot.
+/// @param relative_source Relative source path.
+/// @param options Active generator configuration.
+/// @param registry Active annotation processors.
+/// @return True when the processor remains registered and every owned artifact exists.
+[[nodiscard]] bool has_reusable_annotation_output(
+    const source_snapshot& snapshot,
+    const fs::path& relative_source,
+    const generation_options& options,
+    const annotation_registry& registry) {
+    if (!snapshot.has_annotation || snapshot.owned_output_path.empty()) {
+        return false;
+    }
+    const auto processor_position = registry.find(snapshot.annotation_name);
+    return processor_position != registry.end()
+        && processor_position->second.has_complete_output(
+            options.output_root,
+            snapshot.output_name)
+        && has_staged_parser_sources(options.output_root, relative_source);
+}
+
+/// @brief Checks the cheap filesystem metadata reuse path.
+/// @param snapshot Previous current-schema source snapshot.
+/// @param file_size_bytes Current source size.
+/// @param last_write_ticks Current source write-time ticks.
+/// @param relative_source Relative source path.
+/// @param options Active generator configuration.
+/// @param registry Active annotation processors.
+/// @return True when no source bytes or required outputs need inspection.
+[[nodiscard]] bool can_reuse_source_metadata(
+    const source_snapshot& snapshot,
+    std::uintmax_t file_size_bytes,
+    std::int64_t last_write_ticks,
+    const fs::path& relative_source,
+    const generation_options& options,
+    const annotation_registry& registry) {
+    return snapshot.file_size_bytes == file_size_bytes
+        && snapshot.last_write_ticks == last_write_ticks
+        && (!snapshot.has_annotation
+            || has_reusable_annotation_output(
+                snapshot,
+                relative_source,
+                options,
+                registry));
+}
+
+/// @brief Checks the content-hash reuse path after filesystem metadata changed.
+/// @param snapshot Previous current-schema source snapshot.
+/// @param content_hash Hash of the current source bytes.
+/// @param relative_source Relative source path.
+/// @param options Active generator configuration.
+/// @param registry Active annotation processors.
+/// @return True when parsing and artifact emission can be skipped safely.
+[[nodiscard]] bool can_reuse_source_content(
+    const source_snapshot& snapshot,
+    std::uint64_t content_hash,
+    const fs::path& relative_source,
+    const generation_options& options,
+    const annotation_registry& registry) {
+    return snapshot.has_annotation && snapshot.content_hash == content_hash
+        && has_reusable_annotation_output(
+            snapshot,
+            relative_source,
+            options,
+            registry);
+}
+
+/// @brief Removes artifacts and staged parser sources no longer owned by current inputs.
+/// @param stored_snapshots All valid rows loaded from the previous state file.
+/// @param inventory Current output ownership inventory.
+/// @param options Active generator configuration.
+void remove_stale_artifacts(
+    const source_snapshots& stored_snapshots,
+    const generation_inventory& inventory,
+    const generation_options& options) {
+    for (const auto& snapshot_entry : stored_snapshots) {
+        const std::string& relative_source = snapshot_entry.first;
+        const source_snapshot& previous_snapshot = snapshot_entry.second;
+        if (!previous_snapshot.has_annotation) {
+            continue;
         }
-        if (name.empty() || name.find_first_of("\t\r\n") != std::string_view::npos) {
-            throw std::runtime_error(
-                "annotation handler produced an invalid output name for " + relative);
+
+        const annotation_output_identity identity{
+            .annotation_name = previous_snapshot.annotation_name,
+            .output_name = previous_snapshot.output_name,
+        };
+        const auto current_output = inventory.outputs.find(identity);
+        const fs::path previous_owned_path = validate_owned_artifact_path(
+            previous_snapshot.owned_output_path,
+            artifact_owner_view{relative_source});
+        const bool path_is_current = current_output != inventory.outputs.end()
+            && current_output->second.owned_output_path
+                == previous_owned_path.generic_string();
+        if (!path_is_current) {
+            fs::remove_all(options.output_root / previous_owned_path);
         }
-        const std::string owned_output_path = checked_owned_output_path(
-            handler->second.owned_output_path(name), relative).generic_string();
-        const std::string key = output_key(annotation_name, name);
-        const auto [owner, owns_path] = owned_output_owners.emplace(
-            owned_output_path, std::pair{key, relative});
-        if (!owns_path && owner->second.first != key) {
-            throw std::runtime_error(
-                "annotation outputs collide at '" + owned_output_path + "': "
-                + owner->second.second + " and " + relative);
+
+        if (inventory.source_outputs.contains(relative_source)) {
+            continue;
         }
-        const auto [position, inserted] = output_inventory.emplace(
-            key,
-            registered_output{
-                .handler = &handler->second,
-                .annotation_name = std::string(annotation_name),
-                .name = std::string(name),
-                .source = relative,
-                .owned_output_path = owned_output_path,
-            });
-        if (!inserted && position->second.source != relative) {
-            throw std::runtime_error(
-                "annotated sources produce duplicate output '" + std::string(name)
-                + "' for " + std::string(annotation_name) + ": "
-                + position->second.source + " and " + relative);
-        }
-        const auto [source_position, source_inserted] =
-            source_outputs.emplace(relative, key);
-        if (!source_inserted && source_position->second != key) {
-            throw std::runtime_error(
-                "source contains multiple registered annotations: " + relative);
-        }
-        return owned_output_path;
-    };
-    for (const auto& source : sources) {
-        const fs::path relative_path = fs::relative(source, command.source_root);
-        const std::string relative = relative_path.generic_string();
-        const auto size = fs::file_size(source);
-        const auto ticks = static_cast<std::int64_t>(
-            fs::last_write_time(source).time_since_epoch().count());
-        const auto previous = previous_state.find(relative);
-        if (previous != previous_state.end()
-            && previous->second.size == size && previous->second.ticks == ticks
-            && (!previous->second.annotated
-                || (handlers.contains(previous->second.annotation_name)
-                    && !previous->second.owned_output_path.empty()
-                    && handlers.at(previous->second.annotation_name).outputs_exist(
-                        command.output_root, previous->second.output_name)
-                    && staged_sources_exist(command.output_root, relative_path)))) {
-            append_source_state(state, relative, previous->second);
-            if (previous->second.annotated) {
-                const std::string owned_output_path = register_output(
-                    previous->second.annotation_name,
-                    previous->second.output_name,
-                    relative);
-                if (owned_output_path != previous->second.owned_output_path) {
+        const fs::path relative_path(relative_source);
+        fs::remove(options.output_root / "annotation_sources" / relative_path);
+        fs::path parser_relative = relative_path;
+        parser_relative.replace_extension(".shadow.cpp");
+        fs::remove(options.output_root / "parser_sources" / parser_relative);
+    }
+}
+
+/// @brief Emits validated artifacts and publishes deterministic generator inventories.
+/// @param pending_artifacts Newly prepared artifacts in deterministic order.
+/// @param inventory Complete current output inventory.
+/// @param state_path Incremental-state destination.
+/// @param state_bytes Serialized current state.
+/// @param options Active generator configuration.
+void publish_generation_results(
+    const std::vector<pending_artifact>& pending_artifacts,
+    const generation_inventory& inventory,
+    const fs::path& state_path,
+    std::string_view state_bytes,
+    const generation_options& options) {
+    std::ostringstream build_inventory;
+    build_inventory << "# Generated external code inventory.\n";
+
+    for (const pending_artifact& pending : pending_artifacts) {
+        pending.artifact.emit_artifacts(options.output_root, options.compiler_id);
+    }
+    for (const auto& output_entry : inventory.outputs) {
+        const annotation_output_identity& identity = output_entry.first;
+        const registered_annotation_output& registered_output = output_entry.second;
+        registered_output.processor->append_build_inventory(
+            build_inventory,
+            identity.output_name);
+    }
+
+    publish_artifact_if_changed(state_path, state_bytes);
+    publish_artifact_if_changed(
+        options.output_root / "generated_apis.cmake",
+        build_inventory.str());
+    mark_artifact_complete(options.stamp);
+}
+
+/// @brief Scans descriptors, incrementally emits outputs, and removes stale artifacts.
+/// @param options Validated generator configuration.
+/// @return Zero after successful deterministic generation.
+[[nodiscard]] int generate_external_clients(const generation_options& options) {
+    const annotation_registry registry = make_annotation_registry();
+    const std::vector<fs::path> sources = discover_descriptor_sources(options.source_root);
+
+    std::vector<pending_artifact> pending_artifacts;
+    generation_inventory inventory;
+    std::ostringstream state_output;
+    const fs::path state_path = options.output_root / "generation_state.tsv";
+    const std::string signature = compute_generation_state_signature(options, registry);
+    state_output << "#signature\t" << signature << '\n';
+
+    const loaded_incremental_state loaded_state = load_incremental_state(
+        state_path,
+        signature);
+    const source_snapshots empty_snapshots;
+    const source_snapshots& previous_snapshots = loaded_state.is_reusable
+        ? loaded_state.snapshots
+        : empty_snapshots;
+
+    for (const fs::path& source_path : sources) {
+        const fs::path relative_path = fs::relative(source_path, options.source_root);
+        const std::string relative_source = relative_path.generic_string();
+        const std::uintmax_t file_size_bytes = fs::file_size(source_path);
+        const std::int64_t last_write_ticks = static_cast<std::int64_t>(
+            fs::last_write_time(source_path).time_since_epoch().count());
+        const auto previous_position = previous_snapshots.find(relative_source);
+
+        if (previous_position != previous_snapshots.end()
+            && can_reuse_source_metadata(
+                previous_position->second,
+                file_size_bytes,
+                last_write_ticks,
+                relative_path,
+                options,
+                registry)) {
+            const source_snapshot& previous_snapshot = previous_position->second;
+            append_source_snapshot(state_output, relative_source, previous_snapshot);
+            if (previous_snapshot.has_annotation) {
+                const std::string owned_path = register_annotation_output(
+                    registry,
+                    inventory,
+                    previous_snapshot.annotation_name,
+                    previous_snapshot.output_name,
+                    relative_source);
+                if (owned_path != previous_snapshot.owned_output_path) {
                     throw std::runtime_error(
                         "cached annotation output path changed without state invalidation: "
-                        + relative);
+                        + relative_source);
                 }
             }
             continue;
         }
 
-        const std::string content = read_file(source);
-        const bool annotated = contains_registered_annotation(content, handlers);
-        source_state current{
-            .size = size,
-            .ticks = ticks,
-            .hash = bioseq::common::fnv1a_64(content),
-            .annotated = annotated,
+        const std::string source_text = read_artifact_bytes(source_path);
+        source_snapshot current_snapshot{
+            .file_size_bytes = file_size_bytes,
+            .last_write_ticks = last_write_ticks,
+            .content_hash = bioseq::common::fnv1a_64(source_text),
+            .has_annotation = has_registered_annotation(source_text, registry),
         };
-        if (!annotated) {
-            append_source_state(state, relative, current);
-            continue;
-        }
-        if (previous != previous_state.end()
-            && previous->second.annotated && previous->second.hash == current.hash
-            && handlers.contains(previous->second.annotation_name)
-            && !previous->second.owned_output_path.empty()
-            && handlers.at(previous->second.annotation_name).outputs_exist(
-                command.output_root, previous->second.output_name)
-            && staged_sources_exist(command.output_root, relative_path)) {
-            current.annotation_name = previous->second.annotation_name;
-            current.output_name = previous->second.output_name;
-            current.owned_output_path = register_output(
-                current.annotation_name, current.output_name, relative);
-            append_source_state(state, relative, current);
+        if (!current_snapshot.has_annotation) {
+            append_source_snapshot(state_output, relative_source, current_snapshot);
             continue;
         }
 
-        write_if_different(
-            command.output_root / "annotation_sources" / relative_path, content);
-        fs::path shadow_relative = relative_path;
-        shadow_relative.replace_extension(".shadow.cpp");
-        const fs::path shadow = command.output_root / "parser_sources" / shadow_relative;
-        const std::string normalized = normalize_shadow(content);
-        write_if_different(shadow, normalized);
-        const auto request = parse_annotation(source, shadow, command.clang_binary, handlers);
-        const auto handler = handlers.find(request.annotation_name);
-        if (handler == handlers.end()) {
-            throw std::runtime_error(
-                "parser returned unregistered annotation '" + request.annotation_name + "'");
+        if (previous_position != previous_snapshots.end()
+            && can_reuse_source_content(
+                previous_position->second,
+                current_snapshot.content_hash,
+                relative_path,
+                options,
+                registry)) {
+            const source_snapshot& previous_snapshot = previous_position->second;
+            current_snapshot.annotation_name = previous_snapshot.annotation_name;
+            current_snapshot.output_name = previous_snapshot.output_name;
+            current_snapshot.owned_output_path = register_annotation_output(
+                registry,
+                inventory,
+                current_snapshot.annotation_name,
+                current_snapshot.output_name,
+                relative_source);
+            append_source_snapshot(state_output, relative_source, current_snapshot);
+            continue;
         }
-        current.annotation_name = request.annotation_name;
-        current.output_name = handler->second.output_name(source);
-        current.owned_output_path = register_output(
-            current.annotation_name, current.output_name, relative);
-        generated_output output = handler->second.generate(request);
-        if (output.name != current.output_name) {
+
+        publish_artifact_if_changed(
+            options.output_root / "annotation_sources" / relative_path,
+            source_text);
+        fs::path parser_relative = relative_path;
+        parser_relative.replace_extension(".shadow.cpp");
+        const fs::path parser_source_path =
+            options.output_root / "parser_sources" / parser_relative;
+        publish_artifact_if_changed(
+            parser_source_path,
+            prepare_clang_translation_unit(source_text));
+
+        const annotation_request request = parse_source_annotation(
+            source_path,
+            parser_source_path,
+            options.clang_binary,
+            registry);
+        const auto processor_position = registry.find(request.annotation_name);
+        if (processor_position == registry.end()) {
             throw std::runtime_error(
-                "annotation handler output name mismatch for " + source.string()
-                + ": expected '" + current.output_name + "', generated '"
-                + output.name + "'");
+                "parser returned unregistered annotation '"
+                + request.annotation_name + "'");
         }
-        if (!output.emit) {
+
+        current_snapshot.annotation_name = request.annotation_name;
+        current_snapshot.output_name =
+            processor_position->second.derive_output_name(source_path);
+        current_snapshot.owned_output_path = register_annotation_output(
+            registry,
+            inventory,
+            current_snapshot.annotation_name,
+            current_snapshot.output_name,
+            relative_source);
+
+        generated_artifact artifact =
+            processor_position->second.prepare_artifact(request);
+        if (artifact.output_name != current_snapshot.output_name) {
             throw std::runtime_error(
-                "annotation handler returned no emitter for " + source.string());
+                "annotation processor output name mismatch for " + source_path.string()
+                + ": expected '" + current_snapshot.output_name + "', generated '"
+                + artifact.output_name + "'");
         }
-        generated.push_back(pending_output{
+        if (!artifact.emit_artifacts) {
+            throw std::runtime_error(
+                "annotation processor returned no artifact emitter for "
+                + source_path.string());
+        }
+        pending_artifacts.push_back(pending_artifact{
             .annotation_name = request.annotation_name,
-            .output = std::move(output),
+            .artifact = std::move(artifact),
         });
-        append_source_state(state, relative, current);
-    }
-    std::ranges::sort(generated, [](const pending_output& left, const pending_output& right) {
-        if (left.annotation_name != right.annotation_name) {
-            return left.annotation_name < right.annotation_name;
-        }
-        return left.output.name < right.output.name;
-    });
-
-    for (const auto& [relative, previous] : stored_state) {
-        if (!previous.annotated) continue;
-        const fs::path relative_path(relative);
-        const std::string key = output_key(previous.annotation_name, previous.output_name);
-        const auto current_output = output_inventory.find(key);
-        const fs::path previous_owned_output_path = checked_owned_output_path(
-            previous.owned_output_path, relative);
-        const bool output_path_is_current = current_output != output_inventory.end()
-            && current_output->second.owned_output_path
-                == previous_owned_output_path.generic_string();
-        if (!output_path_is_current) {
-            fs::remove_all(command.output_root / previous_owned_output_path);
-        }
-        if (source_outputs.contains(relative)) {
-            continue;
-        }
-        fs::remove(command.output_root / "annotation_sources" / relative_path);
-        fs::path shadow_relative = relative_path;
-        shadow_relative.replace_extension(".shadow.cpp");
-        fs::remove(command.output_root / "parser_sources" / shadow_relative);
+        append_source_snapshot(state_output, relative_source, current_snapshot);
     }
 
-    std::ostringstream cmake_manifest;
-    cmake_manifest << "# Generated external code inventory.\n";
-    for (const auto& pending : generated) {
-        pending.output.emit(command.output_root, command.compiler_id);
-    }
-    for (const auto& [key, output] : output_inventory) {
-        (void)key;
-        output.handler->append_cmake_inventory(cmake_manifest, output.name);
-    }
-    write_if_different(state_path, state.str());
-    write_if_different(command.output_root / "generated_apis.cmake", cmake_manifest.str());
-    touch_stamp(command.stamp);
+    std::ranges::sort(
+        pending_artifacts,
+        [](const pending_artifact& left, const pending_artifact& right) {
+            if (left.annotation_name != right.annotation_name) {
+                return left.annotation_name < right.annotation_name;
+            }
+            return left.artifact.output_name < right.artifact.output_name;
+        });
+
+    remove_stale_artifacts(loaded_state.snapshots, inventory, options);
+    publish_generation_results(
+        pending_artifacts,
+        inventory,
+        state_path,
+        state_output.str(),
+        options);
     return 0;
 }
 
-}
+} // namespace bioseq::codegen::external

@@ -5,7 +5,7 @@
 // touch the SIMD minimizer kernels, so it needs NO Highway namespace wrapper.
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <array>

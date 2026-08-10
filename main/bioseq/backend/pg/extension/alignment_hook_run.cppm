@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -44,7 +44,7 @@ static_assert(!executor_run_output_fully_drained(
 } // namespace
 
 ExecutorRun_hook_type PreviousExecutorRunHook = nullptr;
-std::vector<AlignmentExecutorFrame*> alignment_current_run{};
+std::vector<alignment_executor_frame*> alignment_current_run{};
 
 namespace {
 
@@ -69,7 +69,7 @@ void bioseq_alignment_executor_run(
 		uint64 count,
 		bool execute_once)
 {
-	AlignmentExecutorFrame* frame = find_alignment_frame(query_desc);
+	alignment_executor_frame* frame = find_alignment_frame(query_desc);
 	if (frame == nullptr) {
 		call_previous_or_standard_executor_run(
 			query_desc, direction, count, execute_once);

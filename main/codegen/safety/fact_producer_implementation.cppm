@@ -62,7 +62,7 @@ import :manifest;
 import :model;
 import :serialization;
 import :validation;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 namespace bioseq::codegen::safety {
@@ -301,10 +301,10 @@ coherent_declaration_source_of(
         .source_file = source_file,
         .span = span,
         .source_file_sha256 =
-            bioseq::codegen::sha256_hex(
-                bioseq::codegen::read_file(source_path)),
+            bioseq::common::sha256_hex(
+                bioseq::codegen::read_artifact_bytes(source_path)),
         .fragment_sha256 =
-            bioseq::codegen::sha256_hex(fragment.str()),
+            bioseq::common::sha256_hex(fragment.str()),
     };
 }
 
@@ -494,7 +494,8 @@ coherent_declaration_source_of(
     const std::string usr = stable_usr(function);
     if (function == nullptr
         || qualified_name(function)
-            != "bioseq::pg_utils::invoke_sql_boundary") {
+            != "bioseq::postgres::support::"
+               "invoke_postgres_callback") {
         return usr.empty()
             ? compiler_owned_function_identity(function)
             : usr;
@@ -538,7 +539,7 @@ coherent_declaration_source_of(
                 location.span.end.byte_offset);
     }
     return "clang-boundary-specialization:"
-        + bioseq::codegen::sha256_hex(material).substr(0, 32);
+        + bioseq::common::sha256_hex(material).substr(0, 32);
 }
 
 [[nodiscard]] bool nontrivial_type(
@@ -646,7 +647,8 @@ struct prepared_identity {
 
 [[nodiscard]] std::vector<fs::path> parse_source_list(
     const fs::path& source_list) {
-    const std::string text = bioseq::codegen::read_file(source_list);
+    const std::string text =
+        bioseq::codegen::read_artifact_bytes(source_list);
     std::vector<fs::path> result;
     std::set<std::string, std::less<>> seen;
     std::size_t begin = 0;
@@ -917,8 +919,8 @@ derive_postgresql_header_authority(
                     canonical_path(derived_physical_root);
                 observed_physical_roots.insert(derived_root);
                 const std::string actual_sha256 =
-                    bioseq::codegen::sha256_hex(
-                        bioseq::codegen::read_file(header));
+                    bioseq::common::sha256_hex(
+                        bioseq::codegen::read_artifact_bytes(header));
                 if (actual_sha256 != expected_sha256) {
                     stale_pin = true;
                     continue;
@@ -1017,7 +1019,7 @@ derive_postgresql_header_authority(
     if (usr.empty()
         && domain == callee_domain::compiler_builtin) {
         usr = "clang-builtin:"
-            + bioseq::codegen::sha256_hex(
+            + bioseq::common::sha256_hex(
                   std::to_string(target->getBuiltinID()) + "\n"
                   + qualified_name(target) + "\n"
                   + target->getType().getCanonicalType().getAsString())
@@ -1089,10 +1091,10 @@ void record_provenance_candidate(
             },
         };
         candidate.upstream_file_sha256 =
-            bioseq::codegen::sha256_hex(
+            bioseq::common::sha256_hex(
                 environment.provenance_authority);
         candidate.fragment_sha256 =
-            bioseq::codegen::sha256_hex(
+            bioseq::common::sha256_hex(
                 std::to_string(target->getBuiltinID()) + "\n"
                 + target_name + "\n"
                 + target->getType()
@@ -1237,10 +1239,10 @@ external_provenance_for(
             + target->getType().getCanonicalType().getAsString();
         if (match->upstream_file != authority_file
             || match->upstream_file_sha256
-                != bioseq::codegen::sha256_hex(
+                != bioseq::common::sha256_hex(
                     environment.provenance_authority)
             || match->fragment_sha256
-                != bioseq::codegen::sha256_hex(material)) {
+                != bioseq::common::sha256_hex(material)) {
             fact_failure(
                 target_name,
                 "pinned compiler builtin authority/hash is stale");
@@ -1393,7 +1395,7 @@ pg_allowlist_for(
             language,
             true);
         usr = "clang-local:"
-            + bioseq::codegen::sha256_hex(
+            + bioseq::common::sha256_hex(
                   location.source_file + "\n"
                   + std::to_string(
                       location.span.begin.byte_offset)
@@ -1439,7 +1441,7 @@ pg_allowlist_for(
         + "\ntemporary";
     return {
         .stable_object_id = "clang-temporary:"
-            + bioseq::codegen::sha256_hex(id_material).substr(0, 32),
+            + bioseq::common::sha256_hex(id_material).substr(0, 32),
         .identity_kind =
             object_identity_kind::synthetic_temporary,
         .canonical_type =
@@ -1463,7 +1465,7 @@ pg_allowlist_for(
         function->getSourceRange(), sources, language, true);
     return {
         .stable_object_id = "clang-coroutine:"
-            + bioseq::codegen::sha256_hex(
+            + bioseq::common::sha256_hex(
                   stable_function_identity(
                       function, context)
                   + "\n"
@@ -1523,7 +1525,7 @@ pg_allowlist_for(
         + std::to_string(location.span.begin.byte_offset);
     return {
         .stable_object_id = "clang-capture:"
-            + bioseq::codegen::sha256_hex(material).substr(0, 32),
+            + bioseq::common::sha256_hex(material).substr(0, 32),
         .identity_kind =
             object_identity_kind::synthetic_capture,
         .canonical_type = type.isNull()
@@ -1660,7 +1662,7 @@ pg_allowlist_for(
             .invocation = invocation,
             .definition = definition,
             .definition_sha256 =
-                bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(
                     source_text(
                         definition_range,
                         sources,
@@ -1931,11 +1933,13 @@ class explicit_call_collector final
         const std::string direct_name =
             direct == nullptr ? std::string{} : qualified_name(direct);
         const bridge_kind exact_bridge =
-            direct_name == "bioseq::pg_utils::invoke_pg_as_cpp"
+            direct_name
+                    == "bioseq::postgres::support::invoke_pg_as_cpp"
             ? bridge_kind::invoke_pg_as_cpp
             : direct_name
-                    == "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp"
-            ? bridge_kind::sql_call_context
+                    == "bioseq::postgres::support::"
+                       "invoke_pg_across_transactions_as_cpp"
+            ? bridge_kind::cross_transaction_callback
             : bridge_kind::none;
         if (exact_bridge != bridge_kind::none
             && call->getNumArgs() != 0) {
@@ -2772,12 +2776,12 @@ macro_expansion_at(
                 language,
                 true),
             .definition_file_sha256 =
-                bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(
                     std::string_view{
                         definition_file.data(),
                         definition_file.size()}),
             .pinned_fragment_sha256 =
-                bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(
                     std::string_view{
                         definition_file.data()
                             + fragment_begin,
@@ -3076,10 +3080,10 @@ class lambda_collector final
 };
 
 inline constexpr std::string_view error_capture_contract_id{
-    "bioseq.pg_utils.error_bridge/error_capture/v1"};
+    "bioseq.postgres.support.error_boundary/error_capture"};
 
 inline constexpr std::string_view error_capture_contract_material{
-    "bioseq.pg_utils.error_bridge/error_capture/v1\n"
+    "bioseq.postgres.support.error_boundary/error_capture\n"
     "outer_catch_helper_call=1\n"
     "copy_error_data_in_nested_pg_try=1\n"
     "flush_error_state_on_copy_success=1\n"
@@ -3187,7 +3191,7 @@ class throw_expression_collector final
             call->getDirectCallee();
         if (direct == nullptr
             || direct->getName()
-                != "capture_current_pg_error_as_cpp") {
+                != "capture_current_postgres_error_as_cpp") {
             continue;
         }
         if (helper_call != nullptr) {
@@ -3204,7 +3208,7 @@ class throw_expression_collector final
         || statement_contains(
             outer_region.try_branch, helper_call)
         || owning_module(helper_definition)
-            != "bioseq.pg_support:error_boundary") {
+            != "bioseq.postgres.support:error_boundary") {
         fact_failure(
             qualified_name(erased_definition),
             "outer PG_CATCH does not call the exact error-capture "
@@ -3290,7 +3294,7 @@ class throw_expression_collector final
             context.getSourceManager(),
             context.getLangOpts(),
             true);
-        if (!text.contains("PostgresErrorCaptureFailure")) {
+        if (!text.contains("postgres_error_capture_failure")) {
             continue;
         }
         if (capture_failure_throw != nullptr) {
@@ -3326,7 +3330,7 @@ class throw_expression_collector final
             "error-capture failure C++ throw is not exactly "
             "flag-guarded");
     }
-    return bioseq::codegen::sha256_hex(
+    return bioseq::common::sha256_hex(
         error_capture_contract_material);
 }
 
@@ -3340,8 +3344,8 @@ require_erased_bridge_definition(
     const analysis_environment& environment) {
     const std::string expected_name =
         kind == bridge_kind::invoke_pg_as_cpp
-        ? "bioseq::pg_utils::invoke_pg_as_cpp_erased"
-        : "bioseq::pg_utils::"
+        ? "bioseq::postgres::support::invoke_pg_as_cpp_erased"
+        : "bioseq::postgres::support::"
           "invoke_pg_across_transactions_as_cpp_erased";
     active_call_collector calls{context};
     calls.TraverseStmt(
@@ -3430,7 +3434,7 @@ require_erased_bridge_definition(
     if (definition == nullptr
         || qualified_name(definition) != expected_name
         || owning_module(definition)
-            != "bioseq.pg_support:error_boundary") {
+            != "bioseq.postgres.support:error_boundary") {
         fact_failure(
             qualified_name(wrapper_definition),
             "erased bridge definition identity is unavailable");
@@ -3447,7 +3451,7 @@ require_erased_bridge_definition(
             context.getLangOpts(),
             true);
     if (!definition_location.source_file.ends_with(
-            "/main/common/pg_support/error_boundary.cppm")) {
+            "/main/common/postgres/support/error_boundary.cppm")) {
         fact_failure(
             qualified_name(wrapper_definition),
             "erased bridge definition identity is unavailable");
@@ -3610,90 +3614,95 @@ void require_generated_tail_structure(
     if (transition_index <= try_index) {
         reject("transition is not lexically after the try statement");
     }
-    if (try_statement->getNumHandlers() != 3) {
+    if (try_statement->getNumHandlers() != 4) {
         reject(
             "handler count is "
             + std::to_string(try_statement->getNumHandlers())
-            + ", expected 3");
+            + ", expected 4");
     }
-    const clang::CXXCatchStmt* postgres_handler =
-        try_statement->getHandler(0);
-    const clang::CXXCatchStmt* standard_handler =
-        try_statement->getHandler(1);
-    const clang::QualType postgres_caught =
-        postgres_handler->getCaughtType();
-    const clang::QualType standard_caught =
-        standard_handler->getCaughtType();
-    if (postgres_handler->getExceptionDecl() == nullptr) {
-        reject("first handler has no exception declaration");
-    }
-    if (standard_handler->getExceptionDecl() == nullptr) {
-        reject("second handler has no exception declaration");
-    }
-    if (!postgres_caught->isLValueReferenceType()) {
-        reject(
-            "first handler is not an lvalue reference: "
-            + postgres_caught.getAsString());
-    }
-    if (!standard_caught->isLValueReferenceType()) {
-        reject(
-            "second handler is not an lvalue reference: "
-            + standard_caught.getAsString());
-    }
-    const clang::QualType postgres_referent =
-        postgres_caught.getNonReferenceType();
-    const clang::QualType standard_referent =
-        standard_caught.getNonReferenceType();
-    const clang::CXXRecordDecl* postgres_record =
-        postgres_referent
-            .getUnqualifiedType()
-            ->getAsCXXRecordDecl();
-    const clang::CXXRecordDecl* standard_record =
-        standard_referent
-            .getUnqualifiedType()
-            ->getAsCXXRecordDecl();
-    if (!postgres_referent.getQualifiers().empty()) {
-        reject(
-            "first handler referent is cv-qualified: "
-            + postgres_referent.getAsString());
-    }
-    if (postgres_record == nullptr) {
-        reject("first handler referent is not a record type");
-    }
-    if (qualified_name(postgres_record)
-        != "bioseq::pg_utils::PostgresErrorAsCpp") {
-        reject(
-            "first handler record is "
-            + qualified_name(postgres_record));
-    }
-    if (!standard_referent
-            .getQualifiers()
-            .hasOnlyConst()) {
-        reject(
-            "second handler referent is not const-only: "
-            + standard_referent.getAsString());
-    }
-    if (standard_record == nullptr) {
-        reject("second handler referent is not a record type");
-    }
-    if (standard_record->getName() != "exception") {
-        reject(
-            "second handler record name is "
-            + standard_record->getNameAsString());
-    }
-    if (!standard_record->isInStdNamespace()) {
-        reject(
-            "second handler exception record is outside namespace "
-            "std");
-    }
+    const auto require_typed_handler =
+        [&](std::size_t handler_index,
+            std::string_view ordinal,
+            std::string_view expected_record,
+            bool const_referent,
+            bool standard_record) {
+            const clang::CXXCatchStmt* handler =
+                try_statement->getHandler(handler_index);
+            if (handler->getExceptionDecl() == nullptr) {
+                reject(
+                    std::string{ordinal}
+                    + " handler has no exception declaration");
+            }
+            const clang::QualType caught =
+                handler->getCaughtType();
+            if (!caught->isLValueReferenceType()) {
+                reject(
+                    std::string{ordinal}
+                    + " handler is not an lvalue reference: "
+                    + caught.getAsString());
+            }
+            const clang::QualType referent =
+                caught.getNonReferenceType();
+            const clang::Qualifiers qualifiers =
+                referent.getQualifiers();
+            if ((const_referent && !qualifiers.hasOnlyConst())
+                || (!const_referent && !qualifiers.empty())) {
+                reject(
+                    std::string{ordinal}
+                    + " handler has incorrect referent qualifiers: "
+                    + referent.getAsString());
+            }
+            const clang::CXXRecordDecl* record =
+                referent.getUnqualifiedType()
+                    ->getAsCXXRecordDecl();
+            if (record == nullptr) {
+                reject(
+                    std::string{ordinal}
+                    + " handler referent is not a record type");
+            }
+            if (standard_record) {
+                if (record->getNameAsString() != expected_record
+                    || !record->isInStdNamespace()) {
+                    reject(
+                        std::string{ordinal}
+                        + " handler is not std::"
+                        + std::string{expected_record});
+                }
+            } else if (qualified_name(record)
+                       != expected_record) {
+                reject(
+                    std::string{ordinal}
+                    + " handler record is "
+                    + qualified_name(record));
+            }
+        };
+    require_typed_handler(
+        0,
+        "first",
+        "bioseq::postgres::support::postgres_error",
+        false,
+        false);
+    require_typed_handler(
+        1,
+        "second",
+        "bioseq::postgres::support::"
+        "postgres_error_capture_failure",
+        true,
+        false);
+    require_typed_handler(
+        2,
+        "third",
+        "exception",
+        true,
+        true);
     const clang::CXXCatchStmt* catch_all =
-        try_statement->getHandler(2);
+        try_statement->getHandler(3);
     if (catch_all->getExceptionDecl() != nullptr) {
-        reject("third handler has an exception declaration");
+        reject("fourth handler has an exception declaration");
     }
     if (!catch_all->getCaughtType().isNull()) {
         reject(
-            "third handler has a non-null caught type: "
+            "fourth handler has a non-null caught type: "
             + catch_all->getCaughtType().getAsString());
     }
     active_call_collector try_calls{context};
@@ -3776,28 +3785,33 @@ bridge_evidence_for(
     std::string expected_source_suffix;
     std::string region_id;
     if (kind == bridge_kind::invoke_pg_as_cpp) {
-        expected_name = "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
-        expected_source_suffix =
-            "/main/common/pg_support/error_boundary.cppm";
-        region_id =
-            "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
-    } else if (kind == bridge_kind::sql_call_context) {
         expected_name =
-            "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_support:error_boundary";
+            "bioseq::postgres::support::invoke_pg_as_cpp";
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
         expected_source_suffix =
-            "/main/common/pg_support/error_boundary.cppm";
+            "/main/common/postgres/support/error_boundary.cppm";
         region_id =
-            "bioseq.pg_utils.error_bridge/"
+            "bioseq.postgres.support.error_boundary/invoke_pg_as_cpp";
+    } else if (
+        kind == bridge_kind::cross_transaction_callback) {
+        expected_name =
+            "bioseq::postgres::support::"
             "invoke_pg_across_transactions_as_cpp";
-    } else if (kind == bridge_kind::sql_subtransaction) {
+        expected_module =
+            "bioseq.postgres.support:error_boundary";
+        expected_source_suffix =
+            "/main/common/postgres/support/error_boundary.cppm";
+        region_id =
+            "bioseq.postgres.support.error_boundary/"
+            "invoke_pg_across_transactions_as_cpp";
+    } else if (kind == bridge_kind::subtransaction) {
         static const std::set<std::string, std::less<>>
             exact_regions{
-                "bioseq::pg_utils::sql_subtransaction::begin",
-                "bioseq::pg_utils::sql_subtransaction::commit",
-                "bioseq::pg_utils::sql_subtransaction::rollback",
-                "bioseq::pg_utils::sql_subtransaction::~sql_subtransaction",
+                "bioseq::postgres::support::subtransaction::begin",
+                "bioseq::postgres::support::subtransaction::commit",
+                "bioseq::postgres::support::subtransaction::rollback",
+                "bioseq::postgres::support::subtransaction::~subtransaction",
             };
         if (!exact_regions.contains(implementation_name)) {
             fact_failure(
@@ -3808,19 +3822,20 @@ bridge_evidence_for(
         expected_name = implementation_name;
         expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/main/common/pg_sql_boundary/call_context_implementation.cpp";
+            "/main/common/pg_sql_boundary/"
+            "call_context_implementation.cppm";
         region_id =
-            "bioseq.pg_utils.sql_boundary.context/"
+            "bioseq.postgres.support.sql_boundary.context/"
             + implementation_name.substr(
                 implementation_name.rfind("::") + 2);
     } else if (kind == bridge_kind::generated_boundary_tail) {
         expected_name =
-            "bioseq::pg_utils::invoke_sql_boundary";
+            "bioseq::postgres::support::invoke_postgres_callback";
         expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
             "/main/common/pg_sql_boundary/index.cppm";
         region_id =
-            "bioseq.pg_utils.sql_boundary/rethrow_tail";
+            "bioseq.postgres.support.sql_boundary/rethrow_tail";
     } else {
         fact_failure(
             target.target_qualified_name,
@@ -3836,7 +3851,7 @@ bridge_evidence_for(
             "bridge implementation identity/module/body does not "
             "match the exact protected region");
     }
-    if (kind == bridge_kind::sql_subtransaction) {
+    if (kind == bridge_kind::subtransaction) {
         static_cast<void>(require_authenticated_pg_try_region(
             definition,
             transition_expression,
@@ -3847,7 +3862,7 @@ bridge_evidence_for(
             "transition"));
     } else if (
         kind == bridge_kind::invoke_pg_as_cpp
-        || kind == bridge_kind::sql_call_context) {
+        || kind == bridge_kind::cross_transaction_callback) {
         static_cast<void>(require_erased_bridge_definition(
             kind,
             definition,
@@ -3869,7 +3884,7 @@ bridge_evidence_for(
     }
     const bool has_error_capture_contract =
         kind == bridge_kind::invoke_pg_as_cpp
-        || kind == bridge_kind::sql_call_context;
+        || kind == bridge_kind::cross_transaction_callback;
     return bridge_transition_evidence{
         .primitive =
             reference_from(*environment.provenance, *record),
@@ -3881,14 +3896,14 @@ bridge_evidence_for(
         .implementation_module = implementation_module,
         .implementation_definition = definition_location,
         .implementation_body_sha256 =
-            bioseq::codegen::sha256_hex(body_text),
+            bioseq::common::sha256_hex(body_text),
         .implementation_contract_id =
             has_error_capture_contract
             ? std::string{error_capture_contract_id}
             : std::string{},
         .implementation_contract_sha256 =
             has_error_capture_contract
-            ? bioseq::codegen::sha256_hex(
+            ? bioseq::common::sha256_hex(
                   error_capture_contract_material)
             : std::string{},
         .protected_region_id = region_id,
@@ -3998,22 +4013,22 @@ bridge_evidence_for(
                 targets.front().target_qualified_name);
         const bool exact_subtransaction_region =
             (caller_name
-                    == "bioseq::pg_utils::sql_subtransaction::begin"
+                    == "bioseq::postgres::support::subtransaction::begin"
                 && leaf == "BeginInternalSubTransaction")
             || (caller_name
-                    == "bioseq::pg_utils::sql_subtransaction::commit"
+                    == "bioseq::postgres::support::subtransaction::commit"
                 && leaf == "ReleaseCurrentSubTransaction")
             || ((caller_name
-                     == "bioseq::pg_utils::sql_subtransaction::rollback"
+                     == "bioseq::postgres::support::subtransaction::rollback"
                  || caller_name
-                     == "bioseq::pg_utils::sql_subtransaction::~sql_subtransaction")
+                     == "bioseq::postgres::support::subtransaction::~subtransaction")
                 && leaf
                     == "RollbackAndReleaseCurrentSubTransaction");
         if (exact_subtransaction_region) {
-            bridge = bridge_kind::sql_subtransaction;
+            bridge = bridge_kind::subtransaction;
             bridge_implementation = function;
         } else if (caller_name
-                == "bioseq::pg_utils::invoke_sql_boundary"
+                == "bioseq::postgres::support::invoke_postgres_callback"
             && (leaf == "ReThrowError"
                 || leaf == "pg_re_throw"
                 || leaf == "errfinish"
@@ -4064,7 +4079,7 @@ bridge_evidence_for(
         + std::to_string(cfg_key.element);
     flow_call_site result{
         .stable_site_id = "clang-site:"
-            + bioseq::codegen::sha256_hex(site_material).substr(0, 32),
+            + bioseq::common::sha256_hex(site_material).substr(0, 32),
         .caller_usr = caller_usr,
         .spelling = std::move(spelling),
         .expansion = std::move(expansion),
@@ -4080,7 +4095,8 @@ bridge_evidence_for(
         .bridge_transition = bridge,
         .analyzer_entered_bridge_callable =
             bridge == bridge_kind::invoke_pg_as_cpp
-            || bridge == bridge_kind::sql_call_context,
+            || bridge
+                == bridge_kind::cross_transaction_callback,
         .generated_boundary_tail =
             bridge
             == bridge_kind::generated_boundary_tail,
@@ -4113,14 +4129,6 @@ struct materialized_call_record {
     flow_call_site fact;
 };
 
-struct runtime_probe_descriptor_binding {
-    const clang::FunctionDecl* target{};
-    std::string target_usr;
-    std::string site_id;
-    std::string fault_key;
-    std::string caller_site_id;
-};
-
 struct runtime_marker {
     runtime_marker_kind kind{runtime_marker_kind::site};
     std::string key;
@@ -4131,10 +4139,10 @@ struct runtime_marker {
     runtime_marker_kind kind) noexcept {
     switch (kind) {
         case runtime_marker_kind::visit:
-            return "bioseq::pg_utils::safety_runtime_probe::"
+            return "bioseq::postgres::support::safety_runtime_probe::"
                    "record_site_visit";
         case runtime_marker_kind::trigger:
-            return "bioseq::pg_utils::safety_runtime_probe::"
+            return "bioseq::postgres::support::safety_runtime_probe::"
                    "consume_fault";
         case runtime_marker_kind::site:
             break;
@@ -4308,256 +4316,11 @@ runtime_probe_target_kind(
     return key;
 }
 
-[[nodiscard]] bool exact_runtime_descriptor_type(
-    clang::QualType type) {
-    const auto* record =
-        type.getCanonicalType()->getAs<clang::RecordType>();
-    return record != nullptr
-        && qualified_name(record->getDecl())
-            == "bioseq::pg_utils::"
-               "sql_boundary_probe_descriptor";
-}
-
-[[nodiscard]] const clang::InitListExpr*
-runtime_descriptor_initializer(const clang::Expr* expression) {
-    const clang::Expr* current = expression;
-    while (current != nullptr) {
-        const clang::Expr* ignored =
-            current->IgnoreParenImpCasts();
-        if (ignored != current) {
-            current = ignored;
-            continue;
-        }
-        if (const auto* cleanup =
-                clang::dyn_cast<clang::ExprWithCleanups>(current)) {
-            current = cleanup->getSubExpr();
-            continue;
-        }
-        if (const auto* materialized =
-                clang::dyn_cast<clang::MaterializeTemporaryExpr>(
-                    current)) {
-            current = materialized->getSubExpr();
-            continue;
-        }
-        if (const auto* bound =
-                clang::dyn_cast<clang::CXXBindTemporaryExpr>(
-                    current)) {
-            current = bound->getSubExpr();
-            continue;
-        }
-        if (const auto* cast =
-                clang::dyn_cast<clang::CXXFunctionalCastExpr>(
-                    current)) {
-            current = cast->getSubExpr();
-            continue;
-        }
-        break;
-    }
-    const auto* initializer =
-        clang::dyn_cast_or_null<clang::InitListExpr>(current);
-    if (initializer != nullptr
-        && !initializer->isSemanticForm()
-        && initializer->getSemanticForm() != nullptr) {
-        initializer = initializer->getSemanticForm();
-    }
-    return initializer;
-}
-
-[[nodiscard]] bool valid_runtime_site_id(
-    std::string_view site_id) noexcept {
-    static constexpr std::string_view prefix = "probe:v2:";
-    return site_id.size() == prefix.size() + 64
-        && site_id.starts_with(prefix)
-        && std::ranges::all_of(
-            site_id.substr(prefix.size()),
-            [](const char value) {
-                return (value >= '0' && value <= '9')
-                    || (value >= 'a' && value <= 'f');
-            });
-}
-
-[[nodiscard]] std::optional<
-    runtime_probe_descriptor_binding>
-runtime_descriptor_binding_for_call(
-    const call_candidate& candidate,
-    std::string_view caller_site_id,
-    clang::ASTContext& context) {
-    const auto* call = clang::dyn_cast_or_null<clang::CallExpr>(
-        candidate.expression);
-    const clang::FunctionDecl* direct =
-        call == nullptr ? nullptr : call->getDirectCallee();
-    if (direct == nullptr
-        || qualified_name(direct)
-            != "bioseq::pg_utils::invoke_sql_boundary") {
-        return std::nullopt;
-    }
-    if (direct->getNumParams() != 2
-        || !exact_runtime_descriptor_type(
-            direct->getParamDecl(0)->getType())) {
-        return std::nullopt;
-    }
-    if (candidate.resolution.resolution
-            != resolution_status::direct
-        || !candidate.resolution.complete
-        || candidate.resolution.targets.size() != 1
-        || candidate.arguments.size() != 2) {
-        fact_failure(
-            caller_site_id,
-            "generated SQL boundary call does not directly bind "
-            "one exact probe descriptor");
-    }
-    const clang::InitListExpr* initializer =
-        runtime_descriptor_initializer(
-            candidate.arguments.front());
-    if (initializer == nullptr
-        || !exact_runtime_descriptor_type(
-            initializer->getType())
-        || initializer->getNumInits() != 2) {
-        fact_failure(
-            caller_site_id,
-            "generated SQL boundary probe descriptor is not one "
-            "exact two-field aggregate initializer");
-    }
-    const auto* record =
-        initializer->getType()
-            .getCanonicalType()
-            ->getAs<clang::RecordType>();
-    std::vector<const clang::FieldDecl*> fields;
-    for (const clang::FieldDecl* field :
-         record->getDecl()->fields()) {
-        fields.push_back(field);
-    }
-    if (fields.size() != 2
-        || fields[0]->getName() != "site_id"
-        || fields[1]->getName() != "fault_key") {
-        fact_failure(
-            caller_site_id,
-            "generated SQL boundary probe descriptor has an "
-            "unexpected field layout");
-    }
-    const std::string site_id = ordinary_runtime_literal(
-        initializer->getInit(0), caller_site_id);
-    const std::string fault_key = ordinary_runtime_literal(
-        initializer->getInit(1), caller_site_id);
-    if (!valid_runtime_site_id(site_id)
-        || !valid_runtime_probe_key(fault_key)) {
-        fact_failure(
-            caller_site_id,
-            "generated SQL boundary descriptor has an invalid "
-            "site id or fault key");
-    }
-    // Keep the selected specialization as the binding identity.
-    // FunctionDecl::getDefinition() may return the shared function-template
-    // pattern for an implicit specialization, collapsing distinct generated
-    // lambda specializations onto one descriptor authority.
-    const clang::FunctionDecl* target = direct;
-    const std::string target_usr =
-        stable_function_identity(target, context);
-    if (target_usr.empty()) {
-        fact_failure(
-            caller_site_id,
-            "generated SQL boundary specialization has no stable "
-            "compiler identity");
-    }
-    return runtime_probe_descriptor_binding{
-        .target = target,
-        .target_usr = target_usr,
-        .site_id = site_id,
-        .fault_key = fault_key,
-        .caller_site_id = std::string{caller_site_id},
-    };
-}
-
-[[nodiscard]] bool exact_runtime_descriptor_member(
-    const clang::Expr* argument,
-    const clang::FunctionDecl* function,
-    std::string_view field_name) {
-    if (function == nullptr || function->getNumParams() != 2
-        || qualified_name(function)
-            != "bioseq::pg_utils::invoke_sql_boundary"
-        || !exact_runtime_descriptor_type(
-            function->getParamDecl(0)->getType())) {
-        return false;
-    }
-    const clang::Expr* expression =
-        peel_runtime_literal(argument);
-    const auto* member =
-        clang::dyn_cast_or_null<clang::MemberExpr>(expression);
-    const auto* field = member == nullptr
-        ? nullptr
-        : clang::dyn_cast<clang::FieldDecl>(
-              member->getMemberDecl());
-    if (field == nullptr
-        || field->getName()
-            != llvm::StringRef{
-                field_name.data(), field_name.size()}
-        || qualified_name(field->getParent())
-            != "bioseq::pg_utils::"
-               "sql_boundary_probe_descriptor") {
-        return false;
-    }
-    const clang::Expr* base =
-        member->getBase()->IgnoreParenImpCasts();
-    const auto* reference =
-        clang::dyn_cast<clang::DeclRefExpr>(base);
-    const auto* parameter = reference == nullptr
-        ? nullptr
-        : clang::dyn_cast<clang::ParmVarDecl>(
-              reference->getDecl());
-    const clang::ParmVarDecl* expected =
-        function->getParamDecl(0);
-    return parameter != nullptr
-        && (parameter->getCanonicalDecl()
-                == expected->getCanonicalDecl()
-            || (parameter->getName() == expected->getName()
-                && parameter->getFunctionScopeDepth()
-                    == expected->getFunctionScopeDepth()
-                && parameter->getFunctionScopeIndex()
-                    == expected->getFunctionScopeIndex()
-                && exact_runtime_descriptor_type(
-                    parameter->getType())));
-}
-
 [[nodiscard]] std::string runtime_marker_fault_key(
     const call_candidate& candidate,
-    runtime_marker_kind kind,
-    const clang::FunctionDecl* function,
-    const runtime_probe_descriptor_binding* binding) {
-    if (candidate.arguments.size() != 1) {
-        fact_failure(
-            runtime_probe_target_name(kind),
-            "runtime probe requires exactly one argument");
-    }
-    const bool bound_boundary =
-        binding != nullptr
-        && binding->target != nullptr
-        && function != nullptr
-        && binding->target->getCanonicalDecl()
-            == function->getCanonicalDecl()
-        && qualified_name(function)
-            == "bioseq::pg_utils::invoke_sql_boundary";
-    if (!bound_boundary
-        || clang::isa_and_nonnull<clang::StringLiteral>(
-            peel_runtime_literal(
-                candidate.arguments.front()))) {
-        return runtime_literal_key(
-            candidate, runtime_probe_target_name(kind));
-    }
-    const std::string_view expected_field =
-        kind == runtime_marker_kind::visit
-        ? std::string_view{"site_id"}
-        : std::string_view{"fault_key"};
-    if (!exact_runtime_descriptor_member(
-            candidate.arguments.front(),
-            function,
-            expected_field)) {
-        fact_failure(
-            runtime_probe_target_name(kind),
-            "runtime probe argument is neither one literal key "
-            "nor the exact authenticated boundary descriptor "
-            "field");
-    }
-    return binding->fault_key;
+    runtime_marker_kind kind) {
+    return runtime_literal_key(
+        candidate, runtime_probe_target_name(kind));
 }
 
 [[nodiscard]] bool call_has_macro(
@@ -5217,26 +4980,9 @@ normal_runtime_event_frontier_after(
 
 [[nodiscard]] std::vector<runtime_probe_fact>
 extract_runtime_probe_facts(
-    const clang::FunctionDecl* function,
     const clang::CFG& cfg,
     const clang::CFG* normal_cfg,
-    const std::vector<materialized_call_record>& calls,
-    const runtime_probe_descriptor_binding* binding) {
-    const bool generated_boundary =
-        qualified_name(function)
-        == "bioseq::pg_utils::invoke_sql_boundary";
-    if (generated_boundary && binding == nullptr) {
-        return {};
-    }
-    if (binding != nullptr
-        && (!generated_boundary || binding->target == nullptr
-            || binding->target->getCanonicalDecl()
-                != function->getCanonicalDecl())) {
-        fact_failure(
-            binding->caller_site_id,
-            "runtime probe descriptor binding targets a "
-            "different function specialization");
-    }
+    const std::vector<materialized_call_record>& calls) {
     std::vector<runtime_marker> marker_storage;
     marker_storage.reserve(calls.size());
     std::map<
@@ -5284,10 +5030,7 @@ extract_runtime_probe_facts(
             marker_storage.push_back({
                 .kind = *probe_kind,
                 .key = runtime_marker_fault_key(
-                    *call.candidate,
-                    *probe_kind,
-                    function,
-                    binding),
+                    *call.candidate, *probe_kind),
                 .call = std::addressof(call),
             });
             continue;
@@ -5637,8 +5380,6 @@ struct analyzed_function {
     function_flow facts;
     std::vector<runtime_probe_fact> runtime_probes;
     std::vector<const clang::FunctionDecl*> body_targets;
-    std::vector<runtime_probe_descriptor_binding>
-        descriptor_bindings;
 };
 
 [[nodiscard]] analyzed_function analyze_function(
@@ -5646,9 +5387,7 @@ struct analyzed_function {
     clang::Preprocessor& preprocessor,
     const bridge_macro_inventory& macro_inventory,
     clang::ASTContext& context,
-    const analysis_environment& environment,
-    const runtime_probe_descriptor_binding*
-        descriptor_binding) {
+    const analysis_environment& environment) {
     const clang::Stmt* body = function->getBody();
     if (body == nullptr) {
         fact_failure(
@@ -5769,8 +5508,6 @@ struct analyzed_function {
     materialized_calls.reserve(candidates.size());
     std::vector<std::string> unresolved;
     std::vector<const clang::FunctionDecl*> body_targets;
-    std::vector<runtime_probe_descriptor_binding>
-        descriptor_bindings;
     std::set<std::string, std::less<>> call_ids;
     for (const call_candidate& candidate : candidates) {
         const element_record* matched = nullptr;
@@ -5935,18 +5672,30 @@ struct analyzed_function {
                     definition == nullptr ? target : definition);
             }
         }
-        if (std::optional<runtime_probe_descriptor_binding>
-                binding =
-                    runtime_descriptor_binding_for_call(
-                        candidate,
-                        call.stable_site_id,
-                        context)) {
-            // The ordinary body target may be the shared template pattern.
-            // Queue the selected specialization as well so its literal
-            // descriptor binding is available when that body is analyzed.
-            body_targets.push_back(binding->target);
-            descriptor_bindings.push_back(
-                std::move(*binding));
+        const auto* call_expression =
+            clang::dyn_cast_or_null<clang::CallExpr>(
+                candidate.expression);
+        const clang::FunctionDecl* direct =
+            call_expression == nullptr
+            ? nullptr
+            : call_expression->getDirectCallee();
+        if (direct != nullptr
+            && qualified_name(direct)
+                == "bioseq::postgres::support::"
+                   "invoke_postgres_callback") {
+            if (candidate.resolution.resolution
+                    != resolution_status::direct
+                || !candidate.resolution.complete
+                || candidate.resolution.targets.size() != 1
+                || candidate.arguments.size() != 1) {
+                fact_failure(
+                    call.stable_site_id,
+                    "generated callback does not resolve to one "
+                    "exact specialization");
+            }
+            // Keep the selected specialization: getDefinition() may return
+            // the shared function-template pattern for an implicit instance.
+            body_targets.push_back(direct);
         }
         materialized_calls.push_back({
             .candidate = std::addressof(candidate),
@@ -5955,10 +5704,7 @@ struct analyzed_function {
         });
     }
     const bool needs_normal_cfg =
-        !(qualified_name(function)
-                == "bioseq::pg_utils::invoke_sql_boundary"
-            && descriptor_binding == nullptr)
-        && std::ranges::any_of(
+        std::ranges::any_of(
             materialized_calls,
             [](const materialized_call_record& call) {
                 return call.candidate != nullptr
@@ -5986,11 +5732,9 @@ struct analyzed_function {
     }
     std::vector<runtime_probe_fact> runtime_probes =
         extract_runtime_probe_facts(
-            function,
             *cfg,
             normal_cfg.get(),
-            materialized_calls,
-            descriptor_binding);
+            materialized_calls);
     std::vector<flow_call_site> calls;
     calls.reserve(materialized_calls.size());
     for (materialized_call_record& call :
@@ -6071,8 +5815,8 @@ struct analyzed_function {
             .lifetime_analysis_complete = true,
             .implicit_call_edges_complete = true,
             .body_sha256 =
-                bioseq::codegen::sha256_hex(body_text),
-            .cfg_sha256 = bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(body_text),
+            .cfg_sha256 = bioseq::common::sha256_hex(
                 lifetimes.canonical_cfg),
             .cfg_block_count = lifetimes.block_count,
             .cfg_element_count = lifetimes.element_count,
@@ -6084,7 +5828,7 @@ struct analyzed_function {
             .lifetime_object_ids =
                 std::move(lifetime_object_ids),
             .lifetime_inventory_sha256 =
-                bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(
                     lifetime_inventory_material),
             .calls = std::move(calls),
             .unresolved_indirect_targets =
@@ -6094,8 +5838,6 @@ struct analyzed_function {
         },
         .runtime_probes = std::move(runtime_probes),
         .body_targets = std::move(body_targets),
-        .descriptor_bindings =
-            std::move(descriptor_bindings),
     };
 }
 
@@ -6671,7 +6413,7 @@ class postgres_callback_collector final
         postgres_callback_root root{
             .stable_callback_id =
                 "pg-callback:"
-                + bioseq::codegen::sha256_hex(material)
+                + bioseq::common::sha256_hex(material)
                       .substr(0, 32),
             .family = std::string{family},
             .slot = std::move(slot),
@@ -6800,7 +6542,7 @@ class bridge_macro_tracker final : public clang::PPCallbacks {
         std::string pinned_fragment_sha256;
         if (!invalid_buffer) {
             definition_file_sha256 =
-                bioseq::codegen::sha256_hex(
+                bioseq::common::sha256_hex(
                     std::string_view{
                         definition_file.data(),
                         definition_file.size()});
@@ -6821,7 +6563,7 @@ class bridge_macro_tracker final : public clang::PPCallbacks {
                     record->upstream_span.end.byte_offset
                     - begin;
                 pinned_fragment_sha256 =
-                    bioseq::codegen::sha256_hex(
+                    bioseq::common::sha256_hex(
                         std::string_view{
                             definition_file.data() + begin,
                             size});
@@ -6888,11 +6630,6 @@ class fact_consumer final : public clang::ASTConsumer {
         std::deque<const clang::FunctionDecl*> pending{
             roots.functions.begin(), roots.functions.end()};
         std::set<std::string, std::less<>> analyzed;
-        std::map<
-            std::string,
-            runtime_probe_descriptor_binding,
-            std::less<>>
-            descriptor_bindings;
         while (!pending.empty()) {
             const clang::FunctionDecl* function = pending.front();
             pending.pop_front();
@@ -6901,54 +6638,17 @@ class fact_consumer final : public clang::ASTConsumer {
             if (usr.empty() || !analyzed.insert(usr).second) {
                 continue;
             }
-            const auto binding =
-                descriptor_bindings.find(usr);
             analyzed_function result = analyze_function(
                 function,
                 preprocessor_,
                 *macro_inventory_,
                 context,
-                environment_,
-                binding == descriptor_bindings.end()
-                ? nullptr
-                : std::addressof(binding->second));
+                environment_);
             for (const clang::FunctionDecl* target :
                  result.body_targets) {
                 if (target != nullptr
                     && target->doesThisDeclarationHaveABody()) {
                     pending.push_back(target);
-                }
-            }
-            for (runtime_probe_descriptor_binding&
-                     discovered :
-                 result.descriptor_bindings) {
-                const auto [existing, inserted] =
-                    descriptor_bindings.emplace(
-                        discovered.target_usr,
-                        discovered);
-                if (!inserted
-                    && (existing->second.site_id
-                            != discovered.site_id
-                        || existing->second.fault_key
-                            != discovered.fault_key)) {
-                    fact_failure(
-                        discovered.caller_site_id,
-                        "one SQL boundary specialization is bound "
-                        "to conflicting literal probe "
-                        "descriptors: specialization="
-                            + discovered.target_usr
-                            + ", existing_site="
-                            + existing->second.site_id
-                            + ", discovered_site="
-                            + discovered.site_id
-                            + ", existing_caller="
-                            + existing->second.caller_site_id);
-                }
-                if (inserted
-                    && analyzed.erase(
-                           discovered.target_usr)
-                        != 0) {
-                    pending.push_back(discovered.target);
                 }
             }
             output_.functions.push_back({
@@ -7216,14 +6916,14 @@ validate_compile_commands(
              json_value{
                  command_arguments_json(command.CommandLine)}},
             {"arguments_sha256",
-             bioseq::codegen::sha256_hex(
+             bioseq::common::sha256_hex(
                  canonical_arguments(command.CommandLine))},
             {"directory",
              canonical_path(command.Directory)},
             {"source", canonical_path(source)},
             {"source_sha256",
-             bioseq::codegen::sha256_hex(
-                 bioseq::codegen::read_file(source))},
+             bioseq::common::sha256_hex(
+                 bioseq::codegen::read_artifact_bytes(source))},
         });
     }
 
@@ -7285,11 +6985,11 @@ validate_compile_commands(
         {"compile_database",
          canonical_path(request.compile_database)},
         {"compile_database_sha256",
-         bioseq::codegen::sha256_hex(compile_database_text)},
+         bioseq::common::sha256_hex(compile_database_text)},
         {"modules", json_value{std::move(modules)}},
         {"pcm_manifest", canonical_path(request.pcm_manifest)},
         {"pcm_manifest_sha256",
-         bioseq::codegen::sha256_hex(pcm_manifest_text)},
+         bioseq::common::sha256_hex(pcm_manifest_text)},
         {"pcm_root", canonical_path(request.pcm_root)},
         {"profile", profile_name(request.profile)},
         {"postgresql_authenticated_headers",
@@ -7301,7 +7001,7 @@ validate_compile_commands(
         {"schema", "bioseq_safety_compile_graph/v1"},
         {"source_list", canonical_path(request.source_list)},
         {"source_list_sha256",
-         bioseq::codegen::sha256_hex(source_list_text)},
+         bioseq::common::sha256_hex(source_list_text)},
         {"translation_units", json_value{std::move(units)}},
     });
 }
@@ -7348,7 +7048,7 @@ validate_compile_commands(
         {"profile", profile_name(profile)},
         {"review_status", "unreviewed"},
         {"scope",
-         "post-FINAL registered-source scan; author only records "
+         "registered-source scan; author only records "
          "also named by a reachable-closure failure"},
         {"schema",
          "bioseq_safety_provenance_candidates/v1"},
@@ -7429,8 +7129,7 @@ validate_compile_commands(
             fact_failure(
                 unit.function.qualified_name,
                 "one SQL boundary specialization produced "
-                "conflicting descriptor-bound runtime-probe "
-                "facts");
+                "conflicting runtime-probe facts");
         }
     }
     isolated_compiler_fact_scan result;
@@ -7847,17 +7546,19 @@ compiler_fact_product produce_compiler_analysis_facts(
     }
 
     const std::string source_list_text =
-        bioseq::codegen::read_file(request.source_list);
+        bioseq::codegen::read_artifact_bytes(request.source_list);
     const std::string compile_database_text =
-        bioseq::codegen::read_file(request.compile_database);
+        bioseq::codegen::read_artifact_bytes(
+            request.compile_database);
     const std::string pcm_manifest_text =
-        bioseq::codegen::read_file(request.pcm_manifest);
+        bioseq::codegen::read_artifact_bytes(request.pcm_manifest);
     const std::string sql_manifest_text =
-        bioseq::codegen::read_file(request.sql_manifest);
+        bioseq::codegen::read_artifact_bytes(request.sql_manifest);
     const std::string provenance_text =
-        bioseq::codegen::read_file(request.provenance);
+        bioseq::codegen::read_artifact_bytes(request.provenance);
     const std::string producer_bytes =
-        bioseq::codegen::read_file(request.producer_executable);
+        bioseq::codegen::read_artifact_bytes(
+            request.producer_executable);
 
     const std::vector<std::filesystem::path> sources =
         fact_detail::parse_source_list(request.source_list);
@@ -7869,8 +7570,8 @@ compiler_fact_product produce_compiler_analysis_facts(
     const fact_detail::prepared_identity identity =
         fact_detail::parse_prepared_identity(pcm_manifest_text);
     const auto prepared =
-        bioseq::codegen::clang_structural::
-            validate_prepared_compilation_environment(
+        bioseq::codegen::structural_analysis::
+            validate_dependency_compilation_environment(
                 sources,
                 request.compile_database,
                 request.pcm_root,
@@ -7888,7 +7589,7 @@ compiler_fact_product produce_compiler_analysis_facts(
     if (prepared.compilation_signature
             != identity.compilation_signature
         || prepared.manifest_sha256
-            != bioseq::codegen::sha256_hex(
+            != bioseq::common::sha256_hex(
                 pcm_manifest_text)) {
         fact_detail::fact_failure(
             request.pcm_manifest.string(),
@@ -7953,10 +7654,10 @@ compiler_fact_product produce_compiler_analysis_facts(
             request.profile,
             "clang:" + std::string{CLANG_VERSION_STRING},
             *provenance_candidates);
-    bioseq::codegen::write_if_different(
+    bioseq::codegen::publish_artifact_if_changed(
         request.provenance_candidates_output,
         candidate_inventory);
-    if (bioseq::codegen::read_file(
+    if (bioseq::codegen::read_artifact_bytes(
             request.provenance_candidates_output)
         != candidate_inventory) {
         fact_detail::fact_failure(
@@ -7975,17 +7676,17 @@ compiler_fact_product produce_compiler_analysis_facts(
             std::string{profile_name(request.profile)},
         .clang_version = CLANG_VERSION_STRING,
         .source_list_sha256 =
-            bioseq::codegen::sha256_hex(source_list_text),
+            bioseq::common::sha256_hex(source_list_text),
         .compile_database_sha256 =
-            bioseq::codegen::sha256_hex(compile_database_text),
+            bioseq::common::sha256_hex(compile_database_text),
         .producer_executable_sha256 =
-            bioseq::codegen::sha256_hex(producer_bytes),
+            bioseq::common::sha256_hex(producer_bytes),
         .compile_graph_sha256 =
-            bioseq::codegen::sha256_hex(compile_graph),
+            bioseq::common::sha256_hex(compile_graph),
         .pcm_manifest_sha256 =
-            bioseq::codegen::sha256_hex(pcm_manifest_text),
+            bioseq::common::sha256_hex(pcm_manifest_text),
         .sql_manifest_sha256 =
-            bioseq::codegen::sha256_hex(sql_manifest_text),
+            bioseq::common::sha256_hex(sql_manifest_text),
         .root_usrs = std::move(reachable.roots),
         .callback_roots =
             std::move(reachable.callback_roots),

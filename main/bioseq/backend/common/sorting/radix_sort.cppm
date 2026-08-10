@@ -1,179 +1,274 @@
 /**
  * @file radix_sort.cppm
- * @brief Port of minimap2's `radix_sort_*` family from `ksort.h`.
+ * @brief In-place most-significant-byte radix sorting for unsigned keys.
  *
- * Reproduces the LSD-then-MSD recursion used by minimap2 for sorting
- * (anchor, chain, coverage_intervals, scored_indices) buckets in the
- * post-sketch pipeline. The algorithm is:
+ * The algorithm uses eight bits per pass and a 256-entry stack bucket table.
+ * Each non-empty bucket is permuted in place by following its destination
+ * cycle. Small ranges use insertion sort to avoid bucket-table overhead.
  *
- *   - 8 bits per pass, MSD-first; one bucket array (256 entries) per
- *     recursion level, allocated on the stack.
- *   - In-place permutation: for each non-empty bucket, follow a swap
- *     chain through the bucket index until the cycle closes. This
- *     leaves every element in its destination bucket without an
- *     auxiliary buffer.
- *   - Below `RS_MIN_SIZE` (= 64) elements, fall back to insertion sort
- *     because the bucket-walking overhead dominates radix's linear scan.
- *
- * The minimap2 macros generate one specialised function per
- * (type, key-extractor, key-size) tuple; we replicate that with a
- * function template and let the compiler inline the key extractor at
- * each call site. The output is byte-identical to a call to the
- * generated `radix_sort_*` variant in `bench/tool_minimap2/minimap2/`.
- *
- * The recursion depth is bounded by `(8 * sizeof(key)) / RS_MAX_BITS`,
- * which is 8 for a 64-bit key, so a hand-converted recursive
- * implementation has no stack-blow risk; we keep it recursive for
- * exact parity with the upstream implementation.
+ * Recursion consumes one key byte per level, bounding depth by the key width.
  */
 module;
 
-#include "common.h"
-
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
-#include <utility>
 
 export module bioseq.common.radix_sort;
 
 export namespace bioseq::sorting {
 
-inline constexpr std::size_t kRadixMinSize  = 64;
-inline constexpr std::size_t kRadixMaxBits  = 8;
+/** Largest range handled by the insertion-sort fast path. */
+inline constexpr std::size_t radix_sort_insertion_limit = 64;
 
-namespace detail {
+/** Number of key bits consumed by each radix pass. */
+inline constexpr std::size_t radix_sort_bits_per_pass = 8;
 
-template <typename T, typename KeyFn>
-void rs_insertsort(T* beg, T* end, KeyFn key) {
-    for (T* i = beg + 1; i < end; ++i) {
-        if (key(*i) < key(*(i - 1))) {
-            T tmp = *i;
-            T* j = i;
-            while (j > beg && key(tmp) < key(*(j - 1))) {
-                *j = *(j - 1);
-                --j;
+}  // namespace bioseq::sorting
+
+namespace bioseq::sorting::radix_sort_detail {
+
+/**
+ * @brief Sort a small non-empty range by its extracted unsigned key.
+ *
+ * @tparam p_value_type Element type stored in the range.
+ * @tparam p_key_function Callable returning an unsigned key for an element.
+ * @param p_begin First element in the range.
+ * @param p_end One past the final element in the range.
+ * @param p_key Key extractor invoked at each comparison site.
+ * @pre `[p_begin, p_end)` is a valid, non-empty mutable range.
+ */
+template <typename p_value_type, typename p_key_function>
+void insertion_sort(
+    p_value_type* p_begin,
+    p_value_type* p_end,
+    p_key_function p_key)
+{
+    for (p_value_type* current = p_begin + 1;
+         current < p_end;
+         ++current) {
+        if (p_key(*current) < p_key(*(current - 1))) {
+            p_value_type value = *current;
+            p_value_type* insertion = current;
+            while (insertion > p_begin
+                   && p_key(value) < p_key(*(insertion - 1))) {
+                *insertion = *(insertion - 1);
+                --insertion;
             }
-            *j = tmp;
+            *insertion = value;
         }
     }
 }
 
-template <typename T, typename KeyFn>
-void rs_sort(T* beg, T* end, int n_bits, int s, KeyFn key) {
-    using KeyT = std::decay_t<decltype(key(*beg))>;
-    static_assert(std::is_unsigned_v<KeyT>,
+/**
+ * @brief Partition a range by one key byte and recursively sort each bucket.
+ *
+ * @tparam p_value_type Element type stored in the range.
+ * @tparam p_key_function Callable returning an unsigned key for an element.
+ * @param p_begin First element in the range.
+ * @param p_end One past the final element in the range.
+ * @param p_bits_per_pass Number of key bits assigned to the bucket index.
+ * @param p_shift Least-significant bit of the current key digit.
+ * @param p_key Key extractor invoked at each radix-extraction site.
+ * @pre `[p_begin, p_end)` is a valid, non-empty mutable range.
+ * @pre `p_bits_per_pass` is positive and no greater than
+ * `radix_sort_bits_per_pass`.
+ */
+template <typename p_value_type, typename p_key_function>
+void sort_suffix(
+    p_value_type* p_begin,
+    p_value_type* p_end,
+    int p_bits_per_pass,
+    int p_shift,
+    p_key_function p_key)
+{
+    using key_type = std::decay_t<decltype(p_key(*p_begin))>;
+    static_assert(std::is_unsigned_v<key_type>,
                   "radix sort requires an unsigned key");
 
-    struct Bucket { T* b; T* e; };
+    struct bucket {
+        p_value_type* begin;
+        p_value_type* end;
+    };
 
-    const int size = 1 << n_bits;
-    const KeyT m = static_cast<KeyT>(size) - 1;
+    const int bucket_count = 1 << p_bits_per_pass;
+    const key_type bucket_mask =
+        static_cast<key_type>(bucket_count) - 1;
 
-    Bucket b[1 << kRadixMaxBits];
-    Bucket* const be = b + size;
+    bucket buckets[1 << radix_sort_bits_per_pass];
+    bucket* const buckets_end = buckets + bucket_count;
 
-    for (Bucket* k = b; k != be; ++k) {
-        k->b = beg;
-        k->e = beg;
+    for (bucket* current_bucket = buckets;
+         current_bucket != buckets_end;
+         ++current_bucket) {
+        current_bucket->begin = p_begin;
+        current_bucket->end = p_begin;
     }
-    for (T* i = beg; i != end; ++i) {
-        ++b[(key(*i) >> s) & m].e;
+    for (p_value_type* current = p_begin;
+         current != p_end;
+         ++current) {
+        ++buckets[(p_key(*current) >> p_shift) & bucket_mask].end;
     }
-    for (Bucket* k = b + 1; k != be; ++k) {
-        k->e += (k - 1)->e - beg;
-        k->b = (k - 1)->e;
+    for (bucket* current_bucket = buckets + 1;
+         current_bucket != buckets_end;
+         ++current_bucket) {
+        current_bucket->end +=
+            (current_bucket - 1)->end - p_begin;
+        current_bucket->begin = (current_bucket - 1)->end;
     }
-    for (Bucket* k = b; k != be; ) {
-        if (k->b != k->e) {
-            Bucket* l = b + ((key(*k->b) >> s) & m);
-            if (l != k) {
-                T tmp = *k->b;
-                T sw;
+    for (bucket* current_bucket = buckets;
+         current_bucket != buckets_end;) {
+        if (current_bucket->begin != current_bucket->end) {
+            bucket* destination = buckets
+                + ((p_key(*current_bucket->begin) >> p_shift)
+                   & bucket_mask);
+            if (destination != current_bucket) {
+                p_value_type pending = *current_bucket->begin;
+                p_value_type displaced;
                 do {
-                    sw = tmp;
-                    tmp = *l->b;
-                    *l->b++ = sw;
-                    l = b + ((key(tmp) >> s) & m);
-                } while (l != k);
-                *k->b++ = tmp;
+                    displaced = pending;
+                    pending = *destination->begin;
+                    *destination->begin++ = displaced;
+                    destination = buckets
+                        + ((p_key(pending) >> p_shift) & bucket_mask);
+                } while (destination != current_bucket);
+                *current_bucket->begin++ = pending;
             } else {
-                ++k->b;
+                ++current_bucket->begin;
             }
         } else {
-            ++k;
+            ++current_bucket;
         }
     }
-    b->b = beg;
-    for (Bucket* k = b + 1; k != be; ++k) {
-        k->b = (k - 1)->e;
+    buckets->begin = p_begin;
+    for (bucket* current_bucket = buckets + 1;
+         current_bucket != buckets_end;
+         ++current_bucket) {
+        current_bucket->begin = (current_bucket - 1)->end;
     }
-    if (s != 0) {
-        const int next_s = s > n_bits ? s - n_bits : 0;
-        for (Bucket* k = b; k != be; ++k) {
-            const std::ptrdiff_t span = k->e - k->b;
-            if (span > static_cast<std::ptrdiff_t>(kRadixMinSize)) {
-                rs_sort(k->b, k->e, n_bits, next_s, key);
+    if (p_shift != 0) {
+        const int next_shift = p_shift > p_bits_per_pass
+            ? p_shift - p_bits_per_pass
+            : 0;
+        for (bucket* current_bucket = buckets;
+             current_bucket != buckets_end;
+             ++current_bucket) {
+            const std::ptrdiff_t span =
+                current_bucket->end - current_bucket->begin;
+            if (span > static_cast<std::ptrdiff_t>(
+                    radix_sort_insertion_limit)) {
+                sort_suffix(
+                    current_bucket->begin,
+                    current_bucket->end,
+                    p_bits_per_pass,
+                    next_shift,
+                    p_key);
             } else if (span > 1) {
-                rs_insertsort(k->b, k->e, key);
+                insertion_sort(
+                    current_bucket->begin,
+                    current_bucket->end,
+                    p_key);
             }
         }
     }
 }
 
-}  // namespace detail
+}  // namespace bioseq::sorting::radix_sort_detail
 
-/// Generic minimap2-style radix sort.
-///
-/// `key` returns an unsigned integer view of `T` (e.g. `[](const Anchor& a)
-/// { return a.ref_bits; }`). The sort is in-place, unstable, and matches
-/// minimap2's `KRADIX_SORT_INIT(name, T, key, sizeof_key)` byte-for-byte
-/// in observable output (modulo the order of elements within each
-/// equal-key bucket, which is unspecified for both implementations).
-template <typename T, typename KeyFn>
-void radix_sort(T* beg, T* end, KeyFn key) {
-    using KeyT = std::decay_t<decltype(key(*beg))>;
-    static_assert(std::is_unsigned_v<KeyT>,
+export namespace bioseq::sorting {
+
+/**
+ * Sort a half-open range in place by an unsigned extracted key.
+ *
+ * Equal-key ordering is unspecified. The key function is invoked inline at
+ * each comparison and radix extraction site.
+ *
+ * @tparam p_value_type Element type stored in the range.
+ * @tparam p_key_function Callable returning an unsigned key for an element.
+ * @param p_begin First element in the range.
+ * @param p_end One past the final element in the range.
+ * @param p_key Key extractor invoked at each comparison and radix site.
+ * @pre `[p_begin, p_end)` is a valid, non-empty mutable range.
+ */
+template <typename p_value_type, typename p_key_function>
+void radix_sort(
+    p_value_type* p_begin,
+    p_value_type* p_end,
+    p_key_function p_key)
+{
+    using key_type = std::decay_t<decltype(p_key(*p_begin))>;
+    static_assert(std::is_unsigned_v<key_type>,
                   "radix sort requires an unsigned key");
-    constexpr int sizeof_key = sizeof(KeyT);
-    if (end - beg <= static_cast<std::ptrdiff_t>(kRadixMinSize)) {
-        detail::rs_insertsort(beg, end, key);
+    constexpr int key_bytes = sizeof(key_type);
+    if (p_end - p_begin <= static_cast<std::ptrdiff_t>(
+            radix_sort_insertion_limit)) {
+        radix_sort_detail::insertion_sort(p_begin, p_end, p_key);
     } else {
-        detail::rs_sort(beg, end, kRadixMaxBits,
-                        (sizeof_key - 1) * static_cast<int>(kRadixMaxBits),
-                        key);
+        radix_sort_detail::sort_suffix(
+            p_begin,
+            p_end,
+            static_cast<int>(radix_sort_bits_per_pass),
+            (key_bytes - 1)
+                * static_cast<int>(radix_sort_bits_per_pass),
+            p_key);
     }
 }
 
-/// Sort a range whose more-significant radix bytes were already partitioned.
-///
-/// `Shift` is the next byte shift to consume.  Callers must provide a range in
-/// which every key byte above `Shift` is equal; under that precondition this is
-/// exactly the recursive suffix that `radix_sort()` would execute after its
-/// already-completed higher-byte passes.  Keeping the ordinary small-span
-/// insertion-sort fallback is important: it preserves both the upstream
-/// threshold and its unspecified-but-repeatable equal-key permutation.
-template <int Shift, typename T, typename KeyFn>
-void radix_sort_from_shift(T* beg, T* end, KeyFn key) {
-    using KeyT = std::decay_t<decltype(key(*beg))>;
-    static_assert(std::is_unsigned_v<KeyT>,
+/**
+ * Sort a range whose more-significant key bytes are already partitioned.
+ *
+ * @tparam p_shift Least-significant bit of the next key byte to consume.
+ * @tparam p_value_type Element type stored in the range.
+ * @tparam p_key_function Callable returning an unsigned key for an element.
+ * @param p_begin First element in the range.
+ * @param p_end One past the final element in the range.
+ * @param p_key Key extractor invoked at each comparison and radix site.
+ * @pre `[p_begin, p_end)` is a valid, non-empty mutable range.
+ * @pre Every key byte above `p_shift` is equal throughout the range.
+ */
+template <int p_shift, typename p_value_type, typename p_key_function>
+void radix_sort_from_shift(
+    p_value_type* p_begin,
+    p_value_type* p_end,
+    p_key_function p_key)
+{
+    using key_type = std::decay_t<decltype(p_key(*p_begin))>;
+    static_assert(std::is_unsigned_v<key_type>,
                   "radix sort requires an unsigned key");
-    static_assert(Shift >= 0, "radix shift must be non-negative");
-    static_assert(Shift % static_cast<int>(kRadixMaxBits) == 0,
+    static_assert(p_shift >= 0, "radix shift must be non-negative");
+    static_assert(
+        p_shift % static_cast<int>(radix_sort_bits_per_pass) == 0,
                   "radix shift must select a byte boundary");
-    static_assert(Shift < static_cast<int>(sizeof(KeyT) * 8u),
+    static_assert(p_shift < static_cast<int>(sizeof(key_type) * 8u),
                   "radix shift exceeds the key width");
-    if (end - beg <= static_cast<std::ptrdiff_t>(kRadixMinSize)) {
-        detail::rs_insertsort(beg, end, key);
+    if (p_end - p_begin <= static_cast<std::ptrdiff_t>(
+            radix_sort_insertion_limit)) {
+        radix_sort_detail::insertion_sort(p_begin, p_end, p_key);
     } else {
-        detail::rs_sort(beg, end, kRadixMaxBits, Shift, key);
+        radix_sort_detail::sort_suffix(
+            p_begin,
+            p_end,
+            static_cast<int>(radix_sort_bits_per_pass),
+            p_shift,
+            p_key);
     }
 }
 
-/// Specialised wrapper for sorting raw `uint64_t` ascending — equivalent
-/// to minimap2's `radix_sort_64`.
-inline void radix_sort_u64(std::uint64_t* beg, std::uint64_t* end) {
-    radix_sort(beg, end, [](std::uint64_t v) { return v; });
+/**
+ * @brief Sort raw unsigned 64-bit values in ascending order.
+ *
+ * @param p_begin First value in the range.
+ * @param p_end One past the final value in the range.
+ * @pre `[p_begin, p_end)` is a valid, non-empty mutable range.
+ */
+inline void radix_sort_unsigned_64(
+    std::uint64_t* p_begin,
+    std::uint64_t* p_end)
+{
+    radix_sort(
+        p_begin,
+        p_end,
+        [](std::uint64_t value) { return value; });
 }
 
 }  // namespace bioseq::sorting

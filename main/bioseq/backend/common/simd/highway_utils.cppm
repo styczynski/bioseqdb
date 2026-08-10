@@ -1,7 +1,11 @@
-/** Canonical generator input for minimizer-owned Highway utilities. */
+/**
+ * @file
+ * @brief Generator-owned Highway SIMD primitives shared by Bioseq kernels.
+ */
 module;
-#include <hwy/highway.h>
+
 #include <hwy/aligned_allocator.h>
+#include <hwy/highway.h>
 
 export module bioseq.highway.sources.simd_utils;
 
@@ -11,441 +15,777 @@ import bioseq.common.templating;
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
+
+/// @brief Makes the canonical compile-time index loop available to generated kernels.
 using ::bioseq::common::templating::for_each_index;
 
-template<class T, class Buffer>
+/**
+ * @brief Allocates an array through Highway's aligned allocator.
+ *
+ * @tparam p_value_type Array element type.
+ * @tparam p_buffer_type Owning buffer type returned by Highway.
+ */
+template <class p_value_type, class p_buffer_type>
 struct simd_array_allocator {
-    static Buffer allocate(const size_t& length) {
-        return hwy::AllocateAligned<T>(length);
+    /**
+     * @brief Allocates aligned storage for a requested element count.
+     *
+     * @param[in] length Number of elements to allocate.
+     * @return Owning Highway-aligned buffer.
+     */
+    [[nodiscard]] static p_buffer_type allocate(std::size_t length) {
+        return hwy::AllocateAligned<p_value_type>(length);
     }
 };
 
-template<class D, class T, class VecT = hn::Vec<D>>
-HWY_INLINE std::vector<T> hwy_to_vector(D& d, const VecT& value) {
-    HWY_ALIGN T lanes[hn::MaxLanes(d)];
-    hn::Store(value, d, lanes);
-    return std::vector<T>(lanes, lanes + hn::Lanes(d));
+/**
+ * @brief Extracts a lane counted backward from the active vector tail.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_tail_offset Zero-based distance from the final active lane.
+ * @tparam p_value_type Scalar lane type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] vector Source vector.
+ * @return Selected scalar lane.
+ * @pre `p_tail_offset < hn::Lanes(simd_tag)`.
+ */
+template <
+    class p_simd_tag,
+    std::size_t p_tail_offset = 0u,
+    class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE p_value_type extract_last_lane(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector) {
+    return hn::ExtractLane(
+        vector,
+        hn::Lanes(simd_tag) - 1u - p_tail_offset);
 }
 
-template<class T>
-inline constexpr std::pair<T, T> int_div_floor(
-    const T& value, const T& divisor)
-{
-    return {value / divisor, value % divisor};
-}
-
-template<class D, size_t index = 0,
-         class Stored = hn::TFromD<D>>
-HWY_INLINE Stored extract_last(D d, hn::Vec<D> value) {
-    return hn::ExtractLane(value, hn::Lanes(d) - 1 - index);
-}
-
-template<class D, size_t index = 0>
-HWY_INLINE hn::Vec<D> broadcast_last(D d, hn::Vec<D> value) {
-    constexpr size_t lane = hn::MaxLanes(d) - 1 - index;
-    if constexpr (hn::MaxLanes(d) <= 64) {
-        return hn::BroadcastLane<lane>(value);
+/**
+ * @brief Broadcasts a lane counted backward from the vector tail.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_tail_offset Zero-based distance from the final lane.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] vector Source vector.
+ * @return Vector whose lanes contain the selected scalar value.
+ */
+template <class p_simd_tag, std::size_t p_tail_offset = 0u>
+HWY_INLINE hn::Vec<p_simd_tag> broadcast_last_lane(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector) {
+    constexpr std::size_t k_lane_index =
+        hn::MaxLanes(p_simd_tag{}) - 1u - p_tail_offset;
+    if constexpr (hn::MaxLanes(p_simd_tag{}) <= 64u) {
+        return hn::BroadcastLane<k_lane_index>(vector);
     } else {
-        return hn::Set(d, extract_last<D, index>(d, value));
+        return hn::Set(
+            simd_tag,
+            extract_last_lane<p_simd_tag, p_tail_offset>(simd_tag, vector));
     }
 }
 
-template<class D, size_t first_count = 1,
-         class Stored = hn::TFromD<D>>
-HWY_INLINE hn::Vec<D> insert_first(
-    D d, hn::Vec<D> value, Stored first)
-{
+/**
+ * @brief Replaces the first lanes of a vector with one scalar value.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_first_lane_count Number of leading lanes to replace.
+ * @tparam p_value_type Scalar lane type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] vector Source vector.
+ * @param[in] first_value Replacement value.
+ * @return Vector with the requested leading lanes replaced.
+ */
+template <
+    class p_simd_tag,
+    std::size_t p_first_lane_count = 1u,
+    class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE hn::Vec<p_simd_tag> replace_first_lanes(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector,
+    p_value_type first_value) {
     return hn::IfThenElse(
-        hn::FirstN(d, first_count), hn::Set(d, first), value);
+        hn::FirstN(simd_tag, p_first_lane_count),
+        hn::Set(simd_tag, first_value),
+        vector);
 }
 
-template<class D, class Stored = hn::TFromD<D>>
-HWY_INLINE Stored extract_lane(D, hn::Vec<D> value, size_t lane) {
-    return hn::ExtractLane(value, lane);
+/**
+ * @brief Extracts one runtime-selected vector lane.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_value_type Scalar lane type.
+ * @param[in] simd_tag Highway descriptor associated with the vector.
+ * @param[in] vector Source vector.
+ * @param[in] lane_index Zero-based active-lane index.
+ * @return Selected scalar lane.
+ * @pre `lane_index < hn::Lanes(simd_tag)`.
+ */
+template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE p_value_type extract_lane(
+    [[maybe_unused]] p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector,
+    std::size_t lane_index) {
+    return hn::ExtractLane(vector, lane_index);
 }
 
-template<class D, class Stored = hn::TFromD<D>>
-HWY_INLINE size_t lane_hargmax(
-    D d, hn::Vec<D> value, Stored maximum)
-{
-    const auto lane = hn::FindFirstTrue(
-        d, hn::Eq(value, hn::Set(d, maximum)));
-    if (lane < 0) [[unlikely]] {
+/**
+ * @brief Finds the first lane containing a supplied maximum value.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_value_type Scalar lane type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] vector Vector searched for the maximum.
+ * @param[in] maximum Maximum scalar value already computed by the caller.
+ * @return Zero-based index of the first matching lane.
+ * @pre At least one active lane equals `maximum`; violation terminates the process.
+ */
+template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE std::size_t find_first_maximum_lane(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector,
+    p_value_type maximum) {
+    const auto lane_index = hn::FindFirstTrue(
+        simd_tag,
+        hn::Eq(vector, hn::Set(simd_tag, maximum)));
+    if (lane_index < 0) [[unlikely]] {
         std::abort();
     }
-    return static_cast<size_t>(lane);
+    return static_cast<std::size_t>(lane_index);
 }
 
-template<size_t N, class D>
-HWY_INLINE hn::Vec<D> lanes_shift_left_zero(D d, hn::Vec<D> value) {
-    // Block Aligner prefix scans rely on the 128-bit-block-local semantics.
-    return hn::ShiftLeftBytes<N * sizeof(hn::TFromD<D>)>(d, value);
+/**
+ * @brief Shifts lanes left within each 128-bit block and fills vacancies with zero.
+ *
+ * @tparam p_lane_count Number of scalar lanes shifted within each block.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @param[in] simd_tag Highway descriptor defining the lane type.
+ * @param[in] vector Source vector.
+ * @return Block-local shifted vector.
+ *
+ * Block-local semantics are required by the alignment prefix scans and must
+ * not be replaced with a whole-vector slide.
+ */
+template <std::size_t p_lane_count, class p_simd_tag>
+HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_zero(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> vector) {
+    return hn::ShiftLeftBytes<
+        p_lane_count * sizeof(hn::TFromD<p_simd_tag>)>(simd_tag, vector);
 }
 
-template<class D, class Stored = hn::TFromD<D>>
-HWY_INLINE hn::Vec<D> lanes_shift_left_1_borrow(
-    D d, hn::Vec<D> current, hn::Vec<D> previous)
-{
-    constexpr size_t vector_bytes =
-        hn::MaxLanes(D{}) * sizeof(hn::TFromD<D>);
-    if constexpr (vector_bytes <= 16) {
-        constexpr size_t shift = hn::MaxLanes(D{}) - 1;
-        return hn::CombineShiftRightLanes<shift>(d, current, previous);
+/**
+ * @brief Shifts lanes left once and fills the first lane from a predecessor vector.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @param[in] simd_tag Highway descriptor defining the active lane count.
+ * @param[in] current Current vector.
+ * @param[in] predecessor Vector preceding `current` in logical lane order.
+ * @return Shifted vector with the predecessor's last active lane inserted first.
+ */
+template <class p_simd_tag>
+HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_with_predecessor(
+    p_simd_tag simd_tag,
+    hn::Vec<p_simd_tag> current,
+    hn::Vec<p_simd_tag> predecessor) {
+    constexpr std::size_t k_vector_byte_count =
+        hn::MaxLanes(p_simd_tag{}) * sizeof(hn::TFromD<p_simd_tag>);
+    if constexpr (k_vector_byte_count <= 16u) {
+        constexpr std::size_t k_shift_lane_count =
+            hn::MaxLanes(p_simd_tag{}) - 1u;
+        return hn::CombineShiftRightLanes<k_shift_lane_count>(
+            simd_tag,
+            current,
+            predecessor);
     } else {
-        const auto shifted = hn::SlideUpLanes(d, current, 1);
+        const auto shifted = hn::SlideUpLanes(simd_tag, current, 1u);
         return hn::IfThenElse(
-            hn::FirstN(d, 1),
-            hn::Set(d, extract_last(d, previous)),
+            hn::FirstN(simd_tag, 1u),
+            hn::Set(simd_tag, extract_last_lane(simd_tag, predecessor)),
             shifted);
     }
 }
 
-template<class D_I, class D_F>
-HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
-    D_I d_int, D_F d_float, hn::Vec<D_I> input_int)
-{
-    const auto input_as_float = hn::ConvertTo(d_float, input_int);
-    const auto float_as_int_bits = hn::BitCast(d_int, input_as_float);
-    const auto raw_exponent = hn::And(
-        hn::ShiftRight<23>(float_as_int_bits), hn::Set(d_int, 255));
-    const auto biased_exponent = hn::Sub(
-        raw_exponent, hn::Set(d_int, 128));
-    const auto exponent_as_float = hn::ConvertTo(d_float, biased_exponent);
+/**
+ * @brief Approximates base-two logarithms for positive integer lanes.
+ *
+ * @tparam p_integer_simd_tag Highway descriptor for input integers and bit operations.
+ * @tparam p_float_simd_tag Highway descriptor for output floating-point lanes.
+ * @param[in] integer_simd_tag Integer descriptor.
+ * @param[in] float_simd_tag Floating-point descriptor with the same lane geometry.
+ * @param[in] integer_values Positive integer input values.
+ * @return Polynomial log2 approximation for every input lane.
+ */
+template <class p_integer_simd_tag, class p_float_simd_tag>
+HWY_INLINE hn::Vec<p_float_simd_tag> approximate_log2(
+    p_integer_simd_tag integer_simd_tag,
+    p_float_simd_tag float_simd_tag,
+    hn::Vec<p_integer_simd_tag> integer_values) {
+    const auto float_values = hn::ConvertTo(float_simd_tag, integer_values);
+    const auto integer_bit_values = hn::BitCast(integer_simd_tag, float_values);
+    const auto raw_exponents = hn::And(
+        hn::ShiftRight<23>(integer_bit_values),
+        hn::Set(integer_simd_tag, 255));
+    const auto biased_exponents = hn::Sub(
+        raw_exponents,
+        hn::Set(integer_simd_tag, 128));
+    const auto float_exponents = hn::ConvertTo(float_simd_tag, biased_exponents);
     const auto mantissa_bits = hn::Add(
-        hn::And(float_as_int_bits, hn::Set(d_int, ~(255 << 23))),
-        hn::Set(d_int, 127 << 23));
-    const auto normalized_mantissa = hn::BitCast(d_float, mantissa_bits);
-    const auto inner_term = hn::MulAdd(
-        hn::Set(d_float, -0.34484843F),
-        normalized_mantissa,
-        hn::Set(d_float, 2.02466578F));
-    const auto fractional_part = hn::MulSub(
-        inner_term,
-        normalized_mantissa,
-        hn::Set(d_float, 0.67487759F));
-    return hn::Add(exponent_as_float, fractional_part);
+        hn::And(
+            integer_bit_values,
+            hn::Set(integer_simd_tag, ~(255 << 23))),
+        hn::Set(integer_simd_tag, 127 << 23));
+    const auto normalized_mantissas = hn::BitCast(float_simd_tag, mantissa_bits);
+    const auto inner_terms = hn::MulAdd(
+        hn::Set(float_simd_tag, -0.34484843F),
+        normalized_mantissas,
+        hn::Set(float_simd_tag, 2.02466578F));
+    const auto fractional_parts = hn::MulSub(
+        inner_terms,
+        normalized_mantissas,
+        hn::Set(float_simd_tag, 0.67487759F));
+    return hn::Add(float_exponents, fractional_parts);
 }
 
-template<typename D>
-concept d_simd_resizeable_x3 = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>>) <= 8;
+/**
+ * @brief Checks whether a lane type remains at most 64 bits after three widenings.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ */
+template <typename p_simd_tag>
+concept simd_lane_widenable_three_times =
+    sizeof(hwy::MakeWide<hwy::MakeWide<
+        hwy::MakeWide<hn::TFromD<p_simd_tag>>>>) <= 8u;
 
-template<typename D>
-concept d_simd_resizeable_x2 = sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>) <= 8;
+/**
+ * @brief Checks whether a lane type remains at most 64 bits after two widenings.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ */
+template <typename p_simd_tag>
+concept simd_lane_widenable_twice =
+    sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<p_simd_tag>>>) <= 8u;
 
-template<typename D>
-concept d_simd_resizeable_x1 = sizeof(hwy::MakeWide<hn::TFromD<D>>) <= 8;
+/**
+ * @brief Checks whether a lane type remains at most 64 bits after one widening.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ */
+template <typename p_simd_tag>
+concept simd_lane_widenable_once =
+    sizeof(hwy::MakeWide<hn::TFromD<p_simd_tag>>) <= 8u;
 
-template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
+/**
+ * @brief Loads and transposes one square matrix of active SIMD lanes.
+ *
+ * The object borrows an indexable matrix-storage handle and never reallocates
+ * it. The caller owns the storage and synchronization. Supported active lane
+ * counts are one, two, four, eight, and sixteen; wider matrices terminate
+ * rather than changing their coordinate or transpose semantics.
+ *
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_simd_vector Highway vector type for the descriptor.
+ * @tparam p_matrix_storage Borrowed indexable storage handle.
+ */
+template <
+    class p_simd_tag,
+    class p_simd_vector = hn::Vec<p_simd_tag>,
+    typename p_matrix_storage = p_simd_vector*>
 class square_lane_matrix {
 private:
-	static constexpr void transpose1(D& d, p_matrix_t& matrix) {};
+    p_matrix_storage matrix_storage_;
 
-	static constexpr void transpose2(D& d, p_matrix_t& matrix) {
-		const VecT v0 = matrix[0]; // A B
-		const VecT v1 = matrix[1]; // C D
-		const VecT t1 = InterleaveUpper(d, v0, v1); // A C
-		const VecT t0 = InterleaveLower(d, v0, v1); // B D
-		matrix[0] = t0;
-		matrix[1] = t1;
-	};
+    /**
+     * @brief Leaves a one-lane matrix unchanged.
+     *
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in,out] matrix_storage Borrowed matrix storage.
+     */
+    static constexpr void transpose_one_lane(
+        [[maybe_unused]] p_simd_tag& simd_tag,
+        [[maybe_unused]] p_matrix_storage& matrix_storage) {}
 
-	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x1<D>) {
-		std::abort();
-	}
+    /**
+     * @brief Transposes a two-lane square matrix in place.
+     *
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in,out] matrix_storage Borrowed matrix storage.
+     */
+    static constexpr void transpose_two_lanes(
+        p_simd_tag& simd_tag,
+        p_matrix_storage& matrix_storage) {
+        const p_simd_vector first_row = matrix_storage[0];
+        const p_simd_vector second_row = matrix_storage[1];
+        const p_simd_vector first_column =
+            hn::InterleaveLower(simd_tag, first_row, second_row);
+        const p_simd_vector second_column =
+            hn::InterleaveUpper(simd_tag, first_row, second_row);
+        matrix_storage[0] = first_column;
+        matrix_storage[1] = second_column;
+    }
 
-	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x1<D>) {
-		const hn::RepartitionToWide<D> dw;
+    /**
+     * @brief Transposes a four-lane square matrix in place.
+     *
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in,out] matrix_storage Borrowed matrix storage.
+     * @warning Terminates when the lane type cannot be widened once.
+     */
+    static constexpr void transpose_four_lanes(
+        p_simd_tag& simd_tag,
+        p_matrix_storage& matrix_storage) {
+        if constexpr (!simd_lane_widenable_once<p_simd_tag>) {
+            std::abort();
+        } else {
+            const hn::RepartitionToWide<p_simd_tag> wide_simd_tag;
 
-		const VecT v0 = matrix[0];
-		const VecT v1 = matrix[1];
-		const VecT v2 = matrix[2];
-		const VecT v3 = matrix[3];
+            const p_simd_vector row_zero = matrix_storage[0];
+            const p_simd_vector row_one = matrix_storage[1];
+            const p_simd_vector row_two = matrix_storage[2];
+            const p_simd_vector row_three = matrix_storage[3];
 
-		const VecT t0 = InterleaveLower(d, v0, v1);
-		const VecT t1 = InterleaveLower(d, v2, v3);
-		const VecT t2 = InterleaveUpper(d, v0, v1);
-		const VecT t3 = InterleaveUpper(d, v2, v3);
+            const p_simd_vector lower_top_pair =
+                hn::InterleaveLower(simd_tag, row_zero, row_one);
+            const p_simd_vector lower_bottom_pair =
+                hn::InterleaveLower(simd_tag, row_two, row_three);
+            const p_simd_vector upper_top_pair =
+                hn::InterleaveUpper(simd_tag, row_zero, row_one);
+            const p_simd_vector upper_bottom_pair =
+                hn::InterleaveUpper(simd_tag, row_two, row_three);
 
-		matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-		matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-		matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-		matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-	};
+            matrix_storage[0] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_top_pair),
+                    hn::BitCast(wide_simd_tag, lower_bottom_pair)));
+            matrix_storage[1] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_top_pair),
+                    hn::BitCast(wide_simd_tag, lower_bottom_pair)));
+            matrix_storage[2] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_top_pair),
+                    hn::BitCast(wide_simd_tag, upper_bottom_pair)));
+            matrix_storage[3] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_top_pair),
+                    hn::BitCast(wide_simd_tag, upper_bottom_pair)));
+        }
+    }
 
-	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x2<D>) {
-		std::abort();
-	}
+    /**
+     * @brief Transposes an eight-lane square matrix in place.
+     *
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in,out] matrix_storage Borrowed matrix storage.
+     * @warning Terminates when the lane type cannot be widened twice.
+     */
+    static constexpr void transpose_eight_lanes(
+        p_simd_tag& simd_tag,
+        p_matrix_storage& matrix_storage) {
+        if constexpr (!simd_lane_widenable_twice<p_simd_tag>) {
+            std::abort();
+        } else {
+            const hn::RepartitionToWide<p_simd_tag> wide_simd_tag;
 
-	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x2<D>) {
-		const hn::RepartitionToWide<D> dw;
+            const p_simd_vector row_zero = matrix_storage[0];
+            const p_simd_vector row_one = matrix_storage[1];
+            const p_simd_vector row_two = matrix_storage[2];
+            const p_simd_vector row_three = matrix_storage[3];
+            const p_simd_vector row_four = matrix_storage[4];
+            const p_simd_vector row_five = matrix_storage[5];
+            const p_simd_vector row_six = matrix_storage[6];
+            const p_simd_vector row_seven = matrix_storage[7];
 
-		const VecT v0 = matrix[0];
-		const VecT v1 = matrix[1];
-		const VecT v2 = matrix[2];
-		const VecT v3 = matrix[3];
+            const p_simd_vector lower_pair_zero =
+                hn::InterleaveLower(simd_tag, row_zero, row_one);
+            const p_simd_vector lower_pair_one =
+                hn::InterleaveLower(simd_tag, row_two, row_three);
+            const p_simd_vector lower_pair_two =
+                hn::InterleaveLower(simd_tag, row_four, row_five);
+            const p_simd_vector lower_pair_three =
+                hn::InterleaveLower(simd_tag, row_six, row_seven);
+            const p_simd_vector upper_pair_zero =
+                hn::InterleaveUpper(simd_tag, row_zero, row_one);
+            const p_simd_vector upper_pair_one =
+                hn::InterleaveUpper(simd_tag, row_two, row_three);
+            const p_simd_vector upper_pair_two =
+                hn::InterleaveUpper(simd_tag, row_four, row_five);
+            const p_simd_vector upper_pair_three =
+                hn::InterleaveUpper(simd_tag, row_six, row_seven);
 
-		const VecT v4 = matrix[4];
-		const VecT v5 = matrix[5];
-		const VecT v6 = matrix[6];
-		const VecT v7 = matrix[7];
+            const p_simd_vector lower_block_zero = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_pair_zero),
+                    hn::BitCast(wide_simd_tag, lower_pair_one)));
+            const p_simd_vector lower_block_one = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_pair_zero),
+                    hn::BitCast(wide_simd_tag, lower_pair_one)));
+            const p_simd_vector lower_block_two = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_pair_two),
+                    hn::BitCast(wide_simd_tag, lower_pair_three)));
+            const p_simd_vector lower_block_three = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, lower_pair_two),
+                    hn::BitCast(wide_simd_tag, lower_pair_three)));
+            const p_simd_vector upper_block_zero = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_pair_zero),
+                    hn::BitCast(wide_simd_tag, upper_pair_one)));
+            const p_simd_vector upper_block_one = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_pair_zero),
+                    hn::BitCast(wide_simd_tag, upper_pair_one)));
+            const p_simd_vector upper_block_two = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_pair_two),
+                    hn::BitCast(wide_simd_tag, upper_pair_three)));
+            const p_simd_vector upper_block_three = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    wide_simd_tag,
+                    hn::BitCast(wide_simd_tag, upper_pair_two),
+                    hn::BitCast(wide_simd_tag, upper_pair_three)));
 
-		const VecT t0 = InterleaveLower(d, v0, v1);
-		const VecT t1 = InterleaveLower(d, v2, v3);
-		const VecT t2 = InterleaveLower(d, v4, v5);
-		const VecT t3 = InterleaveLower(d, v6, v7);
+            const hn::RepartitionToWideX2<p_simd_tag> double_wide_simd_tag;
 
-		const VecT t4 = InterleaveUpper(d, v0, v1);
-		const VecT t5 = InterleaveUpper(d, v2, v3);
-		const VecT t6 = InterleaveUpper(d, v4, v5);
-		const VecT t7 = InterleaveUpper(d, v6, v7);
+            matrix_storage[0] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, lower_block_zero),
+                    hn::BitCast(double_wide_simd_tag, lower_block_two)));
+            matrix_storage[1] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, lower_block_zero),
+                    hn::BitCast(double_wide_simd_tag, lower_block_two)));
+            matrix_storage[2] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, lower_block_one),
+                    hn::BitCast(double_wide_simd_tag, lower_block_three)));
+            matrix_storage[3] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, lower_block_one),
+                    hn::BitCast(double_wide_simd_tag, lower_block_three)));
+            matrix_storage[4] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, upper_block_zero),
+                    hn::BitCast(double_wide_simd_tag, upper_block_two)));
+            matrix_storage[5] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, upper_block_zero),
+                    hn::BitCast(double_wide_simd_tag, upper_block_two)));
+            matrix_storage[6] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, upper_block_one),
+                    hn::BitCast(double_wide_simd_tag, upper_block_three)));
+            matrix_storage[7] = hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    double_wide_simd_tag,
+                    hn::BitCast(double_wide_simd_tag, upper_block_one),
+                    hn::BitCast(double_wide_simd_tag, upper_block_three)));
+        }
+    }
 
-		const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-		const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-		const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-		const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+    /**
+     * @brief Interleaves corresponding columns from two eight-row matrix halves.
+     *
+     * @tparam p_select_upper Whether to select the upper interleave result.
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in] triple_wide_simd_tag Descriptor spanning eight scalar lanes.
+     * @param[in] upper_column Column from the first matrix half.
+     * @param[in] lower_column Column from the second matrix half.
+     * @return One interleaved column of the sixteen-row matrix.
+     */
+    template <bool p_select_upper>
+    static constexpr p_simd_vector interleave_matrix_halves(
+        p_simd_tag& simd_tag,
+        const hn::RepartitionToWideX3<p_simd_tag>& triple_wide_simd_tag,
+        p_simd_vector upper_column,
+        p_simd_vector lower_column) {
+        const auto upper_wide =
+            hn::BitCast(triple_wide_simd_tag, upper_column);
+        const auto lower_wide =
+            hn::BitCast(triple_wide_simd_tag, lower_column);
+        if constexpr (p_select_upper) {
+            return hn::BitCast(
+                simd_tag,
+                hn::InterleaveUpper(
+                    triple_wide_simd_tag,
+                    upper_wide,
+                    lower_wide));
+        } else {
+            return hn::BitCast(
+                simd_tag,
+                hn::InterleaveLower(
+                    triple_wide_simd_tag,
+                    upper_wide,
+                    lower_wide));
+        }
+    }
 
-		const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
-		const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
-		const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
-		const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
+    /**
+     * @brief Transposes a sixteen-lane square matrix in place.
+     *
+     * @param[in] simd_tag Active Highway descriptor.
+     * @param[in,out] matrix_storage Borrowed matrix storage.
+     * @warning Terminates when the lane type cannot be widened three times.
+     */
+    static constexpr void transpose_sixteen_lanes(
+        p_simd_tag& simd_tag,
+        p_matrix_storage& matrix_storage) {
+        if constexpr (!simd_lane_widenable_three_times<p_simd_tag>) {
+            std::abort();
+        } else {
+            auto lower_half_storage = &matrix_storage[8];
+            transpose_eight_lanes(simd_tag, matrix_storage);
+            transpose_eight_lanes(simd_tag, lower_half_storage);
 
-		const hn::RepartitionToWideX2<D> dww;
+            const p_simd_vector upper_column_zero = matrix_storage[0];
+            const p_simd_vector upper_column_one = matrix_storage[1];
+            const p_simd_vector upper_column_two = matrix_storage[2];
+            const p_simd_vector upper_column_three = matrix_storage[3];
+            const p_simd_vector upper_column_four = matrix_storage[4];
+            const p_simd_vector upper_column_five = matrix_storage[5];
+            const p_simd_vector upper_column_six = matrix_storage[6];
+            const p_simd_vector upper_column_seven = matrix_storage[7];
+            const p_simd_vector lower_column_zero = matrix_storage[8];
+            const p_simd_vector lower_column_one = matrix_storage[9];
+            const p_simd_vector lower_column_two = matrix_storage[10];
+            const p_simd_vector lower_column_three = matrix_storage[11];
+            const p_simd_vector lower_column_four = matrix_storage[12];
+            const p_simd_vector lower_column_five = matrix_storage[13];
+            const p_simd_vector lower_column_six = matrix_storage[14];
+            const p_simd_vector lower_column_seven = matrix_storage[15];
 
-		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
-		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
+            const hn::RepartitionToWideX3<p_simd_tag> triple_wide_simd_tag;
 
-		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
-		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
+            matrix_storage[0] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_zero,
+                lower_column_zero);
+            matrix_storage[1] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_zero,
+                lower_column_zero);
+            matrix_storage[2] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_one,
+                lower_column_one);
+            matrix_storage[3] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_one,
+                lower_column_one);
+            matrix_storage[4] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_two,
+                lower_column_two);
+            matrix_storage[5] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_two,
+                lower_column_two);
+            matrix_storage[6] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_three,
+                lower_column_three);
+            matrix_storage[7] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_three,
+                lower_column_three);
+            matrix_storage[8] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_four,
+                lower_column_four);
+            matrix_storage[9] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_four,
+                lower_column_four);
+            matrix_storage[10] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_five,
+                lower_column_five);
+            matrix_storage[11] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_five,
+                lower_column_five);
+            matrix_storage[12] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_six,
+                lower_column_six);
+            matrix_storage[13] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_six,
+                lower_column_six);
+            matrix_storage[14] = interleave_matrix_halves<false>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_seven,
+                lower_column_seven);
+            matrix_storage[15] = interleave_matrix_halves<true>(
+                simd_tag,
+                triple_wide_simd_tag,
+                upper_column_seven,
+                lower_column_seven);
+        }
+    }
 
-		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
-		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
-
-		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
-		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
-	};
-
-	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x3<D>) {
-		std::abort();
-	}
-
-	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x3<D>) {
-		auto matrix_lower = &matrix[8];
-		transpose8(d, matrix);
-		transpose8(d, matrix_lower);
-
-		const VecT e0 = matrix[0];
-		const VecT e1 = matrix[1];
-		const VecT e2 = matrix[2];
-		const VecT e3 = matrix[3];
-		const VecT e4 = matrix[4];
-		const VecT e5 = matrix[5];
-		const VecT e6 = matrix[6];
-		const VecT e7 = matrix[7];
-
-		const VecT e8 = matrix[8];
-		const VecT e9 = matrix[9];
-		const VecT e10 = matrix[10];
-		const VecT e11 = matrix[11];
-		const VecT e12 = matrix[12];
-		const VecT e13 = matrix[13];
-		const VecT e14 = matrix[14];
-		const VecT e15 = matrix[15];
-
-		const hn::RepartitionToWideX3<D> dww;
-
-		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e8)));
-		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e8)));
-		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e9)));
-		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e9)));
-		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e2), BitCast(dww, e10)));
-		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e2), BitCast(dww, e10)));
-		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e3), BitCast(dww, e11)));
-		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e3), BitCast(dww, e11)));
-
-		matrix[8] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e12)));
-		matrix[9] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e12)));
-		matrix[10] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e13)));
-		matrix[11] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e13)));
-		matrix[12] = BitCast(d, InterleaveLower(dww, BitCast(dww, e6), BitCast(dww, e14)));
-		matrix[13] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e6), BitCast(dww, e14)));
-		matrix[14] = BitCast(d, InterleaveLower(dww, BitCast(dww, e7), BitCast(dww, e15)));
-		matrix[15] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e7), BitCast(dww, e15)));
-	};
 public:
-	using vec_t = VecT;
-	using matrix_t = p_matrix_t;
+    /**
+     * @brief Binds a matrix wrapper to caller-owned vector storage.
+     *
+     * @param[in,out] matrix_storage Storage for at least `hn::Lanes(p_simd_tag{})` vectors.
+     */
+    explicit square_lane_matrix(p_matrix_storage matrix_storage)
+        : matrix_storage_(matrix_storage) {}
 
-	p_matrix_t matrix;
+    /**
+     * @brief Loads one complete SIMD row at each supplied source offset.
+     *
+     * @tparam p_value_type Scalar source element type.
+     * @tparam p_offset_count Number of source offsets.
+     * @param[in] simd_tag Highway descriptor defining row width.
+     * @param[in] offsets Scalar offsets for consecutive matrix rows.
+     * @param[in] source Readable scalar source storage.
+     * @return Number of fully loaded rows.
+     * @pre `p_offset_count >= hn::Lanes(simd_tag)` and every row is fully readable.
+     */
+    template <typename p_value_type, std::size_t p_offset_count>
+    constexpr std::size_t load_rows_at_offsets(
+        p_simd_tag& simd_tag,
+        const std::array<std::size_t, p_offset_count> offsets,
+        const p_value_type* source) {
+        const std::size_t lane_count = hn::Lanes(simd_tag);
+        for (std::size_t row_index = 0; row_index < lane_count; ++row_index) {
+            matrix_storage_[row_index] =
+                hn::LoadU(simd_tag, &source[offsets[row_index]]);
+        }
+        return lane_count;
+    }
 
-	explicit square_lane_matrix(p_matrix_t p_matrix): matrix(p_matrix) {}
+    /**
+     * @brief Loads bounded rows and zero-fills rows with no available source lanes.
+     *
+     * @tparam p_value_type Scalar source element type.
+     * @tparam p_offset_count Number of source offsets.
+     * @param[in] simd_tag Highway descriptor defining row width.
+     * @param[in] available_value_count Readable scalar count in `source`.
+     * @param[in] offsets Scalar offsets for consecutive matrix rows.
+     * @param[in] source Readable scalar source storage.
+     * @return Pair of fully loaded row count and lane count in the final partial row.
+     * @pre `p_offset_count == hn::Lanes(simd_tag)`.
+     */
+    template <typename p_value_type, std::size_t p_offset_count>
+    constexpr std::pair<std::size_t, std::size_t> load_bounded_rows_at_offsets(
+        p_simd_tag& simd_tag,
+        std::size_t available_value_count,
+        const std::array<std::size_t, p_offset_count> offsets,
+        const p_value_type* source) {
+        const std::size_t lane_count = hn::Lanes(simd_tag);
+        if (p_offset_count < lane_count) [[unlikely]] {
+            std::abort();
+        }
 
-	// template<typename T>
-	// constexpr std::vector<std::vector<T>> to_vectors(D& d) const {
-	// 	std::vector<std::vector<T>> ret;
-	// 	const size_t rows = hn::Lanes(d);
-	// 	ret.resize(rows);
-	// 	for(size_t i = 0; i < rows; ++i) {
-	// 		hn::Store();
-	// 		ret[i] = ;
-	// 	}
-	// }
+        std::size_t partial_lane_count = 0u;
+        std::size_t full_row_count = 0u;
+        std::size_t row_index = 0u;
+        for (; row_index < p_offset_count; ++row_index) {
+            const std::size_t source_offset = offsets[row_index];
+            if (source_offset + lane_count > available_value_count) [[unlikely]] {
+                if (source_offset >= available_value_count) [[unlikely]] {
+                    matrix_storage_[row_index] = hn::Zero(simd_tag);
+                } else {
+                    const std::size_t available_lane_count =
+                        available_value_count - source_offset;
+                    matrix_storage_[row_index] = hn::LoadN(
+                        simd_tag,
+                        &source[source_offset],
+                        available_lane_count);
+                    partial_lane_count = available_lane_count;
+                }
+            } else {
+                matrix_storage_[row_index] =
+                    hn::LoadU(simd_tag, &source[source_offset]);
+                ++full_row_count;
+            }
+        }
+        for (; row_index < lane_count; ++row_index) {
+            matrix_storage_[row_index] = hn::Zero(simd_tag);
+        }
+        return {full_row_count, partial_lane_count};
+    }
 
-	template<typename T>
-	std::vector<std::vector<T>> to_scalar_2d(D& d) const {
-		std::vector<std::vector<T>> data;
-		const size_t rows_to_load = hn::Lanes(d);
-		data.resize(rows_to_load);
-		for(size_t i = 0; i < rows_to_load; ++i) {
-			data[i] = hwy_to_vector<D, T, VecT>(d, matrix[i]);
-		}
-		return data;
-	}
-
-	template<typename T, size_t K>
-	constexpr size_t fill_with_offsets(
-		D& d, const std::array<size_t, K> offsets, const T* data
-	) {
-		const size_t rows_to_load = hn::Lanes(d);
-		for(size_t i = 0; i < rows_to_load; ++i) {
-			matrix[i] = hn::LoadU(d, &(data[offsets[i]]));
-		}
-		return rows_to_load;
-	}
-
-	template<typename T, size_t K>
-	constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
-		D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
-	) {
-		if (K < hn::Lanes(d)) [[unlikely]] {
-			std::abort();
-		}
-
-		const size_t rows_to_load = hn::Lanes(d);
-		size_t partial_filled_rows = 0;
-		size_t full_rows_count = 0;
-		size_t i = 0;
-		for(; i < K; ++i) {
-			const size_t offset = offsets[i];
-			if (offset + rows_to_load > data_available) [[unlikely]] {
-				// We cannot load entire row
-				if (offset >= data_available) [[unlikely]] {
-					matrix[i] = hn::Zero(d);
-				} else {
-					const size_t rows_to_load = data_available - offset;
-					if (offset + rows_to_load > data_available) [[unlikely]] {
-						std::abort();
-					}
-					matrix[i] = hn::LoadN(d, &(data[offset]), rows_to_load);
-					partial_filled_rows = rows_to_load;
-				}
-			} else {
-				matrix[i] = hn::LoadU(d, &(data[offset]));
-				++full_rows_count;
-			}
-		}
-		for(; i < rows_to_load; ++i) {
-			matrix[i] = hn::Zero(d);
-		}
-		return std::make_pair(full_rows_count, partial_filled_rows);
-	}
-
-	// OLD IMPL
-	// template<typename T, size_t K>
-	// constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
-	// 	D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
-	// ) {
-	// 	assert(K >= hn::Lanes(d));
-	// 	assert(std::is_sorted(offsets));
-
-	// 	const size_t rows_to_load = hn::Lanes(d);
-	// 	size_t i = 0;
-	// 	size_t data_p = 0;
-	// 	size_t partial_filled_rows = 0;
-	// 	for(; i < rows_to_load; ++i) {
-	// 		data_p = offsets[i];
-	// 		if (data_p + rows_to_load > data_available) {
-	// 			// We cannot load entire row
-	// 			partial_filled_rows = data_p + rows_to_load - data_available;
-	// 			break;
-	// 		}
-	// 		matrix[i] = hn::LoadU(d, &(data[data_p]));
-	// 	}
-	// 	const size_t full_rows_count = i;
-	// 	if (i < rows_to_load && partial_filled_rows > 0) {
-	// 		matrix[i] = hn::LoadN(d, &(data[data_p]), partial_filled_rows);
-	// 		++i;
-	// 	}
-	// 	for(; i < hn::Lanes(d); ++i) {
-	// 		matrix[i] = Zero(d);
-	// 	}
-	// 	return std::make_pair(full_rows_count, partial_filled_rows);
-	// }
-
-	template<typename T>
-	constexpr size_t fill(
-		D& d, const size_t context, const T* data
-	) {
-		const size_t rows_to_load = hn::Lanes(d);
-		const size_t row_offset = rows_to_load - context;
-		for(size_t i = 0; i < rows_to_load; ++i) {
-			matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
-		}
-		return rows_to_load * row_offset;
-	}
-
-	template<typename T>
-	constexpr std::pair<size_t, size_t> partial_fill(
-		D& d, const size_t data_available, const size_t context, const T* data
-	) {
-		if (data_available < context) [[unlikely]] {
-			const size_t loaded_units = std::min(data_available, hn::Lanes(d));
-			matrix[0] = hn::LoadN(d, data, loaded_units);
-			for(size_t i = 1; i < hn::Lanes(d); ++i) {
-				matrix[i] = Zero(d);
-			}
-			const size_t loaded_rows = 0;
-			return std::make_pair(loaded_rows, loaded_units);
-		} else {
-			//const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
-			const size_t row_offset = hn::Lanes(d) - context;
-			const auto& [full_rows_count, last_row_lanes] = int_div_floor(data_available-context, row_offset);
-			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
-			size_t partial_filled_rows = 0;
-			size_t i = 0;
-			for(; i < rows_to_load; ++i) {
-				matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
-			}
-			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
-				partial_filled_rows = context+last_row_lanes;
-				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), partial_filled_rows);
-				++i;
-			}
-			for(; i < hn::Lanes(d); ++i) {
-				matrix[i] = Zero(d);
-			}
-			return std::make_pair(full_rows_count, partial_filled_rows);
-			//rows_to_load * row_offset + last_row_lanes;
-		}
-	}
-
-	inline constexpr void transpose(
-		D& d
-	) {
-		// For size = 2
-		if (hn::Lanes(d) == 1) {
-			transpose1(d, matrix);
-		} else if (hn::Lanes(d) == 2) {
-			transpose2(d, matrix);
-		} else if (hn::Lanes(d) == 4) {
-			transpose4(d, matrix);
-		} else if (hn::Lanes(d) == 8) {
-			transpose8(d, matrix);
-		} else if (hn::Lanes(d) == 16) {
-			transpose16(d, matrix);
-		} else {
-			std::abort();
-		}
-	}
+    /**
+     * @brief Transposes the bound square lane matrix in place.
+     *
+     * @param[in] simd_tag Highway descriptor defining matrix dimensions.
+     * @warning Terminates for unsupported lane counts or element widths.
+     */
+    constexpr void transpose_in_place(p_simd_tag& simd_tag) {
+        const std::size_t lane_count = hn::Lanes(simd_tag);
+        if (lane_count == 1u) {
+            transpose_one_lane(simd_tag, matrix_storage_);
+        } else if (lane_count == 2u) {
+            transpose_two_lanes(simd_tag, matrix_storage_);
+        } else if (lane_count == 4u) {
+            transpose_four_lanes(simd_tag, matrix_storage_);
+        } else if (lane_count == 8u) {
+            transpose_eight_lanes(simd_tag, matrix_storage_);
+        } else if (lane_count == 16u) {
+            transpose_sixteen_lanes(simd_tag, matrix_storage_);
+        } else {
+            std::abort();
+        }
+    }
 };
 
 } // namespace target

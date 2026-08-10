@@ -35,7 +35,7 @@ import :row_hash;
 export namespace bioseq::postgres_test {
 
 /// @brief Build outputs required to install one extension in a private cluster.
-struct extension_artifact {
+struct extension_install_source {
     std::string name;
     std::filesystem::path control_file;
     std::filesystem::path install_sql;
@@ -43,7 +43,7 @@ struct extension_artifact {
 };
 
 /// @brief Source/staged paths and SHA-256 evidence for one extension triple.
-struct staged_extension_artifact {
+struct staged_extension_files {
     std::string name;
     std::filesystem::path source_control_file;
     std::filesystem::path source_install_sql;
@@ -58,7 +58,7 @@ struct staged_extension_artifact {
 };
 
 /// @brief Exact private directories holding staged extension artifacts.
-struct extension_stage {
+struct extension_stage_layout {
     std::filesystem::path stage_root;
     std::optional<std::filesystem::path> manifest_file;
     std::optional<sha256_digest> manifest_digest;
@@ -66,7 +66,7 @@ struct extension_stage {
     std::filesystem::path control_directory;
     std::filesystem::path library_directory;
     std::optional<std::filesystem::path> runtime_library_directory;
-    std::vector<staged_extension_artifact> extensions;
+    std::vector<staged_extension_files> extensions;
 };
 
 }  // namespace bioseq::postgres_test
@@ -533,7 +533,7 @@ nullable_unsigned_integer_member(
     return unsigned_integer_member(object, name);
 }
 
-[[nodiscard]] inline bool valid_sha256_text(std::string_view digest) {
+[[nodiscard]] inline bool is_valid_sha256_text(std::string_view digest) {
     return digest.size() == 64U
         && std::ranges::all_of(
             digest,
@@ -551,7 +551,7 @@ nullable_unsigned_integer_member(
         return std::nullopt;
     }
     const std::string& digest = string_member(object, name);
-    if (!valid_sha256_text(digest)) {
+    if (!is_valid_sha256_text(digest)) {
         throw std::invalid_argument(
             "preinstalled PostgreSQL stage manifest member must be a "
             "lower-case SHA-256 digest or null: " + std::string(name));
@@ -559,7 +559,7 @@ nullable_unsigned_integer_member(
     return digest;
 }
 
-[[nodiscard]] inline bool path_is_within(
+[[nodiscard]] inline bool is_path_within(
     const std::filesystem::path& root,
     const std::filesystem::path& candidate) {
     auto root_part = root.begin();
@@ -629,7 +629,7 @@ nullable_unsigned_integer_member(
     std::error_code error;
     const std::filesystem::path canonical =
         std::filesystem::canonical(cursor, error);
-    if (error || !path_is_within(stage_root, canonical)) {
+    if (error || !is_path_within(stage_root, canonical)) {
         throw std::invalid_argument(
             std::string(label) + " is outside the stage root");
     }
@@ -649,8 +649,8 @@ inline void require_digest(
     const std::filesystem::path& path,
     std::string_view expected,
     std::string_view label) {
-    if (!valid_sha256_text(expected)
-        || sha256_file(path).hex() != expected) {
+    if (!is_valid_sha256_text(expected)
+        || hash_sha256_file(path).render_hex() != expected) {
         throw std::invalid_argument(
             std::string(label) + " SHA-256 mismatch: " + path.string());
     }
@@ -948,20 +948,20 @@ inline void validate_postgresql_tools(
     const std::filesystem::path& canonical_root,
     const std::filesystem::path& manifest_bin_dir,
     const std::filesystem::path& staged_bin_relative) {
-    constexpr std::array<std::string_view, 6> tools{
+    constexpr std::array<std::string_view, 6> k_tools{
         "postgres", "initdb", "pg_ctl", "createdb", "dropdb", "psql"};
     require_exact_object_members(
         expected_paths,
         {"postgres", "initdb", "pg_ctl", "createdb", "dropdb", "psql"},
         "stage manifest expected_tool_paths");
     if (tool_signatures.kind != manifest_json_kind::array
-        || tool_signatures.array.size() != tools.size()) {
+        || tool_signatures.array.size() != k_tools.size()) {
         throw std::invalid_argument(
             "stage manifest tool_signatures must contain exactly six tools");
     }
     std::set<std::string> observed_tools;
-    for (std::size_t index = 0; index != tools.size(); ++index) {
-        const std::string tool{tools[index]};
+    for (std::size_t index = 0; index != k_tools.size(); ++index) {
+        const std::string tool{k_tools[index]};
         const std::filesystem::path expected_relative =
             (staged_bin_relative / tool).lexically_normal();
         const std::string& expected_path_text =
@@ -1063,7 +1063,7 @@ normalized_relative_metadata_path(
 
 struct no_follow_file_evidence {
     std::uintmax_t size{};
-    std::string sha256;
+    std::string sha256_hex;
 };
 
 [[nodiscard]] inline no_follow_file_evidence
@@ -1128,7 +1128,7 @@ inspect_regular_file_no_follow(
     close_descriptor();
     return {
         .size = bytes_read,
-        .sha256 = hasher.finalize().hex()};
+        .sha256_hex = hasher.finalize().render_hex()};
 }
 
 struct runtime_root_metadata {
@@ -1148,21 +1148,21 @@ struct validated_runtime_entry {
     std::optional<std::string> source_link_target;
     std::string resolved_source_path;
     std::optional<std::uintmax_t> size;
-    std::optional<std::string> sha256;
+    std::optional<std::string> sha256_hex;
 };
 
 [[nodiscard]] inline std::size_t runtime_root_index(
     std::string_view root) {
-    constexpr std::array<std::string_view, 3> roots{
+    constexpr std::array<std::string_view, 3> k_roots{
         "bindir", "sharedir", "pkglibdir"};
-    const auto found = std::ranges::find(roots, root);
-    if (found == roots.end()) {
+    const auto found = std::ranges::find(k_roots, root);
+    if (found == k_roots.end()) {
         throw std::invalid_argument(
             "stage manifest runtime entry has unknown root: "
             + std::string(root));
     }
     return static_cast<std::size_t>(
-        std::distance(roots.begin(), found));
+        std::distance(k_roots.begin(), found));
 }
 
 [[nodiscard]] inline std::string runtime_entry_record(
@@ -1177,7 +1177,7 @@ struct validated_runtime_entry {
         + "resolved_source_path:" + entry.resolved_source_path + '\n'
         + "size:"
         + (entry.size ? std::to_string(*entry.size) : "-") + '\n'
-        + "sha256:" + entry.sha256.value_or("-") + '\n';
+        + "sha256:" + entry.sha256_hex.value_or("-") + '\n';
 }
 
 inline void validate_runtime_sentinels(
@@ -1193,9 +1193,9 @@ inline void validate_runtime_sentinels(
         std::string_view kind;
     };
 #if defined(__APPLE__)
-    constexpr std::string_view plpgsql_filename{"plpgsql.dylib"};
+    constexpr std::string_view k_plpgsql_filename{"plpgsql.dylib"};
 #else
-    constexpr std::string_view plpgsql_filename{"plpgsql.so"};
+    constexpr std::string_view k_plpgsql_filename{"plpgsql.so"};
 #endif
     const std::array contracts{
         sentinel_contract{
@@ -1233,7 +1233,7 @@ inline void validate_runtime_sentinels(
         sentinel_contract{
             "extension", "sharedir", "extension", "dir"},
         sentinel_contract{
-            "plpgsql", "pkglibdir", plpgsql_filename, "file"}};
+            "plpgsql", "pkglibdir", k_plpgsql_filename, "file"}};
     require_exact_object_members(
         sentinels,
         {"postgres_bki", "postgresql_conf_sample",
@@ -1268,13 +1268,13 @@ inline void validate_runtime_sentinels(
         const std::optional<std::string> digest =
             nullable_digest_member(sentinel, "sha256");
         if (contract.kind == "dir") {
-            if (digest || entry->second.sha256) {
+            if (digest || entry->second.sha256_hex) {
                 throw std::invalid_argument(
                     "stage manifest runtime directory sentinel must have "
                     "a null SHA-256: " + std::string(contract.name));
             }
-        } else if (!digest || !entry->second.sha256
-                   || *digest != *entry->second.sha256) {
+        } else if (!digest || !entry->second.sha256_hex
+                   || *digest != *entry->second.sha256_hex) {
             throw std::invalid_argument(
                 "stage manifest runtime file sentinel SHA-256 disagrees "
                 "with its closure entry: " + std::string(contract.name));
@@ -1339,7 +1339,7 @@ validate_loader_dependencies(
             unsigned_integer_member(entry, "size");
         const std::string& expected_digest =
             string_member(entry, "sha256");
-        if (!valid_sha256_text(expected_digest)) {
+        if (!is_valid_sha256_text(expected_digest)) {
             throw std::invalid_argument(
                 "stage manifest loader dependency has an invalid SHA-256");
         }
@@ -1347,7 +1347,7 @@ validate_loader_dependencies(
             inspect_regular_file_no_follow(
                 staged_file, "staged PostgreSQL loader dependency");
         if (observed.size != expected_size
-            || observed.sha256 != expected_digest) {
+            || observed.sha256_hex != expected_digest) {
             throw std::invalid_argument(
                 "staged PostgreSQL loader dependency size or SHA-256 "
                 "mismatch: " + staged_text);
@@ -1359,8 +1359,9 @@ validate_loader_dependencies(
     }
     const std::string& expected_aggregate =
         string_member(loader_dependencies, "aggregate_sha256");
-    if (!valid_sha256_text(expected_aggregate)
-        || sha256(aggregate_record).hex() != expected_aggregate) {
+    if (!is_valid_sha256_text(expected_aggregate)
+        || hash_sha256_bytes(aggregate_record).render_hex()
+            != expected_aggregate) {
         throw std::invalid_argument(
             "stage manifest loader dependency aggregate SHA-256 mismatch");
     }
@@ -1386,7 +1387,7 @@ inline void validate_runtime_closure(
             "stage manifest runtime_closure has an unsupported algorithm");
     }
 
-    constexpr std::array<std::string_view, 3> root_names{
+    constexpr std::array<std::string_view, 3> k_root_names{
         "bindir", "sharedir", "pkglibdir"};
     const manifest_json_value& roots_json =
         object_member(closure, "roots");
@@ -1396,7 +1397,7 @@ inline void validate_runtime_closure(
     std::array<runtime_root_metadata, 3> roots;
     for (std::size_t index = 0; index != roots.size(); ++index) {
         const manifest_json_value& root =
-            object_member(roots_json, root_names[index]);
+            object_member(roots_json, k_root_names[index]);
         require_exact_object_members(
             root, {"reported_source", "canonical_source", "staged"},
             "stage manifest runtime root");
@@ -1426,10 +1427,10 @@ inline void validate_runtime_closure(
             throw std::invalid_argument(
                 "stage manifest runtime root disagrees with top-level "
                 "PostgreSQL coordinates: "
-                + std::string(root_names[index]));
+                + std::string(k_root_names[index]));
         }
         roots[index] = {
-            .name = std::string(root_names[index]),
+            .name = std::string(k_root_names[index]),
             .reported_source = reported,
             .canonical_source = canonical_source,
             .staged_relative = staged_relative,
@@ -1469,7 +1470,7 @@ inline void validate_runtime_closure(
                 string_member(entry_json, "resolved_source_path"),
             .size =
                 nullable_unsigned_integer_member(entry_json, "size"),
-            .sha256 = nullable_digest_member(entry_json, "sha256")};
+            .sha256_hex = nullable_digest_member(entry_json, "sha256")};
         const std::size_t root_index =
             runtime_root_index(entry.root);
         static_cast<void>(normalized_relative_metadata_path(
@@ -1500,7 +1501,7 @@ inline void validate_runtime_closure(
              / std::filesystem::path(entry.path)).lexically_normal();
         if ((source_path != expected_reported_source
              && source_path != expected_canonical_source)
-            || !path_is_within(
+            || !is_path_within(
                 root.canonical_source, resolved_source_path)) {
             throw std::invalid_argument(
                 "stage manifest runtime entry source provenance escapes "
@@ -1527,9 +1528,9 @@ inline void validate_runtime_closure(
                 "inconsistent");
         }
         if ((entry.kind == "dir"
-             && (entry.size || entry.sha256))
+             && (entry.size || entry.sha256_hex))
             || (entry.kind == "file"
-                && (!entry.size || !entry.sha256))) {
+                && (!entry.size || !entry.sha256_hex))) {
             throw std::invalid_argument(
                 "stage manifest runtime entry size/SHA-256 nullability "
                 "disagrees with its kind");
@@ -1552,8 +1553,9 @@ inline void validate_runtime_closure(
     }
     const std::string& expected_aggregate =
         string_member(closure, "aggregate_sha256");
-    if (!valid_sha256_text(expected_aggregate)
-        || sha256(aggregate_record).hex() != expected_aggregate) {
+    if (!is_valid_sha256_text(expected_aggregate)
+        || hash_sha256_bytes(aggregate_record).render_hex()
+            != expected_aggregate) {
         throw std::invalid_argument(
             "stage manifest runtime closure aggregate SHA-256 mismatch");
     }
@@ -1568,7 +1570,7 @@ inline void validate_runtime_closure(
     for (const std::filesystem::path& dependency :
          loader_dependency_files) {
         for (const runtime_root_metadata& root : roots) {
-            if (!path_is_within(root.staged_directory, dependency)) {
+            if (!is_path_within(root.staged_directory, dependency)) {
                 continue;
             }
             const std::string dependency_relative =
@@ -1611,7 +1613,7 @@ inline void validate_runtime_closure(
     struct observed_entry {
         std::string kind;
         std::optional<std::uintmax_t> size;
-        std::optional<std::string> sha256;
+        std::optional<std::string> sha256_hex;
     };
     std::map<
         std::pair<std::string, std::string>,
@@ -1670,7 +1672,7 @@ inline void validate_runtime_closure(
                     observed_entry{
                         .kind = "dir",
                         .size = std::nullopt,
-                        .sha256 = std::nullopt});
+                        .sha256_hex = std::nullopt});
             } else if (std::filesystem::is_regular_file(status)) {
                 const no_follow_file_evidence evidence =
                     inspect_regular_file_no_follow(
@@ -1680,7 +1682,7 @@ inline void validate_runtime_closure(
                     observed_entry{
                         .kind = "file",
                         .size = evidence.size,
-                        .sha256 = evidence.sha256});
+                        .sha256_hex = evidence.sha256_hex});
             } else {
                 throw std::invalid_argument(
                     "staged PostgreSQL runtime closure contains a special "
@@ -1707,7 +1709,7 @@ inline void validate_runtime_closure(
         }
         if (observed->second.kind != expected.kind
             || observed->second.size != expected.size
-            || observed->second.sha256 != expected.sha256) {
+            || observed->second.sha256_hex != expected.sha256_hex) {
             throw std::invalid_argument(
                 "staged PostgreSQL runtime closure entry type, size, or "
                 "SHA-256 mismatch: "
@@ -1720,7 +1722,7 @@ inline void validate_runtime_closure(
         [&allowed_external_directories,
          &canonical_root](std::filesystem::path directory) {
             while (directory != canonical_root) {
-                if (!path_is_within(canonical_root, directory)
+                if (!is_path_within(canonical_root, directory)
                     || directory.empty()
                     || directory == directory.root_path()) {
                     throw std::invalid_argument(
@@ -1800,19 +1802,19 @@ inline void validate_runtime_closure(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Attests and selects artifacts from one immutable preinstalled stage.
+/// @brief Validates and selects artifacts from one immutable preinstalled stage.
 ///
 /// The caller's artifact vector is a name-unique subset whose caller order is
 /// preserved; it need not follow manifest order. It remains mandatory because
 /// its source paths are independently hashed.
 /// Only a name present in @p allowed_runtime_dso_overrides may substitute a
 /// different DSO; its control and SQL always remain the suite-stage files.
-[[nodiscard]] inline extension_stage attest_preinstalled_extension_stage(
+[[nodiscard]] inline extension_stage_layout validate_preinstalled_extension_stage(
     const std::filesystem::path& stage_root,
     const std::filesystem::path& stage_manifest,
     const std::filesystem::path& postgres_bin_dir,
     const std::filesystem::path& runtime_library_root,
-    std::span<const extension_artifact> artifacts,
+    std::span<const extension_install_source> artifacts,
     const std::set<std::string>& allowed_runtime_dso_overrides) {
     if (artifacts.empty()) {
         throw std::invalid_argument(
@@ -1849,12 +1851,12 @@ export namespace bioseq::postgres_test {
         artifact_detail::string_member(manifest, "postgresql_version");
     const std::string& postgresql_configure =
         artifact_detail::string_member(manifest, "postgresql_configure");
-    constexpr std::string_view version_prefix{"PostgreSQL 17"};
-    if (!postgresql_version.starts_with(version_prefix)
-        || (postgresql_version.size() > version_prefix.size()
-            && postgresql_version[version_prefix.size()] != '.'
-            && postgresql_version[version_prefix.size()] != ' '
-            && postgresql_version[version_prefix.size()] != '\t')) {
+    constexpr std::string_view k_version_prefix{"PostgreSQL 17"};
+    if (!postgresql_version.starts_with(k_version_prefix)
+        || (postgresql_version.size() > k_version_prefix.size()
+            && postgresql_version[k_version_prefix.size()] != '.'
+            && postgresql_version[k_version_prefix.size()] != ' '
+            && postgresql_version[k_version_prefix.size()] != '\t')) {
         throw std::invalid_argument(
             "preinstalled PostgreSQL stage must identify PostgreSQL 17");
     }
@@ -1922,9 +1924,9 @@ export namespace bioseq::postgres_test {
         artifact_detail::require_real_directory(
             shared_directory / "extension",
             "staged PostgreSQL extension directory");
-    if (!artifact_detail::path_is_within(
+    if (!artifact_detail::is_path_within(
             canonical_root, control_directory)
-        || !artifact_detail::path_is_within(
+        || !artifact_detail::is_path_within(
             canonical_root, library_directory)) {
         throw std::invalid_argument(
             "preinstalled PostgreSQL stage directories escape their root");
@@ -1972,7 +1974,8 @@ export namespace bioseq::postgres_test {
     const std::string& expected_aggregate =
         artifact_detail::string_member(
             extension_artifacts, "aggregate_sha256");
-    if (sha256(aggregate_record).hex() != expected_aggregate) {
+    if (hash_sha256_bytes(aggregate_record).render_hex()
+        != expected_aggregate) {
         throw std::invalid_argument(
             "stage manifest extension aggregate SHA-256 mismatch");
     }
@@ -2016,7 +2019,7 @@ export namespace bioseq::postgres_test {
         excluded_overlay_coordinates);
     std::set<std::string> selected_names;
     std::set<std::string> consumed_overrides;
-    extension_stage result{
+    extension_stage_layout result{
         .stage_root = canonical_root,
         .manifest_file = canonical_manifest,
         .manifest_digest = parsed_manifest_digest,
@@ -2027,7 +2030,7 @@ export namespace bioseq::postgres_test {
         .extensions = {}};
     result.extensions.reserve(artifacts.size());
 
-    for (const extension_artifact& artifact : artifacts) {
+    for (const extension_install_source& artifact : artifacts) {
         artifact_detail::validate_extension_name(artifact.name);
         if (!selected_names.insert(artifact.name).second) {
             throw std::invalid_argument(
@@ -2080,10 +2083,10 @@ export namespace bioseq::postgres_test {
             source_sql,
             manifest_artifact.install_sql_sha256,
             "runner source install SQL");
-        const sha256_digest source_dso_digest = sha256_file(source_dso);
+        const sha256_digest source_dso_digest = hash_sha256_file(source_dso);
         const bool dso_is_override =
             source_dso != manifest_artifact.source_dso
-            || source_dso_digest.hex()
+            || source_dso_digest.render_hex()
                 != manifest_artifact.library_sha256;
         std::filesystem::path consumed_dso =
             manifest_artifact.staged_dso;
@@ -2108,11 +2111,11 @@ export namespace bioseq::postgres_test {
                 / manifest_artifact.library_filename;
             artifact_detail::copy_exact(source_dso, consumed_dso);
             artifact_detail::require_digest(
-                consumed_dso, source_dso_digest.hex(),
+                consumed_dso, source_dso_digest.render_hex(),
                 "runtime extension DSO override");
         }
 
-        result.extensions.push_back(staged_extension_artifact{
+        result.extensions.push_back(staged_extension_files{
             .name = artifact.name,
             .source_control_file = source_control,
             .source_install_sql = source_sql,
@@ -2122,11 +2125,11 @@ export namespace bioseq::postgres_test {
             .staged_install_sql =
                 manifest_artifact.staged_install_sql,
             .staged_dso = consumed_dso,
-            .control_digest = sha256_file(source_control),
-            .install_sql_digest = sha256_file(source_sql),
+            .control_digest = hash_sha256_file(source_control),
+            .install_sql_digest = hash_sha256_file(source_sql),
             .dso_digest = source_dso_digest,
             .staged_control_digest =
-                sha256_file(manifest_artifact.staged_control)});
+                hash_sha256_file(manifest_artifact.staged_control)});
     }
 
     if (consumed_overrides != allowed_runtime_dso_overrides) {
@@ -2183,9 +2186,9 @@ inline void validate_extension_name(std::string_view name) {
 [[nodiscard]] inline std::string shared_library_suffix(
     const std::filesystem::path& source) {
     const std::string filename = source.filename().string();
-    constexpr std::array<std::string_view, 4> suffixes{
+    constexpr std::array<std::string_view, 4> k_suffixes{
         ".dylib", ".bundle", ".dll", ".so"};
-    for (const std::string_view suffix : suffixes) {
+    for (const std::string_view suffix : k_suffixes) {
         const std::size_t position = filename.find(suffix);
         if (position != std::string::npos) {
             return std::string(filename.substr(position));
@@ -2286,14 +2289,14 @@ inline void stage_control_file(
 export namespace bioseq::postgres_test {
 
 /// @brief Validates and stages extension triples without glob deletion.
-[[nodiscard]] inline extension_stage stage_extension_artifacts(
+[[nodiscard]] inline extension_stage_layout materialize_extension_stage(
     const std::filesystem::path& root,
-    std::span<const extension_artifact> artifacts) {
+    std::span<const extension_install_source> artifacts) {
     if (artifacts.empty()) {
         throw std::invalid_argument(
             "private PostgreSQL staging requires at least one extension");
     }
-    extension_stage stage{
+    extension_stage_layout stage{
         .stage_root = root,
         .manifest_file = std::nullopt,
         .manifest_digest = std::nullopt,
@@ -2307,7 +2310,7 @@ export namespace bioseq::postgres_test {
 
     std::set<std::string> extension_names;
     stage.extensions.reserve(artifacts.size());
-    for (const extension_artifact& artifact : artifacts) {
+    for (const extension_install_source& artifact : artifacts) {
         artifact_detail::validate_extension_name(artifact.name);
         if (!extension_names.insert(artifact.name).second) {
             throw std::invalid_argument("duplicate extension artifact name: "
@@ -2344,7 +2347,7 @@ export namespace bioseq::postgres_test {
             source_control, staged_control,
             stage.library_directory / artifact.name);
 
-        stage.extensions.push_back(staged_extension_artifact{
+        stage.extensions.push_back(staged_extension_files{
             .name = artifact.name,
             .source_control_file = source_control,
             .source_install_sql = source_sql,
@@ -2352,10 +2355,10 @@ export namespace bioseq::postgres_test {
             .staged_control_file = staged_control,
             .staged_install_sql = staged_sql,
             .staged_dso = staged_dso,
-            .control_digest = sha256_file(source_control),
-            .install_sql_digest = sha256_file(source_sql),
-            .dso_digest = sha256_file(source_dso),
-            .staged_control_digest = sha256_file(staged_control)});
+            .control_digest = hash_sha256_file(source_control),
+            .install_sql_digest = hash_sha256_file(source_sql),
+            .dso_digest = hash_sha256_file(source_dso),
+            .staged_control_digest = hash_sha256_file(staged_control)});
     }
     return stage;
 }

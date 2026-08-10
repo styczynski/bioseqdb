@@ -1,19 +1,14 @@
-/**-------------------------------------------------------------------------
- *
- * extension/index.cppm
- *
+/**
+ * @file index.cppm
+ * @brief Declares typed owners for annotated PostgreSQL SQL routines.
  * @defgroup bioseq_sql_public_api Bioseq SQL public API
  *
- * Exported declarations for typed SQL routine owners. Generated fmgr
- * modules provide the C ABI for annotated SQL routines; implementations and
- * extension lifecycle state live in the bioseq.postgres.extension
- * implementation unit.
- *
- *-------------------------------------------------------------------------
+ * Generated FMGR modules provide the C ABI wrappers; implementation units
+ * own routine bodies and extension lifecycle state.
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 #include <array>
 #include <cstddef>
@@ -24,11 +19,11 @@ module;
 export module bioseq.postgres.extension;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.mod.alignment.sql_rows;
-import bioseq.mod.sql_rows;
+import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.sql_rows;
 import bioseq.pipeline.stats;
-import bioseq.pg_utils.sql_boundary;
-import bioseq.table.sql_rows;
+import bioseq.postgres.support.sql_boundary;
+import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.table.alignment_execution;
 
 export namespace bioseq::pg::sql_routines {
@@ -385,8 +380,8 @@ std::string gpu_warmup_shader_cache();
     .volatility = bioseq::sql::volatility::stable,
     .parallel = bioseq::sql::parallel_safety::safe,
 })]]
-bioseq::pg_utils::named_out<
-    bioseq::pg::sql_rows::vulkan_runtime_status_row>
+bioseq::postgres::support::named_output<
+    bioseq::postgres::sql_rows::vulkan_runtime_status_row>
 vulkan_runtime_status();
 
 [[bioseq_sql::function({
@@ -461,25 +456,25 @@ Datum bioseq_placeholder_support(
  * The result combines configured policy, persisted shard size, and last
  * update time without requiring an index generation to exist.
  */
-bioseq::pg_utils::returns_table<
-    bioseq::pg::sql_rows::list_metadata_row>
+bioseq::postgres::support::table_rows<
+    bioseq::postgres::sql_rows::list_metadata_row>
 list_metadata();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::alignment_execution_stats_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::alignment_execution_stats_row>
 last_alignment_execution_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::alignment_execution_stats_v2_row>
-last_alignment_execution_stats_v2();
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::alignment_execution_stats_with_simd_row>
+last_alignment_execution_stats_with_simd();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -488,8 +483,8 @@ last_alignment_execution_stats_v2();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -498,8 +493,8 @@ last_alignment_format5_reader_memory_evidence();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v2();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_exact_array_layout_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -508,8 +503,8 @@ last_alignment_format5_reader_memory_evidence_v2();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v3();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_fragment_native_query_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -518,8 +513,8 @@ last_alignment_format5_reader_memory_evidence_v3();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v4();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_provider_lifecycle_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -528,8 +523,8 @@ last_alignment_format5_reader_memory_evidence_v4();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v5();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_bucket_direct_query_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -538,8 +533,8 @@ last_alignment_format5_reader_memory_evidence_v5();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format5_reader_memory_evidence_v6();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_grouped_soa_compact_direct_one_decode_reader_memory_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -548,19 +543,8 @@ last_alignment_format5_reader_memory_evidence_v6();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_format6_reader_evidence();
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq">,
-    .create = bioseq::sql::create_mode::or_replace,
-    .parallel = bioseq::sql::parallel_safety::restricted,
-})]]
-[[bioseq_sql::result({
-    .sql_type = bioseq::sql::pg::jsonb,
-})]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_persisted_gpu_operation_evidence_v1();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_hash_major_reader_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -570,8 +554,19 @@ last_alignment_persisted_gpu_operation_evidence_v1();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-std::optional<bioseq::pg_utils::sql_jsonb>
-last_alignment_persisted_gpu_operation_evidence_v2();
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_persisted_gpu_operation_stats();
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::jsonb,
+})]]
+std::optional<bioseq::postgres::support::jsonb_value>
+last_alignment_persisted_gpu_operation_stats_with_cache_validation();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -611,24 +606,24 @@ void reset_active_read_policy_debug();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-bioseq::pg_utils::returns_table<
-    bioseq::pg::sql_rows::active_read_policy_debug_row>
+bioseq::postgres::support::table_rows<
+    bioseq::postgres::sql_rows::active_read_policy_debug_row>
 active_read_policy_debug();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::returns_table<
-    bioseq::pg::sql_rows::last_mps_build_stats_row>
+bioseq::postgres::support::table_rows<
+    bioseq::postgres::sql_rows::last_mps_build_stats_row>
 last_mps_build_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::returns_table<
-    bioseq::pg::sql_rows::scheduler_mps_build_stats_row>
+bioseq::postgres::support::table_rows<
+    bioseq::postgres::sql_rows::scheduler_mps_build_stats_row>
 scheduler_mps_build_stats();
 
 [[bioseq_sql::function({
@@ -659,9 +654,9 @@ void disarm_async_mps_worker_failure();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::async_mps_worker_boundary_stats_row>
-async_mps_worker_boundary_stats();
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::async_mps_worker_boundary_stats_row>
+async_minimizer_sequence_worker_boundary_stats();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
@@ -673,8 +668,8 @@ void scheduler_restart();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::scheduler_stats_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::scheduler_stats_row>
 scheduler_stats();
 
 [[bioseq_sql::function({
@@ -692,8 +687,8 @@ std::int64_t index_table_row_count(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
-bioseq::pg_utils::named_out<
-	bioseq::pg::sql_rows::inspect_cold_no_index_absence_row>
+bioseq::postgres::support::named_output<
+	bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>
 inspect_cold_no_index_absence(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -715,8 +710,8 @@ inspect_cold_no_index_absence(
  * @brief Validates a source-bound ready minimizer generation without reading
  * payload extents or enabling live generation reads.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::inspect_ready_minimizer_generation_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::inspect_ready_minimizer_generation_row>
 inspect_ready_minimizer_generation(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -739,11 +734,11 @@ inspect_ready_minimizer_generation(
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
 /**
- * @brief Validates a source-bound ready Format-6 generation and verifies its
- * metadata, catalog rows, byte counts, and checksums.
+ * @brief Validates a source-bound ready hash-major minimizer generation,
+ * including its metadata, catalog rows, byte counts, and checksums.
  */
-bioseq::pg_utils::sql_jsonb
-inspect_ready_minimizer_format6_generation(
+bioseq::postgres::support::jsonb_value
+inspect_ready_hash_major_minimizer_generation(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
 	})]]
@@ -768,7 +763,7 @@ inspect_ready_minimizer_format6_generation(
  * using a serial scan when requested_workers is zero or a shared parallel heap
  * scan when it is positive.
  */
-bioseq::pg_utils::sql_jsonb format6_parallel_scan_probe(
+bioseq::postgres::support::jsonb_value hash_major_minimizer_parallel_scan_probe(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
 	})]]
@@ -789,8 +784,8 @@ bioseq::pg_utils::sql_jsonb format6_parallel_scan_probe(
  * @brief Builds and publishes an authenticated minimizer generation for one
  * explicit sketch backend without opening a read session.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::build_minimizer_fixture_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::build_minimizer_fixture_row>
 build_minimizer_fixture(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -800,7 +795,7 @@ build_minimizer_fixture(
 	std::int64_t sequence_rowno,
 	std::int16_t kmer_size,
 	std::int16_t window_size,
-	std::int16_t selected_wire_format,
+	std::int16_t selected_layout,
 	[[bioseq_sql::param({
 		.default_value = bioseq::sql::checked_sql{"'scalar'"},
 	})]]
@@ -822,8 +817,8 @@ build_minimizer_fixture(
  * @brief Opens an authenticated minimizer-generation read session and returns
  * payload validation, lookup, scan, and cache counters.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::read_minimizer_fixture_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::read_minimizer_fixture_row>
 read_minimizer_fixture(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -833,7 +828,7 @@ read_minimizer_fixture(
 	std::int64_t sequence_rowno,
 	std::int16_t kmer_size,
 	std::int16_t window_size,
-	std::int16_t selected_wire_format,
+	std::int16_t selected_layout,
 	[[bioseq_sql::param({
 		.default_value = bioseq::sql::checked_sql{"'scalar'"},
 	})]]
@@ -851,8 +846,8 @@ read_minimizer_fixture(
  * @brief Scans one complete minimizer generation through the requested sketch
  * backend and returns payload and scan counters without decoding payload bytes.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::scan_minimizer_generation_fixture_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::scan_minimizer_generation_fixture_row>
 scan_minimizer_generation_fixture(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -862,7 +857,7 @@ scan_minimizer_generation_fixture(
 	std::int64_t sequence_rowno,
 	std::int16_t kmer_size,
 	std::int16_t window_size,
-	std::int16_t selected_wire_format,
+	std::int16_t selected_layout,
 	std::string requested_backend);
 
 [[bioseq_sql::function({
@@ -962,8 +957,8 @@ void exercise_generation_session_failure(
  * @brief Runs the selected generation-storage transition and returns
  * relation-handle, rollback, and cache-invalidation state.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::generation_storage_state_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::generation_storage_state_row>
 inspect_generation_storage_transition(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -985,8 +980,8 @@ inspect_generation_storage_transition(
  * @brief Builds and publishes a ready PostgreSQL-backed MPF generation without
  * changing active routing or metadata age.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::build_ready_mpf_generation_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::build_ready_mpf_generation_row>
 build_ready_mpf_generation(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -1008,8 +1003,8 @@ build_ready_mpf_generation(
  * @brief Builds and publishes a ready PostgreSQL-backed MPS generation,
  * releases its spill runs, and leaves active routing and metadata age unchanged.
  */
-bioseq::pg_utils::returns_table<
-	bioseq::pg::sql_rows::build_ready_mps_generation_row>
+bioseq::postgres::support::table_rows<
+	bioseq::postgres::sql_rows::build_ready_mps_generation_row>
 build_ready_mps_generation(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -1072,7 +1067,7 @@ std::int64_t column_row_number(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::tid,
 	})]]
-	bioseq::pg_utils::sql_tid ctid);
+	bioseq::postgres::support::tuple_identifier ctid);
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -1104,7 +1099,7 @@ void write_index_chunk(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::bytea,
 	})]]
-	bioseq::pg_utils::sql_bytea payload);
+	bioseq::postgres::support::bytea_value payload);
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -1159,7 +1154,7 @@ void reset_sequence_source_counters();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
-bioseq::pg_utils::sql_jsonb sequence_source_counters();
+bioseq::postgres::support::jsonb_value sequence_source_counters();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
@@ -1237,44 +1232,43 @@ namespace bioseq::pg::detail {
 void install_alignment_execution_hooks();
 
 [[nodiscard]] const std::optional<
-	bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
+	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_alignment_execution_snapshot_ref() noexcept;
 
 [[nodiscard]] const std::optional<
-	bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
-last_completed_alignment_evidence_snapshot_ref() noexcept;
+	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
+last_completed_alignment_snapshot_ref() noexcept;
 
-[[nodiscard]] bioseq::pipeline_stats::ExecutedBackend
+[[nodiscard]] bioseq::pipeline_stats::executed_backend
 validate_alignment_snapshot_environment(
-	const bioseq::pg::alignment_execution::AlignmentExecutionSnapshot& snapshot);
+	const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot);
 
 [[nodiscard]] std::string fixed_hex_u64(std::uint64_t value);
 
-template<std::size_t N>
-[[nodiscard]] std::string fixed_hex_bytes(
-		const std::array<std::uint8_t, N>& bytes)
+[[nodiscard]] constexpr std::uint8_t hex_byte_value(
+		const std::uint8_t byte) noexcept
 {
-	constexpr char digits[] = "0123456789abcdef";
-	std::string result(N * 2, '0');
-	for (std::size_t i = 0; i < N; ++i) {
-		result[i * 2] = digits[(bytes[i] >> 4U) & 0x0fU];
-		result[i * 2 + 1] = digits[bytes[i] & 0x0fU];
-	}
-	return result;
+	return byte;
 }
 
-template<std::size_t N>
-[[nodiscard]] std::string fixed_hex_bytes(
-		const std::array<std::byte, N>& bytes)
+[[nodiscard]] constexpr std::uint8_t hex_byte_value(
+		const std::byte byte) noexcept
 {
-	constexpr char digits[] = "0123456789abcdef";
-	std::string result(N * 2, '0');
-	for (std::size_t i = 0; i < N; ++i) {
-		const std::uint8_t value = std::to_integer<std::uint8_t>(bytes[i]);
-		result[i * 2] = digits[(value >> 4U) & 0x0fU];
-		result[i * 2 + 1] = digits[value & 0x0fU];
+	return std::to_integer<std::uint8_t>(byte);
+}
+
+template<class byte_type, std::size_t extent>
+[[nodiscard]] std::string fixed_hex_bytes(
+		const std::array<byte_type, extent>& bytes)
+{
+	constexpr char hex_digits[] = "0123456789abcdef";
+	std::string encoded(extent * 2, '0');
+	for (std::size_t byte_index = 0; byte_index < extent; ++byte_index) {
+		const std::uint8_t value = hex_byte_value(bytes[byte_index]);
+		encoded[byte_index * 2] = hex_digits[(value >> 4U) & 0x0fU];
+		encoded[byte_index * 2 + 1] = hex_digits[value & 0x0fU];
 	}
-	return result;
+	return encoded;
 }
 
 } // namespace bioseq::pg::detail

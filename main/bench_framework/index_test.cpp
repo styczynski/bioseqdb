@@ -23,7 +23,7 @@
  *     `printf`/`cerr` outside `StderrCapture`'s redirect plumbing,
  *     and no helper that throws on cleanup.
  */
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 #include "../bench/prefilter_small_seed_keys.hpp"
 

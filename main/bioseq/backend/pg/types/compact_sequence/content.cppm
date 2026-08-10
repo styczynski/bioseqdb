@@ -9,19 +9,19 @@ module;
 #include <limits>
 #include <span>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:content;
+export module bioseq.postgres.types.compact_sequence:content;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :tree_types;
 import :view_session;
 import :packed_output;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 
 namespace {
 
@@ -173,7 +173,7 @@ inline void read_unbound_chunk(
         state ^= alphabet;
         state *= prime;
     }
-    /* sequence_logical_hash_bytes_v1 begins at offset^seed. */
+    /* hash_logical_ranks begins at offset^seed. */
     return offset ^ state;
 }
 
@@ -204,7 +204,7 @@ inline void read_unbound_chunk(
         result = with_pg_sequence_views<int>(
             left_input, right_input,
             [](auto left_view, auto right_view) {
-                return bioseq::storage::compare_sequence_views(
+                return bioseq::storage::compare_lazy_sequences(
                     left_view, right_view);
             });
     }
@@ -411,7 +411,7 @@ bool seq_gt(
         result = with_pg_sequence_view<std::uint64_t>(
             input,
             [prefixed](auto view) {
-                return bioseq::storage::sequence_logical_hash_v1(
+                return bioseq::storage::hash_logical_sequence(
                     view, prefixed);
             });
     }

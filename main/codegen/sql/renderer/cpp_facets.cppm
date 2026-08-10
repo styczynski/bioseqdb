@@ -79,17 +79,17 @@ namespace detail {
         << "#include \"catalog/pg_class_d.h\"\n"
         << "}\n\n"
         << "export module " << module.module_name << ";\n\n"
-        << "export import bioseq.pg_utils.sql_catalog_entities;\n\n"
+        << "export import bioseq.postgres.support.sql_catalog_entities;\n\n"
         << "export namespace " << module.cpp_namespace << " {\n\n";
     for (const rendered_entity_handle& handle : module.handles) {
         output
-            << "inline constexpr bioseq::pg_utils::relation_entity_handle<\n"
+            << "inline constexpr bioseq::postgres::support::relation_entity_handle<\n"
             << "    " << handle.expected_relkind << ",\n"
-            << "    bioseq::pg_utils::fixed_catalog_name{\""
+            << "    bioseq::postgres::support::fixed_catalog_name{\""
             << handle.leaf_name << "\"},\n"
-            << "    bioseq::pg_utils::sql_schema_binding::"
+            << "    bioseq::postgres::support::sql_schema_binding::"
             << handle.schema_binding << ",\n"
-            << "    bioseq::pg_utils::fixed_catalog_name{\""
+            << "    bioseq::postgres::support::fixed_catalog_name{\""
             << (handle.schema_binding == "fixed"
                     ? handle.schema_name
                     : "bioseq")
@@ -464,9 +464,9 @@ inline void validate_row_codec_text_lifetime_contract(
     }
 
     constexpr std::string_view encode_bridge{
-        "bioseq::pg_utils::encode_text_to_memory_context("};
+        "bioseq::postgres::support::encode_text_to_memory_context("};
     constexpr std::string_view deform_bridge{
-        "bioseq::pg_utils::copy_text_datum_to_string("};
+        "bioseq::postgres::support::decode_text("};
     const std::size_t expected_encode_bridges =
         text_field_count + 1;
     if (count_text_occurrences(rendered, encode_bridge)
@@ -533,27 +533,27 @@ inline void validate_row_codec_text_lifetime_contract(
             << field.type_oid << ";\n"
             << "    [[nodiscard]] static consteval RegProcedure "
                "comparison_procedure(\n"
-            << "            bioseq::pg_utils::scan_comparison "
+            << "            bioseq::postgres::support::scan_comparison "
                "comparison) {\n"
             << "        switch (comparison) {\n"
             << "            case "
-               "bioseq::pg_utils::scan_comparison::equal:\n"
+               "bioseq::postgres::support::scan_comparison::equal:\n"
             << "                return "
             << field.comparison_procedures[0] << ";\n"
             << "            case "
-               "bioseq::pg_utils::scan_comparison::less:\n"
+               "bioseq::postgres::support::scan_comparison::less:\n"
             << "                return "
             << field.comparison_procedures[1] << ";\n"
             << "            case "
-               "bioseq::pg_utils::scan_comparison::less_equal:\n"
+               "bioseq::postgres::support::scan_comparison::less_equal:\n"
             << "                return "
             << field.comparison_procedures[2] << ";\n"
             << "            case "
-               "bioseq::pg_utils::scan_comparison::greater:\n"
+               "bioseq::postgres::support::scan_comparison::greater:\n"
             << "                return "
             << field.comparison_procedures[3] << ";\n"
             << "            case "
-               "bioseq::pg_utils::scan_comparison::greater_equal:\n"
+               "bioseq::postgres::support::scan_comparison::greater_equal:\n"
             << "                return "
             << field.comparison_procedures[4] << ";\n"
             << "        }\n"
@@ -608,7 +608,7 @@ inline void validate_row_codec_text_lifetime_contract(
         if (is_by_reference_storage(field.storage)) {
             output
                 << "    static inline constexpr "
-                   "bioseq::pg_utils::by_reference_datum_copy_policy "
+                   "bioseq::postgres::support::by_reference_datum_copy_policy "
                    "datum_copy_policy{\n"
                 << "        .type_length = "
                 << datum_copy_length_expression(field.storage) << ",\n"
@@ -621,13 +621,13 @@ inline void validate_row_codec_text_lifetime_contract(
         << "} // namespace detail\n\n"
         << "struct " << codec_name << " final {\n"
         << "    using row_type = " << row_type << ";\n"
-        << "    static constexpr std::size_t fields_count = "
+        << "    static constexpr std::size_t field_count = "
         << fields.size() << ";\n"
         << "    static constexpr std::string_view row_name = \""
         << row.source.schema << "." << row.source.name << "\";\n\n"
         << "    static inline constexpr std::array<\n"
-        << "        bioseq::pg_utils::row_descriptor_field,\n"
-        << "        fields_count> expected_descriptor{{\n";
+        << "        bioseq::postgres::support::row_descriptor_field,\n"
+        << "        field_count> expected_descriptor{{\n";
     for (const row_codec_field& field : fields) {
         output
             << "        {.attribute_number = " << field.attribute_number
@@ -648,7 +648,7 @@ inline void validate_row_codec_text_lifetime_contract(
         << "        return field<Member>::attribute_number;\n"
         << "    }\n\n"
         << "    static void validate_descriptor(TupleDesc descriptor) {\n"
-        << "        bioseq::pg_utils::validate_row_descriptor(\n"
+        << "        bioseq::postgres::support::validate_row_descriptor(\n"
         << "            descriptor, row_name, expected_descriptor);\n"
         << "    }\n\n"
         << "    struct encoded_tuple_data final {\n"
@@ -696,7 +696,7 @@ inline void validate_row_codec_text_lifetime_contract(
     output << ") {\n";
     if (has_by_reference_fields) {
         output
-            << "            bioseq::pg_utils::require_row_result_context(\n"
+            << "            bioseq::postgres::support::require_row_result_context(\n"
             << "                value_context, row_name);\n";
     }
     for (const row_codec_field& field : fields) {
@@ -727,7 +727,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ".has_value()) {\n"
                         << "                data_.set_raw("
                         << field.attribute_number
-                        << ", bioseq::pg_utils::pg_datum::from_oid(*row."
+                        << ", bioseq::postgres::support::pg_datum::from_oid(*row."
                         << field.cpp_name << "));\n"
                         << "            } else {\n"
                         << "                data_.set_null("
@@ -737,7 +737,7 @@ inline void validate_row_codec_text_lifetime_contract(
                     output
                         << "            data_.set_raw("
                         << field.attribute_number
-                        << ", bioseq::pg_utils::pg_datum::from_oid(row."
+                        << ", bioseq::postgres::support::pg_datum::from_oid(row."
                         << field.cpp_name << "));\n";
                 }
                 break;
@@ -748,7 +748,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ".has_value()) {\n"
                         << "                data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                    TimestampTzGetDatum(*row."
                         << field.cpp_name << ")));\n"
                         << "            } else {\n"
@@ -759,7 +759,7 @@ inline void validate_row_codec_text_lifetime_contract(
                     output
                         << "            data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                TimestampTzGetDatum(row."
                         << field.cpp_name << ")));\n";
                 }
@@ -771,7 +771,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ".has_value()) {\n"
                         << "                data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                    FullTransactionIdGetDatum(*row."
                         << field.cpp_name << ")));\n"
                         << "            } else {\n"
@@ -782,7 +782,7 @@ inline void validate_row_codec_text_lifetime_contract(
                     output
                         << "            data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                FullTransactionIdGetDatum(row."
                         << field.cpp_name << ")));\n";
                 }
@@ -794,11 +794,11 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ".has_value()) {\n"
                         << "                data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
-                        << "                    bioseq::pg_utils::"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
+                        << "                    bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context(\n"
                         << "                        "
-                           "bioseq::pg_utils::pg_datum::from_name(\n"
+                           "bioseq::postgres::support::pg_datum::from_name(\n"
                         << "                            const_cast<Name>(&*row."
                         << field.cpp_name << ")).raw(),\n"
                         << "                        field<&row_type::"
@@ -812,12 +812,12 @@ inline void validate_row_codec_text_lifetime_contract(
                     output
                         << "            data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                "
-                        << "bioseq::pg_utils::"
+                        << "bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context(\n"
                         << "                    "
-                        << "bioseq::pg_utils::pg_datum::from_name(\n"
+                        << "bioseq::postgres::support::pg_datum::from_name(\n"
                         << "                        const_cast<Name>(&row."
                         << field.cpp_name << ")).raw(),\n"
                         << "                    field<&row_type::"
@@ -837,9 +837,9 @@ inline void validate_row_codec_text_lifetime_contract(
                         << "            } else {\n"
                         << "                data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                    "
-                        << "bioseq::pg_utils::"
+                        << "bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context(\n"
                         << "                        "
                         << "PointerGetDatum(*row." << field.cpp_name
@@ -853,16 +853,16 @@ inline void validate_row_codec_text_lifetime_contract(
                         << "            if (row." << field.cpp_name
                         << " == nullptr) {\n"
                         << "                throw "
-                           "bioseq::pg_utils::row_codec_error{\n"
+                           "bioseq::postgres::support::row_codec_error{\n"
                         << "                    std::string{row_name} + "
                            "\" has a null C++ pointer for "
                         << field.cpp_name << "\"};\n"
                         << "            }\n"
                         << "            data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                "
-                        << "bioseq::pg_utils::"
+                        << "bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context(\n"
                         << "                    PointerGetDatum(row."
                         << field.cpp_name << "),\n"
@@ -881,9 +881,9 @@ inline void validate_row_codec_text_lifetime_contract(
                         << "            } else {\n"
                         << "                data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                    "
-                           "bioseq::pg_utils::encode_text_to_memory_context(\n"
+                           "bioseq::postgres::support::encode_text_to_memory_context(\n"
                         << "                        std::string_view{\n"
                         << "                            row." << field.cpp_name
                         << "->data(), row." << field.cpp_name
@@ -894,9 +894,9 @@ inline void validate_row_codec_text_lifetime_contract(
                     output
                         << "            data_.set_raw("
                         << field.attribute_number << ", "
-                        << "bioseq::pg_utils::pg_datum::from_raw(\n"
+                        << "bioseq::postgres::support::pg_datum::from_raw(\n"
                         << "                "
-                           "bioseq::pg_utils::encode_text_to_memory_context(\n"
+                           "bioseq::postgres::support::encode_text_to_memory_context(\n"
                         << "                    std::string_view{\n"
                         << "                        row." << field.cpp_name
                         << ".data(), row." << field.cpp_name
@@ -908,7 +908,7 @@ inline void validate_row_codec_text_lifetime_contract(
     }
     output
         << "        }\n\n"
-        << "        bioseq::pg_utils::encoded_row_data<fields_count> "
+        << "        bioseq::postgres::support::encoded_row_data<field_count> "
            "data_{};\n"
         << "    };\n\n"
         << "    [[nodiscard]] static encoded_row encode(\n"
@@ -939,7 +939,7 @@ inline void validate_row_codec_text_lifetime_contract(
         << "            TupleDesc descriptor,\n"
         << "            MemoryContext result_context) {\n"
         << "        const auto data =\n"
-        << "            bioseq::pg_utils::deformed_row_data<fields_count>::"
+        << "            bioseq::postgres::support::deformed_row_data<field_count>::"
            "deform(\n"
         << "                tuple,\n"
         << "                descriptor,\n"
@@ -949,7 +949,7 @@ inline void validate_row_codec_text_lifetime_contract(
     for (const row_codec_field& field : fields) {
         if (!field.nullable) {
             output
-                << "        bioseq::pg_utils::require_row_attribute_not_null(\n"
+                << "        bioseq::postgres::support::require_row_attribute_not_null(\n"
                 << "            data.is_null(" << field.attribute_number
                 << "), " << field.attribute_number
                 << ", row_name);\n";
@@ -966,12 +966,12 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ")\n"
                         << "                ? std::nullopt\n"
                         << "                : " << field.cpp_type
-                        << "{bioseq::pg_utils::pg_datum::to<"
+                        << "{bioseq::postgres::support::pg_datum::to<"
                         << field.underlying_cpp_type << ">(data.at("
                         << field.attribute_number << "))}";
                 } else {
                     output
-                        << "bioseq::pg_utils::pg_datum::to<"
+                        << "bioseq::postgres::support::pg_datum::to<"
                         << field.cpp_type << ">(data.at("
                         << field.attribute_number << "))";
                 }
@@ -983,11 +983,11 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ")\n"
                         << "                ? std::nullopt\n"
                         << "                : std::optional<Oid>{"
-                           "bioseq::pg_utils::pg_datum::to_oid(data.at("
+                           "bioseq::postgres::support::pg_datum::to_oid(data.at("
                         << field.attribute_number << "))}";
                 } else {
                     output
-                        << "bioseq::pg_utils::pg_datum::to_oid(data.at("
+                        << "bioseq::postgres::support::pg_datum::to_oid(data.at("
                         << field.attribute_number << "))";
                 }
                 break;
@@ -1029,7 +1029,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ")\n"
                         << "                ? std::nullopt\n"
                         << "                : std::optional<NameData>{\n"
-                        << "                    *bioseq::pg_utils::"
+                        << "                    *bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context<NameData>(\n"
                         << "                        data.at("
                         << field.attribute_number << "),\n"
@@ -1038,7 +1038,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << "                        result_context)}";
                 } else {
                     output
-                        << "*bioseq::pg_utils::"
+                        << "*bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context<NameData>(\n"
                         << "                data.at("
                         << field.attribute_number << "),\n"
@@ -1055,7 +1055,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ")\n"
                         << "                ? std::nullopt\n"
                         << "                : " << field.cpp_type << "{\n"
-                        << "                    bioseq::pg_utils::"
+                        << "                    bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context<"
                         << (field.storage
                                     == row_codec_field::storage_kind::
@@ -1070,7 +1070,7 @@ inline void validate_row_codec_text_lifetime_contract(
                         << "                        result_context)}";
                 } else {
                     output
-                        << "bioseq::pg_utils::"
+                        << "bioseq::postgres::support::"
                            "copy_pg_datum_to_memory_context<"
                         << (field.storage
                                     == row_codec_field::storage_kind::
@@ -1092,12 +1092,12 @@ inline void validate_row_codec_text_lifetime_contract(
                         << ")\n"
                         << "                ? std::nullopt\n"
                         << "                : std::optional<std::string>{"
-                           "bioseq::pg_utils::copy_text_datum_to_string(\n"
+                           "bioseq::postgres::support::decode_text(\n"
                         << "                    data.at("
                         << field.attribute_number << ").raw())}";
                 } else {
                     output
-                        << "bioseq::pg_utils::copy_text_datum_to_string(\n"
+                        << "bioseq::postgres::support::decode_text(\n"
                         << "                data.at("
                         << field.attribute_number << ").raw())";
                 }
@@ -1127,20 +1127,20 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
         << "                        "
-           "bioseq::pg_utils::pg_datum::from_oid(*value));\n"
+           "bioseq::postgres::support::pg_datum::from_oid(*value));\n"
         << "                } else if constexpr "
            "(field<Member>::timestamp_tz_value) {\n"
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
         << "                        "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            TimestampTzGetDatum(*value)));\n"
         << "                } else if constexpr "
            "(field<Member>::xid8_value) {\n"
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
         << "                        "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            "
            "FullTransactionIdGetDatum(*value)));\n"
         << "                } else {\n"
@@ -1153,20 +1153,20 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                data_.set_raw(\n"
         << "                    attribute_number<Member>(),\n"
         << "                    "
-           "bioseq::pg_utils::pg_datum::from_oid(value));\n"
+           "bioseq::postgres::support::pg_datum::from_oid(value));\n"
         << "            } else if constexpr "
            "(field<Member>::timestamp_tz_value) {\n"
         << "                data_.set_raw(\n"
         << "                    attribute_number<Member>(),\n"
         << "                    "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                        TimestampTzGetDatum(value)));\n"
         << "            } else if constexpr "
            "(field<Member>::xid8_value) {\n"
         << "                data_.set_raw(\n"
         << "                    attribute_number<Member>(),\n"
         << "                    "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                        FullTransactionIdGetDatum(value)));\n"
         << "            } else {\n"
         << "                data_.set(\n"
@@ -1179,7 +1179,7 @@ inline void validate_row_codec_text_lifetime_contract(
         << "        update& set(\n"
         << "                member_type<Member> value,\n"
         << "                MemoryContext value_context) {\n"
-        << "            bioseq::pg_utils::require_row_result_context(\n"
+        << "            bioseq::postgres::support::require_row_result_context(\n"
         << "                value_context, row_name);\n"
         << "            if constexpr (field<Member>::name_value) {\n"
         << "                if constexpr (field<Member>::nullable) {\n"
@@ -1190,11 +1190,11 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                        data_.set_raw(\n"
         << "                            attribute_number<Member>(),\n"
         << "                            "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                                "
-           "bioseq::pg_utils::copy_pg_datum_to_memory_context(\n"
+           "bioseq::postgres::support::copy_pg_datum_to_memory_context(\n"
         << "                                    "
-           "bioseq::pg_utils::pg_datum::from_name(\n"
+           "bioseq::postgres::support::pg_datum::from_name(\n"
         << "                                        &*value).raw(),\n"
         << "                                    "
            "field<Member>::datum_copy_policy,\n"
@@ -1204,11 +1204,11 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
         << "                        "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            "
-           "bioseq::pg_utils::copy_pg_datum_to_memory_context(\n"
+           "bioseq::postgres::support::copy_pg_datum_to_memory_context(\n"
         << "                                "
-           "bioseq::pg_utils::pg_datum::from_name(\n"
+           "bioseq::postgres::support::pg_datum::from_name(\n"
         << "                                    &value).raw(),\n"
         << "                                "
            "field<Member>::datum_copy_policy,\n"
@@ -1220,9 +1220,9 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                        std::string_view text_value) {\n"
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
-        << "                        bioseq::pg_utils::pg_datum::from_raw(\n"
+        << "                        bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            "
-           "bioseq::pg_utils::encode_text_to_memory_context(\n"
+           "bioseq::postgres::support::encode_text_to_memory_context(\n"
         << "                                text_value,\n"
         << "                                value_context)));\n"
         << "                };\n"
@@ -1251,9 +1251,9 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                        data_.set_raw(\n"
         << "                            attribute_number<Member>(),\n"
         << "                            "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                                "
-           "bioseq::pg_utils::copy_pg_datum_to_memory_context(\n"
+           "bioseq::postgres::support::copy_pg_datum_to_memory_context(\n"
         << "                                    PointerGetDatum(*value),\n"
         << "                                    "
            "field<Member>::datum_copy_policy,\n"
@@ -1262,16 +1262,16 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                } else {\n"
         << "                    if (value == nullptr) {\n"
         << "                        throw "
-           "bioseq::pg_utils::row_codec_error{\n"
+           "bioseq::postgres::support::row_codec_error{\n"
         << "                            std::string{row_name} + "
            "\" has a null C++ varlena pointer\"};\n"
         << "                    }\n"
         << "                    data_.set_raw(\n"
         << "                        attribute_number<Member>(),\n"
         << "                        "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            "
-           "bioseq::pg_utils::copy_pg_datum_to_memory_context(\n"
+           "bioseq::postgres::support::copy_pg_datum_to_memory_context(\n"
         << "                                PointerGetDatum(value),\n"
         << "                                "
            "field<Member>::datum_copy_policy,\n"
@@ -1296,21 +1296,21 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                expected_descriptor);\n"
         << "        }\n\n"
         << "    private:\n"
-        << "        bioseq::pg_utils::row_update_data<fields_count> "
+        << "        bioseq::postgres::support::row_update_data<field_count> "
            "data_{};\n"
         << "    };\n\n"
         << "    template<auto Member,\n"
-        << "             bioseq::pg_utils::scan_comparison Comparison =\n"
-        << "                 bioseq::pg_utils::scan_comparison::equal>\n"
+        << "             bioseq::postgres::support::scan_comparison Comparison =\n"
+        << "                 bioseq::postgres::support::scan_comparison::equal>\n"
         << "        requires (!field<Member>::by_reference\n"
         << "                  && !field<Member>::nullable)\n"
         << "    [[nodiscard]] static ScanKeyData scan_key(\n"
         << "            member_type<Member> value) {\n"
-        << "        return bioseq::pg_utils::make_row_scan_key(\n"
+        << "        return bioseq::postgres::support::make_row_scan_key(\n"
         << "            attribute_number<Member>(),\n"
         << "            {\n"
         << "                .strategy =\n"
-        << "                    bioseq::pg_utils::row_scan_strategy(\n"
+        << "                    bioseq::postgres::support::row_scan_strategy(\n"
         << "                        Comparison),\n"
         << "                .procedure =\n"
         << "                    "
@@ -1318,20 +1318,20 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                .datum = [value] {\n"
         << "                    if constexpr (field<Member>::oid_value) {\n"
         << "                        return "
-           "bioseq::pg_utils::pg_datum::from_oid(value);\n"
+           "bioseq::postgres::support::pg_datum::from_oid(value);\n"
         << "                    } else if constexpr "
            "(field<Member>::timestamp_tz_value) {\n"
         << "                        return "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            TimestampTzGetDatum(value));\n"
         << "                    } else if constexpr "
            "(field<Member>::xid8_value) {\n"
         << "                        return "
-           "bioseq::pg_utils::pg_datum::from_raw(\n"
+           "bioseq::postgres::support::pg_datum::from_raw(\n"
         << "                            FullTransactionIdGetDatum(value));\n"
         << "                    } else {\n"
         << "                        return "
-           "bioseq::pg_utils::pg_datum::from(value);\n"
+           "bioseq::postgres::support::pg_datum::from(value);\n"
         << "                    }\n"
         << "                }(),\n"
         << "            });\n"
@@ -1365,7 +1365,7 @@ inline void validate_row_codec_text_lifetime_contract(
         << "#include <utility>\n\n"
         << "export module " << module.module_name << ";\n\n"
         << "export import " << module.source_module << ";\n"
-        << "export import bioseq.pg_utils.sql_boundary;\n\n"
+        << "export import bioseq.postgres.support.sql_boundary;\n\n"
         << "export namespace " << module.cpp_namespace << " {\n\n";
     for (const auto& [row, columns] : rows) {
         output << render_row_codec(*row, columns);
@@ -1382,8 +1382,7 @@ render_entity_handle_modules(const sql_graph& graph) {
         grouped;
     std::map<std::string, std::string, std::less<>> source_by_owner_key;
     for (const normalized_entity& entity : graph.entities) {
-        if (entity.source.kind != entity_kind::sequence
-            || entity.source.typed_install_owner) {
+        if (entity.source.kind != entity_kind::sequence) {
             continue;
         }
         if (!entity.source.active_condition.empty()) {
@@ -1466,7 +1465,6 @@ render_row_codec_modules(const sql_graph& graph) {
     for (const normalized_entity& entity : graph.entities) {
         if ((entity.source.kind != entity_kind::table
              && entity.source.kind != entity_kind::type)
-            || entity.source.typed_install_owner
             || !entity.source.source_module.ends_with(".sql_rows")) {
             continue;
         }

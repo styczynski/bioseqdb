@@ -1,5 +1,6 @@
-// DOC0372 — the synchronous run-bridge between the PostgreSQL CustomScan and
-// the compile-time provider pack. Given a normalized query and a target
+/// @brief Synchronous bridge from callers to the configured provider pack.
+// Given a normalized query and target provider, the bridge uses
+// the compile-time provider pack. It
 // provider id, it dispatches once through configured_external_api_provider,
 // opens a session, runs it to completion collecting every pushed
 // owning_provider_message into a vector, and returns that owned buffer. It is
@@ -16,7 +17,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq.external.run;
+export module bioseq.external.providers.run;
 
 import bioseq.external.provider.base;
 import bioseq.external.provider.errors;
@@ -35,72 +36,78 @@ namespace prov = bioseq::external::provider;
 
 // The owned outcome of one provider run. `messages` holds the normalized rows
 // and diagnostics (owning variants — self-contained, safe to outlive the run).
-// `error` is set when planning, opening, or running failed; `messages` may still
-// hold whatever was emitted before the failure.
-struct external_run_result {
-    std::vector<prov::owning_provider_message> messages;
-    prov::provider_statistics stats{};
-    std::optional<prov::external_error> error;
+// `error` is set when planning, opening, or running failed; `messages` may
+// still hold whatever was emitted before the failure.
+struct external_query_result {
+  std::vector<prov::owning_provider_message> messages;
+  prov::provider_statistics statistics{};
+  std::optional<prov::external_error> error;
 
-    [[nodiscard]] bool ok() const noexcept { return !error.has_value(); }
+  [[nodiscard]] bool is_successful() const noexcept {
+    return !error.has_value();
+  }
 };
 
 // Collector satisfying the owning-message push protocol; appends to a vector.
 namespace detail {
 
-inline std::expected<void, prov::external_error> collect_message(
-    void* self, prov::owning_provider_message&& message) {
-    auto* out = static_cast<std::vector<prov::owning_provider_message>*>(self);
-    out->push_back(std::move(message));
-    return {};
+inline std::expected<void, prov::external_error>
+collect_message(void *self, prov::owning_provider_message &&message) {
+  auto *messages =
+      static_cast<std::vector<prov::owning_provider_message> *>(self);
+  messages->push_back(std::move(message));
+  return {};
 }
 
-}  // namespace detail
+} // namespace detail
 
 // Run one provider for one normalized query and collect its messages. Dispatch
 // is by stable provider id through the configured pack; an unknown id yields an
 // unsupported_capability error (never a fallthrough). The provider's own
 // plan()/open() decide capability — an unsupported target returns an error and
 // an empty buffer, which the PG layer renders as an empty (but valid) scan.
-inline external_run_result run_external_query(
-    context::context& memory, const bioseq::parallelism::GlobalPool& pool,
-    prov::external_runtime_services& runtime,
-    std::optional<prov::credential_view> credentials, prov::provider_id provider,
-    const prov::normalized_external_query& query,
-    const prov::external_slot_budget& budget) {
-    external_run_result result;
+inline external_query_result run_external_query(
+    context::context &memory, const bioseq::parallelism::global_pool &pool,
+    prov::external_runtime_services &runtime,
+    std::optional<prov::credential_view> credentials,
+    prov::provider_id provider, const prov::normalized_external_query &query,
+    const prov::external_slot_budget &budget) {
+  external_query_result result;
 
-    prov::provider_message_sink_ref sink{.object = &result.messages,
-                                         .push_fn = &detail::collect_message};
-    std::stop_source stop;
+  prov::provider_message_sink_ref sink{.object = &result.messages,
+                                       .push_fn = &detail::collect_message};
+  std::stop_source stop;
 
-    // Generic handler: the pack invokes handler.operator()<Provider>() exactly
-    // once, for the adapter whose stable id equals `provider`.
-    auto handler = [&]<class Provider>() -> std::expected<void, prov::external_error> {
-        const prov::provider_capability_snapshot snapshot{};
-        auto plan = Provider::plan(query, snapshot, budget);
-        if (!plan.has_value()) {
-            return std::unexpected(plan.error());
-        }
-        auto session = Provider::open(memory, pool, runtime, credentials, *plan,
-                                      budget);
-        if (!session.has_value()) {
-            return std::unexpected(session.error());
-        }
-        auto stats = session->run(sink, stop.get_token());
-        if (!stats.has_value()) {
-            return std::unexpected(stats.error());
-        }
-        result.stats = *stats;
-        return {};
-    };
-
-    auto dispatched =
-        providers::configured_external_api_provider::dispatch(provider, handler);
-    if (!dispatched.has_value()) {
-        result.error = dispatched.error();
+  // Generic handler: the pack invokes handler.operator()<p_provider_type>()
+  // exactly once, for the adapter whose stable id equals `provider`.
+  auto handler = [&memory, &pool, &runtime, &credentials, &query, &budget,
+                  &sink, &stop, &result]<class p_provider_type>()
+      -> std::expected<void, prov::external_error> {
+    const prov::provider_capability_snapshot snapshot{};
+    auto query_plan = p_provider_type::plan(query, snapshot, budget);
+    if (!query_plan.has_value()) {
+      return std::unexpected(query_plan.error());
     }
-    return result;
+    auto session = p_provider_type::open(memory, pool, runtime, credentials,
+                                         *query_plan, budget);
+    if (!session.has_value()) {
+      return std::unexpected(session.error());
+    }
+    auto provider_statistics_result = session->run(sink, stop.get_token());
+    if (!provider_statistics_result.has_value()) {
+      return std::unexpected(provider_statistics_result.error());
+    }
+    result.statistics = *provider_statistics_result;
+    return {};
+  };
+
+  auto dispatch_result =
+      providers::configured_external_api_provider::dispatch_to_provider(
+          provider, handler);
+  if (!dispatch_result.has_value()) {
+    result.error = dispatch_result.error();
+  }
+  return result;
 }
 
-}  // namespace bioseq::external
+} // namespace bioseq::external

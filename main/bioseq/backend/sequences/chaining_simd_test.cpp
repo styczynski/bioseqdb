@@ -1,6 +1,6 @@
 #include "common.h"
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>

@@ -6,11 +6,11 @@
  *
  *-------------------------------------------------------------------------
  */
-export module bioseq.storage.metadata:options;
+export module bioseq.postgres.storage.metadata:options;
 
 import :core;
 
-export using ::InitBioseqColumnOptions;
-export using ::SetBioseqColumnOptions;
-export using ::DeleteBioseqColumnTableOptions;
-export using ::read_bioseq_column_options;
+export using ::initialize_column_options;
+export using ::set_column_options;
+export using ::delete_column_table_options;
+export using ::read_column_options;

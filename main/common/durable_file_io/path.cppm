@@ -4,31 +4,34 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <expected>
 #include <fcntl.h>
 #include <filesystem>
-#include <limits>
-#include <span>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
 export module bioseq.common.durable_file_io:path;
-import :types;
 
-namespace bioseq::durable_file_io::detail {
+namespace bioseq::common::durable_file_io::detail {
+
+inline constexpr mode_t creation_permission_mask =
+    S_IRWXU | S_IRWXG | S_IRWXO;
+
+[[nodiscard]] inline bool valid_creation_mode(mode_t mode) noexcept {
+    return mode != 0 && (mode & ~creation_permission_mask) == 0;
+}
+
+[[nodiscard]] inline bool contains_parent_traversal(
+    const std::filesystem::path& path) {
+    for (const std::filesystem::path& component : path) {
+        if (component == "..") {
+            return true;
+        }
+    }
+    return false;
+}
 
 [[nodiscard]] inline std::filesystem::path parent_directory(
     const std::filesystem::path& path) {
@@ -109,4 +112,4 @@ namespace bioseq::durable_file_io::detail {
 #endif
 }
 
-}  // namespace bioseq::durable_file_io::detail
+}  // namespace bioseq::common::durable_file_io::detail

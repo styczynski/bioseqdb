@@ -1,50 +1,18 @@
 /**
  * @file chunk_fetcher.cppm
- * @brief Parallel gzip chunk decoder.
+ * @brief Ordered gzip chunk planning, decoding, and delivery.
  *
- * Two execution paths:
+ * The single-worker path decodes members in order. The parallel path first
+ * discovers member boundaries and independent dynamic-Huffman block starts,
+ * then submits bounded decode work to the shared task pool. An ordered drain
+ * propagates the 32 KiB dependency window before publishing chunks.
  *
- *   * **Single-thread fallback** (`worker_count <= 1`) — the proven
- *     correctness baseline. The producer thread parses gzip headers and
- *     drives `deflate::block` over each member to fill arena slots in
- *     order. ~88 MiB/s gz on Apple Silicon.
- *
- *   * **Parallel pool** (`worker_count > 1`) — the rapidgzip
- *     architecture (paper §3.2 + §5.3):
- *
- *     1. **Pre-scan members** (sequential, ~10 GB/s memory) — scan
- *        `_compressed_view` for `0x1f 0x8b 0x08 <flags>` candidates,
- *        validate with `parse_gzip_header`. Cost is invisible vs
- *        decompression (0.2 s for 1.9 GiB).
- *     2. **Plan chunks** — for each member, partition
- *        `[header_end_bit, footer_start_bit)` into ~4 MiB compressed
- *        chunks. Chunk 0 of each member starts at the first deflate
- *        block (direct mode); chunks 1..N find their start via
- *        `seek_dynamic_huffman_candidate` (marker mode).
- *     3. **Worker pool** — N threads race on `_next_worker_chunk_idx`,
- *        own a heap-allocated `block`, decode into
- *        `arena[chunk_idx % kArenaCapacity]`, advance the slot
- *        lifecycle to `READY_FOR_DRAIN`.
- *     4. **Drain** — the producer thread waits for chunks in chunk-idx
- *        order, runs the marker resolver against `_drain_window` (the
- *        last 32 KiB of resolved bytes), captures the new trailing
- *        window, resets the window at member boundaries, and publishes
- *        the chunk into the consumer's ready ring.
- *
- * **Slot lifecycle** (parallel path):
- *
- *     FREE → WORKER_FILLING → READY_FOR_DRAIN → READY_FOR_CONSUMER
- *          → CONSUMER_HOLDING → FREE
- *
- * Every transition holds `_state_mutex` and notifies `_state_cv`.
- * Workers wait for `FREE`; drain waits for `READY_FOR_DRAIN` AND the
- * slot's tagged chunk_idx matching the drain cursor. The single-thread
- * path collapses the worker+drain steps and transitions
- * `FREE → WORKER_FILLING → READY_FOR_CONSUMER` directly.
+ * Every arena lifecycle transition holds `_state_mutex` and notifies
+ * `_state_cv`. A monotonically increasing chunk tag prevents a recycled slot
+ * from being consumed for the wrong decode request.
  */
 module;
 
-#include "common.h"
 
 #include <algorithm>
 #include <atomic>
@@ -63,11 +31,10 @@ module;
 
 export module bioseq.io.compression.chunk_fetcher;
 
-import bioseq.common.mlogging;
-import bioseq.io.simd_kernels;
+import bioseq.io.simd;
 import bioseq.io.compression.aligned_byte_buffer;
 import bioseq.io.compression.bit_reader;
-import bioseq.io.compression.blockfinder;
+import bioseq.io.compression.block_finder;
 import bioseq.io.compression.chunk;
 import bioseq.io.compression.deflate;
 import bioseq.io.compression.gzip_format;
@@ -83,7 +50,7 @@ export namespace bioseq::io::compression {
 /// per slot. 8 slots × 200 MiB = 1.6 GiB peak — large but acceptable
 /// for the 4× target. Smaller arenas starve the worker pool when
 /// consumer is slow.
-inline constexpr std::size_t kChunkArenaCapacity = 8;
+inline constexpr std::size_t chunk_arena_capacity = 8;
 
 /// Chunk target size (compressed bytes). The paper's optimum is
 /// 4 MiB on a 128-core x86 system; on Apple Silicon with 6-8 workers
@@ -92,12 +59,12 @@ inline constexpr std::size_t kChunkArenaCapacity = 8;
 /// sizes. 32 MiB cuts chunk count from ~462 to ~59 on the SRR
 /// corpus, amortising those overheads while keeping arena RAM
 /// bounded (8 slots × 100 MiB marker = 800 MiB peak).
-inline constexpr std::size_t kDefaultChunkTargetBytes = 32 * 1024 * 1024;
+inline constexpr std::size_t default_chunk_target_bytes = 32 * 1024 * 1024;
 
 /// Cap worker count. Past ~core count workers stop helping, and the
 /// drain side becomes the bottleneck. M1 Pro has 8 perf cores, so 8 is
 /// the practical ceiling.
-inline constexpr std::size_t kMaxWorkerCount = 12;
+inline constexpr std::size_t maximum_worker_count = 12;
 
 /// Hard cap on a chunk's decompressed output size. Real chunks are
 /// ~50 MiB (16 MiB compressed × 3.16 ratio). 256 MiB gives a 5× safety
@@ -105,7 +72,7 @@ inline constexpr std::size_t kMaxWorkerCount = 12;
 /// bytes) while bounding the damage from a false-positive block start
 /// that passes header validation but decodes to garbage. Chunks
 /// exceeding this cap return an error rather than ballooning RAM.
-inline constexpr std::size_t kMaxChunkDecompressedBytes = 256 * 1024 * 1024;
+inline constexpr std::size_t maximum_chunk_decompressed_bytes = 256 * 1024 * 1024;
 
 namespace detail {
 
@@ -113,21 +80,22 @@ namespace detail {
 // Slot lifecycle (parallel path)
 // =====================================================================
 
+/// Ownership state of one tagged chunk-arena slot.
 enum class slot_lifecycle : std::uint8_t {
-    FREE                = 0,
-    WORKER_FILLING      = 1,
-    READY_FOR_DRAIN     = 2,
-    PHASE_1_DONE        = 3,  // drain finished phase-1 (last 32 KiB);
-                              // phase-2 worker can resolve remainder
-    READY_FOR_CONSUMER  = 4,
-    CONSUMER_HOLDING    = 5,
+    free = 0,
+    worker_filling = 1,
+    ready_for_drain = 2,
+    trailing_window_resolved = 3,
+    ready_for_consumer = 4,
+    consumer_holding = 5,
 };
 
 // =====================================================================
 // Member pre-scan
 // =====================================================================
 
-struct member_info {
+/// Header boundary required to plan one gzip member.
+struct gzip_member_descriptor {
     /// Byte offset of the gzip-magic byte (0x1f).
     std::size_t header_byte = 0;
     /// First bit of the first deflate block in this member (= header
@@ -136,8 +104,8 @@ struct member_info {
 };
 
 /// Lightweight validation of a dynamic-Huffman block header at the
-/// reader's current position. Mirrors `block::read_header` but skips
-/// the actual literal/distance Huffman table BUILDS — instead just
+/// reader's current position. Mirrors `deflate_block_decoder::read_header`
+/// but skips the literal/distance Huffman table builds and instead
 /// runs the Kraft completeness check on each table's code lengths.
 /// ~5× faster than `read_header` for false-positive rejection.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(
@@ -168,16 +136,15 @@ struct member_info {
 /// rapidgzip paper (tab:false_positives), bringing expected fake
 /// members per file to effectively zero.
 ///
-/// COMPATIBILITY: this rejects the rare case of a real gzip member
+/// Unsupported parallel-member layout: this rejects a gzip member
 /// whose first deflate block is fixed-Huffman or uncompressed. Real
 /// gzip encoders (gzip, pigz, igzip, zlib level ≥ 1) emit dynamic
 /// Huffman for any payload past a few hundred bytes, so this is safe
-/// for production data. If you need to support fixed-block first
-/// members, fall back to the single-thread producer (`worker_count
-/// <= 1`).
-[[nodiscard]] inline std::expected<std::vector<member_info>, std::string>
+/// for production data. Fixed-block-first members use the single-worker
+/// producer (`worker_count <= 1`).
+[[nodiscard]] inline std::expected<std::vector<gzip_member_descriptor>, std::string>
 prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
-    std::vector<member_info> members;
+    std::vector<gzip_member_descriptor> members;
     if (compressed_view.empty()) return members;
 
     std::size_t cursor = 0;
@@ -232,7 +199,7 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
             continue;
         }
 
-        member_info info;
+        gzip_member_descriptor info;
         info.header_byte = cursor;
         info.header_end_bit = header_end_bit_global;
         members.push_back(info);
@@ -254,8 +221,8 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
 // Chunk planning
 // =====================================================================
 
-struct chunk_plan {
-    std::uint32_t member_idx          = 0;
+struct chunk_decode_plan {
+    std::uint32_t member_index          = 0;
     /// Bit offset of a valid deflate-block start. Worker seeks here.
     std::size_t   start_bit           = 0;
     /// Worker stops decoding once a block starts at-or-after this bit
@@ -281,36 +248,36 @@ struct chunk_plan {
     if (reader.bits_buffered() < 14) return false;
     const std::size_t literal_count =
         static_cast<std::size_t>(reader.read<5>()) + 257u;
-    if (literal_count > kMaxLiteralOrLengthSymbols) return false;
+    if (literal_count > maximum_literal_or_length_symbols) return false;
     const std::size_t distance_count =
         static_cast<std::size_t>(reader.read<5>()) + 1u;
-    if (distance_count > kMaxDistanceSymbolCount) return false;
+    if (distance_count > maximum_distance_symbol_count) return false;
     const std::size_t precode_count =
         static_cast<std::size_t>(reader.read<4>()) + 4u;
 
-    std::array<std::uint8_t, kMaxPrecodeCount> precode_cl{};
+    std::array<std::uint8_t, maximum_precode_count> precode_cl{};
     for (std::size_t i = 0; i < precode_count; ++i) {
-        if (reader.bits_buffered() < kPrecodeBits) reader.refill();
-        // Fully-qualify `kPrecodeAlphabet` — the unqualified name
-        // shadows on `bioseq::io::compression::detail::kPrecodeAlphabet`
+        if (reader.bits_buffered() < precode_bit_count) reader.refill();
+        // Fully-qualify `precode_alphabet` — the unqualified name
+        // shadows on `bioseq::io::compression::detail::precode_alphabet`
         // (from huffman.cppm), which is a size_t count, not the
         // alphabet array (which lives in the parent namespace).
-        precode_cl[::bioseq::io::compression::kPrecodeAlphabet[i]] =
-            static_cast<std::uint8_t>(reader.read<kPrecodeBits>());
+        precode_cl[::bioseq::io::compression::precode_alphabet[i]] =
+            static_cast<std::uint8_t>(reader.read<precode_bit_count>());
     }
 
     const auto precode = precode_decoder::build(
         std::span<const std::uint8_t>{precode_cl.data(), precode_cl.size()});
     if (!precode.is_valid()) return false;
 
-    std::array<std::uint8_t, kLiteralAndDistanceClBufferSize> literal_cl{};
+    std::array<std::uint8_t, literal_and_distance_code_length_buffer_size> literal_cl{};
     if (auto err = read_distance_and_literal_code_lengths(
             literal_cl, reader, precode,
             literal_count + distance_count);
-        err != decode_status::OK) {
+        err != decode_status::ok) {
         return false;
     }
-    if (literal_cl[kEndOfBlockSymbol] == 0) return false;
+    if (literal_cl[end_of_block_symbol] == 0) return false;
     if (!lit_len_decoder::is_valid_code_lengths(
             std::span<const std::uint8_t>{literal_cl.data(), literal_count})) {
         return false;
@@ -337,11 +304,11 @@ struct chunk_plan {
 /// at a chunk boundary corrupts the output stream. `read_header` runs
 /// the full Kraft completeness check on literal+distance trees, which
 /// is the strongest filter we have without actually decoding the body.
-[[nodiscard]] inline std::expected<std::vector<chunk_plan>, std::string>
+[[nodiscard]] inline std::expected<std::vector<chunk_decode_plan>, std::string>
 plan_chunks(std::span<const std::uint8_t>      compressed_view,
-            const std::vector<member_info>&    members,
+            const std::vector<gzip_member_descriptor>&    members,
             std::size_t                        chunk_target_compressed_bytes) noexcept {
-    std::vector<chunk_plan> plans;
+    std::vector<chunk_decode_plan> plans;
     if (members.empty()) {
         return std::unexpected(std::string{"plan_chunks: no members"});
     }
@@ -356,13 +323,13 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
             scan.seek_to_bit(cursor);
             const std::size_t candidate =
                 seek_dynamic_huffman_candidate(scan, until_bit);
-            if (candidate == kBlockfinderSentinel) {
-                return kBlockfinderSentinel;
+            if (candidate == block_finder_sentinel) {
+                return block_finder_sentinel;
             }
             bit_reader probe{compressed_view};
             probe.seek_to_bit(candidate);
             // Lightweight Kraft check — skips the literal+distance
-            // table BUILDS that `block::read_header` performs. Saves
+            // table builds that `deflate_block_decoder::read_header` performs. Saves
             // ~5 µs per candidate × ~5.8M candidates per corpus → ~30 s
             // sequential, ~5 s parallel.
             if (validate_dynamic_huffman_only(probe)) {
@@ -370,7 +337,7 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
             }
             cursor = candidate + 1u;
         }
-        return kBlockfinderSentinel;
+        return block_finder_sentinel;
     };
 
     // Worker count for parallel candidate validation. Plan generation
@@ -399,7 +366,7 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
 
         const std::size_t target_bytes =
             chunk_target_compressed_bytes == 0
-                ? kDefaultChunkTargetBytes
+                ? default_chunk_target_bytes
                 : chunk_target_compressed_bytes;
         std::size_t n_chunks = member_compressed_bytes / target_bytes;
         if (n_chunks == 0u) n_chunks = 1u;
@@ -417,15 +384,15 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
         // (paper false-positive rate × 30 µs read_header per
         // candidate). With 6 workers we land ~3-4 s.
         std::vector<std::size_t> per_chunk_start(n_chunks,
-                                                 kBlockfinderSentinel);
+                                                 block_finder_sentinel);
         per_chunk_start[0] = member_start_bit;
 
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
-        if (!pool.active()) {
-            pool.configure(bioseq::parallelism::PoolConfig{
-                .max_concurrency = static_cast<unsigned>(
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        if (!pool.is_active()) {
+            pool.configure(bioseq::parallelism::pool_config{
+                .maximum_concurrency = static_cast<unsigned>(
                     std::max<std::size_t>(1, plan_workers)),
-                .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
+                .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
             });
         }
         if (n_chunks > 1) {
@@ -445,15 +412,15 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
         // Merge in chunk-index order, skipping sentinels and duplicates.
         for (std::size_t k = 1; k < n_chunks; ++k) {
             const std::size_t candidate = per_chunk_start[k];
-            if (candidate == kBlockfinderSentinel) continue;
+            if (candidate == block_finder_sentinel) continue;
             if (!plan_start_bits.empty()
                 && plan_start_bits.back() == candidate) continue;
             plan_start_bits.push_back(candidate);
         }
 
         for (std::size_t k = 0; k < plan_start_bits.size(); ++k) {
-            chunk_plan plan;
-            plan.member_idx = static_cast<std::uint32_t>(m);
+            chunk_decode_plan plan;
+            plan.member_index = static_cast<std::uint32_t>(m);
             plan.start_bit  = plan_start_bits[k];
             plan.stop_at_bit =
                 (k + 1u < plan_start_bits.size())
@@ -506,13 +473,13 @@ inline void resolve_lane_range(
     }
 }
 
-/// **Phase 1**: resolve the chunk's LAST 32 KiB only. Sequential
+/// Resolve the chunk's trailing 32 KiB. This operation is sequential
 /// across chunks (each chunk's trailing window depends on the
 /// previous chunk's). Saves the prior `drain_window` snapshot into
-/// the chunk so phase 2 can resolve the remainder using the same
-/// prev-window in parallel.
-[[nodiscard]] inline bool resolve_markers_phase_1(
-    chunk_data&         chunk,
+/// the chunk so workers can resolve the remainder against the same
+/// previous window in parallel.
+[[nodiscard]] inline bool resolve_trailing_window_markers(
+    decoded_chunk&         chunk,
     const std::uint8_t* drain_window,
     std::size_t         drain_window_size) noexcept {
     if (!chunk.uses_marker_storage) return true;
@@ -526,14 +493,14 @@ inline void resolve_lane_range(
     const std::uint16_t* src = chunk.marker_storage.data.get();
 
     chunk.prior_window_snapshot_size =
-        std::min(drain_window_size, kChunkTrailingWindowBytes);
+        std::min(drain_window_size, chunk_trailing_window_bytes);
     if (chunk.prior_window_snapshot_size > 0) {
         std::memcpy(chunk.prior_window_snapshot.data(),
                     drain_window, chunk.prior_window_snapshot_size);
     }
 
     const std::size_t tail_n =
-        std::min<std::size_t>(n, kChunkTrailingWindowBytes);
+        std::min<std::size_t>(n, chunk_trailing_window_bytes);
     const std::size_t tail_begin = n - tail_n;
     resolve_lane_range(src + tail_begin, dst + tail_begin, tail_n,
                        drain_window, drain_window_size);
@@ -546,23 +513,21 @@ inline void resolve_lane_range(
     return true;
 }
 
-/// **Phase 2**: resolve the chunk's REMAINDER (everything except
-/// the last 32 KiB that phase 1 already handled). Independent across
-/// chunks — runs in parallel from a worker pool. Uses the chunk's
-/// `prior_window_snapshot` saved during phase 1.
-inline void resolve_markers_phase_2(chunk_data& chunk) noexcept {
+/// Resolve the chunk prefix not covered by the trailing window. Chunks are
+/// independent after the ordered drain has saved `prior_window_snapshot`.
+inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     if (!chunk.uses_marker_storage) {
         return;
     }
     const std::size_t n = chunk.marker_storage.size;
-    if (n <= kChunkTrailingWindowBytes) {
-        // Phase 1 already resolved all of it; just clear marker state.
+    if (n <= chunk_trailing_window_bytes) {
+        // The trailing-window pass already resolved the whole chunk.
         chunk.marker_storage.clear();
         chunk.uses_marker_storage = false;
         return;
     }
 
-    const std::size_t prefix_n = n - kChunkTrailingWindowBytes;
+    const std::size_t prefix_n = n - chunk_trailing_window_bytes;
     std::uint8_t* dst = chunk.byte_storage.data.get();
     const std::uint16_t* src = chunk.marker_storage.data.get();
     resolve_lane_range(src, dst, prefix_n,
@@ -578,7 +543,7 @@ inline void resolve_markers_phase_2(chunk_data& chunk) noexcept {
 // =====================================================================
 
 [[nodiscard]] inline std::size_t copy_direct_view(
-    chunk_uint8_buffer&       byte_storage,
+    chunk_byte_buffer&       byte_storage,
     const decoded_data_view&  view) noexcept {
     const std::size_t total = view.data_size();
     if (total == 0) return 0;
@@ -595,7 +560,7 @@ inline void resolve_markers_phase_2(chunk_data& chunk) noexcept {
 }
 
 [[nodiscard]] inline std::size_t copy_marker_view(
-    chunk_uint16_buffer&      marker_storage,
+    chunk_marker_buffer&      marker_storage,
     const decoded_data_view&  view) noexcept {
     const std::size_t total = view.data_with_markers_size();
     if (total == 0) return 0;
@@ -612,21 +577,21 @@ inline void resolve_markers_phase_2(chunk_data& chunk) noexcept {
     return copied;
 }
 
-/// Drive `block` over `reader` until `target_bytes` of decompressed
+/// Drive `deflate_block_decoder` over `reader` until `target_bytes` of decompressed
 /// output have been emitted (or end-of-stream). Used by the
 /// single-thread producer fallback.
 [[nodiscard]] inline std::pair<std::size_t, decode_status>
-decode_until(block&         decoder,
+decode_until(deflate_block_decoder& decoder,
              bit_reader&    reader,
-             chunk_data&    out_chunk,
+             decoded_chunk&    out_chunk,
              std::size_t    target_bytes) noexcept {
     std::size_t produced = 0;
-    decode_status final_status = decode_status::OK;
+    decode_status final_status = decode_status::ok;
 
     while (produced < target_bytes) {
         if (decoder.is_end_of_block()) {
             const auto err = decoder.read_header(reader);
-            if (err != decode_status::OK) {
+            if (err != decode_status::ok) {
                 final_status = err;
                 break;
             }
@@ -640,7 +605,7 @@ decode_until(block&         decoder,
                 const std::size_t copied =
                     copy_marker_view(out_chunk.marker_storage, view);
                 if (copied == std::numeric_limits<std::size_t>::max()) {
-                    final_status = decode_status::GENERIC_ERROR;
+                    final_status = decode_status::generic_error;
                     break;
                 }
                 produced += copied;
@@ -650,13 +615,13 @@ decode_until(block&         decoder,
                     auto reserve_or = out_chunk.byte_storage.reserve(
                         out_chunk.marker_storage.size + view.data_size());
                     if (!reserve_or) {
-                        final_status = decode_status::GENERIC_ERROR;
+                        final_status = decode_status::generic_error;
                         break;
                     }
                     auto extend_or = out_chunk.byte_storage.extend(
                         out_chunk.marker_storage.size);
                     if (!extend_or) {
-                        final_status = decode_status::GENERIC_ERROR;
+                        final_status = decode_status::generic_error;
                         break;
                     }
                     std::uint8_t* dst = extend_or->data();
@@ -671,13 +636,13 @@ decode_until(block&         decoder,
                 const std::size_t copied =
                     copy_direct_view(out_chunk.byte_storage, view);
                 if (copied == std::numeric_limits<std::size_t>::max()) {
-                    final_status = decode_status::GENERIC_ERROR;
+                    final_status = decode_status::generic_error;
                     break;
                 }
                 produced += copied;
             }
         }
-        if (status != decode_status::OK) {
+        if (status != decode_status::ok) {
             final_status = status;
             break;
         }
@@ -692,14 +657,14 @@ decode_until(block&         decoder,
 // Worker chunk decode (parallel-pool path)
 // =====================================================================
 
-/// Decode a single chunk per a `chunk_plan`. Invoked from each worker
-/// thread. The worker owns `decoder` (a heap-allocated `block`) and a
+/// Decode a single chunk per a `chunk_decode_plan`. Invoked from each worker
+/// task. The worker owns a heap-allocated decoder and a
 /// fresh `bit_reader` over `compressed_view`.
 [[nodiscard]] inline decode_status worker_decode_chunk(
-    block&                            decoder,
+    deflate_block_decoder&            decoder,
     std::span<const std::uint8_t>     compressed_view,
-    const chunk_plan&                 plan,
-    chunk_data&                       out_chunk) noexcept {
+    const chunk_decode_plan&                 plan,
+    decoded_chunk&                       out_chunk) noexcept {
     out_chunk.byte_storage.clear();
     out_chunk.marker_storage.clear();
     out_chunk.decompressed_size_bytes = 0;
@@ -728,7 +693,7 @@ decode_until(block&         decoder,
         // each chunk may need to scan past several false positives
         // before finding a real block start.
         //
-        // We deliberately avoid `block::reset()` between attempts —
+        // We deliberately avoid `deflate_block_decoder::reset()` between attempts —
         // its 128 KiB marker-buffer memcpy dominates wall clock at
         // false-positive rates. `read_header` is idempotent on state
         // (it overwrites compression_type, is_last_block, and Huffman
@@ -736,7 +701,7 @@ decode_until(block&         decoder,
         // enough: the marker buffer is set up once and read_header
         // re-runs cheap-and-clean for each attempt.
         decoder.reset();
-        decode_status header_err = decode_status::OK;
+        decode_status header_err = decode_status::ok;
         std::size_t  retry_search_start = plan.start_bit;
         // Unbounded retry — terminates only when either a valid block
         // is found OR the blockfinder runs out of candidates within
@@ -745,17 +710,17 @@ decode_until(block&         decoder,
         while (true) {
             reader.seek_to_bit(retry_search_start);
             header_err = decoder.read_header(reader);
-            if (header_err == decode_status::OK) break;
+            if (header_err == decode_status::ok) break;
             bit_reader probe{compressed_view};
             probe.seek_to_bit(retry_search_start + 1);
             const std::size_t next_candidate =
                 seek_dynamic_huffman_candidate(probe, plan.stop_at_bit);
-            if (next_candidate == kBlockfinderSentinel) {
+            if (next_candidate == block_finder_sentinel) {
                 // No candidate left in the chunk's window — the chunk
                 // is effectively empty. Return success with zero bytes;
                 // the next chunk's worker will pick up the slack.
                 out_chunk.encoded_end_bit_offset = plan.stop_at_bit;
-                return decode_status::OK;
+                return decode_status::ok;
             }
             retry_search_start = next_candidate;
         }
@@ -770,7 +735,7 @@ decode_until(block&         decoder,
             // with.
             const auto next_block_bit = reader.bit_position();
             const auto err = decoder.read_header(reader);
-            if (err != decode_status::OK) {
+            if (err != decode_status::ok) {
                 return err;
             }
             // Preemptive stop (librapidarchive `GzipChunk.hpp:550-554`):
@@ -786,7 +751,7 @@ decode_until(block&         decoder,
             if (next_block_bit >= plan.stop_at_bit
                 && !decoder.is_last_block()
                 && decoder.compression_type()
-                       != block_compression::FIXED_HUFFMAN) {
+                       != block_compression::fixed_huffman) {
                 break;
             }
         }
@@ -799,7 +764,7 @@ decode_until(block&         decoder,
                 const std::size_t copied =
                     copy_marker_view(out_chunk.marker_storage, view);
                 if (copied == std::numeric_limits<std::size_t>::max()) {
-                    return decode_status::GENERIC_ERROR;
+                    return decode_status::generic_error;
                 }
                 out_chunk.decompressed_size_bytes += copied;
             } else if (out_chunk.uses_marker_storage) {
@@ -821,7 +786,7 @@ decode_until(block&         decoder,
                 const std::size_t total = view.data_size();
                 auto extend_or = out_chunk.marker_storage.extend(total);
                 if (!extend_or) {
-                    return decode_status::GENERIC_ERROR;
+                    return decode_status::generic_error;
                 }
                 std::uint16_t* dst = extend_or->data();
                 std::size_t dst_pos = 0;
@@ -839,14 +804,14 @@ decode_until(block&         decoder,
                 const std::size_t copied =
                     copy_direct_view(out_chunk.byte_storage, view);
                 if (copied == std::numeric_limits<std::size_t>::max()) {
-                    return decode_status::GENERIC_ERROR;
+                    return decode_status::generic_error;
                 }
                 out_chunk.decompressed_size_bytes += copied;
             }
         }
-        if (status != decode_status::OK
-            && status != decode_status::END_OF_BLOCK
-            && status != decode_status::END_OF_STREAM) {
+        if (status != decode_status::ok
+            && status != decode_status::end_of_block
+            && status != decode_status::end_of_stream) {
             return status;
         }
         if (decoder.is_end_of_block() && decoder.is_last_block()) {
@@ -858,10 +823,10 @@ decode_until(block&         decoder,
         }
         // Defence against unbounded output: a false-positive header
         // can build malformed Huffman tables and decode for far longer
-        // than expected. Bound the damage to `kMaxChunkDecompressedBytes`.
+        // than expected. Bound the damage to `maximum_chunk_decompressed_bytes`.
         if (out_chunk.decompressed_size_bytes
-                >= kMaxChunkDecompressedBytes) [[unlikely]] {
-            return decode_status::GENERIC_ERROR;
+                >= maximum_chunk_decompressed_bytes) [[unlikely]] {
+            return decode_status::generic_error;
         }
     }
 
@@ -869,7 +834,7 @@ decode_until(block&         decoder,
 
     if (!out_chunk.uses_marker_storage) {
         const std::size_t window_bytes = std::min<std::size_t>(
-            out_chunk.byte_storage.size, kChunkTrailingWindowBytes);
+            out_chunk.byte_storage.size, chunk_trailing_window_bytes);
         if (window_bytes > 0u) {
             const std::uint8_t* src =
                 out_chunk.byte_storage.data.get()
@@ -878,7 +843,7 @@ decode_until(block&         decoder,
         }
         out_chunk.trailing_window_size = window_bytes;
     }
-    return decode_status::OK;
+    return decode_status::ok;
 }
 
 }  // namespace detail
@@ -896,16 +861,16 @@ public:
         : _compressed_view(compressed_view),
           _chunk_target_bytes(
               chunk_decompressed_target_bytes == 0
-                  ? kDefaultChunkTargetBytes
+                  ? default_chunk_target_bytes
                   : chunk_decompressed_target_bytes),
-          _worker_count(std::clamp(worker_count, std::size_t{1}, kMaxWorkerCount)),
+          _worker_count(std::clamp(worker_count, std::size_t{1}, maximum_worker_count)),
           _verify_crc(verify_crc),
-          _slot_lifecycles(kChunkArenaCapacity, detail::slot_lifecycle::FREE),
-          _slot_chunk_idx(kChunkArenaCapacity,
+          _slot_lifecycles(chunk_arena_capacity, detail::slot_lifecycle::free),
+          _slot_chunk_index(chunk_arena_capacity,
                           std::numeric_limits<std::size_t>::max()) {
-        _chunk_arena.reserve(kChunkArenaCapacity);
-        for (std::size_t i = 0; i < kChunkArenaCapacity; ++i) {
-            _chunk_arena.emplace_back(std::make_unique<chunk_data>());
+        _chunk_arena.reserve(chunk_arena_capacity);
+        for (std::size_t i = 0; i < chunk_arena_capacity; ++i) {
+            _chunk_arena.emplace_back(std::make_unique<decoded_chunk>());
         }
     }
 
@@ -921,7 +886,7 @@ public:
     void start_producer() noexcept {
         if (_producer_started) return;
         _producer_started = true;
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        auto& pool = bioseq::parallelism::global_pool::instance();
         _producer_group = pool.make_task_group();
         _producer_group.run(bioseq::parallelism::task_body{[this]() noexcept {
             if (_worker_count <= 1) {
@@ -932,48 +897,46 @@ public:
         }});
     }
 
-    [[nodiscard]] std::pair<const chunk_data*, bool>
+    [[nodiscard]] std::pair<const decoded_chunk*, bool>
     get_next_chunk() noexcept {
         start_producer();
         std::unique_lock<std::mutex> guard(_state_mutex);
-        // Idx-based wait: consumer reads chunks in chunk_idx order
+        // Tagged wait: the consumer reads chunks in chunk-index order
         // regardless of which slot they live in. Workers and the drain
-        // mark slots READY_FOR_CONSUMER as soon as their chunk's
-        // resolution finishes — possibly out of idx order, since
-        // phase-2 across workers is parallel. The consumer just waits
-        // for ITS specific next idx to land in its slot.
-        const std::size_t slot = _consumer_next_idx % kChunkArenaCapacity;
+        // mark slots ready as soon as their chunk's resolution finishes,
+        // possibly out of order. The consumer waits for its specific tag.
+        const std::size_t slot = _consumer_next_index % chunk_arena_capacity;
         _state_cv.wait(guard, [this, slot]() noexcept {
             return (_slot_lifecycles[slot]
-                        == detail::slot_lifecycle::READY_FOR_CONSUMER
-                    && _slot_chunk_idx[slot] == _consumer_next_idx)
+                        == detail::slot_lifecycle::ready_for_consumer
+                    && _slot_chunk_index[slot] == _consumer_next_index)
                 || _producer_done.load(std::memory_order_acquire);
         });
         const bool slot_ready =
             _slot_lifecycles[slot]
-                == detail::slot_lifecycle::READY_FOR_CONSUMER
-            && _slot_chunk_idx[slot] == _consumer_next_idx;
+                == detail::slot_lifecycle::ready_for_consumer
+            && _slot_chunk_index[slot] == _consumer_next_index;
         if (!slot_ready) {
             const bool has_error = !_last_error_message.empty();
             return {nullptr, has_error};
         }
-        _slot_lifecycles[slot] = detail::slot_lifecycle::CONSUMER_HOLDING;
-        ++_consumer_next_idx;
+        _slot_lifecycles[slot] = detail::slot_lifecycle::consumer_holding;
+        ++_consumer_next_index;
         _state_cv.notify_all();
-        chunk_data* chunk = _chunk_arena[slot].get();
-        return {chunk, chunk->state == chunk_state::DECODE_ERROR};
+        decoded_chunk* chunk = _chunk_arena[slot].get();
+        return {chunk, chunk->state == chunk_state::decode_error};
     }
 
-    void release_chunk(const chunk_data* chunk) noexcept {
+    void release_chunk(const decoded_chunk* chunk) noexcept {
         if (chunk == nullptr) return;
-        std::size_t slot = kChunkArenaCapacity;
-        for (std::size_t i = 0; i < kChunkArenaCapacity; ++i) {
+        std::size_t slot = chunk_arena_capacity;
+        for (std::size_t i = 0; i < chunk_arena_capacity; ++i) {
             if (_chunk_arena[i].get() == chunk) { slot = i; break; }
         }
-        if (slot >= kChunkArenaCapacity) return;
+        if (slot >= chunk_arena_capacity) return;
         std::lock_guard<std::mutex> guard(_state_mutex);
-        _slot_lifecycles[slot] = detail::slot_lifecycle::FREE;
-        _slot_chunk_idx[slot] = std::numeric_limits<std::size_t>::max();
+        _slot_lifecycles[slot] = detail::slot_lifecycle::free;
+        _slot_chunk_index[slot] = std::numeric_limits<std::size_t>::max();
         _state_cv.notify_all();
     }
 
@@ -997,17 +960,15 @@ public:
 
 private:
     // -----------------------------------------------------------------
-    // Producer (single-thread fallback)
+    // Producer (single-worker path)
     // -----------------------------------------------------------------
 
-    /// Single-thread per-member loop. Used when `worker_count == 1`.
-    /// Each chunk transitions FREE → WORKER_FILLING → READY_FOR_CONSUMER
-    /// directly (no intermediate drain step).
+    /// Single-worker per-member loop. Each chunk moves directly from worker
+    /// ownership to consumer readiness because no ordered marker drain is needed.
     void producer_loop_single_thread() noexcept {
         bit_reader reader{_compressed_view};
         std::size_t fill_cursor = 0;  // round-robin slot index
-        std::size_t chunk_idx_counter = 0;  // strict chunk_idx for the
-                                            // idx-based consumer.
+        std::size_t chunk_index_counter = 0;  // Strict consumer order.
 
         while (true) {
             auto header_or = parse_gzip_header(reader, _compressed_view);
@@ -1016,32 +977,32 @@ private:
                 signal_done();
                 return;
             }
-            block decoder;
+            deflate_block_decoder decoder;
             decoder.reset();
             decoder.set_initial_window(std::span<const std::uint8_t>{});
 
             while (!_shutdown.load(std::memory_order_acquire)) {
                 const std::size_t slot = fill_cursor;
-                const std::size_t this_chunk_idx = chunk_idx_counter;
+                const std::size_t this_chunk_index = chunk_index_counter;
 
                 {
                     std::unique_lock<std::mutex> guard(_state_mutex);
                     _state_cv.wait(guard, [this, slot]() noexcept {
                         return _shutdown.load(std::memory_order_acquire)
                             || _slot_lifecycles[slot]
-                                   == detail::slot_lifecycle::FREE;
+                                   == detail::slot_lifecycle::free;
                     });
                     if (_shutdown.load(std::memory_order_acquire)) return;
                     _slot_lifecycles[slot] =
-                        detail::slot_lifecycle::WORKER_FILLING;
-                    _slot_chunk_idx[slot] = this_chunk_idx;
+                        detail::slot_lifecycle::worker_filling;
+                    _slot_chunk_index[slot] = this_chunk_index;
                 }
-                fill_cursor = (fill_cursor + 1) % kChunkArenaCapacity;
-                ++chunk_idx_counter;
+                fill_cursor = (fill_cursor + 1) % chunk_arena_capacity;
+                ++chunk_index_counter;
 
-                chunk_data& chunk = *_chunk_arena[slot];
+                decoded_chunk& chunk = *_chunk_arena[slot];
                 chunk.encoded_start_bit_offset = reader.bit_position();
-                chunk.state = chunk_state::DIRECTLY_DECODED;
+                chunk.state = chunk_state::directly_decoded;
                 chunk.uses_marker_storage = false;
                 chunk.byte_storage.clear();
                 chunk.marker_storage.clear();
@@ -1052,7 +1013,7 @@ private:
                 if (auto reserve_or =
                         chunk.byte_storage.reserve(_chunk_target_bytes);
                     !reserve_or) {
-                    chunk.state = chunk_state::DECODE_ERROR;
+                    chunk.state = chunk_state::decode_error;
                     chunk.error_message.assign(reserve_or.error());
                     set_error(reserve_or.error());
                     publish_to_consumer(slot);
@@ -1065,10 +1026,10 @@ private:
                                          _chunk_target_bytes);
                 chunk.decompressed_size_bytes = produced;
                 chunk.encoded_end_bit_offset = reader.bit_position();
-                if (status != decode_status::OK
-                    && status != decode_status::END_OF_BLOCK
-                    && status != decode_status::END_OF_STREAM) {
-                    chunk.state = chunk_state::DECODE_ERROR;
+                if (status != decode_status::ok
+                    && status != decode_status::end_of_block
+                    && status != decode_status::end_of_stream) {
+                    chunk.state = chunk_state::decode_error;
                     chunk.error_message.assign(decode_status_name(status));
                     set_error(std::string{decode_status_name(status)});
                     publish_to_consumer(slot);
@@ -1078,7 +1039,7 @@ private:
 
                 if (!chunk.uses_marker_storage) {
                     const std::size_t window_bytes = std::min<std::size_t>(
-                        chunk.byte_storage.size, kChunkTrailingWindowBytes);
+                        chunk.byte_storage.size, chunk_trailing_window_bytes);
                     if (window_bytes > 0) {
                         const std::uint8_t* src =
                             chunk.byte_storage.data.get()
@@ -1122,13 +1083,13 @@ private:
             return;
         }
         auto plans_or = detail::plan_chunks(
-            _compressed_view, *members_or, kDefaultChunkTargetBytes);
+            _compressed_view, *members_or, default_chunk_target_bytes);
         if (!plans_or) {
             set_error(plans_or.error());
             signal_done();
             return;
         }
-        std::vector<detail::chunk_plan> plans = std::move(*plans_or);
+        std::vector<detail::chunk_decode_plan> plans = std::move(*plans_or);
 
         const std::size_t total_chunks = plans.size();
         if (total_chunks == 0) {
@@ -1136,14 +1097,14 @@ private:
             return;
         }
 
-        _next_worker_chunk_idx.store(0, std::memory_order_relaxed);
+        _next_worker_chunk_index.store(0, std::memory_order_relaxed);
 
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
-        if (!pool.active()) {
-            pool.configure(bioseq::parallelism::PoolConfig{
-                .max_concurrency = static_cast<unsigned>(
+        auto& pool = bioseq::parallelism::global_pool::instance();
+        if (!pool.is_active()) {
+            pool.configure(bioseq::parallelism::pool_config{
+                .maximum_concurrency = static_cast<unsigned>(
                     std::max<std::size_t>(1, _worker_count)),
-                .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
+                .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
             });
         }
         auto workers = pool.make_task_group();
@@ -1154,56 +1115,55 @@ private:
                 }});
         }
 
-        // Drain in idx order, resolve markers, publish to consumer.
-        std::array<std::uint8_t, kChunkTrailingWindowBytes> drain_window{};
+        // Drain in chunk-index order, resolve markers, publish to consumer.
+        std::array<std::uint8_t, chunk_trailing_window_bytes> drain_window{};
         std::size_t drain_window_size = 0;
-        std::uint32_t current_member_idx = 0;
+        std::uint32_t current_member_index = 0;
         bool fatal_error = false;
 
         for (std::size_t k = 0; k < total_chunks
              && !_shutdown.load(std::memory_order_acquire)
              && !fatal_error; ++k) {
-            const std::size_t slot = k % kChunkArenaCapacity;
+            const std::size_t slot = k % chunk_arena_capacity;
 
             // Wait for slot[k % K] to be filled by the worker that owns
-            // chunk_idx == k.
+            // chunk_index == k.
             {
                 std::unique_lock<std::mutex> guard(_state_mutex);
                 _state_cv.wait(guard, [this, slot, k]() noexcept {
                     return _shutdown.load(std::memory_order_acquire)
                         || (_slot_lifecycles[slot]
-                                == detail::slot_lifecycle::READY_FOR_DRAIN
-                            && _slot_chunk_idx[slot] == k);
+                                == detail::slot_lifecycle::ready_for_drain
+                            && _slot_chunk_index[slot] == k);
                 });
                 if (_shutdown.load(std::memory_order_acquire)) break;
             }
 
-            chunk_data& chunk = *_chunk_arena[slot];
+            decoded_chunk& chunk = *_chunk_arena[slot];
             const auto& plan = plans[k];
 
             // Member-boundary reset.
-            if (plan.member_idx != current_member_idx) {
+            if (plan.member_index != current_member_index) {
                 drain_window_size = 0;
-                current_member_idx = plan.member_idx;
+                current_member_index = plan.member_index;
             }
 
             // Worker reported an error?
-            if (chunk.state == chunk_state::DECODE_ERROR) {
+            if (chunk.state == chunk_state::decode_error) {
                 set_error(std::string{chunk.error_message.view()});
                 publish_to_consumer(slot);
                 fatal_error = true;
                 break;
             }
 
-            // Phase-1 marker resolution: the last 32 KiB only. Drain
+            // Resolve the trailing 32 KiB in the ordered drain so the window
             // runs this serially so the trailing window propagates
-            // forward correctly. Phase 2 (the chunk's REMAINDER) is
-            // dispatched to the decode-worker pool, which picks it
-            // up in parallel after we mark the slot PHASE_1_DONE.
+            // propagates forward correctly. The remaining prefix is resolved
+            // by the worker after this slot is marked ready.
             if (chunk.uses_marker_storage) {
-                if (!detail::resolve_markers_phase_1(
+                if (!detail::resolve_trailing_window_markers(
                         chunk, drain_window.data(), drain_window_size)) {
-                    chunk.state = chunk_state::DECODE_ERROR;
+                    chunk.state = chunk_state::decode_error;
                     chunk.error_message.assign(
                         std::string_view{"resolve_markers: alloc failure"});
                     set_error("resolve_markers: alloc failure");
@@ -1215,18 +1175,18 @@ private:
 
             // Update drain_window from the chunk's trailing window.
             const std::size_t chunk_tail = chunk.trailing_window_size;
-            if (chunk_tail >= kChunkTrailingWindowBytes) {
+            if (chunk_tail >= chunk_trailing_window_bytes) {
                 std::memcpy(drain_window.data(),
                             chunk.trailing_window.data(),
-                            kChunkTrailingWindowBytes);
-                drain_window_size = kChunkTrailingWindowBytes;
+                            chunk_trailing_window_bytes);
+                drain_window_size = chunk_trailing_window_bytes;
             } else if (chunk_tail > 0u) {
                 const std::size_t keep =
                     std::min<std::size_t>(
                         drain_window_size,
-                        kChunkTrailingWindowBytes - chunk_tail);
+                        chunk_trailing_window_bytes - chunk_tail);
                 if (keep > 0u) {
-                    std::array<std::uint8_t, kChunkTrailingWindowBytes>
+                    std::array<std::uint8_t, chunk_trailing_window_bytes>
                         scratch{};
                     std::memcpy(scratch.data(),
                                 drain_window.data() + (drain_window_size - keep),
@@ -1238,24 +1198,24 @@ private:
                             chunk_tail);
                 drain_window_size =
                     std::min<std::size_t>(
-                        keep + chunk_tail, kChunkTrailingWindowBytes);
+                        keep + chunk_tail, chunk_trailing_window_bytes);
             }
 
             if (chunk.is_member_final) {
                 drain_window_size = 0;
             }
 
-            chunk.state = chunk_state::DIRECTLY_DECODED;
+            chunk.state = chunk_state::directly_decoded;
             if (chunk.uses_marker_storage) {
-                // Hand off to a phase-2 worker. After phase 2 finishes,
-                // the worker will mark READY_FOR_CONSUMER itself.
+                // Hand the remaining prefix back to its worker. The worker
+                // publishes the slot after marker resolution.
                 std::lock_guard<std::mutex> guard(_state_mutex);
                 _slot_lifecycles[slot] =
-                    detail::slot_lifecycle::PHASE_1_DONE;
+                    detail::slot_lifecycle::trailing_window_resolved;
                 _state_cv.notify_all();
             } else {
                 // Direct-mode chunk — already fully resolved by the
-                // worker. Skip phase 2; publish straight to consumer.
+                // worker. Publish it directly.
                 publish_to_consumer(slot);
             }
         }
@@ -1271,22 +1231,22 @@ private:
         signal_done();
     }
 
-    /// One worker thread. Claims chunks atomically, decodes them into
-    /// the arena slot at `chunk_idx % K`, signals drain.
-    void worker_loop(const std::vector<detail::chunk_plan>& plans,
+    /// One worker task. Claims chunks atomically, decodes them into
+    /// their tagged arena slots, and signals the ordered drain.
+    void worker_loop(const std::vector<detail::chunk_decode_plan>& plans,
                      std::size_t                            total_chunks) noexcept {
         // Heap-allocate the decoder — its 128 KiB `_window16` is too
         // big for the worker's stack on macOS.
-        auto decoder = std::make_unique<block>();
+        auto decoder = std::make_unique<deflate_block_decoder>();
 
         while (true) {
-            const std::size_t chunk_idx =
-                _next_worker_chunk_idx.fetch_add(1u,
+            const std::size_t chunk_index =
+                _next_worker_chunk_index.fetch_add(1u,
                                                  std::memory_order_relaxed);
-            if (chunk_idx >= total_chunks) break;
+            if (chunk_index >= total_chunks) break;
             if (_shutdown.load(std::memory_order_acquire)) break;
 
-            const std::size_t slot = chunk_idx % kChunkArenaCapacity;
+            const std::size_t slot = chunk_index % chunk_arena_capacity;
 
             // Wait for slot to be FREE (consumer released previous
             // chunk).
@@ -1295,70 +1255,55 @@ private:
                 _state_cv.wait(guard, [this, slot]() noexcept {
                     return _shutdown.load(std::memory_order_acquire)
                         || _slot_lifecycles[slot]
-                               == detail::slot_lifecycle::FREE;
+                               == detail::slot_lifecycle::free;
                 });
                 if (_shutdown.load(std::memory_order_acquire)) break;
                 _slot_lifecycles[slot] =
-                    detail::slot_lifecycle::WORKER_FILLING;
-                _slot_chunk_idx[slot] = chunk_idx;
+                    detail::slot_lifecycle::worker_filling;
+                _slot_chunk_index[slot] = chunk_index;
             }
 
-            chunk_data& chunk = *_chunk_arena[slot];
+            decoded_chunk& chunk = *_chunk_arena[slot];
             const auto err = detail::worker_decode_chunk(
-                *decoder, _compressed_view, plans[chunk_idx], chunk);
-            if (err != decode_status::OK) {
-                chunk.state = chunk_state::DECODE_ERROR;
+                *decoder, _compressed_view, plans[chunk_index], chunk);
+            if (err != decode_status::ok) {
+                chunk.state = chunk_state::decode_error;
                 chunk.error_message.assign(decode_status_name(err));
             } else {
-                chunk.state = chunk_state::DIRECTLY_DECODED;
+                chunk.state = chunk_state::directly_decoded;
             }
 
-            const bool needs_phase_2 = chunk.uses_marker_storage
-                && err == decode_status::OK;
+            const bool needs_remaining_marker_resolution = chunk.uses_marker_storage
+                && err == decode_status::ok;
 
             {
                 std::lock_guard<std::mutex> guard(_state_mutex);
                 _slot_lifecycles[slot] =
-                    detail::slot_lifecycle::READY_FOR_DRAIN;
+                    detail::slot_lifecycle::ready_for_drain;
                 _state_cv.notify_all();
             }
 
-            // Phase 2: if this chunk needs marker resolution, wait for
-            // the drain to finish phase 1 (which propagates the
-            // trailing window through the chain). Then resolve the
-            // chunk's REMAINDER (everything except the last 32 KiB
-            // already resolved by drain) using the prior_window
-            // snapshot the drain saved on this chunk. Phase 2 is
-            // independent across chunks — multiple workers run it
-            // concurrently while the drain marches forward sequentially.
-            //
-            // Shutdown vs phase-1-done race: drain sets `_shutdown =
-            // true` IMMEDIATELY after marking PHASE_1_DONE on the last
-            // chunk and breaking its loop. A worker that's just woken
-            // up sees BOTH predicates true. The check below has to run
-            // phase 2 anyway when PHASE_1_DONE was set on this slot —
-            // otherwise the last chunk's prefix (everything before the
-            // tail 32 KiB) never gets resolved and the consumer drops
-            // its bytes silently. Only break-without-phase-2 when
-            // shutdown was set BEFORE the drain reached this chunk
-            // (i.e. PHASE_1_DONE not set on this slot/idx).
-            if (needs_phase_2) {
-                bool phase_1_ready = false;
+            // If markers remain, wait until the drain has propagated and
+            // snapshotted the dependency window. A ready slot wins over a
+            // simultaneous shutdown notification: otherwise the final chunk's
+            // prefix would remain unresolved and be silently omitted.
+            if (needs_remaining_marker_resolution) {
+                bool trailing_window_ready = false;
                 {
                     std::unique_lock<std::mutex> guard(_state_mutex);
-                    _state_cv.wait(guard, [this, slot, chunk_idx]() noexcept {
+                    _state_cv.wait(guard, [this, slot, chunk_index]() noexcept {
                         return _shutdown.load(std::memory_order_acquire)
                             || (_slot_lifecycles[slot]
-                                    == detail::slot_lifecycle::PHASE_1_DONE
-                                && _slot_chunk_idx[slot] == chunk_idx);
+                                    == detail::slot_lifecycle::trailing_window_resolved
+                                && _slot_chunk_index[slot] == chunk_index);
                     });
-                    phase_1_ready =
+                    trailing_window_ready =
                         _slot_lifecycles[slot]
-                            == detail::slot_lifecycle::PHASE_1_DONE
-                        && _slot_chunk_idx[slot] == chunk_idx;
+                            == detail::slot_lifecycle::trailing_window_resolved
+                        && _slot_chunk_index[slot] == chunk_index;
                 }
-                if (!phase_1_ready) break;
-                detail::resolve_markers_phase_2(chunk);
+                if (!trailing_window_ready) break;
+                detail::resolve_remaining_markers(chunk);
                 publish_to_consumer(slot);
             }
         }
@@ -1369,14 +1314,12 @@ private:
     // -----------------------------------------------------------------
 
     /// Publish a slot to the consumer. Slot's chunk is fully resolved.
-    /// Consumer reads in chunk_idx order via the idx-based wait in
-    /// `get_next_chunk` — slots can be marked READY_FOR_CONSUMER out
-    /// of order (parallel phase-2) and the consumer still walks the
-    /// idx sequence linearly.
+    /// The consumer reads tagged slots in chunk-index order even when workers
+    /// publish them out of order.
     void publish_to_consumer(std::size_t slot) noexcept {
         std::lock_guard<std::mutex> guard(_state_mutex);
         _slot_lifecycles[slot] =
-            detail::slot_lifecycle::READY_FOR_CONSUMER;
+            detail::slot_lifecycle::ready_for_consumer;
         _state_cv.notify_all();
     }
 
@@ -1395,29 +1338,27 @@ private:
 
     // -----------------------------------------------------------------
     // Members
-    // -----------------------------------------------------------------
-
     std::span<const std::uint8_t> _compressed_view;
     std::size_t                   _chunk_target_bytes;
     std::size_t                   _worker_count;
     bool                          _verify_crc;
 
-    std::vector<std::unique_ptr<chunk_data>> _chunk_arena;
+    std::vector<std::unique_ptr<decoded_chunk>> _chunk_arena;
 
     mutable std::mutex             _state_mutex;
     std::condition_variable        _state_cv;
 
     /// Per-slot lifecycle. Source of truth for slot ownership.
     std::vector<detail::slot_lifecycle> _slot_lifecycles;
-    /// chunk_idx currently in slot[i] (max_size_t = unset). Set by
+    /// chunk_index currently in slot[i] (max_size_t = unset). Set by
     /// workers, cleared on consumer release.
-    std::vector<std::size_t>            _slot_chunk_idx;
+    std::vector<std::size_t>            _slot_chunk_index;
 
-    // Consumer's next-to-read chunk_idx. Strictly monotonic.
-    std::size_t                    _consumer_next_idx = 0;
+    // Consumer's next-to-read chunk_index. Strictly monotonic.
+    std::size_t                    _consumer_next_index = 0;
 
     // Parallel-path coordination.
-    std::atomic<std::size_t>       _next_worker_chunk_idx{0};
+    std::atomic<std::size_t>       _next_worker_chunk_index{0};
 
     std::atomic<bool>              _shutdown{false};
     std::atomic<bool>              _producer_done{false};

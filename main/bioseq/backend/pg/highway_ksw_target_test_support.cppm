@@ -30,9 +30,9 @@ export module bioseq.highway_ksw_target_test_support;
 import bioseq.alignment.contracts;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.common.context;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
-import bioseq.pg_utils;
+import bioseq.postgres.support;
 import bioseq.sequences;
 import bioseq.storage.lazy;
 
@@ -56,7 +56,7 @@ inline constexpr std::array<std::size_t, 9> kBoundaryLengths{
     if (dispatch.runnable_targets <= 0
         || !std::has_single_bit(runnable)
         || dispatch.planned_target != dispatch.runnable_targets) {
-        bioseq::pg_utils::raise_sql_error(
+        bioseq::postgres::support::raise_sql_error(
             ERRCODE_INTERNAL_ERROR,
             {
                 .message = "KSW2 boundary receipt requires one forced Highway target",
@@ -72,7 +72,7 @@ inline constexpr std::array<std::size_t, 9> kBoundaryLengths{
     if (binding.target != dispatch.planned_target
         || binding.kernels == nullptr
         || !binding.kernels->complete()) {
-        bioseq::pg_utils::raise_sql_error(
+        bioseq::postgres::support::raise_sql_error(
             ERRCODE_INTERNAL_ERROR,
             {
                 .message = "Selected Highway target has no complete KSW2 table",
@@ -84,7 +84,7 @@ inline constexpr std::array<std::size_t, 9> kBoundaryLengths{
     if (identity == nullptr
         || binding.kernels->resolve_alphabet_identity(identity->alphabet_code)
             != identity) {
-        bioseq::pg_utils::raise_sql_error(
+        bioseq::postgres::support::raise_sql_error(
             ERRCODE_INTERNAL_ERROR,
             {
                 .message = "Selected Highway target has no canonical DNA4 identity",
@@ -97,7 +97,7 @@ inline constexpr std::array<std::size_t, 9> kBoundaryLengths{
             return *static_cast<const alignment_table_t*>(entry.typed_table);
         }
     }
-    bioseq::pg_utils::raise_sql_error(
+    bioseq::postgres::support::raise_sql_error(
         ERRCODE_INTERNAL_ERROR,
         {
             .message = "Selected Highway target has no complete DNA4 KSW2 table",
@@ -150,7 +150,7 @@ void append_result(
     const std::size_t length,
     const bioseq::simd::KswAlignResult& result) {
     if (result.score == bioseq::simd::kKswNegInf || result.cigar.empty()) {
-        bioseq::pg_utils::raise_sql_error(
+        bioseq::postgres::support::raise_sql_error(
             ERRCODE_INTERNAL_ERROR,
             {
                 .message = "KSW2 boundary receipt observed no alignment work",

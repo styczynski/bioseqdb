@@ -1,4 +1,4 @@
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>
@@ -35,7 +35,7 @@ import bioseq.gpu.vulkan.shader_cache;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_layout;
 import bioseq.gpu.vulkan.shader_variants;
-import bioseq.gpu.vulkan.phase_c_abi;
+import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences.prefilters.prefilter_types;

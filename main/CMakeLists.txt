@@ -840,7 +840,7 @@ if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
   add_subdirectory(common/durable_file_io)
   add_subdirectory(common/cache_provider_api)
   add_subdirectory(common/memory_budget)
-  add_subdirectory(common/pg_support)
+  add_subdirectory(common/postgres/support)
 endif()
 
 if(BIOSEQ_BUILD_CACHE)
@@ -906,7 +906,7 @@ if(BIOSEQ_BUILD_CORE)
       bioseq_highway_clang_imported_binder_canary)
   endif()
   foreach(_bioseq_highway_validation_consumer IN ITEMS
-      bioseq_aligner_tests_exec
+      bioseq_unit_tests
       bioseq_external_integration_tests_exec)
     if(TARGET ${_bioseq_highway_validation_consumer})
       add_dependencies(

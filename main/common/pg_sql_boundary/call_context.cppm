@@ -25,77 +25,86 @@ extern "C" {
 #include "windowapi.h"
 }
 
-#include <concepts>
-#include <memory>
-#include <stdexcept>
-#include <type_traits>
-#include <utility>
-
 export module bioseq.pg_sql_boundary:call_context;
 
 import :error_boundary;
 
-export namespace bioseq::pg_utils {
+export namespace bioseq::postgres::support {
 
-struct sql_boundary_access;
-
-class sql_call_context final {
+/** Checked non-owning view of PostgreSQL's active fmgr call frame. */
+class function_call_context final {
 public:
+    /** Construct a checked view for one fmgr invocation. */
+    [[nodiscard]] static function_call_context from_call(
+            FunctionCallInfo call) noexcept {
+        return function_call_context{call};
+    }
+
+    /** Return the invoked function OID, or InvalidOid without a call frame. */
     [[nodiscard]] Oid function_oid() const noexcept {
         return call_ == nullptr || call_->flinfo == nullptr
             ? InvalidOid
             : call_->flinfo->fn_oid;
     }
-    [[nodiscard]] Oid collation() const noexcept;
-    [[nodiscard]] Oid argument_type(int zero_based_index) const;
-    [[nodiscard]] Oid result_type() const;
-    [[nodiscard]] ReturnSetInfo& return_set_info() const;
+    /** Return the call collation OID, or InvalidOid without a call frame. */
+    [[nodiscard]] Oid collation_oid() const noexcept;
+    /** Return the declared OID for one zero-based argument. */
+    [[nodiscard]] Oid argument_type_oid(int argument_index) const;
+    /** Return the declared result type OID. */
+    [[nodiscard]] Oid result_type_oid() const;
+    /** Return the active set-result descriptor or raise a PostgreSQL error. */
+    [[nodiscard]] ReturnSetInfo& set_result_info() const;
+    /** Return the aggregate memory context or raise a PostgreSQL error. */
     [[nodiscard]] MemoryContext aggregate_memory_context() const;
+    /** Return the active window object or raise a PostgreSQL error. */
     [[nodiscard]] WindowObject window_object() const;
-    [[nodiscard]] void*& fn_extra() const noexcept;
-    [[nodiscard]] MemoryContext fn_mcxt() const noexcept;
-    void require_nonatomic_procedure_call() const;
+    /** Return the function-cache payload slot. */
+    [[nodiscard]] void*& function_extra() const noexcept;
+    /** Return the function-cache memory context. */
+    [[nodiscard]] MemoryContext function_memory_context() const noexcept;
+    /** Require a non-atomic procedure invocation. */
+    void require_nonatomic_call() const;
+    /** Commit the active non-atomic procedure transaction. */
     void commit_transaction();
+    /** Roll back and chain the active non-atomic procedure transaction. */
     void rollback_transaction();
 
-    sql_call_context(const sql_call_context&) = delete;
-    sql_call_context& operator=(const sql_call_context&) = delete;
+    function_call_context(const function_call_context&) = delete;
+    function_call_context& operator=(const function_call_context&) = delete;
 
 private:
-    friend struct sql_boundary_access;
-
-    explicit sql_call_context(FunctionCallInfo call) noexcept
+    explicit function_call_context(FunctionCallInfo call) noexcept
         : call_{call} {}
 
     FunctionCallInfo call_;
 };
 
-struct sql_boundary_access final {
-    [[nodiscard]] static sql_call_context
-    make_context(FunctionCallInfo call) noexcept {
-        return sql_call_context{call};
-    }
-};
+/** Marker for PostgreSQL table access-method handler pseudo-arguments. */
+struct table_access_method_handler final {};
 
-struct table_am_handler_context final {};
+/** Marker for PostgreSQL subscripting handler pseudo-arguments. */
+struct subscript_handler final {};
 
-struct subscript_handler_context final {};
-
-class sql_subtransaction final {
+/** RAII owner for one PostgreSQL internal subtransaction. */
+class subtransaction final {
 public:
-    [[nodiscard]] static sql_subtransaction begin();
+    /** Begin an internal subtransaction. */
+    [[nodiscard]] static subtransaction begin();
 
-    sql_subtransaction(const sql_subtransaction&) = delete;
-    sql_subtransaction& operator=(const sql_subtransaction&) = delete;
-    sql_subtransaction(sql_subtransaction&&) = delete;
-    sql_subtransaction& operator=(sql_subtransaction&&) = delete;
-    ~sql_subtransaction() noexcept;
+    subtransaction(const subtransaction&) = delete;
+    subtransaction& operator=(const subtransaction&) = delete;
+    subtransaction(subtransaction&&) = delete;
+    subtransaction& operator=(subtransaction&&) = delete;
+    /** Roll back an active subtransaction; terminate on cleanup failure. */
+    ~subtransaction() noexcept;
 
+    /** Commit and release the owned subtransaction. */
     void commit();
+    /** Roll back and release the owned subtransaction. */
     void rollback();
 
 private:
-    sql_subtransaction(
+    subtransaction(
         MemoryContext outer_context,
         ResourceOwner outer_owner,
         int outer_nest_level,
@@ -112,17 +121,23 @@ private:
     bool active_ = true;
 };
 
-class scoped_spi_session final {
+/** RAII owner for one PostgreSQL Server Programming Interface session. */
+class spi_session final {
 public:
-    scoped_spi_session() noexcept = default;
-    scoped_spi_session(const scoped_spi_session&) = delete;
-    scoped_spi_session& operator=(const scoped_spi_session&) = delete;
-    scoped_spi_session(scoped_spi_session&&) = delete;
-    scoped_spi_session& operator=(scoped_spi_session&&) = delete;
-    ~scoped_spi_session() noexcept;
+    /** Construct a disconnected SPI session owner. */
+    spi_session() noexcept = default;
+    spi_session(const spi_session&) = delete;
+    spi_session& operator=(const spi_session&) = delete;
+    spi_session(spi_session&&) = delete;
+    spi_session& operator=(spi_session&&) = delete;
+    /** Finish an active SPI session; terminate on cleanup failure. */
+    ~spi_session() noexcept;
 
+    /** Connect SPI with the requested PostgreSQL options. */
     [[nodiscard]] int connect(int options = 0);
+    /** Finish the active SPI session. */
     [[nodiscard]] int finish();
+    /** Return whether this object owns an active SPI connection. */
     [[nodiscard]] bool active() const noexcept {
         return active_;
     }
@@ -131,4 +146,4 @@ private:
     bool active_ = false;
 };
 
-}  // namespace bioseq::pg_utils
+}  // namespace bioseq::postgres::support

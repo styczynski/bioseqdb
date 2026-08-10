@@ -9,21 +9,18 @@ option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
   "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
 option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
   "Run the maintainer SQL negative/provenance fixture suite during the build" ON)
-option(BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK
-  "Run the Git-history-backed DOC0388 ledger maintainer check during the build" ON)
-
-set(BIOSEQ_PG_BUILD_CONFIG_HEADER
-  "${CMAKE_CURRENT_LIST_DIR}/include2/headers/pg_build_config.h")
+set(BIOSEQ_PG_BUILD_PROFILE_HEADER
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include/bioseq/pg_build_profile.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${BIOSEQ_PG_BUILD_CONFIG_HEADER}")
-file(STRINGS "${BIOSEQ_PG_BUILD_CONFIG_HEADER}"
+  "${BIOSEQ_PG_BUILD_PROFILE_HEADER}")
+file(STRINGS "${BIOSEQ_PG_BUILD_PROFILE_HEADER}"
   _bioseq_opttimization_level_line
   REGEX "^#define BIOSEQ_OPTTIMIZATION_LEVEL [0-5]$")
 list(LENGTH _bioseq_opttimization_level_line
   _bioseq_opttimization_level_line_count)
 if(NOT _bioseq_opttimization_level_line_count EQUAL 1)
   message(FATAL_ERROR
-    "${BIOSEQ_PG_BUILD_CONFIG_HEADER} must contain exactly one literal "
+    "${BIOSEQ_PG_BUILD_PROFILE_HEADER} must contain exactly one literal "
     "'#define BIOSEQ_OPTTIMIZATION_LEVEL N' with N in 0..5")
 endif()
 string(REGEX REPLACE
@@ -55,14 +52,14 @@ endif()
 if("${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL "")
   set(BIOSEQ_OPTTIMIZATION_LEVEL
     "${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL}")
-  set(_bioseq_opttimization_level_source "pg_build_config.h default")
+  set(_bioseq_opttimization_level_source "pg_build_profile.h default")
 else()
   set(BIOSEQ_OPTTIMIZATION_LEVEL
     "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}")
   set(_bioseq_opttimization_level_source "qualification preset override")
 endif()
 # Generated Highway implementation units intentionally do not include the
-# PostgreSQL build-config header. Publish the one resolved CMake value for
+# PostgreSQL build-profile header. Publish the one resolved CMake value for
 # every profile so the generated partition switches and the owner manifest
 # cannot disagree when the checked-in default is raised to level 4 or 5.
 # Header-consuming translation units see the same value through its guarded
@@ -76,23 +73,21 @@ message(STATUS
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
-set(BIOSEQ_GPU_ARCHIVE_BUILDER_SRC
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_builder.cpp)
-set(BIOSEQ_GPU_METAL_ARCHIVE_SRC
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive.cpp)
-# Both builder files are compiled into bioseq_gpu_archive_builder, not the extension.
-# Old probe files are excluded if still present on disk.
-list(REMOVE_ITEM SRC_FILES
-  ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
-  ${BIOSEQ_GPU_METAL_ARCHIVE_SRC}
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe_helper.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe.cpp)
+set(BIOSEQ_GPU_ARCHIVE_MODULE_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/builder.cppm")
+set(BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/main.cppm")
 
 file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
+list(REMOVE_ITEM SRC_MOD_FILES
+  ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS}
+  ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
 
 # PostgreSQL must publish the digest-derived MoltenVK environment and install
 # its shader provider before the process-local Vulkan Runtime singleton is
@@ -110,8 +105,8 @@ file(GLOB_RECURSE BIOSEQ_PG_RUNTIME_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.hpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.hpp)
 set(BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_vulkan.cppm)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/shader_runtime.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/vulkan.cppm)
 foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
   list(FIND BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
     "${_bioseq_pg_source}" _bioseq_pg_runtime_owner_index)
@@ -131,14 +126,14 @@ endforeach()
 # Lazy-facade representation-erasure invariant: sequence consumers must not
 # reach through the facade into a concrete scanner/range implementation. These files
 # are the complete implementation-owner allowlist:
-#   * lazy_compact_sequence.cppm owns the canonical facade adapters;
+#   * lazy_sequence.cppm owns the canonical facade adapters;
 #   * sequence_scanner*.cppm own scanner implementations and PG leases.
 # Any new concrete dependency outside those ownership boundaries fails CMake
 # configuration, making the allowlist a repository-enforced invariant.
 set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_scanner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/sequence_scanner_pg.cppm)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/scanner.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/scanner.cppm)
 
 # Named unit fixtures may deliberately construct concrete scanners to exercise
 # the representation-erasure boundary.  Keep this list explicit: a new test is
@@ -195,10 +190,10 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
       continue()
     endif()
     if(_bioseq_lazy_code_line MATCHES
-        "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_compact_sequence[ \t]*<|sequence_scanner_pg[ \t]*<)")
+        "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_sequence[ \t]*<|chunked_span_sequence_scanner[ \t]*<)")
       message(FATAL_ERROR
         "Lazy-facade representation-erasure violation in ${_bioseq_lazy_source}; "
-        "consume basic_lazy_sequence_view or update the documented ownership boundary; "
+        "consume lazy_sequence_view or update the documented ownership boundary; "
         "matched code: ${_bioseq_lazy_code_line}")
     endif()
   endforeach()
@@ -214,24 +209,24 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_minimizers.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_batch_processor.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_cpu_preparation.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/batch_sort.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/cpu_preparation.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm)
 file(GLOB_RECURSE BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.inc
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.h
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.hpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.inc
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.h
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.hpp)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/*.hpp)
 list(APPEND BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES})
 list(REMOVE_DUPLICATES BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES)
@@ -246,11 +241,11 @@ function(bioseq_private_packed_access_scope_names
     _bioseq_source _bioseq_result)
   set(_bioseq_scopes)
   if("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm")
     set(_bioseq_scopes
       bounded_u32_dna4_view
       run_packed_kernel
-      collect_minimizers_packed_paper_nthash_simd_checked)
+      collect_minimizers_bounded_nthash_simd_checked)
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
     set(_bioseq_scopes
@@ -258,13 +253,13 @@ function(bioseq_private_packed_access_scope_names
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
       run_fragmented_impl)
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm")
     set(_bioseq_scopes
       byte_upload_range_address_adapter
       vulkan_sketchable_sequence
       compute_segment_descriptor
-      make_phase_c_segment_window
-      phase_c_segment_windows
+      make_sketch_segment_window
+      sketch_segment_windows
       make_upload_view_from_window
       make_sequence_upload_view
       build_gpu_segment_index_on_device_resident_impl
@@ -318,7 +313,7 @@ function(bioseq_private_packed_access_line_allowed
     _bioseq_source _bioseq_scope _bioseq_line _bioseq_result)
   set(_bioseq_allowed FALSE)
   if("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm")
     if("${_bioseq_scope}" STREQUAL "bounded_u32_dna4_view"
         AND ("${_bioseq_line}" STREQUAL
           "return local_view_units * traits::letters_per_unit - local_bp_size;"
@@ -330,7 +325,7 @@ function(bioseq_private_packed_access_line_allowed
           "static_cast<std::uint64_t>(view.padding())")
       set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL
-        "collect_minimizers_packed_paper_nthash_simd_checked"
+        "collect_minimizers_bounded_nthash_simd_checked"
         AND ("${_bioseq_line}" STREQUAL "traits::letters_per_unit;"
           OR "${_bioseq_line}" STREQUAL "sequence.read_cptr(begin));"))
       set(_bioseq_allowed TRUE)
@@ -355,7 +350,7 @@ function(bioseq_private_packed_access_line_allowed
       set(_bioseq_allowed TRUE)
     endif()
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm")
     if("${_bioseq_scope}" STREQUAL "byte_upload_range_address_adapter"
         AND "${_bioseq_line}" STREQUAL
           "[[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {")
@@ -370,11 +365,11 @@ function(bioseq_private_packed_access_line_allowed
           OR "${_bioseq_line}" STREQUAL
             "? static_cast<std::uint32_t>(seq.padding())"))
       set(_bioseq_allowed TRUE)
-    elseif("${_bioseq_scope}" STREQUAL "make_phase_c_segment_window"
+    elseif("${_bioseq_scope}" STREQUAL "make_sketch_segment_window"
         AND "${_bioseq_line}" STREQUAL
           "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);")
       set(_bioseq_allowed TRUE)
-    elseif("${_bioseq_scope}" STREQUAL "phase_c_segment_windows"
+    elseif("${_bioseq_scope}" STREQUAL "sketch_segment_windows"
         AND "${_bioseq_line}" STREQUAL
           "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);")
       set(_bioseq_allowed TRUE)
@@ -503,7 +498,7 @@ if(_bioseq_self_nested STREQUAL "" OR _bioseq_self_mismatch STREQUAL ""
   message(FATAL_ERROR "private packed access invariant private-scope guard negative self-check failed")
 endif()
 set(_bioseq_private_packed_self_source
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm")
 bioseq_private_packed_access_line_allowed(
   "${_bioseq_private_packed_self_source}" bounded_u32_dna4_view
   "return local_view_units * traits::letters_per_unit - local_bp_size;"
@@ -734,23 +729,24 @@ endforeach()
 # DOC0269 Phase A — cross-target BMI sharing via an OBJECT library that owns
 # the Domain N (NO_POSTGRES) module file set.
 #
-# Before this change every consumer (bioseq_aligner, bioseq_aligner_tests_exec,
-# bioseq_bench, bioseq_io_bench, bioseq_bench_framework_example, …) rebuilt
+# Before this change every consumer (bioseq_unit_tests, bioseq_bench,
+# bioseq_io_bench, bioseq_bench_framework_example, …) rebuilt
 # its own copy of every shared module (~68 BMIs at ~25 s each). With the
 # library owning the FILE_SET CXX_MODULES PUBLIC, consumers link in the BMIs
 # instead and only compile their target-private modules. See
 # main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_VIA_SHARED_MODULE_LIBRARY_IMPORT_STD_AND_PIPE_PARTITIONS__DOC0269.md.
 #
 # `testing.cppm` is excluded — it pulls in Catch2 reporter headers; non-test
-# binaries (bioseq_aligner CLI, bioseq_bench, bench_framework_example,
-# bioseq_io_bench) don't link Catch2. Test targets add it as their own
+# binaries (bioseq_bench, bench_framework_example, bioseq_io_bench) don't link
+# Catch2. Test targets add it as their own
 # per-target module on top of the shared lib.
 # ============================================================================
 
 # DOC0322 Option A — Domain-N membership is now STRUCTURAL: everything under
 # backend/** (and instrumentation/**) EXCEPT the Domain-P column-store set relocated
 # under backend/pg/** is Domain N. Replaces the previously hand-maintained explicit
-# list (and the sorted_pair_runs_pg/index_residency_pg manual appends below).
+# list. PostgreSQL-domain implementation units are reclassified below after
+# the structural glob so named implementations are ordinary private sources.
 # testing.cppm stays per-target (Catch2), so it is excluded here.
 file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
@@ -771,9 +767,9 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/reference_minimap_int_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimap2_reference_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
@@ -786,7 +782,7 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
 # Highway target templates. A marked source is scan-only generator input, never
 # an ordinary module provider, and every registered input must carry the marker.
 set(BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm")
 
 # The annotation and generator registry are one exact ownership boundary. Scan
 # only authored source-tree module units (never current or stale build outputs),
@@ -1047,31 +1043,41 @@ unset(_bioseq_template_flatten_authored_cppm_candidates)
 
 set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index_impl.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd_implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/summary_writer/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence/pair_sort.cppm")
+set(BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/linux.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/macos.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/unsupported.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
-  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES})
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
-  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES})
 
-# DOC0286 §12.1 Edit 1 — the IO reader (FASTA/FASTQ + gzip) + the new
-# file_utils.cppm are NO_POSTGRES and are now consumed by the pg extension
-# (backend/storage/io/load.cppm imports bioseq_io.public_api), so they join the
-# shared nopg module set instead of the io bench's private glob. The .cppm glob
-# captures the whole reader closure under io/ (including io/compression/*.cppm);
-# the io bench main/tests are .cpp and excluded.
+# The IO reader closure is PostgreSQL-independent and is shared by the
+# extension, external providers, and the IO benchmark. The benchmark launcher
+# and logic module are target-private and removed from this broad owner below.
 file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_DIR}/io/*.cppm")
+list(REMOVE_ITEM BIOSEQ_IO_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/main.cppm")
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
-set(BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/tbb_partition_link_shim.cpp)
+set(BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool/tbb_runtime_symbols.cppm)
 set(BIOSEQ_RUNTIME_CORE_MODULES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
@@ -1093,15 +1099,16 @@ list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 # the Bioseq source glob.
 set(BIOSEQ_SINK_CONTROL_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/sink_control.cppm")
-# DOC0372 §369-374 — read_result + io_source protocol as a lightweight leaf so
-# external transfer / generated clients depend on the byte-source protocol
-# without the sequences/alphabets graph. The io/*.cppm glob captures it, so it
-# must leave BIOSEQ_NOPG_OWNED_MODULES to be compiled exactly once in its target.
-set(BIOSEQ_IO_SOURCE_CORE_MODULE
-  "${CMAKE_CURRENT_LIST_DIR}/io/source_core.cppm")
+set(BIOSEQ_HTTP_VALIDATION_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/http/validation/index.cppm")
+# The byte-source protocol remains a lightweight leaf so external transfer and
+# generated clients do not inherit the sequence/alphabet graph.
+set(BIOSEQ_IO_SOURCE_MODULE
+  "${CMAKE_CURRENT_LIST_DIR}/io/source.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
   "${BIOSEQ_SINK_CONTROL_MODULE}"
-  "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
+  "${BIOSEQ_HTTP_VALIDATION_MODULE}"
+  "${BIOSEQ_IO_SOURCE_MODULE}")
 
 add_library(bioseq_sink_control_core STATIC)
 set_target_properties(bioseq_sink_control_core PROPERTIES
@@ -1113,15 +1120,25 @@ target_sources(bioseq_sink_control_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_SINK_CONTROL_MODULE}")
 
-add_library(bioseq_io_source_core STATIC)
-set_target_properties(bioseq_io_source_core PROPERTIES
+add_library(bioseq_http_validation_core STATIC)
+set_target_properties(bioseq_http_validation_core PROPERTIES
   CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
   CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
-target_compile_definitions(bioseq_io_source_core PRIVATE NO_POSTGRES=1)
-target_sources(bioseq_io_source_core
+target_compile_definitions(bioseq_http_validation_core PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_http_validation_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
+    FILES "${BIOSEQ_HTTP_VALIDATION_MODULE}")
+
+add_library(bioseq_io_source STATIC)
+set_target_properties(bioseq_io_source PROPERTIES
+  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_io_source PRIVATE NO_POSTGRES=1)
+target_sources(bioseq_io_source
+  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES "${BIOSEQ_IO_SOURCE_MODULE}")
 
 # DOC0372 §413-424 / DOC0371 §37.2 — the admission controller remains a
 # single-owner leaf, while OS probes and MemoryBudget now have one shared
@@ -1150,7 +1167,7 @@ target_sources(bioseq_memory_admission_core
 # their ownership and link this core for the moved leaves' BMIs.
 set(BIOSEQ_COMMON_TEMPLATING_CORE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/template_str.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/compile_time_string.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_search.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/runtime_dispatch.cppm")
@@ -1187,25 +1204,25 @@ target_link_libraries(bioseq_runtime_core PUBLIC
   TBB::tbb)
 target_sources(bioseq_runtime_core
   PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging_specializations.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_RUNTIME_CORE_MODULES})
+list(REMOVE_ITEM BIOSEQ_NOPG_MODULES BIOSEQ_NOPG_OWNED_MODULES SRC_MOD_FILES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm")
+set_source_files_properties(
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/specializations.cppm"
+  PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
-list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+list(REMOVE_ITEM SRC_MOD_FILES BIOSEQ_NOPG_MODULES
+  ${BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION})
 
-set(BIOSEQ_NOPG_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
-list(APPEND BIOSEQ_NOPG_SOURCES
-  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+set(BIOSEQ_NOPG_SOURCES ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
 set_source_files_properties(
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
   PROPERTIES COMPILE_OPTIONS "-x;c++")
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
-  list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
+  list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_RUNTIME_SYMBOLS_IMPLEMENTATION})
 endif()
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
 
@@ -1216,13 +1233,13 @@ set_target_properties(bioseq_modules_nopg PROPERTIES
   CXX_EXTENSIONS ON
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
-  # IPO disabled here for the same reason as the existing `*_tests_exec`
+  # IPO disabled here for the same reason as the test executables
   # variants (see AddPostgreSQLExtension.cmake, comment on
   # `INTERPROCEDURAL_OPTIMIZATION FALSE` for `_tests_exec`): clang's
   # ThinLTO drops module-attached TLS init wrappers (the `_ZTHW…` symbols
   # for `mlogging::fmtlogDetailT<0>::sbc`) at link time. With the lib's
   # objects feeding into every Domain N consumer — including
-  # `bioseq_aligner_tests_exec` which we know reproduces the bug — the
+  # `bioseq_unit_tests` which we know reproduces the bug — the
   # lib has to stay non-LTO so the test execs link cleanly. The lib's
   # codegen is still `-O3 -DNDEBUG` per bench-opt; the only thing we
   # lose is cross-TU inlining BETWEEN the lib's objects and the
@@ -1266,7 +1283,7 @@ target_compile_options(bioseq_modules_nopg PRIVATE
 
 target_include_directories(bioseq_modules_nopg PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../config"
-  "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/hwy_contrib"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
@@ -1287,8 +1304,9 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   bioseq_memory_budget
   bioseq_runtime_core
   bioseq_sink_control_core
+  bioseq_http_validation_core
   bioseq_checked_arithmetic_core
-  bioseq_io_source_core
+  bioseq_io_source
   bioseq_memory_admission_core
   bioseq_common_templating_core
   safestring_static
@@ -1307,6 +1325,10 @@ target_link_libraries(bioseq_modules_nopg PRIVATE
 
 target_sources(bioseq_modules_nopg
   PRIVATE ${BIOSEQ_NOPG_SOURCES}
+  PRIVATE FILE_SET bioseq_instrumentation_backend_modules
+    TYPE CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_INSTRUMENTATION_PRIVATE_MODULES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_OWNED_MODULES})
@@ -1323,7 +1345,7 @@ set(BIOSEQ_HIGHWAY_GENERATED_ROOT
 # single alphabet/width/shard authority shared by both generators; neither
 # frontend may rediscover or multiply the other's domain.
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm")
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/template_flatten/dispatch_processor_typed")
 cmake_path(IS_PREFIX BIOSEQ_HIGHWAY_GENERATED_ROOT
@@ -1345,7 +1367,7 @@ bioseq_template_flatten_probe(
   NAME dispatch_processor_typed
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
   OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
-  OUTPUT_MODULE bioseq.scheduler.dispatch_processor
+  OUTPUT_MODULE bioseq.postgres.scheduler.dispatch_processor
   PROFILE "${BIOSEQ_OPTTIMIZATION_LEVEL}"
   OUT_CONFIGURE_TOPOLOGY_MANIFEST BIOSEQ_TYPED_CONFIGURE_TOPOLOGY
   OUT_TOPOLOGY_DIGEST BIOSEQ_TYPED_TOPOLOGY_DIGEST
@@ -1378,19 +1400,19 @@ foreach(_bioseq_highway_alignment_alphabet_label
   set(_bioseq_highway_alignment_family
     "alignment_${_bioseq_highway_alignment_alphabet_ordinal}")
   list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS
-    "ksw2|${_bioseq_highway_alignment_family}|ksw2_z2|&::bioseq::simd::{target_namespace}::ksw2_z2<${_bioseq_highway_alignment_alphabet_replacement}>"
-    "ksw2|${_bioseq_highway_alignment_family}|ksw2_d2|&::bioseq::simd::{target_namespace}::ksw2_d2<${_bioseq_highway_alignment_alphabet_replacement}>"
-    "ksw2_batched|${_bioseq_highway_alignment_family}|ksw2_batched|&::bioseq::simd::{target_namespace}::ksw2_batched<${_bioseq_highway_alignment_alphabet_replacement}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_prepare|&::bioseq::simd::{target_namespace}::block_prepare<${_bioseq_highway_alignment_alphabet_replacement}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_try_certified_gap|&::bioseq::simd::{target_namespace}::block_try_certified_gap<${_bioseq_highway_alignment_alphabet_replacement}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_align|&::bioseq::simd::{target_namespace}::block_align<${_bioseq_highway_alignment_alphabet_replacement}>")
+    "ksw2|${_bioseq_highway_alignment_family}|align_ksw2_single_affine|&::bioseq::simd::{target_namespace}::align_ksw2_single_affine<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "ksw2|${_bioseq_highway_alignment_family}|align_ksw2_dual_affine|&::bioseq::simd::{target_namespace}::align_ksw2_dual_affine<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "ksw2_batched|${_bioseq_highway_alignment_family}|align_ksw2_batched|&::bioseq::simd::{target_namespace}::align_ksw2_batched<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|prepare_block_global_gap_certificate|&::bioseq::simd::{target_namespace}::prepare_block_global_gap_certificate<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|try_block_certified_gap|&::bioseq::simd::{target_namespace}::try_block_certified_gap<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|align_block|&::bioseq::simd::{target_namespace}::align_block<${_bioseq_highway_alignment_alphabet_replacement}>")
   list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS
-    "${_bioseq_highway_alignment_family}|ksw2_z2"
-    "${_bioseq_highway_alignment_family}|ksw2_d2"
-    "${_bioseq_highway_alignment_family}|ksw2_batched"
-    "${_bioseq_highway_alignment_family}|block_prepare"
-    "${_bioseq_highway_alignment_family}|block_try_certified_gap"
-    "${_bioseq_highway_alignment_family}|block_align")
+    "${_bioseq_highway_alignment_family}|align_ksw2_single_affine"
+    "${_bioseq_highway_alignment_family}|align_ksw2_dual_affine"
+    "${_bioseq_highway_alignment_family}|align_ksw2_batched"
+    "${_bioseq_highway_alignment_family}|prepare_block_global_gap_certificate"
+    "${_bioseq_highway_alignment_family}|try_block_certified_gap"
+    "${_bioseq_highway_alignment_family}|align_block")
 endforeach()
 unset(_bioseq_highway_alignment_family)
 unset(_bioseq_highway_alignment_alphabet_label)
@@ -1443,13 +1465,13 @@ foreach(_bioseq_highway_minimizer_alphabet_label
     set(_bioseq_highway_minimizer_template_arguments
       "${_bioseq_highway_minimizer_alphabet_replacement},::std::uint${_bioseq_highway_minimizer_width_bits}_t")
     list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS
-      "minimizer_reference|${_bioseq_highway_minimizer_family}|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int_case<${_bioseq_highway_minimizer_template_arguments}>"
-      "minimizer_two_stack|${_bioseq_highway_minimizer_family}|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash_case<${_bioseq_highway_minimizer_template_arguments}>"
-      "minimizer_paper|${_bioseq_highway_minimizer_family}|paper_nthash|&::bioseq::simd::{target_namespace}::paper_nthash_case<${_bioseq_highway_minimizer_template_arguments}>")
+      "minimizer_minimap2_reference|${_bioseq_highway_minimizer_family}|minimap2_reference|&::bioseq::simd::{target_namespace}::minimap2_reference_case<${_bioseq_highway_minimizer_template_arguments}>"
+      "minimizer_two_stack_nthash|${_bioseq_highway_minimizer_family}|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash_case<${_bioseq_highway_minimizer_template_arguments}>"
+      "minimizer_bounded_nthash|${_bioseq_highway_minimizer_family}|bounded_nthash|&::bioseq::simd::{target_namespace}::bounded_nthash_case<${_bioseq_highway_minimizer_template_arguments}>")
     list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS
-      "${_bioseq_highway_minimizer_family}|reference_minimap_int"
+      "${_bioseq_highway_minimizer_family}|minimap2_reference"
       "${_bioseq_highway_minimizer_family}|two_stack_nthash"
-      "${_bioseq_highway_minimizer_family}|paper_nthash")
+      "${_bioseq_highway_minimizer_family}|bounded_nthash")
   endforeach()
 endforeach()
 unset(_bioseq_highway_minimizer_family)
@@ -1472,29 +1494,26 @@ set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   "sequence_ops|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/sequence_ops.cppm.in"
   "simd_utils|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/simd_utils.cppm.in"
   "two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/two_stack.cppm.in")
-set(BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS
-  "grouped32|${CMAKE_CURRENT_LIST_DIR}/../bench/highway_grouped32_probe.cppm.in")
-
 # One bounded ordinary owner per admitted result representation prevents every
 # coarse input-width wrapper from instantiating the complete result-layout
 # switch. K15-only profiles have 7 owners / 14 typed instantiations; profile 4+
 # adds K7/K27 identities for exactly 13 owners / 24 instantiations per target.
-set(BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
-  "reference_l15_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<15u,15u>|u32,u64"
-  "reference_l28_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<28u,15u>|u32,u64"
-  "reference_l33_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<33u,15u>|u32,u64"
-  "reference_l63_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,15u>|u32,u64"
-  "paper_l15_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<15u,15u>|u32,u64"
-  "paper_l28_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<28u,15u>|u32,u64"
-  "paper_l63_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<63u,15u>|u32,u64")
+set(BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
+  "minimap2_reference_l15_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
+  "minimap2_reference_l28_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
+  "minimap2_reference_l33_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<33u,15u>|u32,u64"
+  "minimap2_reference_l63_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,15u>|u32,u64"
+  "bounded_nthash_l15_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
+  "bounded_nthash_l28_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
+  "bounded_nthash_l63_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<63u,15u>|u32,u64")
 if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
-  list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
-    "reference_l7_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<7u,7u>|u32,u64"
-    "reference_l17_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<17u,7u>|u32,u64"
-    "reference_l49_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<49u,7u>|u32,u64"
-    "reference_l63_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,7u>|u32,u64"
-    "reference_l27_k27|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<27u,27u>|u64"
-    "reference_l63_k27|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,27u>|u64")
+  list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
+    "minimap2_reference_l7_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<7u,7u>|u32,u64"
+    "minimap2_reference_l17_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<17u,7u>|u32,u64"
+    "minimap2_reference_l49_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<49u,7u>|u32,u64"
+    "minimap2_reference_l63_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,7u>|u32,u64"
+    "minimap2_reference_l27_k27|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<27u,27u>|u64"
+    "minimap2_reference_l63_k27|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,27u>|u64")
 endif()
 
 bioseq_add_highway_codegen(
@@ -1503,7 +1522,7 @@ bioseq_add_highway_codegen(
   POLICY_TARGET bioseq_highway_target_policy
   OUTPUT_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
   CONTRACT_MODULE bioseq.highway.dispatch_contract
-  DISPATCH_MODULE bioseq.scheduler.dispatch_processor
+  DISPATCH_MODULE bioseq.postgres.scheduler.dispatch_processor
   HIGHWAY_VERSION 1.3.0
   # Block Aligner requires at least eight lanes. EMU128 remains the portable
   # fixed-width fallback; scalar and sizeless targets are outside this table.
@@ -1523,9 +1542,9 @@ bioseq_add_highway_codegen(
     "hasher_base|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm|bioseq.highway.sources.hasher_base|hasher_base|hasher_base|sequence_ops,simd_utils"
     "hasher_lexic|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm|bioseq.highway.sources.hasher_lexic|hasher_lexic|hasher_lexic|hasher_base,simd_utils"
     "hasher_minimap_int|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm|bioseq.highway.sources.hasher_minimap_int|hasher_minimap_int|hasher_minimap_int|hasher_base,hasher_lexic,simd_utils"
-    "minimizer_reference|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/reference_minimap_int_kernel.cppm|bioseq.highway.sources.minimizer_reference|minimizer_reference|minimizers|sequence_ops,hasher_base,hasher_minimap_int,simd_utils,vector_stream"
-    "minimizer_two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack|minimizer_two_stack|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
-    "minimizer_paper|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm|bioseq.highway.sources.minimizer_paper|minimizer_paper|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
+    "minimizer_minimap2_reference|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimap2_reference_kernel.cppm|bioseq.highway.sources.minimizer_minimap2_reference|minimizer_minimap2_reference|minimizers|sequence_ops,hasher_base,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_two_stack_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack_nthash|minimizer_two_stack_nthash|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_bounded_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm|bioseq.highway.sources.minimizer_bounded_nthash|minimizer_bounded_nthash|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
     "alignment_utils|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm|bioseq.highway.sources.alignment_utils|alignment_utils|alignment|"
     "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils"
     "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils"
@@ -1536,19 +1555,16 @@ bioseq_add_highway_codegen(
   SLOT_RECORDS
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
-    "prefilter|common|sneaky_snake_simd_batch|&bioseq::sequences::prefilters::{target_namespace}::sneaky_snake_simd_batch"
+    "prefilter|common|sneaky_snake_simd_batch|&bioseq::prefilter::{target_namespace}::sneaky_snake_simd_batch"
     "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
-    "indexing|indexing|validate_non_scatter_local32_w2|&bioseq::indexing::{target_namespace}::validate_non_scatter_local32_w2"
   REQUIRED_SLOT_RECORDS
     ${BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
     "common|sneaky_snake_simd_batch"
     "chaining|chain_anchors_simd"
-    "indexing|validate_non_scatter_local32_w2"
   UNIT_PROBE_RECORDS ${BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS}
-  BENCH_PROBE_RECORDS ${BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS}
-  MINIMIZER_REPR_INSTANCE_RECORDS
-    ${BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS}
+  MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
+    ${BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS}
   OUTPUT_MODULES BIOSEQ_HIGHWAY_GENERATED_MODULES
   OUTPUT_PRIMARY_MODULES BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES
   OUTPUT_TARGET_IMPLEMENTATIONS
@@ -1560,10 +1576,8 @@ bioseq_add_highway_codegen(
   OUTPUT_TEST_SUPPORT BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT
   OUTPUT_UNIT_PROBE_IMPLEMENTATIONS
     BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS
-  OUTPUT_BENCH_PROBE_IMPLEMENTATIONS
-    BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
-  OUTPUT_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
-    BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
+  OUTPUT_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS
+    BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS
   OUTPUT_SOURCE_INPUTS BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS
   OUTPUT_TARGET_RECORDS BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
   OUTPUT_COMPILED_MASK BIOSEQ_HIGHWAY_COMPILED_TARGET_MASK)
@@ -1572,46 +1586,36 @@ list(LENGTH BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   _bioseq_highway_unit_probe_record_count)
 list(LENGTH BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS
   _bioseq_highway_unit_probe_output_count)
-list(LENGTH BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS
-  _bioseq_highway_bench_probe_record_count)
-list(LENGTH BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
-  _bioseq_highway_bench_probe_output_count)
-list(LENGTH BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
-  _bioseq_highway_repr_owner_count)
+list(LENGTH BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
+  _bioseq_highway_representation_owner_count)
 list(LENGTH BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
   _bioseq_highway_compiled_target_count)
-list(LENGTH BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
-  _bioseq_highway_repr_output_count)
-math(EXPR _bioseq_highway_expected_repr_output_count
-  "${_bioseq_highway_repr_owner_count} * ${_bioseq_highway_compiled_target_count}")
+list(LENGTH BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS
+  _bioseq_highway_representation_output_count)
+math(EXPR _bioseq_highway_expected_representation_output_count
+  "${_bioseq_highway_representation_owner_count} * ${_bioseq_highway_compiled_target_count}")
 if(NOT _bioseq_highway_unit_probe_record_count EQUAL 4
     OR NOT _bioseq_highway_unit_probe_output_count EQUAL 4)
   message(FATAL_ERROR
     "DOC0399 requires exactly four fixed-target unit probe owners/outputs")
 endif()
-if(NOT _bioseq_highway_bench_probe_record_count EQUAL 1
-    OR NOT _bioseq_highway_bench_probe_output_count EQUAL 1)
-  message(FATAL_ERROR
-    "DOC0399 requires exactly one fixed-target benchmark probe owner/output")
-endif()
 if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
-  set(_bioseq_highway_expected_repr_owner_count 13)
+  set(_bioseq_highway_expected_representation_owner_count 13)
 else()
-  set(_bioseq_highway_expected_repr_owner_count 7)
+  set(_bioseq_highway_expected_representation_owner_count 7)
 endif()
-if(NOT _bioseq_highway_repr_owner_count EQUAL
-      _bioseq_highway_expected_repr_owner_count
-    OR NOT _bioseq_highway_repr_output_count EQUAL
-      _bioseq_highway_expected_repr_output_count)
+if(NOT _bioseq_highway_representation_owner_count EQUAL
+      _bioseq_highway_expected_representation_owner_count
+    OR NOT _bioseq_highway_representation_output_count EQUAL
+      _bioseq_highway_expected_representation_output_count)
   message(FATAL_ERROR
     "DOC0399 minimizer representation owner/output closure diverged: "
-    "owners=${_bioseq_highway_repr_owner_count}, "
-    "outputs=${_bioseq_highway_repr_output_count}, "
+    "owners=${_bioseq_highway_representation_owner_count}, "
+    "outputs=${_bioseq_highway_representation_output_count}, "
     "targets=${_bioseq_highway_compiled_target_count}")
 endif()
 set(_bioseq_highway_probe_outputs
-  ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS}
-  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS})
+  ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS})
 set(_bioseq_highway_unique_probe_outputs ${_bioseq_highway_probe_outputs})
 list(REMOVE_DUPLICATES _bioseq_highway_unique_probe_outputs)
 list(LENGTH _bioseq_highway_probe_outputs _bioseq_highway_probe_output_count)
@@ -1627,8 +1631,6 @@ foreach(_bioseq_highway_unit_probe
         BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
       OR _bioseq_highway_unit_probe IN_LIST
         BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
-      OR _bioseq_highway_unit_probe IN_LIST
-        BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
       OR _bioseq_highway_unit_probe STREQUAL
         BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
       OR _bioseq_highway_unit_probe STREQUAL
@@ -1638,34 +1640,16 @@ foreach(_bioseq_highway_unit_probe
       "${_bioseq_highway_unit_probe}")
   endif()
 endforeach()
-foreach(_bioseq_highway_bench_probe
-    IN LISTS BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS)
-  if(_bioseq_highway_bench_probe IN_LIST
-        BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
-      OR _bioseq_highway_bench_probe IN_LIST
-        BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
-      OR _bioseq_highway_bench_probe STREQUAL
-        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
-      OR _bioseq_highway_bench_probe STREQUAL
-        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY)
-    message(FATAL_ERROR
-      "benchmark probe escaped its dedicated fixed-target output: "
-      "${_bioseq_highway_bench_probe}")
-  endif()
-endforeach()
-unset(_bioseq_highway_bench_probe)
 unset(_bioseq_highway_unit_probe)
 unset(_bioseq_highway_probe_outputs)
 unset(_bioseq_highway_unique_probe_outputs)
 unset(_bioseq_highway_probe_output_count)
 unset(_bioseq_highway_unique_probe_output_count)
-unset(_bioseq_highway_expected_repr_owner_count)
-unset(_bioseq_highway_expected_repr_output_count)
-unset(_bioseq_highway_repr_output_count)
+unset(_bioseq_highway_expected_representation_owner_count)
+unset(_bioseq_highway_expected_representation_output_count)
+unset(_bioseq_highway_representation_output_count)
 unset(_bioseq_highway_compiled_target_count)
-unset(_bioseq_highway_repr_owner_count)
-unset(_bioseq_highway_bench_probe_output_count)
-unset(_bioseq_highway_bench_probe_record_count)
+unset(_bioseq_highway_representation_owner_count)
 unset(_bioseq_highway_unit_probe_output_count)
 unset(_bioseq_highway_unit_probe_record_count)
 
@@ -1697,11 +1681,15 @@ endif()
 
 if(APPLE)
   add_executable(bioseq_gpu_archive_builder
-    ${BIOSEQ_GPU_ARCHIVE_BUILDER_SRC}
-    ${BIOSEQ_GPU_METAL_ARCHIVE_SRC})
+    ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
+  target_sources(bioseq_gpu_archive_builder
+    PRIVATE
+      FILE_SET archive_modules TYPE CXX_MODULES FILES
+        ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS})
+  set_source_files_properties(
+    ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS}
+    PROPERTIES CXX_SCAN_FOR_MODULES ON)
   target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
-  target_include_directories(bioseq_gpu_archive_builder PRIVATE
-    "${CMAKE_CURRENT_LIST_DIR}/backend")
   if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
     install(TARGETS bioseq_gpu_archive_builder
       RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
@@ -1714,9 +1702,7 @@ endif()
 # because the shared lib excludes Catch2.
 # ============================================================================
 
-file(GLOB_RECURSE A_SRC_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/cli/cli_main.cpp)
-file(GLOB_RECURSE A_SRC_TESTS
+file(GLOB_RECURSE BIOSEQ_UNIT_TEST_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
@@ -1733,7 +1719,7 @@ file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_formats_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_parser_test.cpp)
 
-file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
+file(GLOB_RECURSE BIOSEQ_INTEGRATION_TEST_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cpp)
@@ -1741,14 +1727,12 @@ file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
 # Integration-tests module set: shared lib provides mlogging.cppm + the
 # whole Domain N core, so we only list testing.cppm + the integration-test-
 # specific modules here.
-file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS_MODULES
+file(GLOB_RECURSE BIOSEQ_INTEGRATION_TEST_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm)
 
-list (APPEND A_SRC_TESTS ${A_SRC_FILES})
-
-list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
-list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
+list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
 
 # DOC0270 — drop every module that the shared bioseq_modules_nopg OBJECT
 # library already owns from postgresql_bioseq's per-target module set. Without
@@ -1766,7 +1750,7 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 # the two Domain N modules that branch on NO_POSTGRES end up with the
 # DEBUG_ASSERT variant in postgresql_bioseq:
 #
-#   - sequences/simd.cppm  ::stdc_compare contract-violation paths use
+#   - sequences/simd_implementation.cppm  ::stdc_compare contract-violation paths use
 #     DEBUG_ASSERT instead of PostgreSQL ERROR logging. With -DNDEBUG the
 #     DEBUG_ASSERT compiles out, so the violations become silent. These
 #     paths are unreachable in well-formed code (caller passes mixed-alphabet
@@ -1785,26 +1769,21 @@ list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 # facets. Both the extension and the dedicated contract OBJECT target import
 # these PUBLIC BMIs; the contract objects themselves never enter the DSO.
 set(BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/alignment_sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/column/metadata/sql_rows.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_sql_rows.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/bitmapset.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/datums.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/error_bridge.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/lists.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/runtime_test_counters.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/safety_runtime_probe.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_catalog_entities.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/aggregate.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/guc_storage.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/row_codec.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/vector.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/sql_rows.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/io/sql_rows.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/sql_rows.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/sequences_pg/sample_table_udf_sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/datums.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/runtime_test_counters.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_catalog_entities.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/aggregate.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/guc_storage.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/row_codec.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/sql_boundary/vector.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/io/sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/manager/sql_rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/sequences/sample_table/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/table/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/vectorization/vector_types.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
@@ -1814,15 +1793,16 @@ list(REMOVE_ITEM SRC_MOD_FILES
 # the production source globs here and compiled only by the dedicated OBJECT
 # target declared after generated provider paths are known.
 set(BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/catalog_entity_handle_producer_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/generated_guc_producer_test.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/sql_boundary_template_producer_test.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/catalog_entity_handle_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/generated_guc_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_boundary_template_producer_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/result_materialization_test.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_entity_handles_test.cppm")
 set(BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/catalog_entity_handle_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/generated_guc_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/sql_boundary_template_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/compile_contracts/active_generated_guc_consumer_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_entity_handles_contract.cpp")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/catalog_entity_handle_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/generated_guc_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/sql_boundary_template_consumer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/compile_contracts/active_generated_guc_consumer_test.cpp")
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES})
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
@@ -1840,24 +1820,6 @@ option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
 if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(FILTER SRC_MOD_FILES EXCLUDE
     REGEX "/backend/pg/external/(scan|row_writer)\\.cppm$")
-else()
-  # DOC0372 streaming data plane — the external CustomScan's producer task
-  # (scan.cppm) imports the libcurl pull source, locator SSRF firewall, serial
-  # gzip decode source, and NCBI sequence stream. Compile those non-PG transfer/IO
-  # modules directly into the extension (like scan/row_writer) so there is one
-  # copy of the shared Domain-N module objects (nopg arrives via SHARED_MODULE_LIBS)
-  # rather than a second copy through a static library.
-  list(APPEND SRC_MOD_FILES
-    "${CMAKE_CURRENT_LIST_DIR}/external/transport/locator.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/external/transport/remote_source.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/external/io/gzip_decode_source.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/external/io/sequence_stream.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/external/io/archive_source.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/external/io/datasets_stream.cppm")
-  # archive_md5.cpp is a classic (non-module) TU: it owns the OpenSSL include so
-  # <openssl/evp.h> never enters a module global module fragment.
-  list(APPEND SRC_FILES
-    "${CMAKE_CURRENT_LIST_DIR}/external/io/archive_md5.cpp")
 endif()
 
 # GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
@@ -1902,13 +1864,13 @@ bioseq_add_template_flatten_codegen(
   NAME dispatch_processor_typed
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
   OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
-  OUTPUT_MODULE bioseq.scheduler.dispatch_processor
+  OUTPUT_MODULE bioseq.postgres.scheduler.dispatch_processor
   CONFIGURE_TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   EXPECTED_TOPOLOGY_DIGEST "${BIOSEQ_TYPED_TOPOLOGY_DIGEST}"
   ENABLED_ORDINALS ${BIOSEQ_TYPED_ENABLED_ORDINALS}
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
   SIGNATURE_SOURCE
-    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/index.cppm"
   PCM_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}/pcm"
   PREPARE_DEPENDS "${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}"
   OUT_API_PARTITION BIOSEQ_TYPED_API_PARTITION
@@ -1955,36 +1917,37 @@ set(BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS
 set(BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_publish.cppm")
 
-set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
+set(BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/lifecycle.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_evidence.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_stats.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_index_admin_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_minimizer_diagnostics_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_scheduler_diagnostics_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_sequence_source_contract_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_sql_frontdoor_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_highway_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/index_admin.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/minimizer_diagnostics.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/scheduler_diagnostics.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/sequence_source_contract.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/sql_frontdoor.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/api_implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/runtime.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/highway_binding.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_legacy.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_metadata.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stage_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stats_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_stage.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_stats.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_worker.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_mps_impl.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/shader_runtime.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/direct_minimizer_materialization.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/external/standard_library_link_support.cppm")
+list(APPEND BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/sorted_runs/postgres_error.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
-  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
+  ${BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS})
 list(APPEND SRC_MOD_FILES
   "${BIOSEQ_TYPED_API_PARTITION}"
   "${BIOSEQ_TYPED_SELECTOR_PARTITION}")
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 list(APPEND SRC_FILES
-  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS}
   ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS})
 foreach(_bioseq_alignment_hook_partition
     IN LISTS BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS)
@@ -2003,7 +1966,7 @@ foreach(_bioseq_alignment_hook_partition
   endif()
   if(_bioseq_alignment_hook_partition IN_LIST SRC_FILES
       OR _bioseq_alignment_hook_partition IN_LIST
-        BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+        BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS
       OR _bioseq_alignment_hook_partition IN_LIST
         BIOSEQ_TYPED_IMPLEMENTATION_UNITS
       OR _bioseq_alignment_hook_partition IN_LIST
@@ -2033,7 +1996,7 @@ foreach(_bioseq_supervisor_partition
   endif()
   if(_bioseq_supervisor_partition IN_LIST SRC_FILES
       OR _bioseq_supervisor_partition IN_LIST
-        BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+        BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS
       OR _bioseq_supervisor_partition IN_LIST
         BIOSEQ_TYPED_IMPLEMENTATION_UNITS
       OR _bioseq_supervisor_partition IN_LIST
@@ -2047,7 +2010,7 @@ unset(_bioseq_supervisor_module_count)
 unset(_bioseq_module_source)
 unset(_bioseq_supervisor_partition)
 set_source_files_properties(
-  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_POSTGRES_NAMED_IMPLEMENTATION_UNITS}
   "${BIOSEQ_TYPED_API_PARTITION}"
   "${BIOSEQ_TYPED_SELECTOR_PARTITION}"
   ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
@@ -2088,39 +2051,35 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
     "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
 endif()
 
-# Per-target module set for the aligner (and its tests_exec sibling): just
-# testing.cppm; every other Domain N module is delivered via
-# bioseq_modules_nopg. tests_exec adds the _test.cpp files to SOURCES via
-# AddCommonTargetX's TESTS arg.
-set(A_ALIGNER_MOD_FILES
+# The unit-test target owns only testing.cppm; every other Domain N module is
+# delivered by bioseq_modules_nopg. The integration target replaces this file
+# set with its integration-specific modules below.
+set(BIOSEQ_UNIT_TEST_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm)
 
-AddCommonTargetX(
-  bioseq_aligner
+set(BIOSEQ_TEST_TARGET_ARGUMENTS
   TYPE EXEC
-  MAIN "cli_main\.cpp"
   CXX 26
   RELOCATABLE
-  NAME bioseq_aligner
-  COMMENT "BioSeq CLI"
+  COMMENT "BioSeq tests"
   VERSION ${INSTALL_VERSION}
   COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
-    "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
   TESTS
-    ${A_SRC_TESTS}
+    ${BIOSEQ_UNIT_TEST_SOURCES}
   INTEGRATION_TESTS
-    ${A_INTEGRATION_SRC_TESTS}
+    ${BIOSEQ_INTEGRATION_TEST_SOURCES}
   INTEGRATION_TESTS_LINKS
     sqlgen::sqlgen
   INTEGRATION_TESTS_MODULES
-    ${A_INTEGRATION_SRC_TESTS_MODULES}
+    ${BIOSEQ_INTEGRATION_TEST_MODULES}
   LINKS
     safestring_static
     fmt
@@ -2135,22 +2094,35 @@ AddCommonTargetX(
     Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
-  SOURCES
-    ${A_SRC_FILES}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}"
   CXX_MOD_FILES
-    ${A_ALIGNER_MOD_FILES}
+    ${BIOSEQ_UNIT_TEST_MODULES}
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
 
+AddCommonTarget(
+  bioseq_unit_tests
+  ON
+  ${BIOSEQ_TEST_TARGET_ARGUMENTS})
+set_target_properties(bioseq_unit_tests PROPERTIES
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+AddCommonTarget(
+  bioseq_integration_tests
+  INTEGRATION
+  ${BIOSEQ_TEST_TARGET_ARGUMENTS})
+set_target_properties(bioseq_integration_tests PROPERTIES
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+unset(BIOSEQ_TEST_TARGET_ARGUMENTS)
+
 # Unit tests use one generator-proven fixed target, chosen from the compiler's
 # HWY_STATIC_TARGET record. The test provider imports the same generated
 # canonical partitions as production and never performs runtime dispatch.
-if(TARGET bioseq_aligner_tests_exec)
+if(TARGET bioseq_unit_tests)
   set_source_files_properties(
     "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
     "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
@@ -2159,7 +2131,7 @@ if(TARGET bioseq_aligner_tests_exec)
   set_source_files_properties(
     ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
     PROPERTIES COMPILE_OPTIONS "-x;c++")
-  target_sources(bioseq_aligner_tests_exec
+  target_sources(bioseq_unit_tests
     PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
     PRIVATE FILE_SET bioseq_highway_fixed_target_test_modules
       TYPE CXX_MODULES
@@ -2172,44 +2144,15 @@ if(TARGET bioseq_aligner_tests_exec)
     set_source_files_properties(
       ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS}
       PROPERTIES GENERATED TRUE COMPILE_OPTIONS "-x;c++")
-    target_sources(bioseq_aligner_tests_exec PRIVATE
+    target_sources(bioseq_unit_tests PRIVATE
       ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS})
   endif()
-  target_link_libraries(bioseq_aligner_tests_exec PRIVATE
+  target_link_libraries(bioseq_unit_tests PRIVATE
     bioseq_highway_target_policy)
   add_dependencies(
-    bioseq_aligner_tests_exec bioseq_highway_target_modules)
+    bioseq_unit_tests bioseq_highway_target_modules)
 endif()
 
-# Test-only backend DSO used by the DOC0388 native alter-function integration
-# matrix.  Keep it outside the integration source glob (the .cc suffix) and
-# pass its absolute build path only to the external libpq test executable.
-if(TARGET bioseq_aligner_int_tests_exec)
-  add_library(bioseq_doc0388_alter_hook_probe MODULE EXCLUDE_FROM_ALL
-    "${CMAKE_CURRENT_LIST_DIR}/integration_tests/doc0388_alter_hook_probe.cc")
-  target_link_libraries(bioseq_doc0388_alter_hook_probe PRIVATE
-    PostgreSQL::ServerHeaders)
-  set_target_properties(bioseq_doc0388_alter_hook_probe PROPERTIES
-    CXX_STANDARD 26
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS ON
-    POSITION_INDEPENDENT_CODE ON
-    PREFIX "")
-  if(APPLE)
-    target_link_options(bioseq_doc0388_alter_hook_probe PRIVATE
-      "-Wl,-undefined,dynamic_lookup")
-  endif()
-  add_dependencies(
-    bioseq_aligner_int_tests_exec
-    bioseq_doc0388_alter_hook_probe)
-  target_compile_definitions(bioseq_aligner_int_tests_exec PRIVATE
-    "BIOSEQ_DOC0388_ALTER_HOOK_PROBE_PATH=\"$<TARGET_FILE:bioseq_doc0388_alter_hook_probe>\"")
-endif()
-
-set(BIOSEQ_SQL_BASE_PHYSICAL_LEDGER
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq-physical-ledger.tsv")
-set(BIOSEQ_SQL_EXTERNAL_PHYSICAL_LEDGER_OVERLAY
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq-external-physical-ledger.tsv")
 set(BIOSEQ_SQL_RETIRED_EXTERNAL_FRAGMENT
   "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_external--1.0.sql")
 if(EXISTS "${BIOSEQ_SQL_RETIRED_EXTERNAL_FRAGMENT}")
@@ -2217,50 +2160,6 @@ if(EXISTS "${BIOSEQ_SQL_RETIRED_EXTERNAL_FRAGMENT}")
     "The optional external SQL surface is generated from natural C++ owners; "
     "the retired bioseq_external--1.0.sql fragment must not be restored")
 endif()
-set(BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER
-  "${BIOSEQ_SQL_BASE_PHYSICAL_LEDGER}")
-if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
-  file(READ "${BIOSEQ_SQL_BASE_PHYSICAL_LEDGER}"
-    _bioseq_sql_base_physical_ledger)
-  if(NOT _bioseq_sql_base_physical_ledger MATCHES "\n$")
-    message(FATAL_ERROR
-      "Base SQL physical ledger must end with a newline")
-  endif()
-  file(STRINGS "${BIOSEQ_SQL_EXTERNAL_PHYSICAL_LEDGER_OVERLAY}"
-    _bioseq_sql_external_physical_rows
-    REGEX "^[^#].+")
-  list(LENGTH _bioseq_sql_external_physical_rows
-    _bioseq_sql_external_physical_row_count)
-  if(NOT _bioseq_sql_external_physical_row_count EQUAL 13)
-    message(FATAL_ERROR
-      "External SQL physical ledger overlay must contain exactly 13 rows")
-  endif()
-  list(GET _bioseq_sql_external_physical_rows 0
-    _bioseq_sql_external_physical_first)
-  list(GET _bioseq_sql_external_physical_rows -1
-    _bioseq_sql_external_physical_last)
-  if(NOT _bioseq_sql_external_physical_first MATCHES "^P492\t"
-      OR NOT _bioseq_sql_external_physical_last MATCHES "^P504\t")
-    message(FATAL_ERROR
-      "External SQL physical ledger overlay must span P492 through P504")
-  endif()
-  string(JOIN "\n" _bioseq_sql_external_physical_body
-    ${_bioseq_sql_external_physical_rows})
-  set(_bioseq_sql_external_physical_ledger_dir
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/physical-ledger")
-  file(MAKE_DIRECTORY
-    "${_bioseq_sql_external_physical_ledger_dir}")
-  set(BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER
-    "${_bioseq_sql_external_physical_ledger_dir}/bioseq-external-physical-ledger.tsv")
-  file(WRITE "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-    "${_bioseq_sql_base_physical_ledger}"
-    "${_bioseq_sql_external_physical_body}\n")
-endif()
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql"
-  "${BIOSEQ_SQL_BASE_PHYSICAL_LEDGER}"
-  "${BIOSEQ_SQL_EXTERNAL_PHYSICAL_LEDGER_OVERLAY}")
-
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
 include(
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/PostgresErrorSafety.cmake")
@@ -2290,15 +2189,13 @@ set_target_properties(bioseq_sql_annotation_probe PROPERTIES
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON)
 
-# The collector receives the configured backend module closure, ignores
-# modules without bioseq_sql annotations, and never reads the checked SQL.
-# The ordinary target is a stale-golden gate; updating the source-tree golden
-# requires the explicitly invoked maintainer target.
+# The collector receives the configured backend module closure and ignores
+# modules without bioseq_sql annotations.
 option(BIOSEQ_TEST_INDEXES
   "Compile the test-only indexing descriptors into the extension + test execs"
   OFF)
 set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/row_codec_runtime_test_support.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
 # Both profile prepares need this named-module provider in the raw compile
@@ -2426,7 +2323,6 @@ set(BIOSEQ_SQL_NEGATIVE_FIXTURES
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_catalog_handle_specialization.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_access.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_catalog_handle_namespace_alias.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_migration_install_owner.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_access_using_declaration.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_type_alias.cppm")
 set(BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP
@@ -2706,8 +2602,6 @@ if(NOT "${BIOSEQ_SQL_SAFETY_EVIDENCE_DIR}" STREQUAL "")
     endif()
   endforeach()
 endif()
-set(BIOSEQ_SQL_GUC_PARITY_LEDGER
-  "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_guc_parity_ledger.json")
 set(BIOSEQ_SQL_GUC_OUTPUT_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/bioseq/sql/gucs")
 set(BIOSEQ_SQL_GUC_GENERATED_MODULES)
@@ -2746,89 +2640,89 @@ bioseq_sql_begin_owner_registry(
 
 bioseq_register_sql_owner(
   OWNER_KEY aligner_guc
-  MODULE bioseq.aligner.sql_guc_settings
-  SOURCES backend/config/aligner_sql_guc_settings.cppm
+  MODULE bioseq.postgres.configuration.aligner
+  SOURCES backend/pg/configuration/aligner.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   GUC_OWNERS aligner)
 bioseq_register_sql_owner(
   OWNER_KEY scheduler_guc
-  MODULE bioseq.scheduler.sql_guc_settings
-  SOURCES backend/config/scheduler_sql_guc_settings.cppm
+  MODULE bioseq.postgres.configuration.scheduler
+  SOURCES backend/pg/configuration/scheduler.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   GUC_OWNERS scheduler)
 bioseq_register_sql_owner(
   OWNER_KEY extension_guc
-  MODULE bioseq.sql_guc_settings
-  SOURCES backend/config/sql_guc_settings.cppm
+  MODULE bioseq.postgres.configuration.core
+  SOURCES backend/pg/configuration/core.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   GUC_OWNERS bioseq)
 bioseq_register_sql_owner(
   OWNER_KEY storage_guc
-  MODULE bioseq.storage.sql_guc_settings
-  SOURCES backend/config/storage_sql_guc_settings.cppm
+  MODULE bioseq.postgres.configuration.storage
+  SOURCES backend/pg/configuration/storage.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   GUC_OWNERS storage)
 
 bioseq_register_sql_owner(
   OWNER_KEY alignment_rows
-  MODULE bioseq.mod.alignment.sql_rows
-  SOURCES backend/pg/alignment_sql_rows.cppm
+  MODULE bioseq.postgres.extension.alignment_sql_rows
+  SOURCES backend/pg/extension/alignment_sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT)
 bioseq_register_sql_owner(
   OWNER_KEY storage_metadata_rows
-  MODULE bioseq.storage.metadata.sql_rows
+  MODULE bioseq.postgres.storage.metadata.sql_rows
   SOURCES backend/pg/column/metadata/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   ROW_CODECS storage_metadata)
 bioseq_register_sql_owner(
   OWNER_KEY mod_rows
-  MODULE bioseq.mod.sql_rows
-  SOURCES backend/pg/mod_sql_rows.cppm
+  MODULE bioseq.postgres.extension.sql_rows
+  SOURCES backend/pg/extension/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT)
 bioseq_register_sql_owner(
   OWNER_KEY sequences_sample_table_udf_rows
-  MODULE bioseq.sequences.sample_table_udf.sql_rows
-  SOURCES backend/pg/sequences_pg/sample_table_udf_sql_rows.cppm
+  MODULE bioseq.postgres.sequences.sample_table:sql_rows
+  SOURCES backend/pg/sequences/sample_table/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   ANNOTATION_FREE_RESULT_ROWS sequences_sample_table_udf)
 bioseq_register_sql_owner(
   OWNER_KEY sql_function_rows
-  MODULE bioseq.sql.functions.sql_rows
+  MODULE bioseq.postgres.sql.functions.sql_rows
   SOURCES backend/pg/sql/functions_sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT)
 bioseq_register_sql_owner(
   OWNER_KEY storage_indexing_rows
-  MODULE bioseq.storage.indexing_pg.sql_rows
-  SOURCES backend/pg/storage_pg/indexing/sql_rows.cppm
+  MODULE bioseq.postgres.storage.indexing.sql_rows
+  SOURCES backend/pg/storage/indexing/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   ROW_CODECS storage_indexing_pg)
 bioseq_register_sql_owner(
   OWNER_KEY storage_load_rows
-  MODULE bioseq.storage.load_pg.sql_rows
-  SOURCES backend/pg/storage_pg/io/sql_rows.cppm
+  MODULE bioseq.postgres.storage.io.sql_rows
+  SOURCES backend/pg/storage/io/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   ROW_CODECS storage_load_pg)
 bioseq_register_sql_owner(
   OWNER_KEY storage_manager_rows
-  MODULE bioseq.storage.manager.sql_rows
-  SOURCES backend/pg/storage_pg/sql_rows.cppm
+  MODULE bioseq.postgres.storage.manager.sql_rows
+  SOURCES backend/pg/storage/manager/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
   ROW_CODECS storage_manager)
 bioseq_register_sql_owner(
   OWNER_KEY table_rows
-  MODULE bioseq.table.sql_rows
+  MODULE bioseq.postgres.table.sql_rows
   SOURCES backend/pg/table/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
@@ -2836,8 +2730,8 @@ bioseq_register_sql_owner(
 
 bioseq_register_sql_owner(
   OWNER_KEY storage_metadata_core
-  MODULE bioseq.storage_metadata.core
-  SOURCES backend/pg/column/metadata/core_sql_entities.cppm
+  MODULE bioseq.postgres.storage.metadata.sql_entities
+  SOURCES backend/pg/column/metadata/sql_entities.cppm
   PROFILES production test_indexes
   AUTHORITIES CORE
   ENTITY_HANDLES storage_metadata_core)
@@ -2864,73 +2758,73 @@ bioseq_register_sql_owner(
   FMGR_ENTRYPOINTS highway_ksw_target_test_support)
 bioseq_register_sql_owner(
   OWNER_KEY sequences_sample_table_udf
-  MODULE bioseq.sequences.sample_table_udf
-  SOURCES backend/pg/sequences_pg/sample_table_udf.cppm
+  MODULE bioseq.postgres.sequences.sample_table
+  SOURCES backend/pg/sequences/sample_table/index.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS sequences_sample_table_udf)
 bioseq_register_sql_owner(
   OWNER_KEY sql_bootstrap
-  MODULE bioseq.sql.bootstrap
+  MODULE bioseq.postgres.sql.bootstrap
   SOURCES backend/pg/sql/bootstrap.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL)
 bioseq_register_sql_owner(
   OWNER_KEY sql_catalog_views
-  MODULE bioseq.sql.catalog_views
+  MODULE bioseq.postgres.sql.catalog_views
   SOURCES backend/pg/sql/catalog_views.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL)
 bioseq_register_sql_owner(
   OWNER_KEY sql_functions
-  MODULE bioseq.sql.functions
+  MODULE bioseq.postgres.sql.functions
   SOURCES backend/pg/sql/functions.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL)
 bioseq_register_sql_owner(
-  OWNER_KEY external_relation_legacy_fmgr
-  MODULE bioseq.pg.external.relation
+  OWNER_KEY external_relation_fmgr_export
+  MODULE bioseq.postgres.external.relation
   SOURCES backend/pg/external/relation.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
-  LEGACY_FMGR_SCANS bioseq_external_handler)
+  HANDWRITTEN_FMGR_EXPORTS bioseq_external_handler)
 bioseq_register_sql_owner(
   OWNER_KEY external_sql_catalog
-  MODULE bioseq.pg.external.sql_catalog
+  MODULE bioseq.postgres.external.sql_catalog
   SOURCES backend/pg/external/sql_catalog.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL)
 bioseq_register_sql_owner(
   OWNER_KEY storage_indexing_pg_chunked_storage
-  MODULE bioseq.storage_indexing_pg.chunked_storage
-  SOURCES backend/pg/storage_pg/indexing/chunked_storage_sql_entities.cppm
+  MODULE bioseq.postgres.storage.indexing.chunked_storage.sql_entities
+  SOURCES backend/pg/storage/indexing/chunked_storage/sql_entities.cppm
   PROFILES production test_indexes
   AUTHORITIES CORE
   ENTITY_HANDLES storage_indexing_pg_chunked_storage)
 bioseq_register_sql_owner(
   OWNER_KEY storage_load_pg
-  MODULE bioseq.storage.load_pg
-  SOURCES backend/pg/storage_pg/io/load.cppm
+  MODULE bioseq.postgres.storage.io
+  SOURCES backend/pg/storage/io/index.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS storage_load_pg)
 bioseq_register_sql_owner(
   OWNER_KEY storage_manager_sequence_storage_manager_core
-  MODULE bioseq.storage_manager.sequence_storage_manager
-  SOURCES backend/pg/storage_pg/sequence_storage_manager_sql_entities.cppm
+  MODULE bioseq.postgres.storage.manager.sequence_storage.sql_entities
+  SOURCES backend/pg/storage/manager/sequence_storage_sql_entities.cppm
   PROFILES production test_indexes
   AUTHORITIES CORE
   ENTITY_HANDLES storage_manager_sequence_storage_manager)
 bioseq_register_sql_owner(
   OWNER_KEY storage_manager_sequence_storage_manager
-  MODULE bioseq.storage.manager:sequence_storage_manager
-  SOURCES backend/pg/storage_pg/sequence_storage_manager.cppm
+  MODULE bioseq.postgres.storage.manager:sequence_storage
+  SOURCES backend/pg/storage/manager/sequence_storage.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS storage_manager_sequence_storage_manager)
 bioseq_register_sql_owner(
   OWNER_KEY table
-  MODULE bioseq.table
+  MODULE bioseq.postgres.table
   SOURCES
     backend/pg/table/access_hooks.cppm
     backend/pg/table/access_method.cppm
@@ -2940,7 +2834,7 @@ bioseq_register_sql_owner(
   FMGR_ENTRYPOINTS table_access_hooks)
 bioseq_register_sql_owner(
   OWNER_KEY types_pg_compact_sequence
-  MODULE bioseq.types.pg_compact_sequence
+  MODULE bioseq.postgres.types.compact_sequence
   SOURCES
     backend/pg/types/compact_sequence/array_string.cppm
     backend/pg/types/compact_sequence/concat_reverse.cppm
@@ -2957,7 +2851,7 @@ bioseq_register_sql_owner(
   FMGR_ENTRYPOINTS types_pg_compact_sequence)
 bioseq_register_sql_owner(
   OWNER_KEY vector_types
-  MODULE bioseq.vector.types
+  MODULE bioseq.postgres.vectorization.types
   SOURCES
     backend/pg/vectorization/types/aggregates.cppm
     backend/pg/vectorization/types/date.cppm
@@ -3006,7 +2900,7 @@ bioseq_finalize_sql_owner_registry(
     aligner
   EXPECTED_ANNOTATION_FREE_RESULT_ROWS
     sequences_sample_table_udf
-  EXPECTED_LEGACY_FMGR_SCANS
+  EXPECTED_HANDWRITTEN_FMGR_EXPORTS
     bioseq_external_handler)
 
 # Clang collection never consumes a GCC BMI or the main target's compiler
@@ -3152,7 +3046,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "vector_comparison_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_COMPARISON_REGISTRY}"
       --fmgr-entrypoints-output
         "vector_aggregate_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}"
-      --guc-parity-ledger "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
       --extension-schema public
@@ -3167,7 +3060,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "${_bioseq_sql_support_compile_database}"
       "${_bioseq_sql_support_pcm_manifest}"
       "${_bioseq_sql_support_registry}"
-      "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       ${_bioseq_sql_support_sources}
     COMMENT
       "Generating ${_bioseq_sql_profile} SQL support modules"
@@ -3378,12 +3270,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_STAMP}")
   set(_bioseq_sql_fmgr_modules
     ${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FINAL_FMGR_ENTRYPOINT_MODULES})
-  set(_bioseq_sql_golden_args)
-  if(_bioseq_sql_profile STREQUAL "production"
-      AND NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
-    set(_bioseq_sql_golden_args
-      --golden "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql")
-  endif()
   set(_bioseq_sql_profile_only_fmgr_args)
   if(_bioseq_sql_profile STREQUAL "test_indexes")
     list(APPEND _bioseq_sql_profile_only_fmgr_args
@@ -3419,9 +3305,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
       --output "${_bioseq_sql_generated_install}"
       --manifest "${_bioseq_sql_generated_manifest}"
-      --physical-ledger "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-      --require-checked-physical-ledger
-      ${_bioseq_sql_golden_args}
       --stamp "${_bioseq_sql_generated_stamp}"
       --support-manifest
         "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_SUPPORT_MANIFEST}"
@@ -3478,7 +3361,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       --fmgr-entrypoints-output
         "vector_aggregate_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}"
       ${_bioseq_sql_profile_only_fmgr_args}
-      --guc-parity-ledger "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
       ${_bioseq_sql_completion_args}
@@ -3509,9 +3391,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       ${BIOSEQ_SQL_GUC_production_MODULES}
       ${BIOSEQ_SQL_GUC_test_indexes_MODULES}
       "${BIOSEQ_SQL_VALIDATOR_SELF_TEST_STAMP}"
-      "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql"
-      "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-      "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       ${_bioseq_sql_final_sources}
     COMMENT
       "Generating ${_bioseq_sql_profile} PostgreSQL extension SQL"
@@ -3787,10 +3666,6 @@ add_custom_command(
       "artifacts/gucs/test_indexes/owners/storage.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/storage.gucs.cppm"
     --ordinary-output
       "artifacts/gucs/test_indexes/owners/aligner.gucs.cppm=${BIOSEQ_SQL_GUC_OUTPUT_ROOT}/test_indexes/owners/aligner.gucs.cppm"
-    --physical-ledger
-      "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-    --guc-parity-ledger
-      "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
     --clang-binary
       "${BIOSEQ_CODEGEN_CLANG_BINARY}"
     --clang-scan-deps
@@ -3845,8 +3720,6 @@ add_custom_command(
     ${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_VECTOR_REGISTRY_MODULES}
     ${BIOSEQ_SQL_GUC_production_MODULES}
     ${BIOSEQ_SQL_GUC_test_indexes_MODULES}
-    "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-    "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
     "${BIOSEQ_CODEGEN_CLANG_BINARY}"
     "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
     "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
@@ -3899,7 +3772,7 @@ target_sources(bioseq_sql_compile_contract_providers
     FILES ${BIOSEQ_SQL_COMPILE_CONTRACT_GENERATED_PROVIDERS})
 target_include_directories(bioseq_sql_compile_contract_providers PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../config"
-  "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -3945,7 +3818,7 @@ target_sources(bioseq_sql_gcc_compile_contract_objects
     FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_MODULES})
 target_include_directories(bioseq_sql_gcc_compile_contract_objects PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/../config"
-  "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
   "${CMAKE_CURRENT_LIST_DIR}/backend")
 target_link_libraries(bioseq_sql_gcc_compile_contract_objects PRIVATE
   bioseq_sql_compile_contract_providers)
@@ -4201,8 +4074,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_INSTALL}"
       --manifest
         "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_MANIFEST}"
-      --base-golden
-        "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql"
       --expect "${_bioseq_sql_external_feature_expect}"
       --stamp "${_bioseq_sql_external_feature_contract_stamp}"
     DEPENDS
@@ -4210,7 +4081,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_STAMP}"
       "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_INSTALL}"
       "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_MANIFEST}"
-      "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql"
     COMMENT
       "Verifying ${_bioseq_sql_profile} external SQL feature contract"
     VERBATIM)
@@ -4223,57 +4093,12 @@ add_dependencies(
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
 
-find_package(Git REQUIRED)
-if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
-    AND BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK)
-  set(BIOSEQ_DOC0388_LEDGER_SCRIPT
-    "${CMAKE_CURRENT_LIST_DIR}/../cmake/doc0388_ledgers.py")
-  set(BIOSEQ_DOC0388_LEDGER_FIXTURES
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_catalog_delta.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_catalog_join_projection.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_fmgr_migration_inventory.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_ledger_schemas.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_result_identity_ledger.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_row_authority_migration_ledger.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_statement_disposition_ledger.json"
-    "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_statement_disposition_rules.json")
-  add_custom_target(bioseq_doc0388_ledgers
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "PYTHONDONTWRITEBYTECODE=1"
-      "${Python3_EXECUTABLE}"
-      "${BIOSEQ_DOC0388_LEDGER_SCRIPT}"
-      check
-      --repository-root "${CMAKE_CURRENT_LIST_DIR}/../.."
-      --candidate-manifest
-        "${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
-      --git "${GIT_EXECUTABLE}"
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "PYTHONDONTWRITEBYTECODE=1"
-      "${Python3_EXECUTABLE}"
-      "${BIOSEQ_DOC0388_LEDGER_SCRIPT}"
-      self-test
-      --repository-root "${CMAKE_CURRENT_LIST_DIR}/../.."
-      --candidate-manifest
-        "${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
-      --git "${GIT_EXECUTABLE}"
-    DEPENDS
-      "${BIOSEQ_DOC0388_LEDGER_SCRIPT}"
-      ${BIOSEQ_DOC0388_LEDGER_FIXTURES}
-      "${BIOSEQ_SQL_PRODUCTION_GENERATED_MANIFEST}"
-    COMMENT
-      "Checking exact DOC0388 source-to-target migration ledgers"
-    VERBATIM)
-  add_dependencies(
-    bioseq_doc0388_ledgers
-    bioseq_sql_final_production)
-endif()
-
-set(_bioseq_sql_check_golden_outputs
+set(_bioseq_sql_generation_contract_outputs
   ${_bioseq_sql_final_stamps}
   ${_bioseq_sql_external_feature_contract_stamps})
 # The full post-FINAL Clang facts/proof closure is intentionally opt-in.  Keep
 # its static validator report available without pulling it into the ordinary
-# generated-SQL/golden or extension-link gates.
+# generated-SQL or extension-link gates.
 if(NOT "${_bioseq_sql_safety_evidence_inputs}" STREQUAL "")
   set(BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT
     "${BIOSEQ_SQL_CODEGEN_DIR}/bioseq-safety-static-evidence.json")
@@ -4347,194 +4172,13 @@ if(NOT "${_bioseq_sql_safety_evidence_inputs}" STREQUAL "")
   add_custom_target(bioseq_sql_postgres_error_safety_static_evidence
     DEPENDS "${BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT}")
 endif()
-add_custom_target(bioseq_sql_check_golden
-  DEPENDS ${_bioseq_sql_check_golden_outputs})
+add_custom_target(bioseq_sql_generation_contract
+  DEPENDS ${_bioseq_sql_generation_contract_outputs})
 add_dependencies(
-  bioseq_sql_check_golden
+  bioseq_sql_generation_contract
   bioseq_sql_validator_self_test
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
-if(TARGET bioseq_doc0388_ledgers)
-  add_dependencies(
-    bioseq_sql_check_golden
-    bioseq_doc0388_ledgers)
-endif()
-
-# The checked golden is the feature-disabled P001-P491 base package.  An
-# external-enabled configuration may verify its generated P492-P504 overlay,
-# but must never publish that optional package into the base source golden.
-if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
-add_custom_target(bioseq_sql_update_golden
-  COMMAND "${CMAKE_COMMAND}" -E echo
-    "bioseq_sql_update_golden is disabled when BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; configure the base profile to update the P001-P491 golden"
-  COMMAND "${CMAKE_COMMAND}" -E false
-  VERBATIM)
-else()
-# The maintainer command must not share writable final artifacts or the success
-# stamp with the ordinary production gate.  It verifies the canonical support
-# row/GUC bytes, but writes every FINAL candidate under its own directory.
-set(BIOSEQ_SQL_UPDATE_GOLDEN_DIR
-  "${BIOSEQ_SQL_CODEGEN_DIR}/update-golden")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_INSTALL
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_DIR}/bioseq--1.0.sql")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_MANIFEST
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_DIR}/bioseq-sql-manifest.json")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_STAMP
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_DIR}/bioseq-sql.stamp")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_DIR}/fmgr")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/mod.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/highway_target_test_support.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/storage_manager_sequence_storage_manager.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_TABLE_ACCESS_HOOKS
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/table_access_hooks.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_LOAD_PG
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/storage_load_pg.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_SAMPLE_TABLE_UDF
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/sequences_sample_table_udf.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_COMPACT_SEQUENCE
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/types_pg_compact_sequence.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_INTEGER
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/vector_types_integer.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_DATE
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/vector_types_date.entrypoints.cppm")
-set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_AGGREGATES
-  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/vector_types_aggregates.entrypoints.cppm")
-add_custom_target(bioseq_sql_update_golden
-  BYPRODUCTS
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_INSTALL}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_MANIFEST}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_STAMP}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_TABLE_ACCESS_HOOKS}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_LOAD_PG}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_SAMPLE_TABLE_UDF}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_COMPACT_SEQUENCE}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_INTEGER}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_DATE}"
-    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_AGGREGATES}"
-  COMMAND
-    "$<TARGET_FILE:bioseq_codegen>" sql update-golden
-    --stage final
-    --profile production
-    --source-list "${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_FILE}"
-    --compile-database "${BIOSEQ_SQL_PRODUCTION_FINAL_COMPILE_DATABASE}"
-    --pcm-root "${BIOSEQ_SQL_PRODUCTION_PCM_ROOT}"
-    --pcm-manifest "${BIOSEQ_SQL_PRODUCTION_FINAL_PCM_MANIFEST}"
-    --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    --llvm-config "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    --compiler-module-inventory
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-    --clang-sha256 "${BIOSEQ_CODEGEN_CLANG_SHA256}"
-    --clang-scan-deps-sha256
-      "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
-    --llvm-config-sha256 "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
-    --compiler-module-inventory-sha256
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
-    --output "${BIOSEQ_SQL_UPDATE_GOLDEN_INSTALL}"
-    --manifest "${BIOSEQ_SQL_UPDATE_GOLDEN_MANIFEST}"
-    --physical-ledger "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-    --require-checked-physical-ledger
-    --golden "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql"
-    --stamp "${BIOSEQ_SQL_UPDATE_GOLDEN_STAMP}"
-    --support-manifest "${BIOSEQ_SQL_PRODUCTION_SUPPORT_MANIFEST}"
-    --support-seal "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"
-    --production-support-manifest
-      "${BIOSEQ_SQL_PRODUCTION_SUPPORT_MANIFEST}"
-    --production-support-seal
-      "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"
-    --test-indexes-support-manifest
-      "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_MANIFEST}"
-    --test-indexes-support-seal
-      "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}"
-    --expected-core-hash "${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
-    --core-manifest "${BIOSEQ_SQL_CORE_MANIFEST}"
-    --entity-handles-output
-      "storage_metadata_core=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_METADATA_CORE}"
-    --entity-handles-output
-      "storage_indexing_pg_chunked_storage=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_INDEXING_CHUNKED}"
-    --entity-handles-output
-      "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
-    --row-codecs-output
-      "storage_metadata=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_METADATA}"
-    --row-codecs-output
-      "storage_indexing_pg=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_INDEXING_PG}"
-    --row-codecs-output
-      "storage_load_pg=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_LOAD_PG}"
-    --row-codecs-output
-      "storage_manager=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_STORAGE_MANAGER}"
-    --row-codecs-output
-      "table=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_TABLE}"
-    --fmgr-entrypoints-output
-      "mod=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD}"
-    --fmgr-entrypoints-output
-      "highway_target_test_support=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT}"
-    --fmgr-entrypoints-output
-      "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER}"
-    --fmgr-entrypoints-output
-      "table_access_hooks=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_TABLE_ACCESS_HOOKS}"
-    --fmgr-entrypoints-output
-      "storage_load_pg=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_LOAD_PG}"
-    --fmgr-entrypoints-output
-      "sequences_sample_table_udf=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_SAMPLE_TABLE_UDF}"
-    --fmgr-entrypoints-output
-      "types_pg_compact_sequence=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_COMPACT_SEQUENCE}"
-    --fmgr-entrypoints-output
-      "vector_types_integer=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_INTEGER}"
-    --fmgr-entrypoints-output
-      "vector_types_date=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_DATE}"
-    --fmgr-entrypoints-output
-      "vector_types_aggregates=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_VECTOR_AGGREGATES}"
-    --fmgr-entrypoints-output
-      "vector_comparison_registry=${BIOSEQ_SQL_PRODUCTION_VECTOR_COMPARISON_REGISTRY}"
-    --fmgr-entrypoints-output
-      "vector_aggregate_registry=${BIOSEQ_SQL_PRODUCTION_VECTOR_AGGREGATE_REGISTRY}"
-    --guc-parity-ledger "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
-    --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
-    --guc-active-profile production
-    --require-complete-codegen
-    --extension-schema public
-  DEPENDS
-    bioseq_codegen_project
-    "${BIOSEQ_CODEGEN_EXECUTABLE}"
-    "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-    "${BIOSEQ_SQL_PRODUCTION_FINAL_PREPARE_STAMP}"
-    "${BIOSEQ_SQL_PRODUCTION_FINAL_COMPILE_DATABASE}"
-    "${BIOSEQ_SQL_PRODUCTION_FINAL_PCM_MANIFEST}"
-    "${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_FILE}"
-    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"
-    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_MANIFEST}"
-    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}"
-    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_MANIFEST}"
-    ${BIOSEQ_SQL_PRODUCTION_ROW_CODEC_MODULES}
-    ${BIOSEQ_SQL_PRODUCTION_SUPPORT_VECTOR_REGISTRY_MODULES}
-    ${BIOSEQ_SQL_GUC_production_MODULES}
-    ${BIOSEQ_SQL_GUC_test_indexes_MODULES}
-    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
-    "${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
-    "${BIOSEQ_SQL_CORE_MANIFEST}"
-    ${BIOSEQ_SQL_ENTITY_HANDLE_MODULES}
-    "${BIOSEQ_SQL_VALIDATOR_SELF_TEST_STAMP}"
-    "${BIOSEQ_SQL_CHECKED_PHYSICAL_LEDGER}"
-    "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
-    ${BIOSEQ_SQL_REGISTRY_PRODUCTION_FINAL_SOURCES}
-  COMMENT
-    "Maintainer-only update of generated bioseq--1.0.sql"
-  VERBATIM)
-add_dependencies(
-  bioseq_sql_update_golden
-  bioseq_sql_prepare_final_production)
-endif()
-
 AddCommonTargetX(
   postgresql_bioseq
   TYPE POSTGRES_EXTENSION
@@ -4546,7 +4190,7 @@ AddCommonTargetX(
   COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
-    "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include" "${CMAKE_CURRENT_LIST_DIR}/include2"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -4586,7 +4230,7 @@ AddCommonTargetX(
     bioseq_format6_parallel_scan_probe_worker_main
   ${_bioseq_sql_completion_target_option}
   PG_ENTRYPOINT_SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/lifecycle.cppm"
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0
@@ -4672,7 +4316,7 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E touch
     "${BIOSEQ_SQL_POSTGRES_EXTENSION_PROOF_STAMP}"
   DEPENDS
-    bioseq_sql_check_golden
+    bioseq_sql_generation_contract
     bioseq_sql_gcc_compile_contracts
   COMMENT
     "Sealing SQL generation and boundary proofs before linking bioseq"
@@ -4716,8 +4360,8 @@ set_target_properties(postgresql_bioseq PROPERTIES
 # postgresql_bioseq target owns the Domain P module fan-out — the modules
 # that import the columnar storage / metadata / table-io stack and feel
 # the most BMI-load + template-instantiation pressure (utils.cppm,
-# access_method.cppm, columnar_customscan.cppm, columnar_aggregator_node
-# .cppm, …). When BIOSEQ_HEAVY_JOBS is set the assignment caps these
+# access_method.cppm, custom_scan.cppm, aggregator_node.cppm, …). When
+# BIOSEQ_HEAVY_JOBS is set the assignment caps these
 # compiles against the same Ninja pool used by bioseq_modules_nopg, so
 # the worst-case concurrent peak RSS is `heavy_compile × per-TU peak`
 # instead of `min(--parallel, ncpu) × per-TU peak`. Same Ninja-generator
@@ -4726,16 +4370,12 @@ set_target_properties(postgresql_bioseq PROPERTIES
 if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
   set_target_properties(postgresql_bioseq PROPERTIES
     JOB_POOL_COMPILE heavy_compile)
-  if(TARGET bioseq_aligner)
-    set_target_properties(bioseq_aligner PROPERTIES
+  if(TARGET bioseq_unit_tests)
+    set_target_properties(bioseq_unit_tests PROPERTIES
       JOB_POOL_COMPILE heavy_compile)
   endif()
-  if(TARGET bioseq_aligner_tests_exec)
-    set_target_properties(bioseq_aligner_tests_exec PROPERTIES
-      JOB_POOL_COMPILE heavy_compile)
-  endif()
-  if(TARGET bioseq_aligner_int_tests_exec)
-    set_target_properties(bioseq_aligner_int_tests_exec PROPERTIES
+  if(TARGET bioseq_integration_tests)
+    set_target_properties(bioseq_integration_tests PROPERTIES
       JOB_POOL_COMPILE heavy_compile)
   endif()
 endif()
@@ -4748,144 +4388,18 @@ endif()
 if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
-  if(TARGET bioseq_aligner_int_tests_exec)
-    target_compile_definitions(bioseq_aligner_int_tests_exec PRIVATE BIOSEQ_TEST_INDEXES=1)
+  if(TARGET bioseq_integration_tests)
+    target_compile_definitions(bioseq_integration_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()
-  if(TARGET bioseq_aligner_tests_exec)
-    target_compile_definitions(bioseq_aligner_tests_exec PRIVATE BIOSEQ_TEST_INDEXES=1)
+  if(TARGET bioseq_unit_tests)
+    target_compile_definitions(bioseq_unit_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()
 endif()
 
-# DOC0388 catalog parity is a runtime gate, not a compilation side effect.
-# The named target is available for an exact focused reproduction, while the
-# integration executable invokes the same command during a full test run.
-# Consequently build_only retains its compile-only contract.
-get_target_property(
-  BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE
-  postgresql_bioseq
-  BIOSEQ_EXTENSION_CONTROL_FILE)
-if(NOT BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE
-   OR BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE MATCHES "-NOTFOUND$")
-  message(FATAL_ERROR
-    "postgresql_bioseq did not publish its control file for catalog parity")
-endif()
-if(BIOSEQ_TEST_INDEXES)
-  set(BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE test_indexes)
-else()
-  set(BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE production)
-endif()
-get_filename_component(
-  BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT
-  "${CMAKE_SOURCE_DIR}/.."
-  ABSOLUTE)
-set(BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/run_private_catalog_parity.py")
-set(BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/stage_private_postgres.cmake")
-set(BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/private_postgresql.conf.in")
-set(BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY
-  "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_catalog_snapshot.sql")
-set(BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA
-  "${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_catalog_delta.json")
-set(BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT
-  "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/catalog-parity")
-
-set(BIOSEQ_DOC0388_CATALOG_PARITY_COMMAND
-  "${Python3_EXECUTABLE}"
-  "${BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT}"
-  run
-  --repository-root
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT}"
-  --output-root
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT}"
-  --cmake
-    "${CMAKE_COMMAND}"
-  --git
-    "${GIT_EXECUTABLE}"
-  --pg-config
-    "${PostgreSQL_CONFIG}"
-  --stage-script
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT}"
-  --config-template
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE}"
-  --control-file
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE}"
-  --candidate-sql
-    "${BIOSEQ_SQL_GENERATED_INSTALL}"
-  --candidate-manifest
-    "${BIOSEQ_SQL_GENERATED_MANIFEST}"
-  --candidate-dso
-    "$<TARGET_FILE:postgresql_bioseq>"
-  --snapshot-query
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY}"
-  --approved-delta
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA}"
-  --guc-parity-ledger
-    "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
-  --active-profile
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE}"
-  --timeout-seconds
-    180)
-
-add_custom_target(bioseq_doc0388_catalog_parity
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "PYTHONDONTWRITEBYTECODE=1"
-    "${Python3_EXECUTABLE}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT}"
-    self-test
-  COMMAND "${CMAKE_COMMAND}" -E env
-    "PYTHONDONTWRITEBYTECODE=1"
-    ${BIOSEQ_DOC0388_CATALOG_PARITY_COMMAND}
-  DEPENDS
-    postgresql_bioseq
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY}"
-    "${BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA}"
-    "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
-    "${CMAKE_CURRENT_LIST_DIR}/../cmake/private_postgres.py"
-    "${BIOSEQ_SQL_GENERATED_INSTALL}"
-    "${BIOSEQ_SQL_GENERATED_MANIFEST}"
-  COMMENT
-    "Comparing immutable legacy and generated catalogs on clean PostgreSQL 17 nodes"
-  USES_TERMINAL
-  VERBATIM)
-
-if(TARGET bioseq_aligner_int_tests_exec)
+if(TARGET bioseq_integration_tests)
   add_dependencies(
-    bioseq_aligner_int_tests_exec
+    bioseq_integration_tests
     postgresql_bioseq)
-  target_compile_definitions(bioseq_aligner_int_tests_exec PRIVATE
-    "BIOSEQ_DOC0388_CATALOG_PARITY_PYTHON=\"${Python3_EXECUTABLE}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT=\"${BIOSEQ_DOC0388_CATALOG_PARITY_SCRIPT}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT=\"${BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT=\"${BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CMAKE=\"${CMAKE_COMMAND}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_GIT=\"${GIT_EXECUTABLE}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_PG_CONFIG=\"${PostgreSQL_CONFIG}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT=\"${BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE=\"${BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE=\"${BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_SQL=\"${BIOSEQ_SQL_GENERATED_INSTALL}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_MANIFEST=\"${BIOSEQ_SQL_GENERATED_MANIFEST}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_DSO=\"$<TARGET_FILE:postgresql_bioseq>\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY=\"${BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA=\"${BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_GUC_LEDGER=\"${BIOSEQ_SQL_GUC_PARITY_LEDGER}\""
-    "BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE=\"${BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE}\"")
-  if(BIOSEQ_TEST_INDEXES)
-    target_compile_definitions(
-      bioseq_aligner_int_tests_exec PRIVATE
-      "BIOSEQ_DOC0388_ROW_AUTHORITY_LEDGER=\"${CMAKE_CURRENT_LIST_DIR}/testdata/doc0388_row_authority_migration_ledger.json\"")
-    if(TARGET bioseq_doc0388_ledgers)
-      add_dependencies(
-        bioseq_aligner_int_tests_exec
-        bioseq_doc0388_ledgers)
-    endif()
-  endif()
 endif()
 
 # Runtime ERROR evidence is an explicit, non-ALL gate. One build tree owns the
@@ -5337,25 +4851,17 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       bioseq_external_codegen)
   endif()
 
-  # DOC0372 — link the compile-time provider pack into the extension so the
-  # external CustomScan (scan.cppm) and row writer resolve bioseq.external.run
+  # Link the compile-time provider pack into the extension so the external
+  # CustomScan and row writer resolve bioseq.external.providers.run
   # and the provider model, and expose those module BMIs to the extension's
   # module compiles. BIOSEQ_EXTERNAL_PG gates the _PG_init registration and the
-  # conditional import of the scan module in backend/pg/column/column.cppm.
+  # conditional import of the scan module in backend/pg/column/index.cppm.
   if(TARGET bioseq_external_provider_adapters)
-    # DOC0372 streaming data plane transfer/archive dependencies (see the
-    # SRC_MOD_FILES append above for the transport/IO modules compiled in).
-    find_package(CURL REQUIRED)
-    find_package(c-ares CONFIG REQUIRED)
-    find_package(LibArchive REQUIRED)
-    find_package(OpenSSL REQUIRED)
+    # The PG-free streaming library is the single compiled owner of the
+    # transport/archive module providers. Linking that owner publishes its
+    # module file set to CustomScan while retaining its private crypto edge.
     target_link_libraries(postgresql_bioseq PRIVATE
-      bioseq_external_provider_core
       bioseq_external_provider_adapters
-      CURL::libcurl
-      c-ares::cares
-      LibArchive::LibArchive
-      OpenSSL::Crypto
-      ZLIB::ZLIB)
+      bioseq_external_io)
   endif()
 endif()

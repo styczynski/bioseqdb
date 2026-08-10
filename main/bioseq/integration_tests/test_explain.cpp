@@ -11,7 +11,7 @@
 //   * `EXPLAIN (FORMAT JSON, ANALYZE, ...)` returns a JSON document whose
 //     plan tree references "BioseqScan" as the custom plan provider.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <libpq-fe.h>
 import bioseq.integration_tests.common;
 

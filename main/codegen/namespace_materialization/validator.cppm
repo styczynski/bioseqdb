@@ -20,7 +20,7 @@ module;
 export module bioseq.codegen.namespace_materialization:validator;
 
 import :model;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
@@ -99,48 +99,48 @@ inline constexpr std::string_view entry_attribute =
 }
 
 [[nodiscard]] inline bool nonempty_range(
-    const clang_structural::source_range& range) noexcept {
+    const structural_analysis::source_range& range) noexcept {
     return range.end.byte_offset > range.begin.byte_offset;
 }
 
 [[nodiscard]] inline bool contains(
-    const clang_structural::source_range& outer,
-    const clang_structural::source_range& inner) noexcept {
+    const structural_analysis::source_range& outer,
+    const structural_analysis::source_range& inner) noexcept {
     return outer.begin.byte_offset <= inner.begin.byte_offset
         && inner.end.byte_offset <= outer.end.byte_offset;
 }
 
 [[nodiscard]] inline bool intersects(
-    const clang_structural::source_range& left,
-    const clang_structural::source_range& right) noexcept {
+    const structural_analysis::source_range& left,
+    const structural_analysis::source_range& right) noexcept {
     return left.begin.byte_offset < right.end.byte_offset
         && right.begin.byte_offset < left.end.byte_offset;
 }
 
-[[nodiscard]] inline const clang_structural::source_range& declaration_range(
-    const clang_structural::declaration_record& declaration) noexcept {
+[[nodiscard]] inline const structural_analysis::source_range& declaration_range(
+    const structural_analysis::declaration_record& declaration) noexcept {
     return nonempty_range(declaration.declaration_range)
         ? declaration.declaration_range
         : declaration.range;
 }
 
-[[nodiscard]] inline const clang_structural::source_range& attribute_range(
-    const clang_structural::attribute_record& attribute) noexcept {
-    return nonempty_range(attribute.complete_range)
-        ? attribute.complete_range
-        : attribute.range;
+[[nodiscard]] inline const structural_analysis::source_range& attribute_range(
+    const structural_analysis::attribute_record& attribute) noexcept {
+    return nonempty_range(attribute.removal_range)
+        ? attribute.removal_range
+        : attribute.spelling_range;
 }
 
 [[nodiscard]] inline std::string location(
     const std::filesystem::path& path,
-    const clang_structural::source_range& range) {
+    const structural_analysis::source_range& range) {
     return path.string() + ':' + std::to_string(range.begin.line) + ':'
         + std::to_string(range.begin.column);
 }
 
 [[noreturn]] inline void reject(
     const std::filesystem::path& path,
-    const clang_structural::source_range& range,
+    const structural_analysis::source_range& range,
     std::string message) {
     throw std::runtime_error(location(path, range) + ": " + std::move(message));
 }
@@ -310,13 +310,13 @@ inline void append_utf8(std::string& output, const std::uint32_t codepoint) {
         "export module bioseq.codegen.probes.token_normalization;\n"
         "using bioseq_token_normalization = "
         + std::string{spelling} + ";\n";
-    const clang_structural::translation_unit unit =
-        clang_structural::scan_token_slice(
+    const structural_analysis::translation_unit unit =
+        structural_analysis::scan_token_slice(
             "template_flatten_token_normalization.cppm", wrapper);
     std::vector<std::string> result;
     bool in_replacement = false;
     bool terminated = false;
-    for (const clang_structural::lexical_token& token : unit.tokens) {
+    for (const structural_analysis::lexical_token& token : unit.tokens) {
         if (!in_replacement) {
             if (token.spelling == "=") in_replacement = true;
             continue;
@@ -336,7 +336,7 @@ inline void append_utf8(std::string& output, const std::uint32_t codepoint) {
 
 [[nodiscard]] inline std::string slice(
     std::string_view source,
-    const clang_structural::source_range& range,
+    const structural_analysis::source_range& range,
     std::string_view role) {
     if (range.begin.byte_offset > range.end.byte_offset
         || range.end.byte_offset > source.size()) {
@@ -405,12 +405,12 @@ inline void validate_replacement_spelling(
     }
 }
 
-[[nodiscard]] inline std::vector<const clang_structural::attribute_record*>
+[[nodiscard]] inline std::vector<const structural_analysis::attribute_record*>
 attributes_named(
-    const clang_structural::declaration_record& declaration,
+    const structural_analysis::declaration_record& declaration,
     std::string_view qualified_name) {
-    std::vector<const clang_structural::attribute_record*> result;
-    for (const clang_structural::attribute_record& attribute
+    std::vector<const structural_analysis::attribute_record*> result;
+    for (const structural_analysis::attribute_record& attribute
          : declaration.attributes) {
         if (attribute.qualified_name == qualified_name) {
             result.push_back(&attribute);
@@ -422,13 +422,15 @@ attributes_named(
 [[nodiscard]] inline const replacement_case& selected_case(
     const binding_record& binding,
     const materialization_coordinate& coordinate) {
-    const auto assignment = std::ranges::find(
+    const std::vector<axis_case_assignment>::const_iterator assignment =
+        std::ranges::find(
         coordinate.assignments, binding.group, &axis_case_assignment::group);
     if (assignment == coordinate.assignments.end()) {
         throw std::runtime_error(
             "coordinate has no assignment for group '" + binding.group + "'");
     }
-    const auto replacement = std::ranges::find(
+    const std::vector<replacement_case>::const_iterator replacement =
+        std::ranges::find(
         binding.cases, assignment->case_label, &replacement_case::label);
     if (replacement == binding.cases.end()) {
         throw std::runtime_error(
@@ -553,8 +555,8 @@ attributes_named(
 }
 
 [[nodiscard]] inline binding_record parse_binding_attribute(
-    const clang_structural::declaration_record& declaration,
-    const clang_structural::attribute_record& attribute) {
+    const structural_analysis::declaration_record& declaration,
+    const structural_analysis::attribute_record& attribute) {
     const std::vector<std::string> arguments =
         parse_closed_string_arguments(attribute.argument_text);
     if (arguments.size() < 4u || arguments.size() % 2u != 0u) {
@@ -595,7 +597,7 @@ attributes_named(
 }
 
 [[nodiscard]] inline selection_clause parse_selection_attribute(
-    const clang_structural::attribute_record& attribute) {
+    const structural_analysis::attribute_record& attribute) {
     const std::vector<std::string> arguments =
         parse_closed_string_arguments(attribute.argument_text);
     if (arguments.size() < 2u || !detail::lowercase_label(arguments.front())) {
@@ -617,7 +619,7 @@ attributes_named(
 }
 
 [[nodiscard]] inline std::string parse_entry_attribute(
-    const clang_structural::attribute_record& attribute) {
+    const structural_analysis::attribute_record& attribute) {
     const std::vector<std::string> arguments =
         parse_closed_string_arguments(attribute.argument_text);
     if (arguments.size() != 1u || !detail::lowercase_label(arguments.front())) {
@@ -659,11 +661,13 @@ void validate_coordinate_axis_domain(
     }
 }
 
+/// Returns whether a coordinate satisfies every selection clause.
 [[nodiscard]] inline bool coordinate_matches(
     const materialization_coordinate& coordinate,
     const std::vector<selection_clause>& clauses) {
     for (const selection_clause& clause : clauses) {
-        const auto assignment = std::ranges::find(
+        const std::vector<axis_case_assignment>::const_iterator assignment =
+            std::ranges::find(
             coordinate.assignments, clause.group, &axis_case_assignment::group);
         if (assignment == coordinate.assignments.end()
             || std::ranges::find(
@@ -675,12 +679,14 @@ void validate_coordinate_axis_domain(
     return true;
 }
 
+/// Resolves a binding's replacement at one validated coordinate.
 [[nodiscard]] inline const replacement_case& replacement_for(
     const binding_record& binding,
     const materialization_coordinate& coordinate) {
     return detail::selected_case(binding, coordinate);
 }
 
+/// Builds source-ordered, zipped axis groups from extracted bindings.
 [[nodiscard]] inline std::vector<axis_group> build_axis_groups(
     const materialization_region& region) {
     std::vector<axis_group> groups;
@@ -689,9 +695,11 @@ void validate_coordinate_axis_domain(
          binding_index < region.bindings.size();
          ++binding_index) {
         const binding_record& binding = region.bindings[binding_index];
-        const auto [iterator, inserted] =
+        const std::pair<
+            std::map<std::string, std::size_t, std::less<>>::iterator,
+            bool> insertion =
             by_name.emplace(binding.group, groups.size());
-        if (inserted) {
+        if (insertion.second) {
             groups.push_back(axis_group{
                 .name = binding.group,
                 .role = binding.role,
@@ -700,7 +708,7 @@ void validate_coordinate_axis_domain(
             });
             continue;
         }
-        axis_group& group = groups[iterator->second];
+        axis_group& group = groups[insertion.first->second];
         if (group.role != binding.role) {
             throw std::runtime_error(
                 "zipped template_flatten group '" + binding.group
@@ -739,6 +747,7 @@ void validate_coordinate_axis_domain(
     return groups;
 }
 
+/// Expands a validated region into its closed coordinate product.
 [[nodiscard]] inline topology_plan build_topology_plan(
     materialization_region region,
     const std::size_t maximum_coordinates = 4096u) {
@@ -798,7 +807,7 @@ void validate_coordinate_axis_domain(
         plan.region,
         plan.groups,
         plan.coordinates);
-    plan.topology_digest = sha256_hex(plan.canonical_digest_input);
+    plan.topology_digest = bioseq::common::sha256_hex(plan.canonical_digest_input);
     for (materialization_coordinate& coordinate : plan.coordinates) {
         coordinate.topology_digest = plan.topology_digest;
     }
@@ -811,21 +820,24 @@ void validate_coordinate_axis_domain(
     return plan;
 }
 
+/// Returns whether an optimization profile includes a coordinate.
 [[nodiscard]] inline bool coordinate_enabled_for_profile(
     const materialization_coordinate& coordinate,
     std::string_view profile) {
     unsigned level{};
-    const auto parsed = std::from_chars(
+    const std::from_chars_result parsed = std::from_chars(
         profile.data(), profile.data() + profile.size(), level);
     if (profile.empty() || parsed.ec != std::errc{}
         || parsed.ptr != profile.data() + profile.size() || level > 5u) {
         throw std::runtime_error(
             "template_flatten profile must be an integer from 0 through 5");
     }
-    const auto alphabet = std::ranges::find(
+    const std::vector<axis_case_assignment>::const_iterator alphabet =
+        std::ranges::find(
         coordinate.assignments, std::string_view{"alphabet"},
         &axis_case_assignment::group);
-    const auto width = std::ranges::find(
+    const std::vector<axis_case_assignment>::const_iterator width =
+        std::ranges::find(
         coordinate.assignments, std::string_view{"width"},
         &axis_case_assignment::group);
     if (alphabet == coordinate.assignments.end()
@@ -843,6 +855,7 @@ void validate_coordinate_axis_domain(
     return true;
 }
 
+/// Returns all supported profiles that include a coordinate.
 [[nodiscard]] inline std::vector<std::string> enabled_profiles_for(
     const materialization_coordinate& coordinate) {
     std::vector<std::string> result;
@@ -876,6 +889,7 @@ inline void validate_configure_topology_digest(
     }
 }
 
+/// Verifies the exact enabled-coordinate list for a profile.
 inline void validate_enabled_ordinals(
     const topology_plan& topology,
     std::string_view profile,
@@ -903,6 +917,7 @@ inline void validate_enabled_ordinals(
     }
 }
 
+/// Verifies unique generated entry ownership for every identity.
 inline void validate_entry_ownership(const topology_plan& topology) {
     std::set<std::string, std::less<>> roles;
     for (const owned_declaration& declaration
@@ -934,7 +949,8 @@ inline void validate_entry_ownership(const topology_plan& topology) {
                 "scheduler template_flatten topology must declare exactly the seven normative entry roles");
         }
     }
-    const auto root = std::ranges::find_if(
+    const std::vector<owned_declaration>::const_iterator root =
+        std::ranges::find_if(
         topology.region.controlled_declarations,
         [](const owned_declaration& declaration) {
             return declaration.generated_api_entry
@@ -945,7 +961,7 @@ inline void validate_entry_ownership(const topology_plan& topology) {
             "template_flatten topology requires one root selector entry");
     }
     std::set<std::string, std::less<>> root_parameters;
-    for (const clang_structural::parameter_record& parameter :
+    for (const structural_analysis::parameter_record& parameter :
          root->declaration.parameters) {
         if (parameter.name.empty()
             || !root_parameters.insert(parameter.name).second) {
@@ -1008,10 +1024,11 @@ inline void validate_entry_ownership(const topology_plan& topology) {
             if (declaration.generated_api_entry
                 || !declaration.declaration.specifiers.is_definition
                 || declaration.declaration.linkage
-                    == clang_structural::entity_linkage::internal) {
+                    == structural_analysis::entity_linkage::internal) {
                 continue;
             }
-            const auto& range = declaration.declaration.declaration_range;
+            const structural_analysis::source_range& range =
+                declaration.declaration.declaration_range;
             if (topology.region.support_island.has_value()
                 && detail::contains(
                     topology.region.support_island->body_range, range)) {
@@ -1038,9 +1055,10 @@ inline void validate_entry_ownership(const topology_plan& topology) {
     }
 }
 
+/// Verifies that body-free probes cover the logical topology exactly once.
 inline void validate_declaration_probes(
     const topology_plan& topology,
-    const std::vector<clang_structural::translation_unit>& probes) {
+    const std::vector<structural_analysis::translation_unit>& probes) {
     if (probes.size() != topology.identity_representative_ordinals.size()) {
         throw std::runtime_error(
             "declaration-probe action count disagrees with identity topology");
@@ -1049,26 +1067,26 @@ inline void validate_declaration_probes(
     std::map<std::string, const binding_record*, std::less<>> bindings;
     std::map<std::string, const owned_declaration*, std::less<>> entries;
     for (const binding_record& binding : topology.region.bindings) {
-        if (binding.declaration.provenance_id.empty()
+        if (binding.declaration.source_identity.empty()
             || !bindings.emplace(
-                    binding.declaration.provenance_id, &binding).second) {
+                    binding.declaration.source_identity, &binding).second) {
             throw std::runtime_error(
                 "materialization bindings require unique source provenance IDs");
         }
         for (const materialization_coordinate& coordinate :
              topology.coordinates) {
             expected_occurrences.insert(
-                binding.declaration.provenance_id + "\n"
+                binding.declaration.source_identity + "\n"
                 + std::to_string(coordinate.ordinal));
         }
     }
     for (const owned_declaration& declaration
          : topology.region.controlled_declarations) {
         if (!declaration.generated_api_entry) continue;
-        if (declaration.declaration.provenance_id.empty()
-            || bindings.contains(declaration.declaration.provenance_id)
+        if (declaration.declaration.source_identity.empty()
+            || bindings.contains(declaration.declaration.source_identity)
             || !entries.emplace(
-                    declaration.declaration.provenance_id,
+                    declaration.declaration.source_identity,
                     &declaration).second) {
             throw std::runtime_error(
                 "materialization entries require unique source provenance IDs");
@@ -1077,7 +1095,7 @@ inline void validate_declaration_probes(
              topology.coordinates) {
             if (coordinate_matches(coordinate, declaration.clauses)) {
                 expected_occurrences.insert(
-                    declaration.declaration.provenance_id + "\n"
+                    declaration.declaration.source_identity + "\n"
                     + std::to_string(coordinate.ordinal));
             }
         }
@@ -1085,42 +1103,42 @@ inline void validate_declaration_probes(
     std::set<std::string, std::less<>> actual_occurrences;
     std::set<std::string, std::less<>> semantic_identities;
     std::set<std::string, std::less<>> probed_identity_keys;
-    for (const clang_structural::translation_unit& probe : probes) {
-        if (probe.mode != clang_structural::collection_mode::declaration_probe) {
+    for (const structural_analysis::translation_unit& probe : probes) {
+        if (probe.mode != structural_analysis::collection_mode::declaration_probe) {
             throw std::runtime_error(
                 probe.source_path.string()
                 + ": body-free validation did not use declaration_probe mode");
         }
         std::optional<std::string> probe_identity_key;
         std::set<std::uint32_t> probe_coordinates;
-        for (const clang_structural::declaration_record& declaration
+        for (const structural_analysis::declaration_record& declaration
              : probe.declarations) {
-            if (declaration.provenance_id.empty()) continue;
-            if (!bindings.contains(declaration.provenance_id)
-                && !entries.contains(declaration.provenance_id)) {
+            if (declaration.source_identity.empty()) continue;
+            if (!bindings.contains(declaration.source_identity)
+                && !entries.contains(declaration.source_identity)) {
                 throw std::runtime_error(
                     probe.source_path.string()
                     + ": declaration probe carries unauthenticated provenance '"
-                    + declaration.provenance_id + "'");
+                    + declaration.source_identity + "'");
             }
             std::uint32_t coordinate_ordinal{};
-            const auto parsed_coordinate = std::from_chars(
-                declaration.provenance_coordinate.data(),
-                declaration.provenance_coordinate.data()
-                    + declaration.provenance_coordinate.size(),
+            const std::from_chars_result parsed_coordinate = std::from_chars(
+                declaration.source_coordinate.data(),
+                declaration.source_coordinate.data()
+                    + declaration.source_coordinate.size(),
                 coordinate_ordinal);
-            if (declaration.provenance_coordinate.empty()
+            if (declaration.source_coordinate.empty()
                 || parsed_coordinate.ec != std::errc{}
                 || parsed_coordinate.ptr
-                    != declaration.provenance_coordinate.data()
-                        + declaration.provenance_coordinate.size()
+                    != declaration.source_coordinate.data()
+                        + declaration.source_coordinate.size()
                 || coordinate_ordinal >= topology.coordinates.size()
-                || declaration.provenance_coordinate
+                || declaration.source_coordinate
                     != std::to_string(coordinate_ordinal)) {
                 throw std::runtime_error(
                     probe.source_path.string()
                     + ": declaration probe has invalid coordinate provenance for '"
-                    + declaration.provenance_id + "'");
+                    + declaration.source_identity + "'");
             }
             const materialization_coordinate& coordinate =
                 topology.coordinates[coordinate_ordinal];
@@ -1141,25 +1159,25 @@ inline void validate_declaration_probes(
                 throw std::runtime_error(
                     probe.source_path.string()
                     + ": declaration probe namespace disagrees with coordinate provenance '"
-                    + declaration.provenance_coordinate + "'");
+                    + declaration.source_coordinate + "'");
             }
-            const std::string occurrence = declaration.provenance_id + "\n"
-                + declaration.provenance_coordinate;
+            const std::string occurrence = declaration.source_identity + "\n"
+                + declaration.source_coordinate;
             if (!expected_occurrences.contains(occurrence)
                 || !actual_occurrences.insert(occurrence).second) {
                 throw std::runtime_error(
                     probe.source_path.string()
                     + ": declaration probe duplicates or misassigns provenance '"
-                    + declaration.provenance_id + "' at coordinate "
-                    + declaration.provenance_coordinate);
+                    + declaration.source_identity + "' at coordinate "
+                    + declaration.source_coordinate);
             }
             if (declaration.stable_usr.empty()
                 || declaration.attachment
-                    != clang_structural::module_attachment::named_module) {
+                    != structural_analysis::module_attachment::named_module) {
                 throw std::runtime_error(
                     probe.source_path.string()
                     + ": probe declaration lost its semantic USR/module attachment for provenance '"
-                    + declaration.provenance_id + "'");
+                    + declaration.source_identity + "'");
             }
             if (!semantic_identities.insert(
                     declaration.stable_usr + "#"
@@ -1168,16 +1186,20 @@ inline void validate_declaration_probes(
                     probe.source_path.string()
                     + ": duplicate semantic declaration identity in body-free probe");
             }
-            if (const auto binding = bindings.find(declaration.provenance_id);
+            if (const std::map<
+                    std::string,
+                    const binding_record*,
+                    std::less<>>::const_iterator binding =
+                    bindings.find(declaration.source_identity);
                 binding != bindings.end()) {
                 const bool expected_alias = binding->second->declaration.kind
-                    == clang_structural::declaration_kind::alias;
+                    == structural_analysis::declaration_kind::alias;
                 if ((expected_alias
                      && declaration.kind
-                         != clang_structural::declaration_kind::alias)
+                         != structural_analysis::declaration_kind::alias)
                     || (!expected_alias
                         && declaration.kind
-                            != clang_structural::declaration_kind::variable)
+                            != structural_analysis::declaration_kind::variable)
                     || (!expected_alias
                         && (!declaration.specifiers.is_static
                             || !declaration.specifiers.is_constexpr
@@ -1186,18 +1208,21 @@ inline void validate_declaration_probes(
                     throw std::runtime_error(
                         probe.source_path.string()
                         + ": replacement changed the declaration kind/specifiers for binding provenance '"
-                        + declaration.provenance_id + "'");
+                        + declaration.source_identity + "'");
                 }
-            } else if (const auto entry =
-                           entries.find(declaration.provenance_id);
+            } else if (const std::map<
+                           std::string,
+                           const owned_declaration*,
+                           std::less<>>::const_iterator entry =
+                           entries.find(declaration.source_identity);
                        entry != entries.end()) {
                 if (declaration.kind
-                        != clang_structural::declaration_kind::function
+                        != structural_analysis::declaration_kind::function
                     || declaration.specifiers.is_definition
                     || declaration.linkage
-                        == clang_structural::entity_linkage::internal
+                        == structural_analysis::entity_linkage::internal
                     || declaration.linkage
-                        == clang_structural::entity_linkage::none
+                        == structural_analysis::entity_linkage::none
                     || declaration.specifiers.is_template
                     || declaration.specifiers.is_overloaded
                     || declaration.specifiers.has_default_arguments
@@ -1234,6 +1259,7 @@ inline void validate_declaration_probes(
     }
 }
 
+/// Verifies the authored boundary and all controlled declarations.
 inline void validate_materialization_region(
     const materialization_region& region,
     std::string_view source_text) {
@@ -1279,8 +1305,10 @@ inline void validate_materialization_region(
             + ": template_flatten input must import its configured output primary exactly once");
     }
     for (const binding_record& binding : region.bindings) {
-        const auto& declaration = binding.declaration;
-        const auto& facts = declaration.specifiers;
+        const structural_analysis::declaration_record& declaration =
+            binding.declaration;
+        const structural_analysis::declaration_specifier_state& facts =
+            declaration.specifiers;
         if (!facts.direct_namespace_member
             || declaration.enclosing_qualified_name
                 != region.boundary.qualified_name) {
@@ -1289,7 +1317,7 @@ inline void validate_materialization_region(
                 detail::declaration_range(declaration),
                 "template_flatten binding must be a direct member of the materialization namespace");
         }
-        if (declaration.kind == clang_structural::declaration_kind::alias) {
+        if (declaration.kind == structural_analysis::declaration_kind::alias) {
             if (binding.role == axis_role::shard || !facts.is_using_alias
                 || facts.is_template || facts.is_static
                 || facts.is_constexpr || facts.is_inline || facts.is_extern
@@ -1303,7 +1331,7 @@ inline void validate_materialization_region(
                         : "an identity alias binding must be exactly one unexported using-alias declaration");
             }
         } else if (declaration.kind
-                   == clang_structural::declaration_kind::variable) {
+                   == structural_analysis::declaration_kind::variable) {
             if (!facts.is_static || !facts.is_constexpr || facts.is_inline
                 || facts.is_extern || facts.is_thread_local
                 || !facts.has_explicit_type || facts.has_deduced_type
@@ -1341,7 +1369,7 @@ inline void validate_materialization_region(
                 "authored RHS/initializer must token-normalize to the first replacement of group '"
                     + binding.group + "'");
         }
-        const auto flatten =
+        const std::vector<const structural_analysis::attribute_record*> flatten =
             detail::attributes_named(declaration, detail::flatten_attribute);
         if (flatten.size() != 1u
             || detail::attribute_range(*flatten.front()).begin.byte_offset
@@ -1363,14 +1391,14 @@ inline void validate_materialization_region(
     std::size_t final_binding_end = 0u;
     for (const binding_record& binding : region.bindings) {
         group_roles.emplace(binding.group, binding.role);
-        binding_provenance.insert(binding.declaration.provenance_id);
+        binding_provenance.insert(binding.declaration.source_identity);
         for (const replacement_case& replacement : binding.cases) {
             group_labels[binding.group].insert(replacement.label);
         }
         if (binding.declaration.kind
-            == clang_structural::declaration_kind::variable) {
+            == structural_analysis::declaration_kind::variable) {
             value_binding_provenance.insert(
-                binding.declaration.provenance_id);
+                binding.declaration.source_identity);
         }
         final_binding_end = std::max(
             final_binding_end,
@@ -1379,7 +1407,8 @@ inline void validate_materialization_region(
     std::set<std::string, std::less<>> entry_names;
     std::set<std::string, std::less<>> controlled_noninternal_names;
     for (const owned_declaration& owned : region.controlled_declarations) {
-        const auto& declaration = owned.declaration;
+        const structural_analysis::declaration_record& declaration =
+            owned.declaration;
         if (!declaration.specifiers.direct_namespace_member
             || !detail::contains(
                 region.boundary.body_range,
@@ -1397,7 +1426,11 @@ inline void validate_materialization_region(
                 "all flatten bindings must precede declarations that use them");
         }
         for (const selection_clause& clause : owned.clauses) {
-            const auto role = group_roles.find(clause.group);
+            const std::map<
+                std::string,
+                axis_role,
+                std::less<>>::const_iterator role =
+                group_roles.find(clause.group);
             if (role == group_roles.end()) {
                 detail::reject(
                     path,
@@ -1421,7 +1454,7 @@ inline void validate_materialization_region(
         if (!owned.generated_api_entry
             && declaration.specifiers.is_definition
             && declaration.linkage
-                != clang_structural::entity_linkage::internal
+                != structural_analysis::entity_linkage::internal
             && !inside_support
             && (declaration.specifiers.is_overloaded
                 || declaration.qualified_name.empty()
@@ -1433,7 +1466,8 @@ inline void validate_materialization_region(
                 "non-TU-local controlled definitions must have unique non-overloaded names; move overloads to an authored module");
         }
         if (!owned.generated_api_entry) continue;
-        const auto& facts = declaration.specifiers;
+        const structural_analysis::declaration_specifier_state& facts =
+            declaration.specifiers;
         if (declaration.enclosing_qualified_name
             != region.boundary.qualified_name) {
             detail::reject(
@@ -1441,7 +1475,7 @@ inline void validate_materialization_region(
                 detail::declaration_range(declaration),
                 "template_flatten_entry must be a direct child of the materialization boundary");
         }
-        if (declaration.kind != clang_structural::declaration_kind::function
+        if (declaration.kind != structural_analysis::declaration_kind::function
             || !facts.is_definition
             || facts.is_static || facts.is_inline || facts.is_constexpr
             || facts.is_consteval || facts.has_deduced_type
@@ -1458,9 +1492,9 @@ inline void validate_materialization_region(
                 detail::declaration_range(declaration),
                 "template_flatten_entry requires one non-template, non-overloaded, body-bearing function with an explicit return type");
         }
-        if (declaration.linkage == clang_structural::entity_linkage::internal
+        if (declaration.linkage == structural_analysis::entity_linkage::internal
             || declaration.attachment
-                != clang_structural::module_attachment::named_module) {
+                != structural_analysis::module_attachment::named_module) {
             detail::reject(
                 path,
                 detail::declaration_range(declaration),
@@ -1479,7 +1513,7 @@ inline void validate_materialization_region(
                 "template_flatten_entry overload/name is not unique");
         }
         for (const std::string& reference
-             : declaration.referenced_declaration_provenance_ids) {
+             : declaration.referenced_declaration_source_identities) {
             if (value_binding_provenance.contains(reference)) {
                 detail::reject(
                     path,
@@ -1502,7 +1536,7 @@ inline void validate_materialization_region(
 /// import the generated target graph. Exact token records keep this check
 /// independent of comments and substrings in unrelated identifiers.
 inline void validate_scheduler_highway_source_separation(
-    const clang_structural::translation_unit& unit,
+    const structural_analysis::translation_unit& unit,
     std::string_view output_module) {
     if (output_module != detail::scheduler_output_module) return;
 
@@ -1522,7 +1556,7 @@ inline void validate_scheduler_highway_source_separation(
         "HWY_EXPORT",
         "HWY_DYNAMIC_DISPATCH",
     };
-    for (const clang_structural::lexical_token& token : unit.tokens) {
+    for (const structural_analysis::lexical_token& token : unit.tokens) {
         if (!std::ranges::contains(forbidden_tokens, token.spelling)) continue;
         detail::reject(
             unit.source_path,
@@ -1533,7 +1567,7 @@ inline void validate_scheduler_highway_source_separation(
     if (!unit.marked_namespaces.empty()) {
         detail::reject(
             unit.source_path,
-            unit.marked_namespaces.front().marker.complete_range,
+            unit.marked_namespaces.front().marker.removal_range,
             "scheduler materialization source contains forbidden bioseq::simd namespace marker");
     }
 }
@@ -1543,10 +1577,10 @@ inline void validate_scheduler_highway_source_separation(
 /// otherwise neutral direct import.
 inline void validate_scheduler_highway_prepared_closure(
     std::string_view output_module,
-    const clang_structural::prepared_compilation_validation& prepared) {
+    const structural_analysis::dependency_compilation_validation& prepared) {
     if (output_module != detail::scheduler_output_module) return;
 
-    for (const clang_structural::preparation_module_identity& module
+    for (const structural_analysis::dependency_module_identity& module
          : prepared.modules) {
         if (!detail::forbidden_scheduler_highway_provider(
                 module.module_name, output_module)) {
@@ -1559,11 +1593,12 @@ inline void validate_scheduler_highway_prepared_closure(
     }
 }
 
+/// Extracts and validates one materialization region from a token slice.
 [[nodiscard]] inline materialization_region extract_materialization_region(
-    const clang_structural::translation_unit& unit,
+    const structural_analysis::translation_unit& unit,
     std::string configured_output_module_name,
     std::string_view source_text) {
-    if (unit.mode != clang_structural::collection_mode::token_slice) {
+    if (unit.mode != structural_analysis::collection_mode::token_slice) {
         throw std::runtime_error(
             unit.source_path.string()
             + ": namespace materialization requires the non-Sema token_slice collector");
@@ -1576,9 +1611,9 @@ inline void validate_scheduler_highway_prepared_closure(
             std::move(configured_output_module_name),
     };
     std::set<std::string, std::less<>> boundary_names;
-    for (const clang_structural::declaration_record& declaration
+    for (const structural_analysis::declaration_record& declaration
          : unit.declarations) {
-        const auto flatten =
+        const std::vector<const structural_analysis::attribute_record*> flatten =
             detail::attributes_named(declaration, detail::flatten_attribute);
         if (flatten.empty()) continue;
         if (flatten.size() != 1u) {
@@ -1613,8 +1648,8 @@ inline void validate_scheduler_highway_prepared_closure(
             unit.source_path.string()
             + ": template_flatten v1 requires exactly one materialization namespace");
     }
-    std::vector<const clang_structural::namespace_record*> boundaries;
-    for (const clang_structural::namespace_record& candidate : unit.namespaces) {
+    std::vector<const structural_analysis::namespace_record*> boundaries;
+    for (const structural_analysis::namespace_record& candidate : unit.namespaces) {
         if (candidate.qualified_name == *boundary_names.begin()) {
             boundaries.push_back(&candidate);
         }
@@ -1626,7 +1661,7 @@ inline void validate_scheduler_highway_prepared_closure(
     }
     region.boundary = *boundaries.front();
 
-    for (const clang_structural::lexical_token& token : unit.tokens) {
+    for (const structural_analysis::lexical_token& token : unit.tokens) {
         if (token.spelling == "export"
             && detail::contains(region.boundary.body_range, token.range)) {
             detail::reject(
@@ -1636,8 +1671,8 @@ inline void validate_scheduler_highway_prepared_closure(
         }
     }
 
-    for (const clang_structural::namespace_record& candidate : unit.namespaces) {
-        if (candidate.provenance_id == region.boundary.provenance_id
+    for (const structural_analysis::namespace_record& candidate : unit.namespaces) {
+        if (candidate.source_identity == region.boundary.source_identity
             || !detail::contains(
                 region.boundary.body_range, candidate.declaration_range)) {
             continue;
@@ -1651,22 +1686,22 @@ inline void validate_scheduler_highway_prepared_closure(
         region.support_island = candidate;
     }
 
-    for (const clang_structural::preprocessor_directive_record& directive
+    for (const structural_analysis::preprocessor_directive_record& directive
          : unit.preprocessor_directives) {
         if (detail::intersects(
-                region.boundary.body_range, directive.complete_range)) {
+                region.boundary.body_range, directive.removal_range)) {
             detail::reject(
                 unit.source_path,
-                directive.complete_range,
+                directive.removal_range,
                 "preprocessor directives are forbidden inside a template_flatten region");
         }
     }
 
-    for (const clang_structural::declaration_record& declaration
+    for (const structural_analysis::declaration_record& declaration
          : unit.declarations) {
-        const auto whens =
+        const std::vector<const structural_analysis::attribute_record*> whens =
             detail::attributes_named(declaration, detail::when_attribute);
-        const auto entries =
+        const std::vector<const structural_analysis::attribute_record*> entries =
             detail::attributes_named(declaration, detail::entry_attribute);
         if (whens.empty() && entries.empty()) continue;
         if (entries.size() > 1u) {
@@ -1680,7 +1715,7 @@ inline void validate_scheduler_highway_prepared_closure(
             .generated_api_entry = !entries.empty(),
         };
         try {
-            for (const clang_structural::attribute_record* attribute : whens) {
+            for (const structural_analysis::attribute_record* attribute : whens) {
                 owned.clauses.push_back(parse_selection_attribute(*attribute));
             }
             if (!entries.empty()) {
@@ -1697,22 +1732,22 @@ inline void validate_scheduler_highway_prepared_closure(
 
     std::set<std::string, std::less<>> policy_owned;
     for (const binding_record& binding : region.bindings) {
-        policy_owned.insert(binding.declaration.provenance_id);
+        policy_owned.insert(binding.declaration.source_identity);
     }
     for (const owned_declaration& declaration
          : region.controlled_declarations) {
-        policy_owned.insert(declaration.declaration.provenance_id);
+        policy_owned.insert(declaration.declaration.source_identity);
         if (declaration.declaration.kind
-            == clang_structural::declaration_kind::namespace_) {
+            == structural_analysis::declaration_kind::namespace_declaration) {
             detail::reject(
                 unit.source_path,
                 detail::declaration_range(declaration.declaration),
                 "selection markers may not own the support namespace itself");
         }
     }
-    for (const clang_structural::declaration_record& declaration
+    for (const structural_analysis::declaration_record& declaration
          : unit.declarations) {
-        const clang_structural::source_range& range =
+        const structural_analysis::source_range& range =
             detail::declaration_range(declaration);
         if (!detail::contains(region.boundary.body_range, range)) {
             continue;
@@ -1723,7 +1758,7 @@ inline void validate_scheduler_highway_prepared_closure(
                 range,
                 "export declarations are forbidden inside a template_flatten materialization body");
         }
-        if (policy_owned.contains(declaration.provenance_id)) continue;
+        if (policy_owned.contains(declaration.source_identity)) continue;
         if (region.support_island.has_value()
             && (range.begin.byte_offset
                     == region.support_island->declaration_range.begin.byte_offset
@@ -1731,7 +1766,7 @@ inline void validate_scheduler_highway_prepared_closure(
             continue;
         }
         if (declaration.kind
-            == clang_structural::declaration_kind::namespace_) {
+            == structural_analysis::declaration_kind::namespace_declaration) {
             detail::reject(
                 unit.source_path,
                 range,
@@ -1740,7 +1775,7 @@ inline void validate_scheduler_highway_prepared_closure(
         if (!declaration.specifiers.is_definition) continue;
         const bool proven_internal = declaration.specifiers.is_static
             || declaration.linkage
-                == clang_structural::entity_linkage::internal;
+                == structural_analysis::entity_linkage::internal;
         if (!proven_internal) {
             detail::reject(
                 unit.source_path,

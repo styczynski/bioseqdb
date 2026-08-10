@@ -214,9 +214,6 @@ EXPECTED_TABLES: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
     ),
 }
 EXPECTED_COLUMN_COUNT = sum(len(columns) for columns in EXPECTED_TABLES.values())
-EXPECTED_EXTERNAL_STATEMENT_IDS = tuple(
-    f"P{ordinal:03d}" for ordinal in range(492, 505)
-)
 POSTGRESQL_TOOLS = frozenset({
     "postgres",
     "initdb",
@@ -237,8 +234,6 @@ BASE_INPUT_FILE_KEYS = frozenset({
     "manifest",
     "dso",
     "static_contract_script",
-    "base_golden",
-    "external_ledger",
     "cmake_fragment",
     "mode_source",
     "runner",
@@ -608,12 +603,7 @@ def _validate_generated_manifest(
         raise ExternalAcceptanceError(
             "generated manifest version is not exactly 1"
         )
-    if (
-        manifest.get("authority_mode") != "annotated_cpp"
-        or manifest.get("natural_authority_complete") is not True
-        or manifest.get("migration_install_action_count") != 0
-        or manifest.get("transitional_install_owner_entity_count") != 0
-    ):
+    if manifest.get("authority_mode") != "annotated_cpp":
         raise ExternalAcceptanceError(
             "generated manifest is not the complete natural C++ authority"
         )
@@ -621,11 +611,6 @@ def _validate_generated_manifest(
     if manifest.get("script_sha256") != install_hash:
         raise ExternalAcceptanceError(
             "generated manifest does not bind the install SQL bytes"
-        )
-    if manifest.get("physical_statement_count") != 504:
-        raise ExternalAcceptanceError(
-            "external-enabled manifest does not contain exactly 504 "
-            "physical statements"
         )
     entities = manifest.get("entities")
     if not isinstance(entities, list) or not entities:
@@ -724,28 +709,33 @@ def _validate_generated_manifest(
             "external source provenance does not close over both authorities"
         )
 
-    statements = manifest.get("physical_statements")
+    statements = manifest.get("statements")
     if not isinstance(statements, list):
         raise ExternalAcceptanceError(
-            "generated manifest has no physical statement inventory"
+            "generated manifest has no statement inventory"
         )
-    external_statement_ids = tuple(
-        str(statement.get("baseline_physical_id"))
+    if manifest.get("statement_count") != len(statements):
+        raise ExternalAcceptanceError(
+            "generated manifest statement_count is stale"
+        )
+    external_statement_owners = {
+        str(statement.get("owner_identity"))
         for statement in statements
         if (
             isinstance(statement, dict)
             and statement.get("source_path") in EXTERNAL_SOURCE_PATHS
         )
-    )
-    if external_statement_ids != EXPECTED_EXTERNAL_STATEMENT_IDS:
+    }
+    if external_statement_owners != EXPECTED_EXTERNAL_TOP_LEVEL_IDENTITIES:
         raise ExternalAcceptanceError(
-            "external physical overlay is not exactly ordered P492-P504"
+            "external statement inventory does not exactly cover the "
+            "reviewed external owner set"
         )
-    if manifest.get("external_legacy_macro_symbols") != [
+    if manifest.get("handwritten_fmgr_export_external_symbols") != [
         "bioseq_external_handler"
-    ]:
+    ] or manifest.get("handwritten_fmgr_export_external_symbol_count") != 1:
         raise ExternalAcceptanceError(
-            "external legacy fmgr ownership is not exactly the handler"
+            "handwritten external FMGR ownership is not exactly the handler"
         )
     external_column_count = sum(
         entity.get("kind") == "column" for entity in external
@@ -759,59 +749,11 @@ def _validate_generated_manifest(
         "install_sql_sha256": install_hash,
         "manifest_script_sha256": manifest["script_sha256"],
         "manifest_entity_count": len(entities),
-        "manifest_physical_statement_count": 504,
+        "manifest_statement_count": len(statements),
         "external_top_level_identity_count": len(external_top_level),
         "external_column_identity_count": external_column_count,
-        "external_statement_ids": list(external_statement_ids),
+        "external_statement_owners": sorted(external_statement_owners),
         "external_source_provenance": source_provenance,
-    }
-
-
-def _validate_external_ledger(
-    ledger_path: Path,
-    manifest: Mapping[str, Any],
-) -> dict[str, object]:
-    rows: list[tuple[str, str, str]] = []
-    for line_number, raw_line in enumerate(
-        ledger_path.read_text(encoding="utf-8").splitlines(),
-        start=1,
-    ):
-        if not raw_line or raw_line.startswith("#"):
-            continue
-        fields = raw_line.split("\t")
-        if len(fields) != 3:
-            raise ExternalAcceptanceError(
-                f"external ledger line {line_number} has {len(fields)} fields"
-            )
-        rows.append((fields[0], fields[1], fields[2]))
-    if tuple(row[0] for row in rows) != EXPECTED_EXTERNAL_STATEMENT_IDS:
-        raise ExternalAcceptanceError(
-            "external ledger IDs are not exactly P492-P504"
-        )
-    statements = manifest.get("physical_statements")
-    if not isinstance(statements, list):
-        raise ExternalAcceptanceError(
-            "manifest has no physical statements for ledger validation"
-        )
-    projection = [
-        (
-            str(statement.get("baseline_physical_id")),
-            str(statement.get("facet")),
-            str(statement.get("owner_identity")),
-        )
-        for statement in statements
-        if (
-            isinstance(statement, dict)
-            and statement.get("source_path") in EXTERNAL_SOURCE_PATHS
-        )
-    ]
-    if projection != rows:
-        raise ExternalAcceptanceError(
-            "external physical ledger differs from the manifest projection"
-        )
-    return {
-        "external_ledger_sha256": _sha256(ledger_path),
-        "external_ledger_row_count": len(rows),
     }
 
 
@@ -1534,9 +1476,6 @@ def _validate_receipt_package(
         install_sql=input_paths["install_sql"],
         repository_root=repository_root,
     )
-    expected.update(_validate_external_ledger(
-        input_paths["external_ledger"], manifest
-    ))
     if not isinstance(value, dict) or value != expected:
         raise ExternalAcceptanceError(
             "receipt generated-package projection is not exact"
@@ -1549,12 +1488,6 @@ def _validate_receipt_package(
             raise ExternalAcceptanceError(
                 "receipt source provenance does not join its input file"
             )
-    if value["external_ledger_sha256"] != input_files[
-        "external_ledger"
-    ]["sha256"]:
-        raise ExternalAcceptanceError(
-            "receipt external ledger does not join its input file"
-        )
 
 
 def _validate_receipt_postgresql(
@@ -2766,8 +2699,6 @@ def _run_live(args: argparse.Namespace) -> Path:
         "manifest": (args.manifest, False),
         "dso": (args.dso, False),
         "static_contract_script": (args.static_contract_script, False),
-        "base_golden": (args.base_golden, False),
-        "external_ledger": (args.external_ledger, False),
         "cmake_fragment": (args.cmake_fragment, False),
         "mode_source": (args.mode_source, False),
         "runner": (__file__, False),
@@ -2786,10 +2717,6 @@ def _run_live(args: argparse.Namespace) -> Path:
         install_sql=paths["install_sql"],
         repository_root=repository_root,
     )
-    package.update(_validate_external_ledger(
-        paths["external_ledger"],
-        manifest,
-    ))
     pg_provenance = _postgresql_provenance(
         paths["pg_config"], timeout=timeout
     )
@@ -2850,8 +2777,6 @@ def _run_live(args: argparse.Namespace) -> Path:
                 str(paths["install_sql"]),
                 "--manifest",
                 str(paths["manifest"]),
-                "--base-golden",
-                str(paths["base_golden"]),
                 "--expect",
                 "enabled",
                 "--stamp",
@@ -3122,45 +3047,35 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         }
         for index in range(1, EXPECTED_COLUMN_COUNT + 1)
     ]
-    physical_statements: list[dict[str, str]] = []
-    for index, statement_id in enumerate(
-        EXPECTED_EXTERNAL_STATEMENT_IDS
-    ):
+    statements: list[dict[str, str]] = []
+    for index, owner_identity in enumerate(sorted_top_level, 1):
         source_path = (
             "main/bioseq/backend/pg/external/relation.cppm"
-            if index < 3 else catalog_source_path
+            if (
+                "handler" in owner_identity
+                or "access_method" in owner_identity
+            )
+            else catalog_source_path
         )
-        physical_statements.append({
-            "baseline_physical_id": statement_id,
+        statements.append({
+            "statement_id": f"S{index:03d}",
             "source_path": source_path,
-            "facet": f"synthetic_facet_{index + 1:02d}",
-            "owner_identity": sorted_top_level[index % len(sorted_top_level)],
+            "owner_identity": owner_identity,
         })
     entities = [*top_level_entities, *column_entities]
     manifest = {
         "manifest_version": 1,
         "authority_mode": "annotated_cpp",
-        "natural_authority_complete": True,
-        "migration_install_action_count": 0,
-        "transitional_install_owner_entity_count": 0,
         "script_sha256": _sha256(install_sql),
-        "physical_statement_count": 504,
+        "statement_count": len(statements),
         "entity_count": len(entities),
         "entities": entities,
-        "physical_statements": physical_statements,
-        "external_legacy_macro_symbols": ["bioseq_external_handler"],
+        "statements": statements,
+        "handwritten_fmgr_export_external_symbol_count": 1,
+        "handwritten_fmgr_export_external_symbols": ["bioseq_external_handler"],
     }
     manifest_path = inputs_root / "bioseq--1.0.manifest.json"
     _write_json(manifest_path, manifest)
-    external_ledger = inputs_root / "external-overlay.tsv"
-    _write_bytes(
-        external_ledger,
-        "".join(
-            f"{row['baseline_physical_id']}\t{row['facet']}\t"
-            f"{row['owner_identity']}\n"
-            for row in physical_statements
-        ).encode("utf-8"),
-    )
 
     raw_input_paths = {
         "python": inputs_root / "python",
@@ -3174,8 +3089,6 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "manifest": manifest_path,
         "dso": dso,
         "static_contract_script": inputs_root / "verify_external.py",
-        "base_golden": inputs_root / "bioseq-base.sql",
-        "external_ledger": external_ledger,
         "cmake_fragment": inputs_root / "external-acceptance.cmake",
         "mode_source": inputs_root / "server.py",
         "runner": inputs_root / "run_external_acceptance.py",
@@ -3187,7 +3100,6 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "install_sql",
         "manifest",
         "dso",
-        "external_ledger",
     }
     for name, path in raw_input_paths.items():
         if name not in precreated:
@@ -3208,9 +3120,6 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         install_sql=install_sql,
         repository_root=repository_root,
     )
-    package.update(_validate_external_ledger(
-        external_ledger, manifest
-    ))
     handler = _validate_handler({
         "schema_name": "bioseq",
         "routine_name": "bioseq_external_handler",
@@ -3543,15 +3452,12 @@ def run_self_tests() -> None:
             "generated package install join": (
                 "generated_package", "install_sql_sha256", "2" * 64,
             ),
-            "generated package physical count": (
-                "generated_package", "manifest_physical_statement_count", 503,
+            "generated package statement count": (
+                "generated_package", "manifest_statement_count", 0,
             ),
             "generated package source join": (
                 "generated_package", "external_source_provenance",
                 sorted(EXTERNAL_SOURCE_PATHS)[0], "sha256", "3" * 64,
-            ),
-            "generated package ledger join": (
-                "generated_package", "external_ledger_sha256", "4" * 64,
             ),
             "PostgreSQL input projection join": (
                 "postgresql", "pg_config", "configure", "--mutated",
@@ -3759,8 +3665,6 @@ def _parser() -> argparse.ArgumentParser:
         "manifest",
         "dso",
         "static_contract_script",
-        "base_golden",
-        "external_ledger",
         "cmake_fragment",
         "mode_source",
     ):

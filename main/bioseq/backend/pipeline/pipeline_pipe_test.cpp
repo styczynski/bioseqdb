@@ -9,7 +9,7 @@
 // test fails); the runtime SECTIONs use Catch2 REQUIRE assertions and run as
 // part of the bioseq unit-test target.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <catch2/matchers/catch_matchers.hpp>
@@ -182,7 +182,7 @@ TEST_CASE("BudgetedSketchVector transfers and destroys host capacity before admi
         constexpr std::size_t count = 4u;
         const std::uint64_t headroom =
             count * sizeof(BudgetedSketchLifetimeProbe)
-            * bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+            * bioseq::parallelism::k_vector_preallocation_headroom_factor;
         auto permit = admission.try_reserve(headroom);
         REQUIRE(permit.has_value());
         Owned owned;

@@ -2,7 +2,7 @@
 // only under -DBIOSEQ_TEST_INDEXES. Gives IndexStorageTablePg::for_each_sequence +
 // write_to live coverage: update_index streams every row and persists the row count as
 // one int64 chunk. Also pins the table-wide-never-UPDATE_ON_INSERT runtime guard.
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <string>
 import bioseq.integration_tests.common;
 

@@ -1,13 +1,9 @@
 /**
  * @file value_sequence.cppm
- * @brief Non-type parameter pack carrier with no constraint on `T`.
+ * @brief Unconstrained carrier for a non-type template-argument pack.
  *
- * Replaces `std::integer_sequence<T, Vs...>` which requires `T` to be
- * integral per the C++ standard — libc++'s primary template rejects
- * enum NTTP packs. `value_sequence<T, Vs...>` carries enum, size_t,
- * or any class-type NTTP pack uniformly. Used by
- * `enum_dispatch_pack` / `value_dispatch_smallest_ge` and by every
- * pipeline registry's `value_list`.
+ * `std::integer_sequence` accepts integral element types only. This carrier also
+ * supports enumeration and structural class values used by runtime dispatch.
  */
 module;
 
@@ -17,10 +13,20 @@ export module bioseq.common.templating.value_sequence;
 
 export namespace bioseq::common::templating {
 
-template <class T, T... Vs>
+/**
+ * @brief Carries a homogeneous pack of structural compile-time values.
+ * @tparam element_type Value type.
+ * @tparam values Values in the sequence.
+ */
+template <class element_type, element_type... values>
 struct value_sequence {
-    using value_type = T;
-    static constexpr std::size_t size() noexcept { return sizeof...(Vs); }
+    /// Type shared by every value in the sequence.
+    using value_type = element_type;
+
+    /// Returns the number of compile-time values.
+    [[nodiscard]] static constexpr std::size_t size() noexcept {
+        return sizeof...(values);
+    }
 };
 
-} // namespace
+} // namespace bioseq::common::templating

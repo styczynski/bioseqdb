@@ -1,15 +1,9 @@
-/*-------------------------------------------------------------------------
- *
- * table/access_hooks.cppm
- *
- * PostgreSQL hook glue for the bioseq table access method. This partition is
- * intentionally separate from :access_method so routine assembly is not mixed
- * with DDL/drop/utility callback wiring.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief PostgreSQL object-access and utility hooks for Bioseq tables.
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "catalog/catalog.h"
@@ -31,46 +25,47 @@ extern "C" {
 #include <exception>
 #include <limits>
 
-export module bioseq.table:access_hooks;
+export module bioseq.postgres.table:access_hooks;
 
-import bioseq.common.mlogging;
-import bioseq.pg_utils;
+import bioseq.common.logging;
+import bioseq.postgres.support;
+import bioseq.postgres.support.sql_boundary;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.storage.metadata;
-import bioseq.storage.manager;
-import bioseq.column.tam;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.storage.manager;
+import bioseq.postgres.column.table_access;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.table.sql_rows;
+import bioseq.postgres.table.sql_rows;
 import :access_identity;
 
 namespace {
 
-static object_access_hook_type PrevObjectAccessHook = NULL;
-static ProcessUtility_hook_type PrevProcessUtilityHook = NULL;
-static bool BioseqExtensionTeardownActive = false;
+static object_access_hook_type previous_object_access_hook = NULL;
+static ProcessUtility_hook_type previous_process_utility_hook = NULL;
+static bool extension_teardown_active = false;
 /* True only while the parent OAT_DROP hook issues PostgreSQL-owned DROP TABLE
  * commands for its generated children. Those recursive commands have already
  * passed the parent's read-only preflight and must not be mistaken for a new
  * user-authored DROP statement. */
-static bool BioseqInternalDropCleanupActive = false;
+static bool internal_drop_cleanup_active = false;
 
 /* PostgreSQL's RemoveRelations() resolves a named partition with
  * RangeVarCallbackForDropRelation so its parent is locked before the child.
  * Query execution and partition DDL use that same parent-first order. This
- * table-only callback mirrors the PG17 ordering, permission and relkind checks
- * needed by our earlier read-only preflight; calling callback-free
+ * callback preserves the ordering, permission, and relation-kind checks
+ * required by the read-only preflight; calling callback-free
  * RangeVarGetRelid(..., AccessExclusiveLock) here would introduce a child-first
  * deadlock edge before core gets a chance to run its own callback. */
-struct BioseqDropLockState
+struct bioseq_drop_lock_state
 {
 	Oid partition_parent_oid = InvalidOid;
 };
 
 static void
-RangeVarCallbackForBioseqDropPreflight(const RangeVar *relation,
+lock_bioseq_drop_target(const RangeVar *relation,
 										Oid relid, Oid old_relid, void *arg)
 {
-	auto *state = static_cast<BioseqDropLockState *>(arg);
+	auto *state = static_cast<bioseq_drop_lock_state *>(arg);
 	if (relid != old_relid && OidIsValid(state->partition_parent_oid))
 	{
 		UnlockRelationOid(state->partition_parent_oid, AccessExclusiveLock);
@@ -127,7 +122,7 @@ RangeVarCallbackForBioseqDropPreflight(const RangeVar *relation,
 	}
 }
 
-/* PG17 find_all_inheritors() intentionally omits a committed
+/* find_all_inheritors() omits a committed
  * DETACH PARTITION CONCURRENTLY member under an active snapshot. DROP's
  * dependency set can still own that pending-detach partition, so the early
  * cleanup preflight must use the extended direct-child API with
@@ -135,7 +130,7 @@ RangeVarCallbackForBioseqDropPreflight(const RangeVar *relation,
  * by PostgreSQL; this breadth-first traversal retains those locks and dedupes
  * multiple-inheritance paths without C++ state that ereport could bypass. */
 static void
-AppendCompleteDropInheritanceClosure(Oid root_relid, List **target_relids)
+append_drop_inheritance_closure(Oid root_relid, List **target_relids)
 {
 	List *closure = list_make1_oid(root_relid);
 	ListCell *agenda_cell = nullptr;
@@ -174,14 +169,14 @@ AppendCompleteDropInheritanceClosure(Oid root_relid, List **target_relids)
  * to decide whether teardown is active.  They survive DROP/CREATE EXTENSION in
  * one backend because PostgreSQL does not unload an already-loaded library.
  */
-static std::uint64_t BioseqExtensionDropLockFallbackClassifications = 0;
-static std::uint64_t BioseqExtensionMissingRelationObservations = 0;
+static std::uint64_t drop_lock_fallback_count = 0;
+static std::uint64_t missing_relation_count = 0;
 
 /* SnapshotSelf, rather than relcache/syscache state, is the authoritative
  * answer for PostgreSQL's precomputed dependency list: a recursive cleanup can
  * delete pg_class while a stale relcache entry remains pinned in this backend. */
 [[nodiscard]] static bool
-RelationCatalogRowExists(const Oid relid)
+relation_catalog_row_exists(const Oid relid)
 {
 	Relation class_relation = table_open(RelationRelationId, AccessShareLock);
 	ScanKeyData key;
@@ -205,7 +200,7 @@ RelationCatalogRowExists(const Oid relid)
  * teardown context without treating an ordinary missing catalog as benign.
  */
 [[nodiscard]] static bool
-BioseqExtensionDropLockHeldByMe()
+extension_drop_lock_is_held()
 {
 	const Oid extension_oid = get_extension_oid("bioseq", true);
 	if (!OidIsValid(extension_oid))
@@ -221,24 +216,24 @@ BioseqExtensionDropLockHeldByMe()
 }
 
 [[nodiscard]] static bool
-BioseqExtensionTeardownContext()
+in_extension_teardown()
 {
 	/* Preserve the direct-String ProcessUtility fast path for backends that
 	 * loaded bioseq before entering DROP EXTENSION. */
-	if (BioseqExtensionTeardownActive)
+	if (extension_teardown_active)
 	{
 		return true;
 	}
-	if (BioseqExtensionDropLockHeldByMe())
+	if (extension_drop_lock_is_held())
 	{
-		++BioseqExtensionDropLockFallbackClassifications;
+		++drop_lock_fallback_count;
 		return true;
 	}
 	return false;
 }
 
 [[nodiscard]] static bool
-DropsBioseqExtension(Node *parsetree)
+drops_bioseq_extension(Node *parsetree)
 {
 	if (!IsA(parsetree, DropStmt))
 	{
@@ -292,7 +287,7 @@ DropsBioseqExtension(Node *parsetree)
  * unless the entire closure preflight succeeds.
  */
 static void
-PreflightBioseqTableDrop(Node *parsetree)
+preflight_bioseq_table_drop(Node *parsetree)
 {
 	if (!IsA(parsetree, DropStmt))
 	{
@@ -315,12 +310,12 @@ PreflightBioseqTableDrop(Node *parsetree)
 		 * let RangeVar lookup skip the invalidation flush and leave a stale
 		 * relhassubclass=false in front of the closure scan. */
 		AcceptInvalidationMessages();
-		BioseqDropLockState lock_state{};
+		bioseq_drop_lock_state lock_state{};
 		const Oid relid = RangeVarGetRelidExtended(
 			relation,
 			AccessExclusiveLock,
 			drop->missing_ok ? RVR_MISSING_OK : 0,
-			RangeVarCallbackForBioseqDropPreflight,
+			lock_bioseq_drop_target,
 			&lock_state);
 		if (OidIsValid(relid) && !list_member_oid(named_relids, relid))
 		{
@@ -336,7 +331,7 @@ PreflightBioseqTableDrop(Node *parsetree)
 	List *target_relids = NIL;
 	foreach(cell, named_relids)
 	{
-		AppendCompleteDropInheritanceClosure(
+		append_drop_inheritance_closure(
 			lfirst_oid(cell), &target_relids);
 	}
 
@@ -344,14 +339,14 @@ PreflightBioseqTableDrop(Node *parsetree)
 	foreach(cell, target_relids)
 	{
 		const Oid relid = lfirst_oid(cell);
-		if (IsBioseqColumnTableAmTable(relid))
+		if (relation_oid_uses_column_table_access_method(relid))
 		{
 			bioseq_relids = lappend_oid(bioseq_relids, relid);
 		}
 	}
 
 	if (bioseq_relids != NIL
-		&& !bioseq::parallelism::pg::supervisor_available())
+		&& !bioseq::postgres::scheduler::supervisor_available())
 	{
 		ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -375,10 +370,10 @@ PreflightBioseqTableDrop(Node *parsetree)
  * Clean-up resources for bioseq column tables.
  */
 static void
-BioseqColumnTableDropHook(Oid relid)
+handle_column_table_drop(Oid relid)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnTableDropHook() entered");
-	const bool extension_teardown = BioseqExtensionTeardownContext();
+	bioseq_log<logging_level::debug>("[bioseq] pg: handle_column_table_drop() entered");
+	const bool extension_teardown = in_extension_teardown();
 
 	/*
 	 * DROP EXTENSION builds one dependency-deletion list before invoking the
@@ -393,9 +388,9 @@ BioseqColumnTableDropHook(Oid relid)
 	 * while the relcache pin is released before any catalog operation that can
 	 * advance the command counter.
 	 */
-	if (!RelationCatalogRowExists(relid))
+	if (!relation_catalog_row_exists(relid))
 	{
-		++BioseqExtensionMissingRelationObservations;
+		++missing_relation_count;
 		if (extension_teardown)
 		{
 			ereport(ERROR,
@@ -408,10 +403,10 @@ BioseqColumnTableDropHook(Oid relid)
 			 errmsg("bioseq drop hook received a missing relation outside extension teardown"),
 			 errdetail("relation_oid=%u", relid)));
 	}
-	Relation drop_target = try_safe_relation_open(relid, AccessShareLock);
+	Relation drop_target = bioseq::postgres::support::try_open_postgres_relation(relid, AccessShareLock);
 	if (drop_target == nullptr)
 	{
-		++BioseqExtensionMissingRelationObservations;
+		++missing_relation_count;
 		if (extension_teardown)
 		{
 			ereport(ERROR,
@@ -425,7 +420,7 @@ BioseqColumnTableDropHook(Oid relid)
 			 errdetail("relation_oid=%u", relid)));
 	}
 	const bool is_bioseq_relation =
-		IsBioseqColumnTableAmRelation(drop_target);
+		relation_uses_column_table_access_method(drop_target);
 	const RelFileLocator relfilelocator = is_bioseq_relation
 		? drop_target->rd_locator
 		: RelFileLocator{};
@@ -448,7 +443,7 @@ BioseqColumnTableDropHook(Oid relid)
 		&& bioseq::storage::is_registered_sequence_fragment_relation(
 			relid))
 	{
-		bioseq::storage::SequenceSourceVersionManager::invalidate_for_fragment(
+		bioseq::storage::sequence_source_version_manager::invalidate_for_fragment(
 			relid);
 	}
 
@@ -463,9 +458,9 @@ BioseqColumnTableDropHook(Oid relid)
 		 * to leave the complete dependency list to PostgreSQL. */
 		if (!extension_teardown)
 		{
-			const bool saved_internal_cleanup = BioseqInternalDropCleanupActive;
+			const bool saved_internal_cleanup = internal_drop_cleanup_active;
 			std::exception_ptr cpp_error;
-			BioseqInternalDropCleanupActive = true;
+			internal_drop_cleanup_active = true;
 			PG_TRY();
 			{
 				try
@@ -481,20 +476,20 @@ BioseqColumnTableDropHook(Oid relid)
 			}
 			PG_CATCH();
 			{
-				BioseqInternalDropCleanupActive = saved_internal_cleanup;
+				internal_drop_cleanup_active = saved_internal_cleanup;
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			BioseqInternalDropCleanupActive = saved_internal_cleanup;
+			internal_drop_cleanup_active = saved_internal_cleanup;
 			if (cpp_error != nullptr)
 			{
 				std::rethrow_exception(cpp_error);
 			}
 		}
 
-		DeleteMetadataRows(relfilelocator);
-		DeleteBioseqColumnTableOptions(relation_oid, true);
-		MarkRelfilenodeDropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
+		delete_metadata_rows(relfilelocator);
+		delete_column_table_options(relation_oid, true);
+		mark_write_state_relation_dropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
 	}
 }
 
@@ -502,9 +497,9 @@ BioseqColumnTableDropHook(Oid relid)
  * Reject AFTER ... FOR EACH ROW triggers on bioseq column tables.
  */
 static void
-BioseqColumnTriggerCreateHook(Oid tgid)
+validate_column_trigger(Oid tgid)
 {
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnTriggerCreateHook() entered");
+	bioseq_log<logging_level::debug>("[bioseq] pg: validate_column_trigger() entered");
 
 	ScanKeyData skey[1];
 	Relation tgrel = table_open(TriggerRelationId, AccessShareLock);
@@ -534,48 +529,48 @@ BioseqColumnTriggerCreateHook(Oid tgid)
 	table_close(tgrel, AccessShareLock);
 
 	if (TRIGGER_FOR_ROW(tgtype) && TRIGGER_FOR_AFTER(tgtype) &&
-		IsBioseqColumnTableAmTable(tgrelid))
+		relation_oid_uses_column_table_access_method(tgrelid))
 	{
-		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("Foreign keys and AFTER ROW triggers are not supported for columnar tables")
-			.hint("Consider an AFTER STATEMENT trigger instead.");
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.with_message("Foreign keys and AFTER ROW triggers are not supported for columnar tables")
+			.with_hint("Consider an AFTER STATEMENT trigger instead.");
 	}
 }
 
 static void
-BioseqColumnTableAMObjectAccessHookImpl(ObjectAccessType access, Oid classId, Oid objectId,
-										int subId, void *arg)
+handle_column_table_object_access(ObjectAccessType access, Oid class_id, Oid object_id,
+										int sub_id, void *arg)
 {
-	if (PrevObjectAccessHook)
+	if (previous_object_access_hook)
 	{
-		PrevObjectAccessHook(access, classId, objectId, subId, arg);
+		previous_object_access_hook(access, class_id, object_id, sub_id, arg);
 	}
 
-	if (access == OAT_DROP && classId == RelationRelationId && !OidIsValid(subId))
+	if (access == OAT_DROP && class_id == RelationRelationId && !OidIsValid(sub_id))
 	{
-		BioseqColumnTableDropHook(objectId);
+		handle_column_table_drop(object_id);
 	}
-	else if (access == OAT_POST_CREATE && classId == TriggerRelationId)
+	else if (access == OAT_POST_CREATE && class_id == TriggerRelationId)
 	{
-		BioseqColumnTriggerCreateHook(objectId);
+		validate_column_trigger(object_id);
 	}
 }
 
 static void
-BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
-									Oid objectId, int subId, void *arg)
+column_table_object_access_hook(ObjectAccessType access, Oid class_id,
+									Oid object_id, int sub_id, void *arg)
 {
-	const bool saved_extension_teardown = BioseqExtensionTeardownActive;
-	const bool saved_internal_cleanup = BioseqInternalDropCleanupActive;
+	const bool saved_extension_teardown = extension_teardown_active;
+	const bool saved_internal_cleanup = internal_drop_cleanup_active;
 	ErrorData* exact_error = nullptr;
 	char detail[512] = "unknown C++ exception";
 	try
 	{
-		BioseqColumnTableAMObjectAccessHookImpl(
-			access, classId, objectId, subId, arg);
+		handle_column_table_object_access(
+			access, class_id, object_id, sub_id, arg);
 		return;
 	}
-	catch (bioseq::pg_utils::PostgresErrorAsCpp& error)
+	catch (bioseq::postgres::support::postgres_error& error)
 	{
 		exact_error = error.release_error_data();
 	}
@@ -587,8 +582,8 @@ BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
 	catch (...)
 	{
 	}
-	BioseqExtensionTeardownActive = saved_extension_teardown;
-	BioseqInternalDropCleanupActive = saved_internal_cleanup;
+	extension_teardown_active = saved_extension_teardown;
+	internal_drop_cleanup_active = saved_internal_cleanup;
 	if (exact_error != nullptr)
 	{
 		ReThrowError(exact_error);
@@ -600,7 +595,7 @@ BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
 }
 
 static void
-PreflightTypmodlessLetterTextCopy(Node *parsetree)
+preflight_typmodless_letter_copy(Node *parsetree)
 {
 	if (!IsA(parsetree, CopyStmt))
 	{
@@ -668,45 +663,45 @@ PreflightTypmodlessLetterTextCopy(Node *parsetree)
 }
 
 static void
-BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
-							   const char *queryString,
-						   bool readOnlyTree,
+process_column_table_utility(PlannedStmt *pstmt,
+							   const char *query_string,
+						   bool read_only_tree,
 						   ProcessUtilityContext context,
 						   ParamListInfo params,
-						   QueryEnvironment *queryEnv,
+						   QueryEnvironment *query_environment,
 						   DestReceiver *dest,
-						   QueryCompletionCompat *completionTag)
+						   QueryCompletion *completion_tag)
 {
-	if (readOnlyTree)
+	if (read_only_tree)
 	{
 		pstmt = copyObject(pstmt);
 	}
 
 	Node *parsetree = pstmt->utilityStmt;
-	PreflightTypmodlessLetterTextCopy(parsetree);
+	preflight_typmodless_letter_copy(parsetree);
 
 	if (IsA(parsetree, IndexStmt))
 	{
-		IndexStmt *indexStmt = reinterpret_cast<IndexStmt *>(parsetree);
+		IndexStmt *index_statement = reinterpret_cast<IndexStmt *>(parsetree);
 
-		Relation rel = relation_openrv(indexStmt->relation,
-									   indexStmt->concurrent ? ShareUpdateExclusiveLock :
+		Relation rel = relation_openrv(index_statement->relation,
+									   index_statement->concurrent ? ShareUpdateExclusiveLock :
 									   ShareLock);
 
-		if (IsBioseqColumnTableAmTable(RelationGetRelid(rel)) &&
-			!BioseqColumnSupportsIndexAM(indexStmt->accessMethod))
+		if (relation_oid_uses_column_table_access_method(RelationGetRelid(rel)) &&
+			!supports_index_access_method(index_statement->accessMethod))
 		{
-			bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-				.msg("unsupported access method for the index on columnar table {} ({})",
-					 RelationGetRelationName(rel), indexStmt->accessMethod);
+			bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
+				.with_message("unsupported access method for the index on columnar table {} ({})",
+					 RelationGetRelationName(rel), index_statement->accessMethod);
 		}
 
 		RelationClose(rel);
 	}
 
-	if (!BioseqInternalDropCleanupActive)
+	if (!internal_drop_cleanup_active)
 	{
-		PreflightBioseqTableDrop(parsetree);
+		preflight_bioseq_table_drop(parsetree);
 	}
 
 	/*
@@ -714,18 +709,18 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	 * hook. Save/restore the prior value rather than unconditionally clearing a
 	 * flag, and restore it on PostgreSQL ERROR longjmp as well as success.
 	 */
-	const bool saved_teardown_context = BioseqExtensionTeardownActive;
-	if (DropsBioseqExtension(parsetree))
+	const bool saved_teardown_context = extension_teardown_active;
+	if (drops_bioseq_extension(parsetree))
 	{
-		BioseqExtensionTeardownActive = true;
+		extension_teardown_active = true;
 	}
 	std::exception_ptr cpp_error;
 	PG_TRY();
 	{
 		try
 		{
-			PrevProcessUtilityHook_compat(pstmt, queryString, readOnlyTree, context,
-									  params, queryEnv, dest, completionTag);
+			previous_process_utility_hook(pstmt, query_string, read_only_tree, context,
+							   params, query_environment, dest, completion_tag);
 		}
 		catch (...)
 		{
@@ -734,11 +729,11 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	}
 	PG_CATCH();
 	{
-		BioseqExtensionTeardownActive = saved_teardown_context;
+		extension_teardown_active = saved_teardown_context;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	BioseqExtensionTeardownActive = saved_teardown_context;
+	extension_teardown_active = saved_teardown_context;
 	if (cpp_error != nullptr)
 	{
 		std::rethrow_exception(cpp_error);
@@ -746,27 +741,27 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 }
 
 static void
-BioseqColumnProcessUtility(PlannedStmt *pstmt,
-							   const char *queryString,
-							   bool readOnlyTree,
+column_table_process_utility_hook(PlannedStmt *pstmt,
+							   const char *query_string,
+							   bool read_only_tree,
 							   ProcessUtilityContext context,
 							   ParamListInfo params,
-							   QueryEnvironment *queryEnv,
+							   QueryEnvironment *query_environment,
 							   DestReceiver *dest,
-							   QueryCompletionCompat *completionTag)
+							   QueryCompletion *completion_tag)
 {
-	const bool saved_extension_teardown = BioseqExtensionTeardownActive;
-	const bool saved_internal_cleanup = BioseqInternalDropCleanupActive;
+	const bool saved_extension_teardown = extension_teardown_active;
+	const bool saved_internal_cleanup = internal_drop_cleanup_active;
 	ErrorData* exact_error = nullptr;
 	char detail[512] = "unknown C++ exception";
 	try
 	{
-		BioseqColumnProcessUtilityImpl(
-			pstmt, queryString, readOnlyTree, context,
-			params, queryEnv, dest, completionTag);
+		process_column_table_utility(
+			pstmt, query_string, read_only_tree, context,
+			params, query_environment, dest, completion_tag);
 		return;
 	}
-	catch (bioseq::pg_utils::PostgresErrorAsCpp& error)
+	catch (bioseq::postgres::support::postgres_error& error)
 	{
 		exact_error = error.release_error_data();
 	}
@@ -778,8 +773,8 @@ BioseqColumnProcessUtility(PlannedStmt *pstmt,
 	catch (...)
 	{
 	}
-	BioseqExtensionTeardownActive = saved_extension_teardown;
-	BioseqInternalDropCleanupActive = saved_internal_cleanup;
+	extension_teardown_active = saved_extension_teardown;
+	internal_drop_cleanup_active = saved_internal_cleanup;
 	if (exact_error != nullptr)
 	{
 		ReThrowError(exact_error);
@@ -793,15 +788,15 @@ BioseqColumnProcessUtility(PlannedStmt *pstmt,
 }
 
 export void
-InstallBioseqColumnTableHooks()
+install_column_table_hooks()
 {
-	PrevObjectAccessHook = object_access_hook;
-	object_access_hook = BioseqColumnTableAMObjectAccessHook;
+	previous_object_access_hook = object_access_hook;
+	object_access_hook = column_table_object_access_hook;
 
-	PrevProcessUtilityHook = ProcessUtility_hook ?
+	previous_process_utility_hook = ProcessUtility_hook ?
 							 ProcessUtility_hook :
 							 standard_ProcessUtility;
-	ProcessUtility_hook = BioseqColumnProcessUtility;
+	ProcessUtility_hook = column_table_process_utility_hook;
 }
 
 export namespace bioseq::table {
@@ -820,7 +815,7 @@ export namespace bioseq::table {
  * @brief Returns backend-local DROP EXTENSION lock-fallback and missing-relation
  * counters.
  */
-[[nodiscard]] bioseq::pg_utils::named_out<teardown_diagnostics_row>
+[[nodiscard]] bioseq::postgres::support::named_output<teardown_diagnostics_row>
 teardown_diagnostics() noexcept {
     const auto clamp_counter = [](std::uint64_t value) noexcept {
         return static_cast<std::int64_t>(
@@ -829,14 +824,14 @@ teardown_diagnostics() noexcept {
                 static_cast<std::uint64_t>(
                     std::numeric_limits<std::int64_t>::max())));
     };
-    return bioseq::pg_utils::named_out<teardown_diagnostics_row>{
+    return bioseq::postgres::support::named_output<teardown_diagnostics_row>{
         teardown_diagnostics_row{
             .lock_fallback_classifications =
                 clamp_counter(
-                    BioseqExtensionDropLockFallbackClassifications),
+                    drop_lock_fallback_count),
             .missing_relation_observations =
                 clamp_counter(
-                    BioseqExtensionMissingRelationObservations),
+                    missing_relation_count),
         }};
 }
 

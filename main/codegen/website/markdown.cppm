@@ -12,27 +12,27 @@ module;
 
 module bioseq.codegen.website:markdown;
 
-import :markdown_extensions;
+import :markdown_directives;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
 
 // MD4C driver (§10.2). Uses MD4C's typed callbacks to project CommonMark plus
-// the enabled extensions onto the owned document_node tree; md4c (not
+// the enabled extensions onto the owned content_node tree; md4c (not
 // md4c-html) is linked so this unit owns safe emission. No MD4C pointer ever
 // escapes this translation unit.
 namespace bioseq::codegen::website {
 
 namespace {
 
-struct markdown_builder {
-    document_node root{.kind = document_node_kind::document};
-    std::vector<document_node*> stack{&root};
+struct markdown_tree_builder {
+    content_node root{.kind = content_node_kind::root};
+    std::vector<content_node*> stack{&root};
 
-    document_node& current() { return *stack.back(); }
+    content_node& current() { return *stack.back(); }
 
-    document_node& push(document_node_kind kind) {
-        current().children.push_back(document_node{.kind = kind});
-        document_node& child = current().children.back();
+    content_node& push(content_node_kind kind) {
+        current().children.push_back(content_node{.kind = kind});
+        content_node& child = current().children.back();
         stack.push_back(&child);
         return child;
     }
@@ -49,36 +49,36 @@ struct markdown_builder {
                           : std::string_view{};
 }
 
-int on_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
-    auto& builder = *static_cast<markdown_builder*>(userdata);
+int enter_markdown_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
+    auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     switch (type) {
     case MD_BLOCK_DOC: break;
-    case MD_BLOCK_P: builder.push(document_node_kind::paragraph); break;
-    case MD_BLOCK_QUOTE: builder.push(document_node_kind::block_quote); break;
-    case MD_BLOCK_UL: builder.push(document_node_kind::unordered_list); break;
-    case MD_BLOCK_OL: builder.push(document_node_kind::ordered_list); break;
-    case MD_BLOCK_LI: builder.push(document_node_kind::list_item); break;
+    case MD_BLOCK_P: builder.push(content_node_kind::paragraph); break;
+    case MD_BLOCK_QUOTE: builder.push(content_node_kind::block_quote); break;
+    case MD_BLOCK_UL: builder.push(content_node_kind::unordered_list); break;
+    case MD_BLOCK_OL: builder.push(content_node_kind::ordered_list); break;
+    case MD_BLOCK_LI: builder.push(content_node_kind::list_item); break;
     case MD_BLOCK_H: {
-        document_node& node = builder.push(document_node_kind::heading);
+        content_node& node = builder.push(content_node_kind::heading);
         const auto* header = static_cast<MD_BLOCK_H_DETAIL*>(detail);
         node.attributes.emplace("level", std::to_string(header->level));
         break;
     }
     case MD_BLOCK_CODE: {
-        document_node& node = builder.push(document_node_kind::code_block);
+        content_node& node = builder.push(content_node_kind::code_block);
         const auto* code = static_cast<MD_BLOCK_CODE_DETAIL*>(detail);
         node.attributes.emplace("language", std::string(attribute_text(code->lang)));
         node.attributes.emplace("info", std::string(attribute_text(code->info)));
         break;
     }
-    case MD_BLOCK_TABLE: builder.push(document_node_kind::table); break;
-    case MD_BLOCK_TR: builder.push(document_node_kind::table_row); break;
+    case MD_BLOCK_TABLE: builder.push(content_node_kind::table); break;
+    case MD_BLOCK_TR: builder.push(content_node_kind::table_row); break;
     case MD_BLOCK_TH:
-    case MD_BLOCK_TD: builder.push(document_node_kind::table_cell); break;
+    case MD_BLOCK_TD: builder.push(content_node_kind::table_cell); break;
     case MD_BLOCK_ADMONITION: {
-        document_node& node = builder.push(document_node_kind::admonition);
+        content_node& node = builder.push(content_node_kind::admonition);
         const auto* admonition = static_cast<MD_BLOCK_ADMONITION_DETAIL*>(detail);
-        // Carry the severity across as "class"; html_render falls back to "note"
+        // Carry the severity across as "class"; :html_renderer falls back to "note"
         // when it is absent, so dropping this detail silently renders every
         // [!WARNING]/[!CAUTION]/[!TIP]/[!IMPORTANT] as a note. Classify through
         // the shared mapping so an unrecognized tag takes that fallback rather
@@ -89,80 +89,80 @@ int on_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
         }
         break;
     }
-    default: builder.push(document_node_kind::paragraph); break;
+    default: builder.push(content_node_kind::paragraph); break;
     }
     return 0;
 }
 
-int on_leave_block(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
-    auto& builder = *static_cast<markdown_builder*>(userdata);
+int leave_markdown_block(MD_BLOCKTYPE type, void* /*detail*/, void* userdata) {
+    auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     if (type != MD_BLOCK_DOC) {
         builder.pop();
     }
     return 0;
 }
 
-int on_enter_span(MD_SPANTYPE type, void* detail, void* userdata) {
-    auto& builder = *static_cast<markdown_builder*>(userdata);
+int enter_markdown_span(MD_SPANTYPE type, void* detail, void* userdata) {
+    auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     switch (type) {
-    case MD_SPAN_EM: builder.push(document_node_kind::emphasis); break;
-    case MD_SPAN_STRONG: builder.push(document_node_kind::strong_text); break;
-    case MD_SPAN_DEL: builder.push(document_node_kind::strikethrough); break;
-    case MD_SPAN_MARK: builder.push(document_node_kind::highlight); break;
-    case MD_SPAN_CODE: builder.push(document_node_kind::code_span); break;
+    case MD_SPAN_EM: builder.push(content_node_kind::emphasis); break;
+    case MD_SPAN_STRONG: builder.push(content_node_kind::strong_text); break;
+    case MD_SPAN_DEL: builder.push(content_node_kind::strikethrough); break;
+    case MD_SPAN_MARK: builder.push(content_node_kind::highlight); break;
+    case MD_SPAN_CODE: builder.push(content_node_kind::code_span); break;
     case MD_SPAN_A: {
-        document_node& node = builder.push(document_node_kind::link);
+        content_node& node = builder.push(content_node_kind::link);
         const auto* anchor = static_cast<MD_SPAN_A_DETAIL*>(detail);
         node.target = std::string(attribute_text(anchor->href));
-        if (auto query = parse_entity_reference(node.target, source_span{})) {
-            node.kind = document_node_kind::entity_link;
+        if (auto query = parse_entity_query(node.target, source_span{})) {
+            node.kind = content_node_kind::entity_link;
         }
         break;
     }
     case MD_SPAN_IMG: {
-        document_node& node = builder.push(document_node_kind::image);
+        content_node& node = builder.push(content_node_kind::image);
         const auto* image = static_cast<MD_SPAN_IMG_DETAIL*>(detail);
         node.target = std::string(attribute_text(image->src));
         break;
     }
     case MD_SPAN_WIKILINK: {
-        document_node& node = builder.push(document_node_kind::entity_link);
+        content_node& node = builder.push(content_node_kind::entity_link);
         const auto* wiki = static_cast<MD_SPAN_WIKILINK_DETAIL*>(detail);
         node.target = std::string(attribute_text(wiki->target));
         break;
     }
-    default: builder.push(document_node_kind::emphasis); break;
+    default: builder.push(content_node_kind::emphasis); break;
     }
     return 0;
 }
 
-int on_leave_span(MD_SPANTYPE /*type*/, void* /*detail*/, void* userdata) {
-    auto& builder = *static_cast<markdown_builder*>(userdata);
+int leave_markdown_span(MD_SPANTYPE /*type*/, void* /*detail*/, void* userdata) {
+    auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     builder.pop();
     return 0;
 }
 
-int on_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
-    auto& builder = *static_cast<markdown_builder*>(userdata);
+int append_markdown_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
+    auto& builder = *static_cast<markdown_tree_builder*>(userdata);
     std::string_view value(text, size);
-    document_node& parent = builder.current();
-    if (parent.kind == document_node_kind::code_block) {
+    content_node& parent = builder.current();
+    if (parent.kind == content_node_kind::code_block) {
         // Verbatim code content, including newlines, accrues on the block node.
         parent.text.append(value);
         return 0;
     }
     if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) {
         parent.children.push_back(
-            document_node{.kind = document_node_kind::line_break});
+            content_node{.kind = content_node_kind::line_break});
         return 0;
     }
     if (!parent.children.empty()
-        && parent.children.back().kind == document_node_kind::text
+        && parent.children.back().kind == content_node_kind::text
         && type != MD_TEXT_CODE) {
         parent.children.back().text.append(value);
     } else {
         parent.children.push_back(
-            document_node{.kind = document_node_kind::text, .text = std::string(value)});
+            content_node{.kind = content_node_kind::text, .text = std::string(value)});
     }
     return 0;
 }
@@ -172,17 +172,17 @@ int on_text(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata)
 /// @brief Parses Markdown body text into an owned document tree.
 /// @param markdown Body text (frontmatter already removed).
 /// @return The document-rooted node with its rendered children.
-[[nodiscard]] document_node parse_markdown(std::string_view markdown) {
-    markdown_builder builder;
+[[nodiscard]] content_node parse_markdown_content(std::string_view markdown) {
+    markdown_tree_builder builder;
     MD_PARSER parser{};
     parser.abi_version = 0;
     parser.flags = MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS
         | MD_FLAG_WIKILINKS | MD_FLAG_LATEXMATHSPANS | MD_DIALECT_GITHUB;
-    parser.enter_block = &on_enter_block;
-    parser.leave_block = &on_leave_block;
-    parser.enter_span = &on_enter_span;
-    parser.leave_span = &on_leave_span;
-    parser.text = &on_text;
+    parser.enter_block = &enter_markdown_block;
+    parser.leave_block = &leave_markdown_block;
+    parser.enter_span = &enter_markdown_span;
+    parser.leave_span = &leave_markdown_span;
+    parser.text = &append_markdown_text;
     const int status = md_parse(markdown.data(),
                                 static_cast<MD_SIZE>(markdown.size()), &parser, &builder);
     if (status != 0) {

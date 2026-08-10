@@ -8,126 +8,104 @@
  * need to reach without importing the full bioseq_table module — which
  * would otherwise create an import cycle.
  *
- * DOC0322 §7.4 — replaces the former `extern "C++"` forward-decl reaches
- * for tid_to_row_number / row_number_to_tid / IsBioseqColumnTableAmTable with
- * a proper exported leaf module. The leaf imports only the lowest-level
- * modules (storage_physical for the row-number constants, pg_utils for
- * relation helpers, mlogging for the error path), so it sits at the very
- * bottom of the import DAG and never feeds back into its importers.
- *
- * The TableAmRoutine identity used by IsBioseqColumnTableAmTable is supplied
- * via dependency inversion: bioseq_tableam_init() (in
- * bioseq_table:access_method) calls register_bioseq_am_routine() with the
- * registered routine pointer, and IsBioseqColumnTableAmTable compares a
- * relation's rd_tableam against it. This keeps the leaf free of any edge
- * back into the table-AM module.
+ * The TableAmRoutine identity used by relation_oid_uses_column_table_access_method is supplied
+ * by the table-AM initializer. Comparing the registered routine pointer keeps
+ * this leaf independent from the full table-access implementation.
  *
  *-------------------------------------------------------------------------
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.column.tam;
+export module bioseq.postgres.column.table_access;
 
-import bioseq.storage.physical;   // BIOSEQ_COLUMN_INVALID_ROW_NUMBER, BIOSEQ_COLUMN_MAX_ROW_NUMBER,
-                           // BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS
-import bioseq.pg_utils;           // safe_relation_open
-import bioseq.common.mlogging;           // bioseq_report<ERR, PG> / bioseq_log<DBG>
+import bioseq.postgres.storage.physical;
+import bioseq.postgres.support;
+import bioseq.common.logging;
 
-/*
- * ErrorIfInvalidRowNumber errors out if given rowNumber is invalid. Module
- * internal — only the two tid helpers below call it. (Moved here from
- * access_method.cppm together with the two helpers it guards.)
- */
+/// @brief Rejects row numbers that cannot be represented by a PostgreSQL TID.
 static void
-ErrorIfInvalidRowNumber(uint64_t rowNumber)
+validate_row_number(uint64_t row_number)
 {
-	if (rowNumber == BIOSEQ_COLUMN_INVALID_ROW_NUMBER)
+	if (row_number == invalid_column_row_number)
 	{
-		/* not expected but be on the safe side */
-		bioseq_report<ERR, PG>().code(ERRCODE_INTERNAL_ERROR)
-			.msg("unexpected row number for columnar table");
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(ERRCODE_INTERNAL_ERROR)
+			.with_message("unexpected row number for columnar table");
 	}
-	else if (rowNumber > BIOSEQ_COLUMN_MAX_ROW_NUMBER)
+	else if (row_number > maximum_column_row_number)
 	{
-		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("columnar tables can't have row numbers greater than {}",
-				 static_cast<uint64_t>(BIOSEQ_COLUMN_MAX_ROW_NUMBER))
-			.hint("Consider using VACUUM FULL for your table");
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.with_message("columnar tables can't have row numbers greater than {}",
+				 static_cast<uint64_t>(maximum_column_row_number))
+			.with_hint("Consider using VACUUM FULL for your table");
 	}
 }
 
 
-/*
- * row_number_to_tid maps given rowNumber to ItemPointerData.
- */
+/// @brief Encodes a column row number as a PostgreSQL item pointer.
+/// @param row_number Valid one-based column row number.
+/// @return PostgreSQL item pointer containing the row identity.
 export ItemPointerData
-row_number_to_tid(uint64_t rowNumber)
+row_number_to_tid(uint64_t row_number)
 {
-	ErrorIfInvalidRowNumber(rowNumber);
+	validate_row_number(row_number);
 
 	ItemPointerData tid = { 0 };
-	ItemPointerSetBlockNumber(&tid, rowNumber / BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS);
-	ItemPointerSetOffsetNumber(&tid, rowNumber % BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS +
+	ItemPointerSetBlockNumber(&tid, row_number / item_pointer_row_capacity);
+	ItemPointerSetOffsetNumber(&tid, row_number % item_pointer_row_capacity +
 							   FirstOffsetNumber);
 	return tid;
 }
 
 
-/*
- * tid_to_row_number maps given ItemPointerData to rowNumber.
- */
+/// @brief Decodes a PostgreSQL item pointer into a column row number.
+/// @param tid Item pointer produced by row_number_to_tid.
+/// @return One-based column row number.
 export uint64_t
 tid_to_row_number(ItemPointerData tid)
 {
-	uint64_t rowNumber = ItemPointerGetBlockNumber(&tid) * BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS +
+	uint64_t row_number = ItemPointerGetBlockNumber(&tid) * item_pointer_row_capacity +
 					   ItemPointerGetOffsetNumber(&tid) - FirstOffsetNumber;
 
-	ErrorIfInvalidRowNumber(rowNumber);
+	validate_row_number(row_number);
 
-	return rowNumber;
+	return row_number;
 }
 
 
-/*
- * The registered bioseq TableAmRoutine pointer. Set once at module-init time
- * by bioseq_tableam_init() via register_bioseq_am_routine(). Used by
- * IsBioseqColumnTableAmTable to identify bioseq tables by their AM identity
- * without depending on bioseq_table:access_method (dependency inversion,
- * DOC0322 §7.4).
- */
-static const TableAmRoutine* g_bioseq_am_routine = nullptr;
+// Registered once during table-AM initialization and compared by identity.
+static const TableAmRoutine* registered_column_table_access_method = nullptr;
 
+/// @brief Records the installed Bioseq table-access routine identity.
 export void
-register_bioseq_am_routine(const TableAmRoutine* routine) noexcept
+register_column_table_access_method(const TableAmRoutine* routine) noexcept
 {
-	g_bioseq_am_routine = routine;
+	registered_column_table_access_method = routine;
 }
 
-/*
- * Relation-handle variant for callers that already hold a relcache pin and
- * relation lock.  Reusing that exact handle is essential during dependency
- * deletion: reopening an OID from PostgreSQL's precomputed DROP list can fail
- * after an earlier recursive drop has already removed the catalog row.
+/** @brief Tests an already-open relation for the Bioseq table-access method.
+ *
+ * Callers retain their existing relcache pin and relation lock. Reusing that
+ * exact handle is essential during dependency deletion: reopening an OID from
+ * PostgreSQL's precomputed DROP list can fail after an earlier recursive drop
+ * has already removed the catalog row.
  */
 export bool
-IsBioseqColumnTableAmRelation(Relation relation) noexcept
+relation_uses_column_table_access_method(Relation relation) noexcept
 {
 	return relation != nullptr
-		&& g_bioseq_am_routine != nullptr
-		&& relation->rd_tableam == g_bioseq_am_routine;
+		&& registered_column_table_access_method != nullptr
+		&& relation->rd_tableam == registered_column_table_access_method;
 }
 
 
-/*
- * IsBioseqColumnTableAmTable returns true if relation has the bioseq table
- * access method. This can be called before extension creation.
- */
+/// @brief Opens an OID and tests it for the Bioseq table-access method.
+/// @return False for invalid OIDs or relations using another access method.
 export bool
-IsBioseqColumnTableAmTable(Oid relationId)
+relation_oid_uses_column_table_access_method(Oid relation_oid)
 {
-	bioseq_log<DBG>("[bioseq] pg: IsBioseqColumnTableAmTable() entered");
-	if (!OidIsValid(relationId))
+	bioseq_log<logging_level::debug>("[bioseq] pg: relation_oid_uses_column_table_access_method() entered");
+	if (!OidIsValid(relation_oid))
 	{
 		return false;
 	}
@@ -136,9 +114,10 @@ IsBioseqColumnTableAmTable(Oid relationId)
 	 * Lock relation to prevent it from being dropped &
 	 * avoid race conditions.
 	 */
-	Relation rel = safe_relation_open(relationId, AccessShareLock);
-	bool result = IsBioseqColumnTableAmRelation(rel);
-	relation_close(rel, NoLock);
+	Relation relation = bioseq::postgres::support::open_postgres_relation(
+		relation_oid, AccessShareLock);
+	const bool result = relation_uses_column_table_access_method(relation);
+	relation_close(relation, NoLock);
 
 	return result;
 }

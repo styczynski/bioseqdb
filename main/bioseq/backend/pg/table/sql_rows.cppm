@@ -4,7 +4,7 @@ module;
 #include <optional>
 #include <type_traits>
 
-export module bioseq.table.sql_rows;
+export module bioseq.postgres.table.sql_rows;
 
 import bioseq.codegen.sql.annotation_model;
 

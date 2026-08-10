@@ -1,6 +1,5 @@
 module;
 
-#include "common.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -12,9 +11,9 @@ export namespace bioseq::io {
 /// Which file format `read_sequences_file` is being asked to parse. The
 /// user MUST commit to one format up front (template parameter); we do
 /// not auto-detect per record. See tech spec §3.3.
-enum class sequence_io_file_type : std::uint8_t {
-    FASTA = 0,
-    FASTQ = 1,
+enum class sequence_file_format : std::uint8_t {
+    fasta = 0,
+    fastq = 1,
 };
 
 /// I/O backend knobs (buffer sizes, mmap thresholds, gzip auto-detection).
@@ -46,7 +45,7 @@ struct io_options {
     // ---------------------------------------------------------------
     bool        parallel_gzip_enabled              = true;
     std::size_t parallel_gzip_min_compressed_bytes = 16ULL * 1024 * 1024;
-    /// 0 = use kDefaultParallelGzipChunkSize = 4 MiB.
+    /// 0 = use default_parallel_gzip_chunk_size = 4 MiB.
     std::size_t parallel_gzip_chunk_bytes          = 0;
     /// 0 = auto (`hardware_concurrency() - 2`, capped at 6).
     std::size_t parallel_gzip_thread_count         = 0;

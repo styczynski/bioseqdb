@@ -16,7 +16,6 @@
  */
 module;
 
-#include "common.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,17 +25,17 @@ module;
 
 export module bioseq.io.compression.gzip_format;
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.io.compression.bit_reader;
-import bioseq.io.simd_kernels;
+import bioseq.io.simd;
 
 export namespace bioseq::io::compression {
 
-inline constexpr std::uint8_t kGzipMagic0 = 0x1F;
-inline constexpr std::uint8_t kGzipMagic1 = 0x8B;
-inline constexpr std::uint8_t kGzipMethodDeflate = 0x08;
+inline constexpr std::uint8_t gzip_magic_first_byte = 0x1F;
+inline constexpr std::uint8_t gzip_magic_second_byte = 0x8B;
+inline constexpr std::uint8_t gzip_deflate_method = 0x08;
 
-struct gzip_flags {
+struct gzip_header_flags {
     bool ftext    = false;
     bool fhcrc    = false;
     bool fextra   = false;
@@ -46,7 +45,7 @@ struct gzip_flags {
 
 struct gzip_header {
     std::size_t end_bit_offset = 0;
-    gzip_flags  flags;
+    gzip_header_flags  flags;
     std::uint8_t  operating_system = 0;
     std::uint8_t  extra_flags      = 0;
     std::uint32_t modification_time = 0;
@@ -67,19 +66,19 @@ parse_gzip_header(bit_reader& reader,
                   std::span<const std::uint8_t> compressed_view) {
     if (reader.bits_buffered() < 8) reader.refill();
     const std::uint64_t magic0 = reader.read<8>();
-    if (magic0 != kGzipMagic0) {
+    if (magic0 != gzip_magic_first_byte) {
         return std::unexpected(fmt::format(
             "gzip header: bad magic byte 0 ({:#04x} expected {:#04x})",
-            magic0, kGzipMagic0));
+            magic0, gzip_magic_first_byte));
     }
     const std::uint64_t magic1 = reader.read<8>();
-    if (magic1 != kGzipMagic1) {
+    if (magic1 != gzip_magic_second_byte) {
         return std::unexpected(fmt::format(
             "gzip header: bad magic byte 1 ({:#04x} expected {:#04x})",
-            magic1, kGzipMagic1));
+            magic1, gzip_magic_second_byte));
     }
     const std::uint64_t method = reader.read<8>();
-    if (method != kGzipMethodDeflate) {
+    if (method != gzip_deflate_method) {
         return std::unexpected(fmt::format(
             "gzip header: unsupported method {} (only DEFLATE supported)",
             method));

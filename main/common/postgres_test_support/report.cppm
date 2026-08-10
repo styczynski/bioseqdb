@@ -29,9 +29,8 @@ module;
 export module bioseq.test.postgres:report;
 
 import bioseq.common.durable_file_io;
-import bioseq.libpq.client;
+import bioseq.common.libpq;
 import :artifact;
-import :migration_probe;
 import :qualification;
 import :resource_sampler;
 import :supervision;
@@ -52,18 +51,18 @@ struct sql_transcript_entry {
     std::string section;
     std::string sql;
     sql_transcript_status status{sql_transcript_status::succeeded};
-    std::string sqlstate;
+    std::string sql_state;
     std::string message;
     std::string command_tag;
-    std::int64_t row_count{};
-    std::int64_t column_count{};
+    std::uint64_t row_count{};
+    std::uint64_t column_count{};
     std::vector<std::vector<std::optional<std::string>>> sampled_rows;
     bool rows_truncated{};
     std::chrono::milliseconds duration{};
 };
 
 /// @brief Catch case/section associated with process-wide report observations.
-struct report_case_context {
+struct execution_case_context {
     std::string test_case;
     std::string section;
 };
@@ -74,7 +73,7 @@ namespace bioseq::postgres_test::report_state_detail {
 
 struct context_state {
     std::mutex mutex;
-    report_case_context current;
+    execution_case_context current;
 };
 
 [[nodiscard]] inline context_state& process_context() {
@@ -82,7 +81,7 @@ struct context_state {
     return state;
 }
 
-[[nodiscard]] inline std::atomic_bool& automatic_collection() {
+[[nodiscard]] inline std::atomic_bool& access_automatic_collection_state() {
     static std::atomic_bool enabled{false};
     return enabled;
 }
@@ -106,7 +105,7 @@ inline void append_crash_transcript(
                << supervision_hex_encode(entry.sql) << '\t'
                << (entry.status == sql_transcript_status::succeeded
                        ? "passed" : "failed")
-               << '\t' << supervision_hex_encode(entry.sqlstate)
+               << '\t' << supervision_hex_encode(entry.sql_state)
                << '\t' << supervision_hex_encode(entry.message)
                << '\t' << supervision_hex_encode(entry.command_tag)
                << '\t' << entry.row_count
@@ -123,45 +122,46 @@ inline void append_crash_transcript(
 export namespace bioseq::postgres_test {
 
 /// @brief Enables fixture-owned process evidence for an integration runner.
-inline void set_automatic_report_collection_enabled(bool enabled) noexcept {
-    report_state_detail::automatic_collection().store(
+inline void set_automatic_observation_collection_enabled(bool enabled) noexcept {
+    report_state_detail::access_automatic_collection_state().store(
         enabled, std::memory_order_relaxed);
 }
 
 /// @brief Returns whether fixtures should attach the process report collectors.
-[[nodiscard]] inline bool automatic_report_collection_enabled() noexcept {
-    return report_state_detail::automatic_collection().load(
+[[nodiscard]] inline bool
+is_automatic_observation_collection_enabled() noexcept {
+    return report_state_detail::access_automatic_collection_state().load(
         std::memory_order_relaxed);
 }
 
 /// @brief Updates the active Catch context inherited by SQL/cleanup observers.
-inline void set_report_case_context(report_case_context context) {
+inline void set_execution_case_context(execution_case_context context) {
     auto& state = report_state_detail::process_context();
     std::scoped_lock lock(state.mutex);
     state.current = std::move(context);
 }
 
 /// @brief Clears the active Catch context outside test execution.
-inline void clear_report_case_context() noexcept {
+inline void clear_execution_case_context() noexcept {
     try {
-        set_report_case_context({});
+        set_execution_case_context({});
     } catch (...) {
     }
 }
 
 /// @brief Returns a stable copy of the active process report context.
-[[nodiscard]] inline report_case_context current_report_case_context() {
+[[nodiscard]] inline execution_case_context current_execution_case_context() {
     auto& state = report_state_detail::process_context();
     std::scoped_lock lock(state.mutex);
     return state.current;
 }
 
 /// @brief Thread-safe executor/observer for literal SQL transcripts.
-class sql_transcript : public bioseq::libpq::execution_observer {
+class sql_transcript : public bioseq::libpq::command_observer {
 public:
     /// @brief Executes SQL, records bounded rows/errors, and preserves exceptions.
-    [[nodiscard]] bioseq::libpq::result execute(
-        bioseq::libpq::connection& connection,
+    [[nodiscard]] bioseq::libpq::command_result execute(
+        bioseq::libpq::client_connection& connection,
         std::string_view session,
         std::string_view sql,
         std::chrono::milliseconds deadline,
@@ -169,28 +169,28 @@ public:
             bioseq::libpq::transaction_policy::require_idle,
         std::size_t max_sample_cells = 256,
         std::size_t max_sample_bytes = 64U * 1024U) {
-        if (connection.execution_observer_ptr() == this) {
-            return connection.exec(sql, deadline, policy);
+        if (connection.observer() == this) {
+            return connection.execute(sql, deadline, policy);
         }
         const auto started = std::chrono::steady_clock::now();
         try {
-            bioseq::libpq::result result =
-                connection.exec(sql, deadline, policy);
+            bioseq::libpq::command_result result =
+                connection.execute(sql, deadline, policy);
             append(success_entry(
                 session, sql, result,
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - started),
                 max_sample_cells, max_sample_bytes));
             return result;
-        } catch (const bioseq::libpq::query_error& error) {
+        } catch (const bioseq::libpq::command_error& error) {
             append(failure_entry(
                 session, sql, error,
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - started)));
             throw;
         } catch (const std::exception& error) {
-            const report_case_context context =
-                current_report_case_context();
+            const execution_case_context context =
+                current_execution_case_context();
             append(sql_transcript_entry{
                 .session = std::string(session),
                 .test_case = context.test_case,
@@ -208,12 +208,13 @@ public:
     void command_succeeded(
         std::string_view context,
         std::string_view sql,
-        const bioseq::libpq::result& outcome,
+        const bioseq::libpq::command_result& outcome,
         std::chrono::nanoseconds elapsed) noexcept override {
         try {
             append(success_entry(
                 context, sql, outcome, elapsed,
-                max_observed_sample_cells, max_observed_sample_bytes));
+                k_max_observed_sample_cells,
+                k_max_observed_sample_bytes));
         } catch (...) {
         }
     }
@@ -221,7 +222,7 @@ public:
     void command_failed(
         std::string_view context,
         std::string_view sql,
-        const bioseq::libpq::query_error& error,
+        const bioseq::libpq::command_error& error,
         std::chrono::nanoseconds elapsed) noexcept override {
         try {
             append(failure_entry(context, sql, error, elapsed));
@@ -251,18 +252,19 @@ public:
     }
 
 private:
-    static constexpr std::size_t max_observed_sample_cells = 256;
-    static constexpr std::size_t max_observed_sample_bytes = 64U * 1024U;
+    static constexpr std::size_t k_max_observed_sample_cells = 256;
+    static constexpr std::size_t k_max_observed_sample_bytes =
+        64U * 1024U;
 
     [[nodiscard]] static sql_transcript_entry success_entry(
         std::string_view session,
         std::string_view sql,
-        const bioseq::libpq::result& result,
+        const bioseq::libpq::command_result& result,
         std::chrono::nanoseconds elapsed,
         std::size_t max_sample_cells,
         std::size_t max_sample_bytes) {
-        const report_case_context context =
-            current_report_case_context();
+        const execution_case_context context =
+            current_execution_case_context();
         sql_transcript_entry entry{
             .session = std::string(session),
             .test_case = context.test_case,
@@ -270,16 +272,16 @@ private:
             .sql = std::string(sql),
             .status = sql_transcript_status::succeeded,
             .command_tag = result.command_tag(),
-            .row_count = result.rows(),
-            .column_count = result.columns(),
+            .row_count = static_cast<std::uint64_t>(result.row_count()),
+            .column_count =
+                static_cast<std::uint64_t>(result.column_count()),
             .duration =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     elapsed)};
         std::size_t sampled_cells = 0;
         std::size_t sampled_bytes = 0;
-        for (int row = 0; row < result.rows(); ++row) {
-            const std::size_t column_count =
-                static_cast<std::size_t>(result.columns());
+        for (std::size_t row = 0; row < result.row_count(); ++row) {
+            const std::size_t column_count = result.column_count();
             if (sampled_cells > max_sample_cells
                 || column_count > max_sample_cells - sampled_cells) {
                 entry.rows_truncated = true;
@@ -287,12 +289,13 @@ private:
             }
             std::size_t row_bytes = 0;
             bool row_exceeds_byte_limit = false;
-            for (int column = 0; column < result.columns(); ++column) {
-                if (result.is_null(row, column)) {
+            for (std::size_t column = 0;
+                 column < result.column_count(); ++column) {
+                if (result.cell_is_null(row, column)) {
                     continue;
                 }
                 const std::size_t cell_bytes =
-                    result.value(row, column).size();
+                    result.text_value(row, column).size();
                 if (row_bytes > max_sample_bytes
                     || cell_bytes > max_sample_bytes - row_bytes) {
                     row_exceeds_byte_limit = true;
@@ -306,13 +309,13 @@ private:
                 break;
             }
             std::vector<std::optional<std::string>> sampled_row;
-            sampled_row.reserve(
-                static_cast<std::size_t>(result.columns()));
-            for (int column = 0; column < result.columns(); ++column) {
-                if (result.is_null(row, column)) {
+            sampled_row.reserve(result.column_count());
+            for (std::size_t column = 0;
+                 column < result.column_count(); ++column) {
+                if (result.cell_is_null(row, column)) {
                     sampled_row.push_back(std::nullopt);
                 } else {
-                    sampled_row.emplace_back(result.value(row, column));
+                    sampled_row.emplace_back(result.text_value(row, column));
                 }
                 ++sampled_cells;
             }
@@ -325,17 +328,17 @@ private:
     [[nodiscard]] static sql_transcript_entry failure_entry(
         std::string_view session,
         std::string_view sql,
-        const bioseq::libpq::query_error& error,
+        const bioseq::libpq::command_error& error,
         std::chrono::nanoseconds elapsed) {
-        const report_case_context context =
-            current_report_case_context();
+        const execution_case_context context =
+            current_execution_case_context();
         return sql_transcript_entry{
             .session = std::string(session),
             .test_case = context.test_case,
             .section = context.section,
             .sql = std::string(sql),
             .status = sql_transcript_status::failed,
-            .sqlstate = std::string(error.sqlstate()),
+            .sql_state = std::string(error.sql_state()),
             .message = error.what(),
             .duration =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -355,13 +358,13 @@ private:
 
 /// @brief Attaches process transcript capture to one test connection.
 inline void attach_process_sql_transcript(
-    bioseq::libpq::connection& connection,
+    bioseq::libpq::client_connection& connection,
     std::string_view session) noexcept {
     try {
-        if (!automatic_report_collection_enabled()) {
+        if (!is_automatic_observation_collection_enabled()) {
             return;
         }
-        connection.set_execution_observer(
+        connection.set_observer(
             &process_sql_transcript(), std::string(session));
     } catch (...) {
     }
@@ -451,14 +454,14 @@ load_supervision_sql_transcript(
         const auto test_case = supervision_hex_decode(fields[2]);
         const auto section = supervision_hex_decode(fields[3]);
         const auto sql = supervision_hex_decode(fields[4]);
-        const auto sqlstate = supervision_hex_decode(fields[6]);
+        const auto sql_state = supervision_hex_decode(fields[6]);
         const auto message = supervision_hex_decode(fields[7]);
         const auto command_tag = supervision_hex_decode(fields[8]);
-        const auto row_count = parse_i64(fields[9]);
-        const auto column_count = parse_i64(fields[10]);
+        const auto row_count = parse_u64(fields[9]);
+        const auto column_count = parse_u64(fields[10]);
         const auto duration = parse_i64(fields[11]);
         if (!ordinal || !session || !test_case || !section || !sql
-            || !sqlstate || !message || !command_tag || !row_count
+            || !sql_state || !message || !command_tag || !row_count
             || !column_count || !duration
             || (fields[5] != "passed" && fields[5] != "failed")) {
             continue;
@@ -472,7 +475,7 @@ load_supervision_sql_transcript(
             .status = fields[5] == "passed"
                 ? sql_transcript_status::succeeded
                 : sql_transcript_status::failed,
-            .sqlstate = std::move(*sqlstate),
+            .sql_state = std::move(*sql_state),
             .message = std::move(*message),
             .command_tag = std::move(*command_tag),
             .row_count = *row_count,
@@ -484,14 +487,14 @@ load_supervision_sql_transcript(
 }
 
 /// @brief One command-line argument after runner-owned sensitivity classification.
-struct report_argument {
+struct invocation_argument {
     std::string name;
     std::string value;
     bool sensitive{};
 };
 
 /// @brief Source-neutral Catch case/section outcome supplied by runner glue.
-struct test_case_report {
+struct test_case_result {
     std::string test_case;
     std::string section;
     std::string status;
@@ -500,7 +503,7 @@ struct test_case_report {
 };
 
 /// @brief Timed acceptance phase associated with the active Catch context.
-struct phase_duration_report {
+struct phase_timing {
     std::uint64_t ordinal{};
     std::string test_case;
     std::string section;
@@ -510,7 +513,7 @@ struct phase_duration_report {
 };
 
 /// @brief Artifact digest/path evidence embedded in the native report.
-struct artifact_report {
+struct artifact_observation {
     std::string name;
     std::filesystem::path preinstalled_stage_root;
     std::filesystem::path stage_manifest;
@@ -528,14 +531,14 @@ struct artifact_report {
 };
 
 /// @brief Resource peaks/sizes sampled by the native runner.
-struct resource_report {
+struct integration_resource_summary {
     std::uint64_t peak_rss_bytes{};
     std::uint64_t observed_temp_bytes{};
-    resource_sampling_report postgres;
+    resource_usage_samples postgres;
 };
 
 /// @brief No-throw teardown verdict supplied after cluster cleanup.
-struct cleanup_report {
+struct cleanup_summary {
     bool succeeded{};
     std::string detail;
 };
@@ -548,40 +551,33 @@ struct cleanup_observation {
     std::filesystem::path root;
     bool succeeded{};
     std::string detail;
-    resource_report resources;
+    integration_resource_summary resources;
 };
 
 /// @brief Complete source-neutral JSON model for a native integration run.
-struct integration_test_report {
+struct integration_run_report {
     std::string schema_version{"bioseq-postgres-test-v1"};
     std::string executable;
     std::string build_identity;
-    std::vector<report_argument> arguments;
+    std::vector<invocation_argument> arguments;
     std::vector<std::pair<std::string, std::string>> cluster_configuration;
-    std::vector<test_case_report> cases;
-    std::vector<phase_duration_report> phase_durations;
-    std::vector<host_qualification_report> host_qualifications;
+    std::vector<test_case_result> cases;
+    std::vector<phase_timing> phase_timings;
+    std::vector<host_qualification_result> host_qualifications;
     std::vector<sql_transcript_entry> sql_transcripts;
-    std::string migration_evidence_harness;
-    std::string migration_report_role;
-    std::string migration_coverage;
-    std::string migration_phase;
-    std::string migration_ledger_sha256;
-    std::string evidence_contract_sha256;
-    std::vector<migration_probe_record> migration_probes;
-    std::vector<artifact_report> artifacts;
+    std::vector<artifact_observation> artifacts;
     std::vector<cleanup_observation> cleanup_observations;
-    resource_report resources;
-    cleanup_report cleanup;
+    integration_resource_summary resources;
+    cleanup_summary cleanup;
 };
 
 /// @brief Converts a staged extension inventory into report evidence.
-[[nodiscard]] inline std::vector<artifact_report> artifact_reports(
-    const extension_stage& stage) {
-    std::vector<artifact_report> reports;
-    reports.reserve(stage.extensions.size());
-    for (const staged_extension_artifact& artifact : stage.extensions) {
-        reports.push_back(artifact_report{
+[[nodiscard]] inline std::vector<artifact_observation> collect_artifact_observations(
+    const extension_stage_layout& stage) {
+    std::vector<artifact_observation> items;
+    items.reserve(stage.extensions.size());
+    for (const staged_extension_files& artifact : stage.extensions) {
+        items.push_back(artifact_observation{
             .name = artifact.name,
             .preinstalled_stage_root =
                 stage.manifest_file
@@ -599,13 +595,14 @@ struct integration_test_report {
             .staged_control_file = artifact.staged_control_file,
             .staged_install_sql = artifact.staged_install_sql,
             .staged_dso = artifact.staged_dso,
-            .control_sha256 = artifact.control_digest.hex(),
-            .install_sql_sha256 = artifact.install_sql_digest.hex(),
-            .dso_sha256 = artifact.dso_digest.hex(),
+            .control_sha256 = artifact.control_digest.render_hex(),
+            .install_sql_sha256 =
+                artifact.install_sql_digest.render_hex(),
+            .dso_sha256 = artifact.dso_digest.render_hex(),
             .staged_control_sha256 =
-                artifact.staged_control_digest.hex()});
+                artifact.staged_control_digest.render_hex()});
     }
-    return reports;
+    return items;
 }
 
 }  // namespace bioseq::postgres_test
@@ -629,9 +626,10 @@ namespace bioseq::postgres_test::report_snapshot_detail {
     return result;
 }
 
-template <class Integer>
-[[nodiscard]] std::optional<Integer> integer(std::string_view text) {
-    Integer value{};
+template <class p_integer>
+[[nodiscard]] std::optional<p_integer> integer(
+    std::string_view text) {
+    p_integer value{};
     const auto [end, error] = std::from_chars(
         text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end != text.data() + text.size()) {
@@ -640,7 +638,7 @@ template <class Integer>
     return value;
 }
 
-[[nodiscard]] bool header(
+[[nodiscard]] bool parse_header(
     std::istringstream& input,
     std::string_view expected_kind,
     std::size_t& count) {
@@ -661,12 +659,12 @@ template <class Integer>
     return true;
 }
 
-template <class Range, class Writer>
+template <class p_range, class p_writer>
 [[nodiscard]] bool publish(
     std::string_view file,
     std::string_view kind,
-    const Range& records,
-    Writer&& writer) noexcept {
+    const p_range& records,
+    p_writer&& writer) noexcept {
     try {
         std::ostringstream output;
         output << "bioseq-watchdog-v1\t" << kind << '\t'
@@ -685,11 +683,12 @@ template <class Range, class Writer>
 
 export namespace bioseq::postgres_test {
 
-[[nodiscard]] inline bool publish_supervision_test_case_reports(
-    std::span<const test_case_report> reports) noexcept {
+/// @brief Durably replaces the watchdog snapshot of native test-case results.
+[[nodiscard]] inline bool publish_supervision_test_case_results(
+    std::span<const test_case_result> items) noexcept {
     return report_snapshot_detail::publish(
-        "cases.snapshot.tsv", "cases", reports,
-        [](std::ostream& output, const test_case_report& report) {
+        "cases.snapshot.tsv", "cases", items,
+        [](std::ostream& output, const test_case_result& report) {
             output << supervision_hex_encode(report.test_case) << '\t'
                    << supervision_hex_encode(report.section) << '\t'
                    << supervision_hex_encode(report.status) << '\t'
@@ -698,8 +697,9 @@ export namespace bioseq::postgres_test {
         });
 }
 
-[[nodiscard]] inline std::optional<std::vector<test_case_report>>
-load_supervision_test_case_reports(
+/// @brief Loads one complete, bounded test-case snapshot or returns nullopt.
+[[nodiscard]] inline std::optional<std::vector<test_case_result>>
+load_supervision_test_case_results(
     const std::filesystem::path& directory) noexcept {
     try {
         const auto payload = load_supervision_snapshot(
@@ -709,11 +709,11 @@ load_supervision_test_case_reports(
         }
         std::istringstream input(*payload);
         std::size_t count{};
-        if (!report_snapshot_detail::header(input, "cases", count)) {
+        if (!report_snapshot_detail::parse_header(input, "cases", count)) {
             return std::nullopt;
         }
-        std::vector<test_case_report> reports;
-        reports.reserve(count);
+        std::vector<test_case_result> items;
+        items.reserve(count);
         std::string line;
         for (std::size_t index = 0; index < count; ++index) {
             if (!std::getline(input, line)) {
@@ -733,7 +733,7 @@ load_supervision_test_case_reports(
                 || !duration || *duration < 0) {
                 return std::nullopt;
             }
-            reports.push_back(test_case_report{
+            items.push_back(test_case_result{
                 .test_case = std::move(*test_case),
                 .section = std::move(*section),
                 .status = std::move(*status),
@@ -743,17 +743,18 @@ load_supervision_test_case_reports(
         if (std::getline(input, line)) {
             return std::nullopt;
         }
-        return reports;
+        return items;
     } catch (...) {
         return std::nullopt;
     }
 }
 
-[[nodiscard]] inline bool publish_supervision_phase_duration_reports(
-    std::span<const phase_duration_report> reports) noexcept {
+/// @brief Durably replaces the watchdog snapshot of completed phase timings.
+[[nodiscard]] inline bool publish_supervision_phase_timings(
+    std::span<const phase_timing> items) noexcept {
     return report_snapshot_detail::publish(
-        "phases.snapshot.tsv", "phases", reports,
-        [](std::ostream& output, const phase_duration_report& report) {
+        "phases.snapshot.tsv", "phases", items,
+        [](std::ostream& output, const phase_timing& report) {
             output << report.ordinal << '\t'
                    << supervision_hex_encode(report.test_case) << '\t'
                    << supervision_hex_encode(report.section) << '\t'
@@ -763,8 +764,9 @@ load_supervision_test_case_reports(
         });
 }
 
-[[nodiscard]] inline std::optional<std::vector<phase_duration_report>>
-load_supervision_phase_duration_reports(
+/// @brief Loads one complete, bounded phase-timing snapshot or returns nullopt.
+[[nodiscard]] inline std::optional<std::vector<phase_timing>>
+load_supervision_phase_timings(
     const std::filesystem::path& directory) noexcept {
     try {
         const auto payload = load_supervision_snapshot(
@@ -774,11 +776,11 @@ load_supervision_phase_duration_reports(
         }
         std::istringstream input(*payload);
         std::size_t count{};
-        if (!report_snapshot_detail::header(input, "phases", count)) {
+        if (!report_snapshot_detail::parse_header(input, "phases", count)) {
             return std::nullopt;
         }
-        std::vector<phase_duration_report> reports;
-        reports.reserve(count);
+        std::vector<phase_timing> items;
+        items.reserve(count);
         std::string line;
         for (std::size_t index = 0; index < count; ++index) {
             if (!std::getline(input, line)) {
@@ -800,7 +802,7 @@ load_supervision_phase_duration_reports(
                 || !duration || *duration < 0) {
                 return std::nullopt;
             }
-            reports.push_back(phase_duration_report{
+            items.push_back(phase_timing{
                 .ordinal = *ordinal,
                 .test_case = std::move(*test_case),
                 .section = std::move(*section),
@@ -811,17 +813,18 @@ load_supervision_phase_duration_reports(
         if (std::getline(input, line)) {
             return std::nullopt;
         }
-        return reports;
+        return items;
     } catch (...) {
         return std::nullopt;
     }
 }
 
-[[nodiscard]] inline bool publish_supervision_artifact_reports(
-    std::span<const artifact_report> reports) noexcept {
+/// @brief Durably replaces the watchdog snapshot of staged artifacts.
+[[nodiscard]] inline bool publish_supervision_artifact_observations(
+    std::span<const artifact_observation> items) noexcept {
     return report_snapshot_detail::publish(
-        "artifacts.snapshot.tsv", "artifacts", reports,
-        [](std::ostream& output, const artifact_report& report) {
+        "artifacts.snapshot.tsv", "artifacts", items,
+        [](std::ostream& output, const artifact_observation& report) {
             output << supervision_hex_encode(report.name) << '\t'
                    << supervision_hex_encode(
                           report.preinstalled_stage_root.string()) << '\t'
@@ -849,8 +852,9 @@ load_supervision_phase_duration_reports(
         });
 }
 
-[[nodiscard]] inline std::optional<std::vector<artifact_report>>
-load_supervision_artifact_reports(
+/// @brief Loads one complete, bounded artifact snapshot or returns nullopt.
+[[nodiscard]] inline std::optional<std::vector<artifact_observation>>
+load_supervision_artifact_observations(
     const std::filesystem::path& directory) noexcept {
     try {
         const auto payload = load_supervision_snapshot(
@@ -860,12 +864,12 @@ load_supervision_artifact_reports(
         }
         std::istringstream input(*payload);
         std::size_t count{};
-        if (!report_snapshot_detail::header(
+        if (!report_snapshot_detail::parse_header(
                 input, "artifacts", count)) {
             return std::nullopt;
         }
-        std::vector<artifact_report> reports;
-        reports.reserve(count);
+        std::vector<artifact_observation> items;
+        items.reserve(count);
         std::string line;
         for (std::size_t index = 0; index < count; ++index) {
             if (!std::getline(input, line)) {
@@ -884,7 +888,7 @@ load_supervision_artifact_reports(
                 }
                 decoded.push_back(std::move(*field));
             }
-            reports.push_back(artifact_report{
+            items.push_back(artifact_observation{
                 .name = std::move(decoded[0]),
                 .preinstalled_stage_root = std::move(decoded[1]),
                 .stage_manifest = std::move(decoded[2]),
@@ -903,16 +907,16 @@ load_supervision_artifact_reports(
         if (std::getline(input, line)) {
             return std::nullopt;
         }
-        return reports;
+        return items;
     } catch (...) {
         return std::nullopt;
     }
 }
 
 /// @brief Samples runner peak RSS and exact bytes below selected temp roots.
-[[nodiscard]] inline resource_report capture_resource_report(
+[[nodiscard]] inline integration_resource_summary capture_integration_resources(
     std::span<const std::filesystem::path> temp_roots = {}) {
-    resource_report report;
+    integration_resource_summary report;
     rusage usage{};
     if (::getrusage(RUSAGE_SELF, &usage) == 0) {
 #if defined(__APPLE__)
@@ -960,12 +964,12 @@ struct cleanup_state {
 
 struct artifact_state {
     std::mutex mutex;
-    std::vector<artifact_report> reports;
+    std::vector<artifact_observation> items;
 };
 
 struct phase_state {
     std::mutex mutex;
-    std::vector<phase_duration_report> reports;
+    std::vector<phase_timing> items;
     std::uint64_t next_ordinal{};
 };
 
@@ -989,15 +993,15 @@ struct phase_state {
 export namespace bioseq::postgres_test {
 
 /// @brief Records one completed or interrupted timed phase.
-inline void record_phase_duration(
+inline void record_phase_timing(
     std::string_view phase,
     std::chrono::milliseconds duration,
     bool completed,
-    report_case_context context = current_report_case_context()) noexcept {
+    execution_case_context context = current_execution_case_context()) noexcept {
     try {
         auto& state = report_state_detail::process_phases();
         std::scoped_lock lock(state.mutex);
-        state.reports.push_back(phase_duration_report{
+        state.items.push_back(phase_timing{
             .ordinal = state.next_ordinal++,
             .test_case = std::move(context.test_case),
             .section = std::move(context.section),
@@ -1005,43 +1009,43 @@ inline void record_phase_duration(
             .status = completed ? "completed" : "interrupted",
             .duration = duration});
         static_cast<void>(
-            publish_supervision_phase_duration_reports(state.reports));
+            publish_supervision_phase_timings(state.items));
     } catch (...) {
     }
 }
 
 /// @brief Clears phase timing evidence before a native Catch session.
-inline void clear_phase_duration_reports() noexcept {
+inline void clear_phase_timings() noexcept {
     try {
         auto& state = report_state_detail::process_phases();
         std::scoped_lock lock(state.mutex);
-        state.reports.clear();
+        state.items.clear();
         state.next_ordinal = 0;
     } catch (...) {
     }
 }
 
 /// @brief Returns phase timings in observation order.
-[[nodiscard]] inline std::vector<phase_duration_report>
-phase_duration_reports() {
+[[nodiscard]] inline std::vector<phase_timing>
+phase_timings() {
     auto& state = report_state_detail::process_phases();
     std::scoped_lock lock(state.mutex);
-    return state.reports;
+    return state.items;
 }
 
 /// @brief RAII phase timer that records interruption during unwinding.
-class scoped_report_phase {
+class scoped_phase_timing {
 public:
-    explicit scoped_report_phase(std::string phase)
+    explicit scoped_phase_timing(std::string phase)
         : phase_(std::move(phase)),
-          context_(current_report_case_context()),
+          context_(current_execution_case_context()),
           started_(std::chrono::steady_clock::now()) {}
 
-    scoped_report_phase(const scoped_report_phase&) = delete;
-    scoped_report_phase& operator=(const scoped_report_phase&) = delete;
+    scoped_phase_timing(const scoped_phase_timing&) = delete;
+    scoped_phase_timing& operator=(const scoped_phase_timing&) = delete;
 
-    ~scoped_report_phase() noexcept {
-        record_phase_duration(
+    ~scoped_phase_timing() noexcept {
+        record_phase_timing(
             phase_,
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started_),
@@ -1049,49 +1053,50 @@ public:
             std::move(context_));
     }
 
-    void complete() noexcept { completed_ = true; }
+    /// @brief Marks the timed phase as normally completed.
+    void mark_completed() noexcept { completed_ = true; }
 
 private:
     std::string phase_;
-    report_case_context context_;
+    execution_case_context context_;
     std::chrono::steady_clock::time_point started_;
     bool completed_{};
 };
 
 /// @brief Records exact source/staged artifact evidence for one fixture.
-inline void record_artifact_stage(
-    const extension_stage& stage) noexcept {
+inline void record_artifact_observations(
+    const extension_stage_layout& stage) noexcept {
     try {
-        std::vector<artifact_report> reports =
-            artifact_reports(stage);
+        std::vector<artifact_observation> items =
+            collect_artifact_observations(stage);
         auto& state = report_state_detail::process_artifacts();
         std::scoped_lock lock(state.mutex);
-        state.reports.insert(
-            state.reports.end(),
-            std::make_move_iterator(reports.begin()),
-            std::make_move_iterator(reports.end()));
+        state.items.insert(
+            state.items.end(),
+            std::make_move_iterator(items.begin()),
+            std::make_move_iterator(items.end()));
         static_cast<void>(
-            publish_supervision_artifact_reports(state.reports));
+            publish_supervision_artifact_observations(state.items));
     } catch (...) {
     }
 }
 
 /// @brief Clears staged-artifact evidence before a native Catch session.
-inline void clear_artifact_stage_reports() noexcept {
+inline void clear_artifact_observations() noexcept {
     try {
         auto& state = report_state_detail::process_artifacts();
         std::scoped_lock lock(state.mutex);
-        state.reports.clear();
+        state.items.clear();
     } catch (...) {
     }
 }
 
 /// @brief Returns source/staged artifact evidence in fixture order.
-[[nodiscard]] inline std::vector<artifact_report>
-artifact_stage_reports() {
+[[nodiscard]] inline std::vector<artifact_observation>
+artifact_observations() {
     auto& state = report_state_detail::process_artifacts();
     std::scoped_lock lock(state.mutex);
-    return state.reports;
+    return state.items;
 }
 
 /// @brief Records one no-throw private-cluster cleanup and resource sample.
@@ -1099,10 +1104,10 @@ inline void record_cleanup_observation(
     const std::filesystem::path& root,
     bool succeeded,
     std::string_view detail,
-    resource_report resources = {}) noexcept {
+    integration_resource_summary resources = {}) noexcept {
     try {
-        const report_case_context context =
-            current_report_case_context();
+        const execution_case_context context =
+            current_execution_case_context();
         auto& state = report_state_detail::process_cleanup();
         std::scoped_lock lock(state.mutex);
         state.observations.push_back(cleanup_observation{
@@ -1137,11 +1142,11 @@ cleanup_observations() {
 }
 
 /// @brief Aggregates all observed fixture teardowns into one run verdict.
-[[nodiscard]] inline cleanup_report aggregate_cleanup_report() {
+[[nodiscard]] inline cleanup_summary summarize_cleanup() {
     const std::vector<cleanup_observation> observations =
         cleanup_observations();
     if (observations.empty()) {
-        return cleanup_report{
+        return cleanup_summary{
             .succeeded = false,
             .detail = "no private-cluster cleanup observation was recorded"};
     }
@@ -1163,20 +1168,20 @@ cleanup_observations() {
         }
     }
     if (failed != 0) {
-        return cleanup_report{
+        return cleanup_summary{
             .succeeded = false,
             .detail = std::to_string(failed)
                 + " private-cluster cleanup(s) failed: " + failures};
     }
-    return cleanup_report{
+    return cleanup_summary{
         .succeeded = true,
         .detail = std::to_string(observations.size())
             + " private-cluster cleanup(s) completed"};
 }
 
 /// @brief Combines client peak RSS with the largest observed fixture tree.
-[[nodiscard]] inline resource_report aggregate_resource_report() {
-    resource_report aggregate = capture_resource_report();
+[[nodiscard]] inline integration_resource_summary summarize_resources() {
+    integration_resource_summary aggregate = capture_integration_resources();
     for (const cleanup_observation& observation :
          cleanup_observations()) {
         aggregate.peak_rss_bytes =
@@ -1207,7 +1212,7 @@ cleanup_observations() {
             observation.resources.postgres.owned_root_sampling_failures;
         auto boundaries =
             observation.resources.postgres.phase_boundaries;
-        for (resource_phase_boundary& boundary : boundaries) {
+        for (resource_sample_boundary& boundary : boundaries) {
             boundary.ordinal =
                 aggregate.postgres.phase_boundaries.size();
             aggregate.postgres.phase_boundaries.push_back(
@@ -1223,7 +1228,7 @@ namespace bioseq::postgres_test::report_detail {
 
 /// @brief Writes one correctly escaped JSON string.
 inline void write_string(std::ostream& output, std::string_view value) {
-    constexpr std::string_view hex{"0123456789abcdef"};
+    constexpr std::string_view k_hex{"0123456789abcdef"};
     output.put('"');
     for (const unsigned char character : value) {
         switch (character) {
@@ -1237,8 +1242,8 @@ inline void write_string(std::ostream& output, std::string_view value) {
         default:
             if (character < 0x20U) {
                 output << "\\u00"
-                       << hex[(character >> 4U) & 0x0fU]
-                       << hex[character & 0x0fU];
+                       << k_hex[(character >> 4U) & 0x0fU]
+                       << k_hex[character & 0x0fU];
             } else {
                 output.put(static_cast<char>(character));
             }
@@ -1283,7 +1288,7 @@ inline void write_transcript(
     string_field("status",
                  entry.status == sql_transcript_status::succeeded
                      ? "passed" : "failed");
-    string_field("sqlstate", entry.sqlstate);
+    string_field("sql_state", entry.sql_state);
     string_field("message", entry.message);
     string_field("command_tag", entry.command_tag);
     integer_field("row_count", entry.row_count);
@@ -1316,7 +1321,7 @@ inline void write_transcript(
 
 inline void write_resource_sampling(
     std::ostream& output,
-    const resource_sampling_report& report) {
+    const resource_usage_samples& report) {
     output.put('{');
     key(output, "peak_postmaster_process_tree_rss_bytes");
     output << report.peak_postmaster_process_tree_rss_bytes;
@@ -1339,7 +1344,7 @@ inline void write_resource_sampling(
     key(output, "phase_boundaries");
     output.put('[');
     bool first = true;
-    for (const resource_phase_boundary& boundary :
+    for (const resource_sample_boundary& boundary :
          report.phase_boundaries) {
         comma(output, first);
         output.put('{');
@@ -1376,55 +1381,16 @@ inline void write_resource_sampling(
 export namespace bioseq::postgres_test {
 
 /// @brief Atomically and durably publishes a native integration JSON report.
-inline void write_integration_test_report(
+inline void write_integration_run_report(
     const std::filesystem::path& path,
-    const integration_test_report& report) {
-    if (report.schema_version == "bioseq-cache-test-v2") {
-        const auto lower_sha256 =
-            [](std::string_view value) {
-                return value.size() == 64
-                    && std::ranges::all_of(
-                        value, [](char character) {
-                            return (character >= '0'
-                                    && character <= '9')
-                                || (character >= 'a'
-                                    && character <= 'f');
-                        });
-            };
-        const bool owner_role_match =
-            (report.migration_evidence_harness
-                    == "cache-integration"
-             && report.migration_report_role
-                    == "cache-integration")
-            || (report.migration_evidence_harness
-                    == "cache-bioseq-integration"
-                && (report.migration_report_role
-                        == "cache-bioseq-support-integration"
-                    || report.migration_report_role
-                        == "cache-bioseq-production-integration"));
-        const bool valid_phase =
-            report.migration_phase == "mapped"
-            || report.migration_phase == "passing"
-            || report.migration_phase == "retired_with_proof"
-            || report.migration_phase == "mixed";
-        if (!owner_role_match
-            || (report.migration_coverage != "full-role"
-                && report.migration_coverage != "executed-only")
-            || !valid_phase
-            || !lower_sha256(report.migration_ledger_sha256)
-            || !lower_sha256(report.evidence_contract_sha256)) {
-            throw std::runtime_error(
-                "bioseq-cache-test-v2 report has incomplete or "
-                "incompatible migration provenance");
-        }
-    }
+    const integration_run_report& report) {
     const std::filesystem::path absolute_path =
         std::filesystem::absolute(path);
     const auto directories_created =
-        bioseq::durable_file_io::durable_create_directories(
+        bioseq::common::durable_file_io::durable_create_directories(
             absolute_path.parent_path());
     if (!directories_created.has_value()) {
-        const bioseq::durable_file_io::file_io_error& error =
+        const bioseq::common::durable_file_io::file_error& error =
             directories_created.error();
         throw std::runtime_error(
             "cannot durably create integration report directory: operation "
@@ -1456,7 +1422,7 @@ inline void write_integration_test_report(
     report_detail::key(output, "arguments");
     output.put('[');
     bool first_argument = true;
-    for (const report_argument& argument : report.arguments) {
+    for (const invocation_argument& argument : report.arguments) {
         report_detail::comma(output, first_argument);
         output.put('{');
         report_detail::key(output, "name");
@@ -1487,7 +1453,7 @@ inline void write_integration_test_report(
     report_detail::key(output, "cases");
     output.put('[');
     bool first_case = true;
-    for (const test_case_report& test_case : report.cases) {
+    for (const test_case_result& test_case : report.cases) {
         report_detail::comma(output, first_case);
         output.put('{');
         report_detail::key(output, "test_case");
@@ -1509,10 +1475,10 @@ inline void write_integration_test_report(
     output.put(']');
 
     report_detail::comma(output, first);
-    report_detail::key(output, "phase_durations");
+    report_detail::key(output, "phase_timings");
     output.put('[');
     bool first_phase = true;
-    for (const phase_duration_report& phase : report.phase_durations) {
+    for (const phase_timing& phase : report.phase_timings) {
         report_detail::comma(output, first_phase);
         output.put('{');
         report_detail::key(output, "ordinal");
@@ -1540,7 +1506,7 @@ inline void write_integration_test_report(
     report_detail::key(output, "host_qualifications");
     output.put('[');
     bool first_qualification = true;
-    for (const host_qualification_report& qualification :
+    for (const host_qualification_result& qualification :
          report.host_qualifications) {
         report_detail::comma(output, first_qualification);
         output.put('{');
@@ -1554,19 +1520,10 @@ inline void write_integration_test_report(
         report_detail::write_string(
             output,
             qualification.status == host_qualification_status::passed
-                ? "passed" : "infrastructure-inconclusive");
+                ? "passed" : "inconclusive");
         output.put(',');
         report_detail::key(output, "detail");
         report_detail::write_string(output, qualification.detail);
-        output.put(',');
-        report_detail::key(output, "total_ram_bytes");
-        output << qualification.total_ram_bytes;
-        output.put(',');
-        report_detail::key(output, "available_ram_bytes");
-        output << qualification.available_ram_bytes;
-        output.put(',');
-        report_detail::key(output, "logical_cores");
-        output << qualification.logical_cores;
         output.put(',');
         report_detail::key(output, "host_total_ram_bytes");
         output << qualification.host_total_ram_bytes;
@@ -1651,7 +1608,7 @@ inline void write_integration_test_report(
         report_detail::key(output, "filesystems");
         output.put('[');
         bool first_filesystem = true;
-        for (const filesystem_qualification_report& filesystem :
+        for (const filesystem_qualification_result& filesystem :
              qualification.filesystems) {
             report_detail::comma(output, first_filesystem);
             output.put('{');
@@ -1728,69 +1685,11 @@ inline void write_integration_test_report(
     }
     output.put(']');
 
-    if (report.schema_version == "bioseq-cache-test-v2") {
-        report_detail::comma(output, first);
-        report_detail::key(output, "migration_evidence_harness");
-        report_detail::write_string(
-            output, report.migration_evidence_harness);
-
-        report_detail::comma(output, first);
-        report_detail::key(output, "migration_report_role");
-        report_detail::write_string(
-            output, report.migration_report_role);
-
-        report_detail::comma(output, first);
-        report_detail::key(output, "migration_coverage");
-        report_detail::write_string(output, report.migration_coverage);
-
-        report_detail::comma(output, first);
-        report_detail::key(output, "migration_phase");
-        report_detail::write_string(output, report.migration_phase);
-
-        report_detail::comma(output, first);
-        report_detail::key(output, "migration_ledger_sha256");
-        report_detail::write_string(
-            output, report.migration_ledger_sha256);
-
-        report_detail::comma(output, first);
-        report_detail::key(output, "evidence_contract_sha256");
-        report_detail::write_string(
-            output, report.evidence_contract_sha256);
-    }
-
-    report_detail::comma(output, first);
-    report_detail::key(output, "migration_probes");
-    output.put('[');
-    bool first_probe = true;
-    for (const migration_probe_record& probe : report.migration_probes) {
-        report_detail::comma(output, first_probe);
-        output.put('{');
-        report_detail::key(output, "stable_id");
-        report_detail::write_string(output, probe.stable_id);
-        output.put(',');
-        report_detail::key(output, "test_case");
-        report_detail::write_string(output, probe.test_case);
-        output.put(',');
-        report_detail::key(output, "section");
-        report_detail::write_string(output, probe.section);
-        output.put(',');
-        report_detail::key(output, "permutation");
-        report_detail::write_string(output, probe.permutation);
-        output.put(',');
-        report_detail::key(output, "passed");
-        output << (probe.passed ? "true" : "false");
-        output.put(',');
-        report_detail::key(output, "ordinal");
-        output << probe.ordinal;
-        output.put('}');
-    }
-    output.put(']');
-
     report_detail::comma(output, first);
     report_detail::key(output, "artifacts");
     output.put('[');
     bool first_artifact = true;
-    for (const artifact_report& artifact : report.artifacts) {
+    for (const artifact_observation& artifact : report.artifacts) {
         report_detail::comma(output, first_artifact);
         output.put('{');
         bool first_artifact_field = true;
@@ -1890,14 +1789,14 @@ inline void write_integration_test_report(
     }
     const std::string serialized = std::move(output).str();
     const auto published =
-        bioseq::durable_file_io::durable_replace_file(
+        bioseq::common::durable_file_io::durable_replace_file(
             absolute_path,
             std::as_bytes(std::span{
                 serialized.data(), serialized.size()}),
-            bioseq::durable_file_io::durable_publish_options{
+            bioseq::common::durable_file_io::publication_options{
                 .mode = 0666});  // Preserve ofstream mode before umask.
     if (!published.has_value()) {
-        const bioseq::durable_file_io::file_io_error& error =
+        const bioseq::common::durable_file_io::file_error& error =
             published.error();
         throw std::runtime_error(
             "cannot durably publish integration report: operation "
@@ -1910,7 +1809,7 @@ inline void write_integration_test_report(
             + std::to_string(static_cast<unsigned>(error.publication)));
     }
     if (published->publication
-        != bioseq::durable_file_io::publication_state::durable) {
+        != bioseq::common::durable_file_io::publication_state::durable) {
         throw std::runtime_error(
             "integration report publication did not become durable");
     }

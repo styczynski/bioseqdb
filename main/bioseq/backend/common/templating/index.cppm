@@ -1,15 +1,10 @@
 /**
  * @file index.cppm
- * @brief Umbrella module that re-exports the seven leaf modules.
- *
- * Consumers say `import bioseq.common.templating;` and get all seven
- * leaves at once. The leaves are stand-alone dot-form modules (not
- * partitions); the umbrella's only purpose is to bundle them so call
- * sites do not need seven separate import lines.
+ * @brief Primary module for shared compile-time and dispatch utilities.
  */
 export module bioseq.common.templating;
 
-export import bioseq.common.templating.template_str;
+export import bioseq.common.templating.compile_time_string;
 export import bioseq.common.templating.pack_search;
 export import bioseq.common.templating.value_sequence;
 export import bioseq.common.templating.runtime_dispatch;

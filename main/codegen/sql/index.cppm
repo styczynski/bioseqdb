@@ -25,21 +25,13 @@ module;
 
 export module bioseq.codegen.sql;
 
-export import :contract_tests;
-export import :baseline_renderer;
-export import :migration;
 export import :model;
-export import :parser;
 export import :policy;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
-import bioseq.codegen.sql.guc_contract_tests;
-import bioseq.codegen.sql.physical_ledger;
 import bioseq.codegen.sql.renderer;
-import bioseq.codegen.safety;
-import bioseq.codegen.clang_structural;
-import bioseq.codegen.clang_structural.contract_tests;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::sql {
@@ -70,7 +62,7 @@ namespace detail {
 [[nodiscard]] inline std::vector<std::filesystem::path> read_source_list(
     const std::filesystem::path& list_path) {
     std::vector<std::filesystem::path> result;
-    const std::string content = read_file(list_path);
+    const std::string content = read_artifact_bytes(list_path);
     std::size_t begin = 0;
     while (begin <= content.size()) {
         const std::size_t newline = content.find('\n', begin);
@@ -245,7 +237,6 @@ inline void validate_artifact_path_aliases(
                     + identity.string());
             }
         };
-    add(command.input, "legacy input");
     add(command.source_list, "source list");
     add(command.compile_database, "owned compile database");
     add(command.raw_compile_database, "raw compile database");
@@ -260,16 +251,9 @@ inline void validate_artifact_path_aliases(
     add(
         command.compiler_module_inventory,
         "compiler module inventory");
-    add(command.migration_owner, "migration owner");
     add(command.output, "SQL output");
     add(command.manifest, "SQL/stage manifest");
-    add(command.golden, "checked SQL golden");
     add(command.stamp, "completion stamp");
-    add(command.physical_ledger, "physical ledger input");
-    add(
-        command.physical_ledger_output,
-        "physical ledger output");
-    add(command.guc_parity_ledger, "GUC parity ledger");
     add(command.guc_output_root, "GUC output root");
     add(command.core_hash_output, "CORE seal output");
     add(command.core_manifest, "CORE manifest");
@@ -361,9 +345,6 @@ inline void validate_artifact_path_aliases(
         writable_add(command.manifest, "SQL/stage manifest");
         writable_add(command.stamp, "completion stamp");
         writable_add(
-            command.physical_ledger_output,
-            "physical ledger output");
-        writable_add(
             command.core_hash_output, "CORE seal output");
         if (command.stage == generation_stage::core) {
             writable_add(command.core_manifest, "CORE manifest");
@@ -399,9 +380,6 @@ inline void validate_artifact_path_aliases(
                         "fmgr entrypoint " + output.owner_key);
                 }
             }
-        }
-        if (command.update_golden) {
-            writable_add(command.golden, "checked SQL golden");
         }
         for (const auto& [path, role] : writable) {
             const std::filesystem::path relative =
@@ -454,7 +432,7 @@ inline void run_artifact_path_alias_contract_self_test() {
             temporary_root / "generated.sql";
         const std::filesystem::path alias =
             temporary_root / "generated-link.sql";
-        write_if_different(target, "-- alias contract target\n");
+        publish_artifact_if_changed(target, "-- alias contract target\n");
         std::error_code error;
         std::filesystem::create_symlink(
             target.filename(), alias, error);
@@ -561,7 +539,7 @@ inline void publish_entity_handle_modules(
         generated.emplace(module.owner_key, &module);
     }
     for (const auto& [owner_key, module] : generated) {
-        write_if_different(
+        publish_artifact_if_changed(
             configured.at(owner_key), module->content);
     }
 }
@@ -614,7 +592,7 @@ inline void publish_row_codec_modules(
         }
     }
     for (const auto& [owner_key, module] : generated) {
-        write_if_different(
+        publish_artifact_if_changed(
             configured.at(owner_key), module->content);
     }
 }
@@ -677,7 +655,7 @@ inline void publish_fmgr_entrypoint_modules(
         }
     }
     for (const auto& [owner_key, module] : generated) {
-        write_if_different(
+        publish_artifact_if_changed(
             configured.at(owner_key), module->content);
     }
 }
@@ -721,7 +699,7 @@ inline void verify_support_fmgr_entrypoint_modules(
                 "FINAL produced unexpected SUPPORT registry owner '"
                 + owner_key + "'");
         }
-        if (read_file(output->second) != module->content) {
+        if (read_artifact_bytes(output->second) != module->content) {
             throw std::runtime_error(
                 "SUPPORT vector registry bytes differ from FINAL "
                 "annotated projection for owner '" + owner_key + "'");
@@ -774,12 +752,12 @@ inline void publish_guc_package(
     const command_line& command,
     const rendered_guc_package& package) {
     for (const rendered_guc_owner_module& owner : package.owners) {
-        write_if_different(
+        publish_artifact_if_changed(
             guc_owner_output_path(
                 command, owner, package.profile),
             owner.content);
     }
-    write_if_different(
+    publish_artifact_if_changed(
         guc_registry_output_path(command, package.profile),
         package.registry.content);
 }
@@ -864,20 +842,20 @@ inline void publish_guc_package(
         rows.push_back(
             "row\t" + module.owner_key + "\t" + module.source_module
             + "\t" + module.module_name + "\t"
-            + sha256_hex(module.content));
+            + bioseq::common::sha256_hex(module.content));
     }
     for (const rendered_guc_owner_module& owner :
          guc_package.owners) {
         rows.push_back(
             "guc-owner\t" + owner.owner_key + "\t"
             + owner.source_module + "\t" + owner.module_name + "\t"
-            + sha256_hex(owner.content));
+            + bioseq::common::sha256_hex(owner.content));
     }
     rows.push_back(
         "guc-registry\t"
         + std::string{guc_profile_name(guc_package.profile)}
         + "\t" + guc_package.registry.module_name + "\t"
-        + sha256_hex(guc_package.registry.content));
+        + bioseq::common::sha256_hex(guc_package.registry.content));
     for (const rendered_fmgr_entrypoint_module& module :
          vector_registry_modules) {
         if (!support_owned_fmgr_output(module.owner_key)) {
@@ -888,7 +866,7 @@ inline void publish_guc_package(
         rows.push_back(
             "vector-registry\t" + module.owner_key + "\t"
             + module.module_name + "\t"
-            + sha256_hex(module.content));
+            + bioseq::common::sha256_hex(module.content));
     }
     std::ranges::sort(rows);
     std::string material =
@@ -897,7 +875,7 @@ inline void publish_guc_package(
     for (const std::string& row : rows) {
         material += row + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] inline std::string render_support_manifest(
@@ -942,7 +920,7 @@ inline void publish_guc_package(
             << ", \"generated_module\": "
             << json_string(module.module_name)
             << ", \"content_sha256\": "
-            << json_string(sha256_hex(module.content)) << "}";
+            << json_string(bioseq::common::sha256_hex(module.content)) << "}";
     }
     output << (row_modules.empty() ? "" : "\n")
            << "  ],\n"
@@ -954,9 +932,6 @@ inline void publish_guc_package(
            << "\"bioseq_guc_profile_projection/v1\",\n"
            << "    \"profile\": "
            << json_string(guc_profile_name(guc_projection.profile))
-           << ",\n"
-           << "    \"ledger_sha256\": "
-           << json_string(guc_projection.ledger_sha256)
            << ",\n"
            << "    \"registry_content_sha256\": "
            << json_string(
@@ -1002,7 +977,7 @@ inline void publish_guc_package(
            << json_string(guc_package.registry.module_name)
            << ", \"content_sha256\": "
            << json_string(
-                  sha256_hex(guc_package.registry.content))
+                  bioseq::common::sha256_hex(guc_package.registry.content))
            << "},\n"
            << "  \"guc_owners\": [";
     for (std::size_t index = 0;
@@ -1018,7 +993,7 @@ inline void publish_guc_package(
             << ", \"generated_module\": "
             << json_string(owner.module_name)
             << ", \"content_sha256\": "
-            << json_string(sha256_hex(owner.content)) << "}";
+            << json_string(bioseq::common::sha256_hex(owner.content)) << "}";
     }
     output << (guc_package.owners.empty() ? "" : "\n")
            << "  ],\n"
@@ -1058,7 +1033,7 @@ inline void publish_guc_package(
         << "  \"support_descriptor_sha256\": "
         << json_string(support_descriptor) << ",\n"
         << "  \"support_manifest_sha256\": "
-        << json_string(sha256_hex(manifest)) << "\n"
+        << json_string(bioseq::common::sha256_hex(manifest)) << "\n"
         << "}\n";
     return output.str();
 }
@@ -1154,7 +1129,7 @@ inline void verify_row_codec_modules(
                 "final SQL generation produced unexpected row-codec "
                 "owner '" + module.owner_key + "'");
         }
-        if (read_file(found->second) != module.content) {
+        if (read_artifact_bytes(found->second) != module.content) {
             throw std::runtime_error(
                 "SUPPORT row-codec bytes differ from FINAL projection "
                 "for owner '" + module.owner_key + "'");
@@ -1168,13 +1143,13 @@ inline void verify_guc_package(
     for (const rendered_guc_owner_module& owner : package.owners) {
         const std::filesystem::path path =
             guc_owner_output_path(command, owner, package.profile);
-        if (read_file(path) != owner.content) {
+        if (read_artifact_bytes(path) != owner.content) {
             throw std::runtime_error(
                 "SUPPORT GUC owner bytes differ from FINAL projection "
                 "for owner '" + owner.owner_key + "'");
         }
     }
-    if (read_file(guc_registry_output_path(command, package.profile))
+    if (read_artifact_bytes(guc_registry_output_path(command, package.profile))
         != package.registry.content) {
         throw std::runtime_error(
             "SUPPORT GUC registry bytes differ from FINAL projection");
@@ -1190,14 +1165,14 @@ inline void verify_guc_package(
             module.owner_key + "\t" + module.source_module + "\t"
             + module.module_name + "\t"
             + (module.profile_invariant ? "invariant" : "variant")
-            + "\t" + sha256_hex(module.content));
+            + "\t" + bioseq::common::sha256_hex(module.content));
     }
     std::ranges::sort(rows);
     std::string material{"bioseq_sql_core_descriptor/v1\n"};
     for (const std::string& row : rows) {
         material += row + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] inline std::string core_entity_handle_logical_path(
@@ -1220,14 +1195,14 @@ inline void verify_guc_package(
             + (module.profile_invariant ? "invariant" : "variant")
             + "\t"
             + core_entity_handle_logical_path(module.owner_key)
-            + "\t" + sha256_hex(module.content));
+            + "\t" + bioseq::common::sha256_hex(module.content));
     }
     std::ranges::sort(rows);
     std::string material{"bioseq_sql_core_artifact_set/v1\n"};
     for (const std::string& row : rows) {
         material += row + "\n";
     }
-    return sha256_hex(material);
+    return bioseq::common::sha256_hex(material);
 }
 
 [[nodiscard]] inline std::string render_core_manifest(
@@ -1282,7 +1257,7 @@ inline void verify_guc_package(
                    ? "invariant"
                    : "variant")
             << ", \"content_sha256\": "
-            << json_string(sha256_hex(module->content)) << "}";
+            << json_string(bioseq::common::sha256_hex(module->content)) << "}";
     }
     output << (generated.empty() ? "" : "\n")
            << "  ]\n"
@@ -1303,7 +1278,7 @@ inline void verify_guc_package(
         << "  \"compilation_signature\": "
         << json_string(compilation_signature) << ",\n"
         << "  \"core_manifest_sha256\": "
-        << json_string(sha256_hex(manifest)) << "\n"
+        << json_string(bioseq::common::sha256_hex(manifest)) << "\n"
         << "}\n";
     return output.str();
 }
@@ -1337,9 +1312,9 @@ inline void verify_core_artifacts(
     const std::string descriptor =
         core_descriptor_hash(modules);
     const std::string manifest =
-        read_file(command.core_manifest);
+        read_artifact_bytes(command.core_manifest);
     const std::string seal =
-        read_file(command.expected_core_hash);
+        read_artifact_bytes(command.expected_core_hash);
     if (json_string_field(manifest, "schema")
             != "bioseq_sql_core_manifest/v1"
         || json_string_field(seal, "schema")
@@ -1387,7 +1362,7 @@ inline void verify_core_artifacts(
             "CORE manifest entries differ from FINAL projection");
     }
     if (json_string_field(seal, "core_manifest_sha256")
-        != sha256_hex(manifest)) {
+        != bioseq::common::sha256_hex(manifest)) {
         throw std::runtime_error(
             "CORE manifest content hash differs from its seal");
     }
@@ -1398,7 +1373,7 @@ inline void verify_core_artifacts(
         configured =
             validated_entity_handle_outputs(command, modules);
     for (const rendered_entity_handle_module& module : modules) {
-        if (read_file(configured.at(module.owner_key))
+        if (read_artifact_bytes(configured.at(module.owner_key))
             != module.content) {
             throw std::runtime_error(
                 "CORE entity-handle bytes differ from FINAL "
@@ -1420,8 +1395,8 @@ inline void verify_support_manifest(
         row_modules,
         guc_package,
         vector_registry_modules);
-    const std::string document = read_file(command.support_manifest);
-    const std::string seal = read_file(command.support_seal);
+    const std::string document = read_artifact_bytes(command.support_manifest);
+    const std::string seal = read_artifact_bytes(command.support_seal);
     if (json_string_field(seal, "schema")
             != "bioseq_sql_support_seal/v1") {
         throw std::runtime_error(
@@ -1466,7 +1441,7 @@ inline void verify_support_manifest(
             "SUPPORT manifest entries differ from FINAL projection");
     }
     if (json_string_field(seal, "support_manifest_sha256")
-        != sha256_hex(document)) {
+        != bioseq::common::sha256_hex(document)) {
         throw std::runtime_error(
             "SUPPORT manifest content hash differs from its seal");
     }
@@ -1488,8 +1463,8 @@ load_sealed_guc_profile_projection(
             "SUPPORT profile handoff is missing or uses a symlink");
     }
     const std::string manifest_document =
-        read_file(manifest_path);
-    const std::string seal_document = read_file(seal_path);
+        read_artifact_bytes(manifest_path);
+    const std::string seal_document = read_artifact_bytes(seal_path);
     llvm::Expected<llvm::json::Value> parsed_manifest =
         llvm::json::parse(manifest_document);
     llvm::Expected<llvm::json::Value> parsed_seal =
@@ -1612,7 +1587,7 @@ load_sealed_guc_profile_projection(
                *seal,
                "support_manifest_sha256",
                "SUPPORT seal")
-            != sha256_hex(manifest_document)) {
+            != bioseq::common::sha256_hex(manifest_document)) {
         throw std::runtime_error(
             "SUPPORT profile handoff seal, role, or toolchain differs "
             "from FINAL");
@@ -1628,7 +1603,6 @@ load_sealed_guc_profile_projection(
         {
             "schema",
             "profile",
-            "ledger_sha256",
             "registry_content_sha256",
             "owner_content_sha256",
             "registrations",
@@ -1636,10 +1610,6 @@ load_sealed_guc_profile_projection(
         "GUC profile projection");
     guc_profile_projection result{
         .profile = expected_profile,
-        .ledger_sha256 = string_field(
-            *projection,
-            "ledger_sha256",
-            "GUC profile projection"),
         .registry_content_sha256 = string_field(
             *projection,
             "registry_content_sha256",
@@ -1651,7 +1621,6 @@ load_sealed_guc_profile_projection(
         || string_field(
                *projection, "profile", "GUC profile projection")
             != profile_name
-        || !is_sha256_hex(result.ledger_sha256)
         || !is_sha256_hex(result.registry_content_sha256)) {
         throw std::runtime_error(
             "SUPPORT GUC profile projection schema or hashes are "
@@ -1766,7 +1735,7 @@ load_sealed_guc_profile_projection(
             != expected_registry_module
         || std::filesystem::is_symlink(registry_path)
         || !std::filesystem::is_regular_file(registry_path)
-        || sha256_hex(read_file(registry_path))
+        || bioseq::common::sha256_hex(read_artifact_bytes(registry_path))
             != result.registry_content_sha256
         || string_field(
             *registry,
@@ -1823,7 +1792,7 @@ load_sealed_guc_profile_projection(
                 != expected_generated_module
             || std::filesystem::is_symlink(owner_path)
             || !std::filesystem::is_regular_file(owner_path)
-            || sha256_hex(read_file(owner_path))
+            || bioseq::common::sha256_hex(read_artifact_bytes(owner_path))
                 != expected->second
             || string_field(
                    *owner,
@@ -1856,11 +1825,9 @@ load_sealed_guc_profile_projection(
 [[nodiscard]] inline command_line parse_command_line(
     std::span<std::string_view const> args) {
     if (args.empty() || (args.front() != "generate"
-                         && args.front() != "update-golden"
-                         && args.front() != "migrate-baseline"
                          && args.front() != "prepare")) {
         throw std::runtime_error(
-            "usage: bioseq_codegen sql <prepare|generate|update-golden> "
+            "usage: bioseq_codegen sql <prepare|generate> "
             "(--source <owner.cppm>... | --source-list <path>) "
             "--profile <context-profile> "
             "--pcm-root <owned-dir> --stamp <path>; prepare additionally "
@@ -1872,33 +1839,21 @@ load_sealed_guc_profile_projection(
             "--compile-database-output, --pcm-manifest, and --depfile; "
             "generation requires --stage <support|core|final>, "
             "--compile-database, and --pcm-manifest "
-            "[--physical-ledger <path> | "
-            "--physical-ledger-output <path>] "
             "[--entity-handles-output <owner-key>=<path>]... "
             "[--row-codecs-output <owner-key>=<path>]... "
             "[--fmgr-entrypoints-output <owner-key>=<path>]... "
-            "[--guc-parity-ledger <path> --guc-output-root <path> "
+            "[--guc-output-root <path> "
             "--guc-active-profile <production|test_indexes>] "
             "[--require-complete-codegen] "
-            "[--require-checked-physical-ledger] "
             "[--extension-name <name>] [--extension-schema <name>] "
             "[--generated-module-prefix <module>] "
             "[--fmgr-boundary-module <module>] "
-            "[--fmgr-prelude <bioseq_common|postgresql>]; "
-            "legacy import is isolated as "
-            "sql migrate-baseline --input <legacy.sql> "
-            "--migration-owner <owner.cppm> ...");
+            "[--fmgr-prelude <bioseq_common|postgresql>]");
     }
-    const bool migrate_baseline = args.front() == "migrate-baseline";
     const bool prepare = args.front() == "prepare";
     command_line result;
     if (prepare) {
         result.action = command_action::prepare;
-    } else if (migrate_baseline) {
-        result.action = command_action::migrate_baseline;
-    } else if (args.front() == "update-golden") {
-        result.action = command_action::update_golden;
-        result.update_golden = true;
     } else {
         result.action = command_action::generate;
     }
@@ -1912,15 +1867,6 @@ load_sealed_guc_profile_projection(
                     + std::string{option});
             }
             result.require_complete_codegen = true;
-            continue;
-        }
-        if (option == "--require-checked-physical-ledger") {
-            if (!singleton_options.emplace(option).second) {
-                throw std::runtime_error(
-                    "duplicate SQL generator singleton option: "
-                    + std::string{option});
-            }
-            result.require_checked_physical_ledger = true;
             continue;
         }
         const bool repeatable =
@@ -1940,9 +1886,7 @@ load_sealed_guc_profile_projection(
                 "missing value for " + std::string{option});
         }
         const std::string_view value = args[++index];
-        if (option == "--input") {
-            result.input = std::filesystem::path{value};
-        } else if (option == "--source") {
+        if (option == "--source") {
             result.sources.emplace_back(value);
         } else if (option == "--source-list") {
             result.source_list = std::filesystem::path{value};
@@ -1995,21 +1939,12 @@ load_sealed_guc_profile_projection(
         } else if (option
                    == "--compiler-module-inventory-sha256") {
             result.compiler_module_inventory_sha256 = value;
-        } else if (option == "--migration-owner") {
-            result.migration_owner = std::filesystem::path{value};
         } else if (option == "--output") {
             result.output = std::filesystem::path{value};
         } else if (option == "--manifest") {
             result.manifest = std::filesystem::path{value};
-        } else if (option == "--golden") {
-            result.golden = std::filesystem::path{value};
         } else if (option == "--stamp") {
             result.stamp = std::filesystem::path{value};
-        } else if (option == "--physical-ledger") {
-            result.physical_ledger = std::filesystem::path{value};
-        } else if (option == "--physical-ledger-output") {
-            result.physical_ledger_output =
-                std::filesystem::path{value};
         } else if (option == "--entity-handles-output") {
             result.entity_handle_outputs.push_back(
                 detail::parse_entity_handle_output(value));
@@ -2022,8 +1957,6 @@ load_sealed_guc_profile_projection(
         } else if (option == "--fmgr-owner-module") {
             result.fmgr_owners.push_back(
                 detail::parse_fmgr_owner(value));
-        } else if (option == "--guc-parity-ledger") {
-            result.guc_parity_ledger = std::filesystem::path{value};
         } else if (option == "--guc-output-root") {
             result.guc_output_root = std::filesystem::path{value};
         } else if (option == "--core-hash-output") {
@@ -2066,48 +1999,11 @@ load_sealed_guc_profile_projection(
                 "unknown SQL generator option: " + std::string{option});
         }
     }
-    const bool has_legacy_input = !result.input.empty();
     const bool has_source_input =
         !result.sources.empty() || !result.source_list.empty();
-    if (migrate_baseline
-        && (!has_legacy_input || has_source_input
-            || result.migration_owner.empty()
-            || !result.entity_handle_outputs.empty()
-            || !result.row_codec_outputs.empty()
-            || !result.fmgr_entrypoint_outputs.empty()
-            || !result.fmgr_owners.empty()
-            || !result.physical_ledger.empty()
-            || !result.physical_ledger_output.empty()
-            || !result.guc_parity_ledger.empty()
-            || !result.guc_output_root.empty()
-            || !result.core_manifest.empty()
-            || !result.support_seal.empty()
-            || !result.production_support_manifest.empty()
-            || !result.production_support_seal.empty()
-            || !result.test_indexes_support_manifest.empty()
-            || !result.test_indexes_support_seal.empty()
-            || !result.clang_binary.empty()
-            || !result.clang_scan_deps.empty()
-            || !result.llvm_config.empty()
-            || !result.compiler_module_inventory.empty()
-            || !result.clang_sha256.empty()
-            || !result.clang_scan_deps_sha256.empty()
-            || !result.llvm_config_sha256.empty()
-            || !result.compiler_module_inventory_sha256.empty()
-            || !result.pcm_manifest.empty()
-            || !result.pcm_root.empty()
-            || result.require_complete_codegen
-            || result.require_checked_physical_ledger)) {
+    if (!has_source_input) {
         throw std::runtime_error(
-            "migrate-baseline requires --input and --migration-owner and "
-            "does not accept annotated sources or generated C++ outputs");
-    }
-    if (!migrate_baseline
-        && (has_legacy_input || !has_source_input)) {
-        throw std::runtime_error(
-            "prepare/generate/update-golden are source-only and require "
-            "--source/--source-list; --input is accepted only by the "
-            "explicit migrate-baseline command");
+            "prepare/generate require --source/--source-list");
     }
     const auto valid_context_token = [](std::string_view value) {
         return !value.empty()
@@ -2120,8 +2016,7 @@ load_sealed_guc_profile_projection(
                         || item == '_';
                 });
     };
-    if (!migrate_baseline
-        && !valid_context_token(result.compiler_profile)) {
+    if (!valid_context_token(result.compiler_profile)) {
         throw std::runtime_error(
             "--profile must be a lowercase context profile identifier");
     }
@@ -2130,27 +2025,25 @@ load_sealed_guc_profile_projection(
         throw std::runtime_error(
             "--fmgr-prelude must be bioseq_common or postgresql");
     }
-    if (!migrate_baseline) {
-        const auto require_sha256 =
-            [](std::string_view value, std::string_view option) {
-                if (!value.empty() && !detail::is_sha256_hex(value)) {
-                    throw std::runtime_error(
-                        std::string{option}
-                        + " must be exactly 64 lowercase hexadecimal "
-                          "characters");
-                }
-            };
-        require_sha256(result.clang_sha256, "--clang-sha256");
-        require_sha256(
-            result.clang_scan_deps_sha256,
-            "--clang-scan-deps-sha256");
-        require_sha256(
-            result.llvm_config_sha256,
-            "--llvm-config-sha256");
-        require_sha256(
-            result.compiler_module_inventory_sha256,
-            "--compiler-module-inventory-sha256");
-    }
+    const auto require_sha256 =
+        [](std::string_view value, std::string_view option) {
+            if (!value.empty() && !detail::is_sha256_hex(value)) {
+                throw std::runtime_error(
+                    std::string{option}
+                    + " must be exactly 64 lowercase hexadecimal "
+                      "characters");
+            }
+        };
+    require_sha256(result.clang_sha256, "--clang-sha256");
+    require_sha256(
+        result.clang_scan_deps_sha256,
+        "--clang-scan-deps-sha256");
+    require_sha256(
+        result.llvm_config_sha256,
+        "--llvm-config-sha256");
+    require_sha256(
+        result.compiler_module_inventory_sha256,
+        "--compiler-module-inventory-sha256");
     if (prepare) {
         if (result.stage_specified) {
             throw std::runtime_error(
@@ -2200,10 +2093,6 @@ load_sealed_guc_profile_projection(
         }
         if (!result.compile_database.empty()
             || !result.output.empty() || !result.manifest.empty()
-            || !result.golden.empty()
-            || !result.physical_ledger.empty()
-            || !result.physical_ledger_output.empty()
-            || !result.guc_parity_ledger.empty()
             || !result.guc_output_root.empty()
             || !result.core_hash_output.empty()
             || !result.core_manifest.empty()
@@ -2217,62 +2106,52 @@ load_sealed_guc_profile_projection(
             || !result.entity_handle_outputs.empty()
             || !result.row_codec_outputs.empty()
             || !result.fmgr_entrypoint_outputs.empty()
-            || result.require_complete_codegen
-            || result.require_checked_physical_ledger) {
+            || result.require_complete_codegen) {
             throw std::runtime_error(
                 "prepare does not accept generation output options");
         }
-        result.mode = authority_mode::annotated_cpp;
         detail::validate_artifact_path_aliases(result);
         return result;
     }
-    if (!migrate_baseline
-        && (!result.stage_specified
-            || result.compile_database.empty()
-            || result.pcm_root.empty()
-            || result.pcm_manifest.empty()
-            || result.clang_binary.empty()
-            || result.clang_scan_deps.empty()
-            || result.llvm_config.empty()
-            || result.compiler_module_inventory.empty()
-            || result.clang_sha256.empty()
-            || result.clang_scan_deps_sha256.empty()
-            || result.llvm_config_sha256.empty()
-            || result.compiler_module_inventory_sha256.empty())) {
+    if (!result.stage_specified
+        || result.compile_database.empty()
+        || result.pcm_root.empty()
+        || result.pcm_manifest.empty()
+        || result.clang_binary.empty()
+        || result.clang_scan_deps.empty()
+        || result.llvm_config.empty()
+        || result.compiler_module_inventory.empty()
+        || result.clang_sha256.empty()
+        || result.clang_scan_deps_sha256.empty()
+        || result.llvm_config_sha256.empty()
+        || result.compiler_module_inventory_sha256.empty()) {
         throw std::runtime_error(
-            "generate/update-golden require --stage, "
+            "generate requires --stage, "
             "--compile-database, --pcm-root, --pcm-manifest, "
             "--clang-binary, --clang-scan-deps, --llvm-config, and "
             "--compiler-module-inventory plus their four "
             "--*-sha256 identities");
     }
-    if (!migrate_baseline
-        && !result.guc_parity_ledger.empty()
+    if (!result.guc_output_root.empty()
         && result.guc_active_profile != result.compiler_profile) {
         throw std::runtime_error(
             "--guc-active-profile must match --profile");
     }
-    result.mode = migrate_baseline
-        ? authority_mode::legacy_baseline
-        : authority_mode::annotated_cpp;
     if (result.stamp.empty()) {
         throw std::runtime_error(
             "SQL generation requires --stamp");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::support
+    if (result.stage == generation_stage::support
         && (result.manifest.empty()
             || result.row_codec_outputs.empty()
             || result.fmgr_entrypoint_outputs.empty()
-            || result.guc_parity_ledger.empty()
             || result.guc_output_root.empty())) {
         throw std::runtime_error(
             "support generation requires --manifest, "
             "--row-codecs-output, SUPPORT registry outputs, "
-            "--guc-parity-ledger, and --guc-output-root");
+            "and --guc-output-root");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::core
+    if (result.stage == generation_stage::core
         && (result.core_hash_output.empty()
             || result.core_manifest.empty()
             || result.entity_handle_outputs.empty())) {
@@ -2280,16 +2159,14 @@ load_sealed_guc_profile_projection(
             "core generation requires --core-hash-output, "
             "--core-manifest, and --entity-handles-output");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::final
+    if (result.stage == generation_stage::final
         && (result.output.empty() || result.manifest.empty())) {
         throw std::runtime_error(
             "final generation requires --output and --manifest; "
             "CORE, SUPPORT, row-codec, GUC, and fmgr artifacts are "
             "required only when selected by registered owners");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::final) {
+    if (result.stage == generation_stage::final) {
         const bool any_core =
             !result.expected_core_hash.empty()
             || !result.core_manifest.empty()
@@ -2324,7 +2201,7 @@ load_sealed_guc_profile_projection(
                 "FINAL cross-profile SUPPORT handoff requires both "
                 "production and test_indexes manifest/seal pairs");
         }
-        if (!result.guc_parity_ledger.empty()
+        if (!result.guc_output_root.empty()
             && (result.support_manifest.empty()
                 || !complete_profile_support)) {
             throw std::runtime_error(
@@ -2332,9 +2209,8 @@ load_sealed_guc_profile_projection(
                 "SUPPORT handoffs");
         }
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::support
-        && (!result.output.empty() || !result.golden.empty()
+    if (result.stage == generation_stage::support
+        && (!result.output.empty()
             || !result.core_hash_output.empty()
             || !result.core_manifest.empty()
             || !result.expected_core_hash.empty()
@@ -2345,15 +2221,11 @@ load_sealed_guc_profile_projection(
             || !result.test_indexes_support_manifest.empty()
             || !result.test_indexes_support_seal.empty()
             || !result.entity_handle_outputs.empty()
-            || !result.physical_ledger.empty()
-            || !result.physical_ledger_output.empty()
-            || result.require_complete_codegen
-            || result.require_checked_physical_ledger)) {
+            || result.require_complete_codegen)) {
         throw std::runtime_error(
             "support generation accepts only SUPPORT-owned outputs");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::support) {
+    if (result.stage == generation_stage::support) {
         for (const configured_fmgr_entrypoint_output& output :
              result.fmgr_entrypoint_outputs) {
             if (!detail::support_owned_fmgr_output(
@@ -2364,10 +2236,8 @@ load_sealed_guc_profile_projection(
             }
         }
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::core
+    if (result.stage == generation_stage::core
         && (!result.output.empty() || !result.manifest.empty()
-            || !result.golden.empty()
             || !result.support_manifest.empty()
             || !result.support_seal.empty()
             || !result.production_support_manifest.empty()
@@ -2377,69 +2247,28 @@ load_sealed_guc_profile_projection(
             || !result.expected_core_hash.empty()
             || !result.row_codec_outputs.empty()
             || !result.fmgr_entrypoint_outputs.empty()
-            || !result.guc_parity_ledger.empty()
             || !result.guc_output_root.empty()
-            || !result.physical_ledger.empty()
-            || !result.physical_ledger_output.empty()
-            || result.require_complete_codegen
-            || result.require_checked_physical_ledger)) {
+            || result.require_complete_codegen)) {
         throw std::runtime_error(
             "core generation accepts only CORE-owned outputs");
     }
-    if (!migrate_baseline
-        && result.stage == generation_stage::final
+    if (result.stage == generation_stage::final
         && !result.core_hash_output.empty()) {
         throw std::runtime_error(
             "final generation verifies but does not publish CORE outputs");
-    }
-    if (migrate_baseline
-        && (result.output.empty() || result.manifest.empty())) {
-        throw std::runtime_error(
-            "migrate-baseline requires --output and --manifest");
-    }
-    if (result.update_golden && result.golden.empty()) {
-        throw std::runtime_error(
-            "update-golden is an explicit maintainer command and requires "
-            "--golden");
-    }
-    if (result.update_golden
-        && (result.stage != generation_stage::final
-            || result.compiler_profile != "production")) {
-        throw std::runtime_error(
-            "update-golden is restricted to the production FINAL "
-            "authority");
-    }
-    if (!migrate_baseline
-        && (result.guc_parity_ledger.empty()
-            != result.guc_output_root.empty())) {
-        throw std::runtime_error(
-            "--guc-parity-ledger and --guc-output-root must be supplied "
-            "together");
-    }
-    if (!result.physical_ledger.empty()
-        && !result.physical_ledger_output.empty()) {
-        throw std::runtime_error(
-            "--physical-ledger and --physical-ledger-output are "
-            "mutually exclusive");
     }
     if (result.guc_active_profile != "production"
         && result.guc_active_profile != "test_indexes") {
         throw std::runtime_error(
             "--guc-active-profile must be production or test_indexes");
     }
-    validate_final_physical_ledger_policy(result);
     detail::validate_artifact_path_aliases(result);
     return result;
 }
 
 [[nodiscard]] inline int self_test() {
     try {
-        bioseq::codegen::clang_structural::
-            run_preparation_contract_self_tests();
         detail::run_artifact_path_alias_contract_self_test();
-        run_generator_contract_self_tests();
-        run_guc_generator_contract_self_tests();
-        bioseq::codegen::safety::run_safety_contract_self_tests();
         return 0;
     } catch (const std::exception& error) {
         std::println(stderr, "bioseq_sql_codegen: {}", error.what());
@@ -2450,33 +2279,6 @@ load_sealed_guc_profile_projection(
 [[nodiscard]] inline int run(std::span<std::string_view const> args) {
     try {
         command_line command = parse_command_line(args);
-        if (command.mode == authority_mode::legacy_baseline) {
-            const std::string source = read_file(command.input);
-            install_script script = parse_install_script(
-                source, command.extension_name);
-            validate_install_script(script);
-            const std::string rendered =
-                render_install_script(script);
-            const std::string manifest =
-                render_manifest(script, rendered);
-            const std::string migration_owner =
-                render_migration_owner(script);
-            write_if_different(
-                command.migration_owner,
-                migration_owner);
-            const std::string publication_material =
-                "bioseq_sql_migration_closure/v1\n"
-                "legacy_input_sha256=" + sha256_hex(source)
-                + "\nmigration_owner_sha256="
-                + sha256_hex(migration_owner) + "\n";
-            publish_artifacts(
-                command,
-                rendered,
-                manifest,
-                publication_material);
-            return 0;
-        }
-
         if (!command.source_list.empty()) {
             std::vector<std::filesystem::path> listed =
                 detail::read_source_list(command.source_list);
@@ -2489,9 +2291,9 @@ load_sealed_guc_profile_projection(
         detail::validate_artifact_path_aliases(command);
 
         if (command.action == command_action::prepare) {
-            clang_structural::prepared_compilation_environment
+            structural_analysis::dependency_compilation_environment
                 prepared =
-                    clang_structural::prepare_compilation_environment(
+                    structural_analysis::prepare_compilation_environment(
                         command.sources,
                         command.raw_compile_database,
                         command.clang_binary,
@@ -2509,18 +2311,18 @@ load_sealed_guc_profile_projection(
                 prepared.dependencies.push_back(
                     command.source_list);
             }
-            write_if_different(
+            publish_artifact_if_changed(
                 command.compile_database_output,
                 prepared.compile_database_json);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.pcm_manifest,
                 prepared.pcm_manifest_json);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.depfile,
                 detail::render_depfile(
                     command.stamp,
                     std::move(prepared.dependencies)));
-            write_if_different(
+            publish_artifact_if_changed(
                 command.stamp,
                 "bioseq_clang_prepare_stamp/v1\n"
                 "authority=" + command.prepare_authority + "\n"
@@ -2530,14 +2332,14 @@ load_sealed_guc_profile_projection(
                 "relocatable_compilation_signature="
                 + prepared.relocatable_compilation_signature + "\n"
                 "pcm_manifest_sha256="
-                + sha256_hex(prepared.pcm_manifest_json) + "\n"
+                + bioseq::common::sha256_hex(prepared.pcm_manifest_json) + "\n"
                 "compile_database_sha256="
-                + sha256_hex(prepared.compile_database_json) + "\n"
+                + bioseq::common::sha256_hex(prepared.compile_database_json) + "\n"
                 "relocatable_pcm_manifest_projection_sha256="
                 + prepared.relocatable_pcm_manifest_sha256 + "\n"
                 "relocatable_compile_database_sha256="
                 + prepared.relocatable_compile_database_sha256 + "\n");
-            touch_stamp(command.stamp);
+            mark_artifact_complete(command.stamp);
             return 0;
         }
 
@@ -2547,10 +2349,10 @@ load_sealed_guc_profile_projection(
             : command.stage == generation_stage::core
             ? "core"
             : "final";
-        const clang_structural::prepared_compilation_validation
+        const structural_analysis::dependency_compilation_validation
             prepared_validation =
-                clang_structural::
-                    validate_prepared_compilation_environment(
+                structural_analysis::
+                    validate_dependency_compilation_environment(
                         command.sources,
                         command.compile_database,
                         command.pcm_root,
@@ -2572,7 +2374,7 @@ load_sealed_guc_profile_projection(
                 .pcm_root = command.pcm_root,
                 .compiler_profile = command.compiler_profile,
             });
-        program.compilation_signature = sha256_hex(
+        program.compilation_signature = bioseq::common::sha256_hex(
             "bioseq_sql_relocatable_prepared_closure/v1\n"
             + prepared_validation.relocatable_compilation_signature
             + "\n");
@@ -2582,24 +2384,23 @@ load_sealed_guc_profile_projection(
                 return entity.kind == entity_kind::guc;
             });
         if (has_guc_annotations
-            != !command.guc_parity_ledger.empty()) {
+            != !command.guc_output_root.empty()) {
             throw std::runtime_error(
                 has_guc_annotations
-                ? "annotated GUC owners require configured parity-ledger "
-                  "and generated-module outputs"
+                ? "annotated GUC owners require generated-module outputs"
                 : "GUC generation was configured but the source closure "
                   "contains no annotated GUC owner");
         }
 
         std::optional<guc_inventory> active_gucs;
         std::optional<rendered_guc_package> active_guc_package;
-        if (!command.guc_parity_ledger.empty()) {
+        if (!command.guc_output_root.empty()) {
             const guc_profile profile =
                 command.compiler_profile == "test_indexes"
                 ? guc_profile::test_indexes
                 : guc_profile::production;
-            active_gucs.emplace(collect_guc_inventory(
-                program, command.guc_parity_ledger, profile));
+            active_gucs.emplace(
+                collect_guc_inventory(program, profile));
             active_guc_package.emplace(
                 render_guc_package(
                     *active_gucs,
@@ -2613,7 +2414,7 @@ load_sealed_guc_profile_projection(
         const std::string compilation_signature =
             program.compilation_signature;
         const std::string clang_version =
-            program.module_graph.clang_version;
+            program.module_graph.clang_release;
         sql_graph graph = build_sql_graph(
             std::move(program),
             command.extension_schema,
@@ -2659,11 +2460,11 @@ load_sealed_guc_profile_projection(
                 command, *active_guc_package);
             detail::publish_fmgr_entrypoint_modules(
                 command, vector_registry_modules, true);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.manifest, support_manifest);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.stamp, support_seal);
-            touch_stamp(command.stamp);
+            mark_artifact_complete(command.stamp);
             return 0;
         }
 
@@ -2690,11 +2491,11 @@ load_sealed_guc_profile_projection(
                     core_manifest);
             detail::publish_entity_handle_modules(
                 command, entity_handle_modules);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.core_manifest, core_manifest);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.core_hash_output, core_seal);
-            write_if_different(
+            publish_artifact_if_changed(
                 command.stamp,
                 "bioseq_sql_core_stamp/v1\n"
                 "profile=production\n"
@@ -2703,10 +2504,10 @@ load_sealed_guc_profile_projection(
                 + compilation_signature + "\n"
                 "core_descriptor_sha256=" + core_hash + "\n"
                 "core_manifest_sha256="
-                + sha256_hex(core_manifest) + "\n"
+                + bioseq::common::sha256_hex(core_manifest) + "\n"
                 "core_seal_sha256="
-                + sha256_hex(core_seal) + "\n");
-            touch_stamp(command.stamp);
+                + bioseq::common::sha256_hex(core_seal) + "\n");
+            mark_artifact_complete(command.stamp);
             return 0;
         }
 
@@ -2785,19 +2586,8 @@ load_sealed_guc_profile_projection(
                 test_indexes_guc_projection));
         }
 
-        physical_ledger_material ledger_material =
-            make_physical_ledger_material({});
-        if (!command.physical_ledger.empty()) {
-            ledger_material = apply_checked_physical_ledger(
-                graph,
-                command.physical_ledger);
-        }
         validate_codegen_completion_policy(
             graph, command.require_complete_codegen);
-        if (!command.physical_ledger_output.empty()) {
-            ledger_material = make_physical_ledger_material(
-                render_physical_ledger(graph));
-        }
         const rendered_sql_artifact artifact =
             render_sql_graph(graph);
         std::string manifest = render_graph_manifest(
@@ -2818,18 +2608,13 @@ load_sealed_guc_profile_projection(
         }
         detail::publish_fmgr_entrypoint_modules(
             command, fmgr_entrypoint_modules, false);
-        if (!command.physical_ledger_output.empty()) {
-            write_if_different(
-                command.physical_ledger_output,
-                ledger_material.exact_bytes);
-        }
         std::vector<std::string> fmgr_seals;
         fmgr_seals.reserve(fmgr_entrypoint_modules.size());
         for (const rendered_fmgr_entrypoint_module& module :
              fmgr_entrypoint_modules) {
             fmgr_seals.push_back(
                 module.owner_key + "\t" + module.module_name + "\t"
-                + sha256_hex(module.content));
+                + bioseq::common::sha256_hex(module.content));
         }
         std::ranges::sort(fmgr_seals);
         std::string publication_material =
@@ -2842,7 +2627,7 @@ load_sealed_guc_profile_projection(
             || command.generated_module_prefix
                 != "bioseq.sql.generated"
             || command.fmgr_boundary_module
-                != "bioseq.pg_utils.sql_boundary"
+                != "bioseq.postgres.support.sql_boundary"
             || command.fmgr_prelude != "bioseq_common") {
             publication_material +=
                 "\nextension_name=" + command.extension_name
@@ -2853,16 +2638,14 @@ load_sealed_guc_profile_projection(
                 + command.fmgr_boundary_module
                 + "\nfmgr_prelude=" + command.fmgr_prelude;
         }
-        publication_material +=
-            "\nphysical_ledger_sha256="
-            + ledger_material.sha256 + "\n";
+        publication_material += "\n";
         const auto append_artifact_hash =
             [&publication_material](
                 std::string_view label,
                 const std::filesystem::path& path) {
                 if (path.empty()) return;
                 publication_material += std::string{label} + "="
-                    + sha256_hex(read_file(path)) + "\n";
+                    + bioseq::common::sha256_hex(read_artifact_bytes(path)) + "\n";
             };
         append_artifact_hash(
             "support_manifest_sha256", command.support_manifest);

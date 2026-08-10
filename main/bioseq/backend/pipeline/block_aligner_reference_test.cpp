@@ -5,7 +5,7 @@
 // They intentionally compare the native single-affine Global/XDrop contract,
 // not KSW2 z-drop or dual-affine behaviour.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>

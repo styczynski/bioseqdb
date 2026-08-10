@@ -1,176 +1,235 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file fragment_cache.cppm
+ * @brief Provides a fixed-capacity cache with observable slot generations.
  *
- * common/fragment_cache.cppm
- *
- * A fixed-capacity cache for sequence fragment handles (DOC0263 §5).
- *
- * This is NOT `circular_append_buffer` (which is a producer-consumer ring
- * with read-once semantics, no random lookup and no explicit pop). Phase B's
- * lazy_compact_sequence wants:
- *   - random lookup-by-key (find a resident fragment by fragment number),
- *   - explicit eviction (evict_oldest / evict_at) with a callback so the
- *     owning scanner can release per-fragment resources (Phase C: pfree),
- *   - a monotonic per-slot generation counter so an in-flight iterator can
- *     detect "the slot I cached has been replaced underneath me".
- *
- * The cache is header-only, allocation-free (the slots live inline in a
- * std::array), and single-threaded — one fragment_cache belongs to one
- * lazy_compact_sequence, which is itself single-threaded (DOC0263 §1.2).
- * Operations are O(N) over N (=16 by default) slots; the linear scan is
- * branchless on modern targets and N is tiny.
- *
- * This module has NO dependency on Postgres — it lives in the NO_POSTGRES
- * shared module library so the unit tests link against it directly
- * (DOC0263 §2.2).
- *
- *-------------------------------------------------------------------------
+ * Slots live inline, lookup is a bounded linear scan, and eviction invokes a
+ * caller-owned cleanup callback before clearing the slot. Each replacement
+ * increments a 64-bit generation so cached slot references can detect
+ * eviction or reuse. A cache instance is single-threaded.
  */
 module;
-
-#include "common.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <type_traits>
 #include <utility>
 
 export module bioseq.common.fragment_cache;
 
-static_assert(__cplusplus >= 202302L, "DOC0263 requires C++23-or-later");
+static_assert(__cplusplus >= 202302L, "fragment_cache requires C++23 or later");
 
 export namespace bioseq::common {
 
-/// Fixed-capacity cache for `sequence_fragment_handle<R>` (or any movable T).
-///
-/// Semantics:
-///   - insert via push(value, on_evict) -> returns (slot_idx, generation).
-///   - look up a resident slot by key via find(key, key_of) ->
-///     optional<(slot_idx, gen)>.
-///   - explicit eviction via evict_oldest(on_evict) and
-///     evict_at(slot_idx, on_evict). The callback is invoked with the
-///     evicted value BEFORE the slot is cleared, so the scanner can release
-///     the fragment's backing bytes.
-///   - per-slot monotonic generation counter (`is_valid_at(idx, gen)`) so a
-///     caller that cached a (idx, gen) pair can detect eviction/replacement
-///     after a potentially-evicting operation.
-template <class T, std::size_t N>
+/**
+ * @brief Stores a bounded set of movable values in generation-tracked slots.
+ *
+ * The cache owns all values inline and performs no dynamic allocation. Calls
+ * are not synchronized; one thread must own an instance. A slot reference is
+ * valid only while `is_valid_at()` accepts its index/generation pair.
+ *
+ * @tparam p_value_type Movable value stored in each slot.
+ * @tparam p_capacity Positive number of inline slots.
+ *
+ * @code{.cpp}
+ * bioseq::common::fragment_cache<int, 4> cache;
+ * const auto [slot_index, generation] =
+ *     cache.push(42, [](int&) noexcept {});
+ * const bool is_resident = cache.is_valid_at(slot_index, generation);
+ * @endcode
+ */
+template <class p_value_type, std::size_t p_capacity>
 class fragment_cache {
 public:
-    using slot_idx_t = std::size_t;
-    using gen_t      = std::uint64_t;
-    static constexpr std::size_t capacity = N;
-    static_assert(N >= 1, "fragment_cache needs at least one slot");
+    /** @brief Unsigned type used to address an inline slot. */
+    using slot_index_type = std::size_t;
 
-    /// Every slot starts empty.
+    /** @brief Unsigned type used for replacement generations. */
+    using generation_type = std::uint64_t;
+
+    /** @brief Number of slots owned by each cache instance. */
+    static constexpr std::size_t k_capacity = p_capacity;
+
+    static_assert(p_capacity >= 1, "fragment_cache requires at least one slot");
+
+    /** @brief Constructs a cache with every slot empty. */
     fragment_cache() noexcept = default;
 
-    fragment_cache(const fragment_cache&)            = delete;
+    fragment_cache(const fragment_cache&) = delete;
     fragment_cache& operator=(const fragment_cache&) = delete;
-    fragment_cache(fragment_cache&&)                 = delete;
-    fragment_cache& operator=(fragment_cache&&)      = delete;
-    ~fragment_cache()                                = default;
+    fragment_cache(fragment_cache&&) = delete;
+    fragment_cache& operator=(fragment_cache&&) = delete;
+    ~fragment_cache() = default;
 
-    [[nodiscard]] [[gnu::always_inline]]
-    std::size_t valid_count() const noexcept { return _valid_count; }
+    /**
+     * @brief Reports the number of occupied slots.
+     * @return Value in the inclusive range `[0, k_capacity]`.
+     */
+    [[nodiscard]] [[gnu::always_inline]] std::size_t valid_count() const noexcept {
+        return valid_count_;
+    }
 
-    /// O(N) scan for a resident slot whose `key_of(slot) == key`. Returns the
-    /// slot's (idx, gen) on hit; nullopt on miss. `_hint_idx` records the last
-    /// hit so a repeated read of the same fragment is O(1). The hint mutation
-    /// under `const` is sound because lazy_compact_sequence (the sole owner)
-    /// is single-threaded (DOC0263 §1.2 / consolidated-review N25).
-    template <class Key, class KeyOf>
+    /**
+     * @brief Finds a resident value by a caller-defined key projection.
+     *
+     * Lookup starts at the previous hit/insert hint and examines at most
+     * `k_capacity` slots. Updating the hint does not change cache contents.
+     *
+     * @tparam p_key_type Lookup key type.
+     * @tparam p_key_extractor Callable returning the comparable key for a stored value.
+     * @param[in] key Key to locate.
+     * @param[in] key_extractor Projection invoked only for occupied slots.
+     * @return Slot index and generation on a hit, or `std::nullopt` on a miss.
+     */
+    template <class p_key_type, class p_key_extractor>
     [[nodiscard]] [[gnu::always_inline]]
-    std::optional<std::pair<slot_idx_t, gen_t>>
-    find(Key key, KeyOf&& key_of) const noexcept {
-        std::size_t i = _hint_idx;
-        for (std::size_t step = 0; step < capacity; ++step) {
-            if (_filled[i] && key_of(_slots[i]) == key) {
-                const_cast<fragment_cache*>(this)->_hint_idx = i;
-                return std::pair<slot_idx_t, gen_t>{i, _gens[i]};
+    std::optional<std::pair<slot_index_type, generation_type>>
+    find(p_key_type key, p_key_extractor&& key_extractor) const noexcept {
+        std::size_t slot_index = hint_index_;
+        for (std::size_t slots_checked = 0; slots_checked < k_capacity; ++slots_checked) {
+            if (filled_[slot_index] && key_extractor(slots_[slot_index]) == key) {
+                hint_index_ = slot_index;
+                return std::pair<slot_index_type, generation_type>{
+                    slot_index, generations_[slot_index]};
             }
-            i = (i + 1) % capacity;
+            slot_index = (slot_index + 1) % k_capacity;
         }
         return std::nullopt;
     }
 
-    /// Push a new value, evicting the oldest slot if the cache is full.
-    /// Returns (slot_idx, gen). The eviction callback runs BEFORE the slot is
-    /// reassigned, so it observes the old value; the new value is moved in
-    /// after the callback returns (consolidated-review N46 — the reference
-    /// handed to on_evict is valid only for the duration of the call).
-    template <class EvictFn>
-    [[gnu::always_inline]]
-    std::pair<slot_idx_t, gen_t> push(T value, EvictFn&& on_evict) noexcept {
-        slot_idx_t idx = 0;
-        if (_valid_count < capacity) {
-            for (idx = 0; idx < capacity; ++idx) {
-                if (!_filled[idx]) break;
+    /**
+     * @brief Inserts a value, evicting the oldest slot when the cache is full.
+     *
+     * The callback observes the old value before it is replaced. Its reference
+     * is valid only for the callback duration.
+     *
+     * @tparam p_eviction_callback Callable accepting a mutable stored value.
+     * @param[in] value Value moved into the selected slot.
+     * @param[in] on_evict Callback used only when insertion must replace a value.
+     * @return Selected slot index and its new generation.
+     */
+    template <class p_eviction_callback>
+    [[gnu::always_inline]] std::pair<slot_index_type, generation_type>
+    push(p_value_type value, p_eviction_callback&& on_evict) noexcept {
+        slot_index_type slot_index = 0;
+        if (valid_count_ < k_capacity) {
+            for (slot_index = 0; slot_index < k_capacity; ++slot_index) {
+                if (!filled_[slot_index]) {
+                    break;
+                }
             }
         } else {
-            idx = _oldest_idx;
-            std::forward<EvictFn>(on_evict)(_slots[idx]);
-            _oldest_idx = (_oldest_idx + 1) % capacity;
-            --_valid_count;
-            _filled[idx] = false;
+            slot_index = oldest_index_;
+            evict_slot_unchecked(
+                slot_index, std::forward<p_eviction_callback>(on_evict));
+            oldest_index_ = (oldest_index_ + 1) % k_capacity;
         }
-        _slots[idx]  = std::move(value);
-        _filled[idx] = true;
-        _gens[idx]   = ++_next_gen;
-        ++_valid_count;
-        _hint_idx = idx;
-        return {idx, _gens[idx]};
+
+        slots_[slot_index] = std::move(value);
+        filled_[slot_index] = true;
+        generations_[slot_index] = ++next_generation_;
+        ++valid_count_;
+        hint_index_ = slot_index;
+        return {slot_index, generations_[slot_index]};
     }
 
-    /// Evict the genuinely-oldest filled slot. No-op if the cache is empty.
-    template <class EvictFn>
-    [[gnu::always_inline]]
-    void evict_oldest(EvictFn&& on_evict) noexcept {
-        if (_valid_count == 0) return;
-        slot_idx_t idx = _oldest_idx;
-        for (std::size_t step = 0; step < capacity; ++step) {
-            if (_filled[idx]) break;
-            idx = (idx + 1) % capacity;
+    /**
+     * @brief Evicts the oldest occupied slot when one exists.
+     * @tparam p_eviction_callback Callable accepting a mutable stored value.
+     * @param[in] on_evict Callback invoked before the selected slot is cleared.
+     */
+    template <class p_eviction_callback>
+    [[gnu::always_inline]] void evict_oldest(p_eviction_callback&& on_evict) noexcept {
+        if (valid_count_ == 0) {
+            return;
         }
-        std::forward<EvictFn>(on_evict)(_slots[idx]);
-        _filled[idx] = false;
-        --_valid_count;
-        _oldest_idx = (idx + 1) % capacity;
+
+        slot_index_type slot_index = oldest_index_;
+        for (std::size_t slots_checked = 0; slots_checked < k_capacity; ++slots_checked) {
+            if (filled_[slot_index]) {
+                break;
+            }
+            slot_index = (slot_index + 1) % k_capacity;
+        }
+        evict_slot_unchecked(slot_index, std::forward<p_eviction_callback>(on_evict));
+        oldest_index_ = (slot_index + 1) % k_capacity;
     }
 
-    /// Evict a specific slot (consolidated-review §17.3). Safe to call with an
-    /// out-of-range or already-empty slot (no-op).
-    template <class EvictFn>
-    [[gnu::always_inline]]
-    void evict_at(slot_idx_t idx, EvictFn&& on_evict) noexcept {
-        if (idx >= capacity || !_filled[idx]) return;
-        std::forward<EvictFn>(on_evict)(_slots[idx]);
-        _filled[idx] = false;
-        --_valid_count;
+    /**
+     * @brief Evicts a specified occupied slot.
+     *
+     * @tparam p_eviction_callback Callable accepting a mutable stored value.
+     * @param[in] slot_index Slot to clear; out-of-range and empty slots are ignored.
+     * @param[in] on_evict Callback invoked before an occupied slot is cleared.
+     */
+    template <class p_eviction_callback>
+    [[gnu::always_inline]] void evict_at(
+        slot_index_type slot_index,
+        p_eviction_callback&& on_evict) noexcept {
+        if (slot_index >= k_capacity || !filled_[slot_index]) {
+            return;
+        }
+        evict_slot_unchecked(slot_index, std::forward<p_eviction_callback>(on_evict));
     }
 
-    /// True iff (idx, gen) still names the slot the caller saw. False once the
-    /// slot has been evicted or replaced.
-    [[nodiscard]] [[gnu::always_inline]]
-    bool is_valid_at(slot_idx_t idx, gen_t gen) const noexcept {
-        return idx < capacity && _filled[idx] && _gens[idx] == gen;
+    /**
+     * @brief Tests whether a slot still contains the observed generation.
+     * @param[in] slot_index Candidate slot index.
+     * @param[in] generation Generation captured by the caller.
+     * @return `true` only when the same slot generation remains resident.
+     */
+    [[nodiscard]] [[gnu::always_inline]] bool
+    is_valid_at(slot_index_type slot_index, generation_type generation) const noexcept {
+        return slot_index < k_capacity && filled_[slot_index]
+            && generations_[slot_index] == generation;
     }
 
-    /// Raw slot accessors. The caller must have checked is_valid_at / find.
+    /**
+     * @brief Accesses an occupied slot as a const reference.
+     * @param[in] slot_index Valid occupied slot index.
+     * @return Stored value reference, valid until the slot is evicted or replaced.
+     * @pre `slot_index < k_capacity` and the slot is occupied.
+     */
     [[nodiscard]] [[gnu::always_inline]]
-    const T& slot_at(slot_idx_t idx) const noexcept { return _slots[idx]; }
+    const p_value_type& slot_at(slot_index_type slot_index) const noexcept {
+        return slots_[slot_index];
+    }
+
+    /**
+     * @brief Accesses an occupied slot as a mutable reference.
+     * @param[in] slot_index Valid occupied slot index.
+     * @return Stored value reference, valid until the slot is evicted or replaced.
+     * @pre `slot_index < k_capacity` and the slot is occupied.
+     */
     [[nodiscard]] [[gnu::always_inline]]
-    T& slot_at(slot_idx_t idx) noexcept { return _slots[idx]; }
+    p_value_type& slot_at(slot_index_type slot_index) noexcept {
+        return slots_[slot_index];
+    }
 
 private:
-    std::array<T, capacity>          _slots{};
-    std::array<bool, capacity>       _filled{};
-    std::array<gen_t, capacity>      _gens{};
-    std::size_t                      _valid_count = 0;
-    std::size_t                      _oldest_idx  = 0;
-    std::size_t                      _hint_idx    = 0;
-    gen_t                            _next_gen    = 0;
+    /**
+     * @brief Invokes cleanup and marks a known occupied slot empty.
+     * @tparam p_eviction_callback Callable accepting a mutable stored value.
+     * @param[in] slot_index In-range occupied slot.
+     * @param[in] on_evict Callback invoked before the slot state changes.
+     * @pre `slot_index < k_capacity` and the slot is occupied.
+     */
+    template <class p_eviction_callback>
+    [[gnu::always_inline]] void evict_slot_unchecked(
+        slot_index_type slot_index,
+        p_eviction_callback&& on_evict) noexcept {
+        std::forward<p_eviction_callback>(on_evict)(slots_[slot_index]);
+        filled_[slot_index] = false;
+        --valid_count_;
+    }
+
+    std::array<p_value_type, k_capacity> slots_{}; ///< Inline value storage.
+    std::array<bool, k_capacity> filled_{}; ///< Occupancy flag for each slot.
+    std::array<generation_type, k_capacity> generations_{}; ///< Generation per slot.
+    std::size_t valid_count_ = 0; ///< Number of occupied slots.
+    std::size_t oldest_index_ = 0; ///< Start position for the next age scan.
+    mutable std::size_t hint_index_ = 0; ///< Start position for the next lookup.
+    generation_type next_generation_ = 0; ///< Generation assigned by the next insert.
 };
 
-}  // namespace bioseq::common
+} // namespace bioseq::common

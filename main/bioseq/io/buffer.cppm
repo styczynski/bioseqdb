@@ -1,8 +1,7 @@
 module;
 
 #include <hwy/aligned_allocator.h>
-
-#include "common.h"
+#include <libassert/assert.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -65,11 +64,11 @@ struct buffer_slab {
         // seq_io's `StdPolicy` (deep-dive §3.1). Doubling past 8 MiB
         // would over-reserve for large FASTA records; linear growth
         // amortises the realloc cost without burning excess RAM.
-        constexpr std::size_t kGeometricToLinearThresholdBytes =
+        constexpr std::size_t geometric_growth_limit_bytes =
             static_cast<std::size_t>(1) << 23;  // 8 MiB
-        std::size_t new_capacity = (capacity < kGeometricToLinearThresholdBytes)
+        std::size_t new_capacity = (capacity < geometric_growth_limit_bytes)
                                        ? capacity * 2
-                                       : capacity + kGeometricToLinearThresholdBytes;
+                                       : capacity + geometric_growth_limit_bytes;
         new_capacity = std::min(new_capacity, options.io.max_buffer_size);
         auto new_data = hwy::AllocateAligned<std::uint8_t>(new_capacity);
         if (fill_size > 0) {

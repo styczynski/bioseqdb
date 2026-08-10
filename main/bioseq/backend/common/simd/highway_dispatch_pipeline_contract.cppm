@@ -1,6 +1,6 @@
 /**
- * @file highway_dispatch_pipeline_contract.cppm
- * @brief Neutral scheduler and alignment ABI owned by the Highway dispatch module.
+ * @file
+ * @brief Target-neutral scheduler and alignment contracts for Highway dispatch.
  */
 module;
 
@@ -16,362 +16,413 @@ export module bioseq.highway.dispatch_contract:pipeline;
 export import bioseq.pipeline.runtime_contract;
 export import bioseq.alignment.contracts;
 export import bioseq.sequences.cigar;
-export import bioseq.sequences.chaining.utils;
-export import bioseq.storage.lazy;
+export import bioseq.chaining.core;
+export import bioseq.storage.lazy_sequence;
 export import bioseq.storage.size;
 import bioseq.sequences;
 
 export namespace bioseq::simd_dispatch {
 
-struct HighwayKernelTable;
+struct highway_kernel_table;
 
-}  // namespace bioseq::simd_dispatch
+} // namespace bioseq::simd_dispatch
 
 export namespace bioseq::simd {
 
-using bioseq::chaining::ChainingMode;
-using bioseq::chaining::ChainingParams;
-using bioseq::chaining::SimdChainingPolicy;
+using bioseq::chaining::chaining_mode;
+using bioseq::chaining::chaining_parameters;
+using bioseq::chaining::simd_chaining_policy;
 using bioseq::storage::sequence_size_t;
 
-struct Minimap2Params {
-    /// Immutable target binding selected exactly once by BatchProcessor.
-    /// Neutral pipeline code carries these values; leaves never query Highway.
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels = nullptr;
-    ::bioseq::simd_dispatch::HighwayDispatchInfo highway_dispatch{};
+/** @brief Runtime parameters and fixed-target binding for one alignment request. */
+struct minimap2_parameters {
+    /** Kernel table selected once for the request. */
+    const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
+    /** Target inventory and planned target selected for the request. */
+    ::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
+    /** Exact target that executed the request. */
     std::int64_t highway_executed_target = 0;
-    /// Central scheduler-registry code fixed by the outer alphabet dispatch.
+    /** Scheduler-owned alphabet code fixed by outer alphabet dispatch. */
     std::uint8_t alphabet_code =
         (std::numeric_limits<std::uint8_t>::max)();
 
-    int32_t kmer_size      = 15;     ///< k-mer size
-    int32_t window_size    = 10;     ///< minimizer window
-    int32_t max_gap        = 5000;   ///< max reference gap in chaining
-    int32_t max_gap_ref    = -1;     ///< explicit ref gap (-1 = use max_gap)
-    int32_t bandwidth      = 500;    ///< bandwidth for chaining & alignment
-    int32_t max_chain_skip = 25;     ///< max skip for early termination in DP
-    int32_t max_chain_iter = 5000;   ///< max predecessors examined per anchor (map.c)
-    int32_t min_seed_count = 3;      ///< min seeds per chain
-    int32_t min_chain_score= 40;     ///< min chain score
-    float   chain_gap_scale= 0.8f;   ///< gap penalty scale (options.c default)
-    float   chain_skip_scale=0.0f;   ///< skip penalty scale (options.c default)
-    float   mask_level     = 0.5f;   ///< primary/secondary overlap threshold
-    int32_t mask_len       = std::numeric_limits<int32_t>::max(); ///< max uncovered length (INT_MAX in options.c)
-    float   pri_ratio      = 0.8f;   ///< secondary score ratio threshold
-    int32_t best_n         = 5;      ///< max secondary alignments to keep
+    /** K-mer size in symbols. */
+    std::int32_t kmer_size = 15;
+    /** Minimizer window size in k-mers. */
+    std::int32_t window_size = 10;
+    /** Maximum reference gap accepted by chaining. */
+    std::int32_t max_gap = 5000;
+    /** Explicit reference gap, or -1 to use max_gap. */
+    std::int32_t max_gap_ref = -1;
+    /** Bandwidth shared by chaining and alignment. */
+    std::int32_t bandwidth = 500;
+    /** Maximum skipped predecessors before dynamic-programming termination. */
+    std::int32_t max_chain_skip = 25;
+    /** Maximum predecessors examined for one anchor. */
+    std::int32_t max_chain_iter = 5000;
+    /** Minimum seed count required for a chain. */
+    std::int32_t min_seed_count = 3;
+    /** Minimum accepted chain score. */
+    std::int32_t min_chain_score = 40;
+    /** Gap-penalty scale used by chaining. */
+    float chain_gap_scale = 0.8f;
+    /** Skip-penalty scale used by chaining. */
+    float chain_skip_scale = 0.0f;
+    /** Primary-to-secondary overlap threshold. */
+    float mask_level = 0.5f;
+    /** Maximum uncovered length used by overlap masking. */
+    std::int32_t mask_len =
+        (std::numeric_limits<std::int32_t>::max)();
+    /** Secondary-to-primary score-ratio threshold. */
+    float pri_ratio = 0.8f;
+    /** Maximum number of secondary alignments to retain. */
+    std::int32_t best_n = 5;
 
-    // Alignment scoring — matches mm_mapopt_init() in options.c
-    int32_t match_score    = 2;      ///< match score (a)
-    int32_t mismatch_pen   = 4;      ///< mismatch penalty (b)
-    int32_t gap_open1      = 4;      ///< short gap open (q)
-    int32_t gap_ext1       = 2;      ///< short gap extend (e)
-    int32_t gap_open2      = 24;     ///< long gap open (q2)
-    int32_t gap_ext2       = 1;      ///< long gap extend (e2)
-    int32_t sc_ambi        = 1;      ///< penalty for ambiguous base (N)
-    int32_t zdrop          = 400;    ///< z-drop threshold
-    int32_t end_bonus      = -1;     ///< bonus for reaching sequence ends (-1 in options.c)
+    /** Match score. */
+    std::int32_t match_score = 2;
+    /** Mismatch penalty. */
+    std::int32_t mismatch_pen = 4;
+    /** Short-gap open penalty. */
+    std::int32_t gap_open1 = 4;
+    /** Short-gap extension penalty. */
+    std::int32_t gap_ext1 = 2;
+    /** Long-gap open penalty. */
+    std::int32_t gap_open2 = 24;
+    /** Long-gap extension penalty. */
+    std::int32_t gap_ext2 = 1;
+    /** Ambiguous-symbol penalty. */
+    std::int32_t sc_ambi = 1;
+    /** Z-drop termination threshold. */
+    std::int32_t zdrop = 400;
+    /** Bonus for reaching sequence ends, or -1 when disabled. */
+    std::int32_t end_bonus = -1;
 
-    int32_t max_occ        = 500;    ///< max seed occurrence to keep
-    int32_t mid_occ        = 500;    ///< mid-level seed occurrence threshold
+    /** Maximum seed occurrence retained by filtering. */
+    std::int32_t max_occ = 500;
+    /** Mid-level seed-occurrence threshold. */
+    std::int32_t mid_occ = 500;
 
-    /// Minimum gap length between consecutive seeds before invoking KSW2.
-    /// minimap2's `mm_align1` (align.c:815) skips KSW2 alignment when the gap
-    /// between consecutive seeds is below this threshold AND the seed is not
-    /// the last in the chain. Default 200 matches minimap2's `opt->min_ksw_len`.
-    /// Setting this to 0 forces a single KSW2 over the entire seed-to-seed
-    /// region, which is the legacy bioseq behaviour. The per-seed-pair gap
-    /// fill replaces a single 1Mbp×1Mbp DP with many ~200bp×~200bp DPs and
-    /// is the dominant speed-up for VERY_LONG sequences (~7× total improvement
-    /// at 903 kbp on the bench, see ENGINEERING_REPORT.md).
-    int32_t min_ksw_len    = 200;
+    /**
+     * Minimum gap length between consecutive seeds before invoking KSW2.
+     * A zero value combines all seed-to-seed gaps into one KSW2 region.
+     */
+    std::int32_t min_ksw_len = 200;
 
-    /// When true, perform base-level alignment via the selected aligner and
-    /// produce CIGAR. Equivalent to MM_F_CIGAR flag in minimap2. Driven by
-    /// whether bioseq.cigar(...) appears in the scan target list.
-    bool    do_cigar            = true;
+    /** Enable base-level alignment and CIGAR generation. */
+    bool do_cigar = true;
+    /** Compute the divergence estimate from seeds. */
+    bool compute_divergence = true;
+    /** Compute mapping quality for output regions. */
+    bool compute_mapq = true;
+    /** Compute the exact unit-cost edit distance from traceback. */
+    bool compute_edit_distance = false;
 
-    /// When true, run estimate_divergence_from_seeds() and populate
-    /// MatchResult::divergence. Driven by whether bioseq.divergence(...) is
-    /// requested. Leaving this false saves the O(n log n) binary-search walk
-    /// per region, with no impact on downstream fields.
-    bool    compute_divergence  = true;
-
-    /// When true, run compute_mapping_quality() and populate
-    /// MatchResult::mapq. Driven by whether bioseq.mapq(...) is requested.
-    /// Skipping this omits the O(regions) log-computation loop.
-    bool    compute_mapq        = true;
-
-    /// Compute the exact unit-cost edit distance represented by the emitted
-    /// alignment.  This forces traceback at the SQL boundary and is used to
-    /// enforce bioseq.edit(...) predicates after SneakySnake's lower-bound
-    /// gate admits a candidate.
-    bool    compute_edit_distance = false;
-
-    /// Apply the authoritative strict edit predicate to aligned regions before
-    /// the final primary/secondary and MAPQ pass.  This is deliberately
-    /// separate from `prefilter_enabled`: SneakySnake may conservatively admit
-    /// a candidate (or be unavailable for the threshold), whereas this filter
-    /// always uses the exact traced edit count.  The signed exclusive bound
-    /// preserves SQL `<` semantics, including the reject-all `bound <= 0`
-    /// case, without unsigned conversion surprises.
-    bool         exact_edit_filter_enabled = false;
+    /** Apply the exact strict edit predicate to aligned regions. */
+    bool exact_edit_filter_enabled = false;
+    /** Signed exclusive upper bound for the exact edit predicate. */
     std::int64_t exact_edit_filter_exclusive_upper_bound = 0;
 
-    /// Enable the query-scoped SneakySnake lower-bound stage.  The threshold
-    /// is the largest admissible exact edit count (so SQL `edit(...) < 10`
-    /// stores 9).  No heuristic divergence/bandwidth value is used here.
-    bool                 prefilter_enabled   = false;
-    std::uint32_t        prefilter_max_edits = 0;
-    ::bioseq::prefilter_stats::PrefilterBackendType prefilter_backend =
-        ::bioseq::prefilter_stats::PrefilterBackendType::AUTO;
+    /** Enable the query-scoped SneakySnake lower-bound stage. */
+    bool prefilter_enabled = false;
+    /** Largest exact edit count admitted by the prefilter. */
+    std::uint32_t prefilter_max_edits = 0;
+    /** Backend selected for prefilter execution. */
+    ::bioseq::prefilter::prefilter_backend prefilter_backend =
+        ::bioseq::prefilter::prefilter_backend::automatic;
 
-    /// Block aligner tunables (ignored when base_alignment_algorithm == KSW2).
-    ///
-    /// Sweep results on the LONG / VERY_LONG / XL CCS bench grid (M1, NEON,
-    /// nthash + SIMD-DP) — Block aligner mean_ms vs KSW2 baseline at VL:
-    ///
-    ///   min=32 max=256: Block 191 ms — 11% slower than KSW2 (172 ms)
-    ///   min=32 max=128: Block 163 ms —  1% faster
-    ///   min=32 max=64:  Block 161 ms —  3% faster
-    ///   min=8  max=32:  Block 139 ms — 19% faster
-    ///   min=8  max=16:  Block 132 ms — 21% faster
-    ///   min=8  max=64:  Block 137 ms — 20% faster
-    ///   min=16 max=64:  Block 135 ms — 21% faster
-    ///   min=16 max=32:  Block 129 ms — 22% faster   <-- chosen default
-    ///
-    /// The previous defaults (32 / 256) over-allocated DP scratch for the
-    /// short gap-fill workload that dominates a typical bench: a single
-    /// region opens hundreds of gap-fill calls, most under 200 bp on each
-    /// axis, and the algorithm rarely needed to grow past 32 cells. With
-    /// max_size pinned at 256 each call paid for an 8-buffer scratch +
-    /// trace ring sized for a doubling-grow chain that almost never fired.
-    /// Pinning min=16 max=32 lets the block aligner clear the +10% goal
-    /// over KSW2 + SIMD-DP + two-stack-nthash on both VERY_LONG and XL.
-    /// Callers with high-error inputs (e.g. ONT_LEGACY) can override via
-    /// Minimap2Params; the bench grid uses these defaults verbatim.
-    size_t  block_min_size      = 16;
-    size_t  block_max_size      = 32;
+    /** Minimum block-aligner scratch block size. */
+    std::size_t block_min_size = 16;
+    /** Maximum block-aligner scratch block size. */
+    std::size_t block_max_size = 32;
 
-    /// Algorithm selection for chaining. Default: SCALAR_DP for backwards compatibility.
-    ChainingMode chaining_mode  = ChainingMode::SCALAR_DP;
-    int32_t bandwidth_long      = 0;  ///< Long-join bandwidth (0 = disabled)
+    /** Shared chaining mode selected by the runtime configuration. */
+    ::bioseq::chaining::chaining_mode chaining_mode =
+        ::bioseq::chaining::chaining_mode::scalar_dp;
+    /** Long-join bandwidth, or zero when long joining is disabled. */
+    std::int32_t bandwidth_long = 0;
 
-    /// Runtime chaining algorithm selector. The pipeline reads this value
-    /// once and template-dispatches so the inner loop is branchless.
-    ChainingAlgorithmType        chaining_algorithm        = ChainingAlgorithmType::SCALAR_MM2;
-    /// Named SIMD forward-chaining semantics.  Exact is the library default;
-    /// production callers must opt into the bounded policy explicitly after
-    /// resolving their final chaining-algorithm override.
-    SimdChainingPolicy           simd_chaining_policy      = SimdChainingPolicy::exact_visited;
-    /// Runtime base-alignment algorithm selector.
-    BaseAlignmentAlgorithmType   base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
-    /// Runtime minimizer-extraction algorithm selector. The default is
-    /// scalar to match the reference output documented in
-    /// CODE_GUIDELINES.md §9; the bench harness flips it to SIMD when
-    /// measuring the Highway-vectorised path.
-    MinimizerAlgorithmType       minimizer_algorithm       = MinimizerAlgorithmType::SCALAR;
+    /** Chaining implementation selected once before the inner loop. */
+    ::bioseq::simd::chaining_algorithm chaining_algorithm =
+        ::bioseq::simd::chaining_algorithm::scalar_minimap2;
+    /** Forward-chaining semantics used by SIMD chaining. */
+    ::bioseq::chaining::simd_chaining_policy simd_chaining_policy =
+        ::bioseq::chaining::simd_chaining_policy::exact_visited;
+    /** Base-alignment implementation selected for the request. */
+    ::bioseq::simd::base_alignment_algorithm base_alignment_algorithm =
+        ::bioseq::simd::base_alignment_algorithm::block_aligner;
+    /** Minimizer-extraction implementation selected for the request. */
+    ::bioseq::simd::minimizer_algorithm minimizer_algorithm =
+        ::bioseq::simd::minimizer_algorithm::scalar;
 
-    /// Runtime profiler toggle. Driven by bioseq.aligner.enable_profiling
-    /// GUC. When true, BatchProcessor::process_sequences instantiates the
-    /// pipeline with context_args_profiling_full; when false, the
-    /// no-profiling instantiation runs (zero overhead).
-    bool                          enable_profiling          = false;
+    /** Enable runtime execution accounting. */
+    bool enable_profiling = false;
+    /** Collect KSW2 fills across queries before batched execution. */
+    bool cross_query_batched = false;
 
-    /// When true and base_alignment_algorithm == KSW2_BATCHED, the
-    /// dispatcher routes through the cross-query deferred-align scheduling
-    /// shape (DOC0254 §11.10). All queries in the outer batch collect their
-    /// fills before any DP runs, producing larger buckets and better SIMD
-    /// occupancy on shorter queries. Off by default — per-query bucketing
-    /// already saturates the bucket fill for VERY_LONG inputs.
-    bool                          cross_query_batched       = false;
+    /** Permit Vulkan-backed algorithms for this request. */
+    bool vulkan_enabled = true;
+    /** Select Vulkan seed-hit lookup. */
+    bool vulkan_seed_hits_enabled = false;
+    /** Cache GPU-resident minimizer indexes under their memory permits. */
+    bool vulkan_index_cache_enabled = true;
+    /** Select the resident two-submit Vulkan frontend. */
+    bool vulkan_fused_frontend_enabled = false;
+    /** Build the target minimizer index on the GPU. */
+    bool vulkan_gpu_index_build_enabled = false;
+    /** Enable GPU base-alignment extension under the block aligner. */
+    bool vulkan_extend_enabled = false;
+    /** Ordered-sketch tile size in base pairs. */
+    std::uint32_t vulkan_ordered_sketch_tile_bp = 2048;
+    /** Device radix-sort digit width in bits per pass. */
+    std::uint32_t vulkan_radix_digit_bits = 8;
 
-    /// Enable Vulkan execution for Vulkan-backed algorithms. If a Vulkan
-    /// algorithm is selected while this is false, the pipeline raises an error;
-    /// algorithm fallback must be chosen before entering the pipeline.
-    bool                          vulkan_enabled            = true;
-
-    /// DOC0307 Phase B — enable the Vulkan seed-hit lookup when Vulkan is on.
-    /// Runtime routing only (never a template parameter). When true, selected
-    /// seed-hit GPU execution is mandatory; when false, the CPU seed path is
-    /// selected before entering the GPU backend.
-    bool                          vulkan_seed_hits_enabled  = false;
-    /// DOC0307 Phase B — cache GPU-resident minimizer index uploads while their
-    /// memory permit is held (batch/wave scoped). Runtime routing only.
-    bool                          vulkan_index_cache_enabled = true;
-
-    /// DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
-    /// sketch + GPU seed count/emit + device anchor sort). Runtime routing only;
-    /// unsupported GPU/runtime shapes are hard errors once this path is selected.
-    bool                          vulkan_fused_frontend_enabled = false;
-    /// DOC0310 Phase C — build the target minimizer index entirely on the GPU
-    /// (parallel sketch → device radix sort → race-free slot table) instead of
-    /// the CPU `MinimizerHashmapFragmentIndex` build + slot upload.
-    bool                          vulkan_gpu_index_build_enabled = false;
-    /// DOC0310 Phase C — optional GPU base-alignment extension under the block
-    /// aligner. Disabled by default; never gates the Phase C performance path.
-    bool                          vulkan_extend_enabled = false;
-    /// DOC0310 Phase C — ordered-sketch tile size (base pairs per tile).
-    uint32_t                      vulkan_phase_c_tile_bp = 2048;
-    /// DOC0310 Phase C — device radix sort digit width (bits per pass).
-    uint32_t                      vulkan_phase_c_radix_bits = 8;
-
-    /// Build ChainingParams from this Minimap2Params.
-    ///
-    /// Extracts only the chaining-relevant subset and precomputes derived values.
-    /// The ChainingMode (used by the shared chaining modules) is synthesized
-    /// from chaining_algorithm so both selectors stay aligned.
-    [[nodiscard]] ChainingParams to_chaining_params() const {
-        ChainingParams cp;
-        cp.kmer_size        = kmer_size;
-        cp.max_gap          = max_gap;
-        cp.bandwidth        = bandwidth;
-        cp.max_chain_skip   = max_chain_skip;
-        cp.max_chain_iter   = max_chain_iter;
-        cp.min_seed_count   = min_seed_count;
-        cp.min_chain_score  = min_chain_score;
-        cp.chain_gap_scale  = chain_gap_scale;
-        cp.chain_skip_scale = chain_skip_scale;
-        cp.simd_policy      = simd_chaining_policy;
+    /**
+     * @brief Build the chaining configuration for this request.
+     * @return Chaining parameters with derived values prepared and the shared
+     * chaining mode synchronized with chaining_algorithm.
+     */
+    [[nodiscard]] chaining_parameters make_chaining_parameters() const {
+        chaining_parameters parameters;
+        parameters.kmer_size = kmer_size;
+        parameters.max_gap = max_gap;
+        parameters.bandwidth = bandwidth;
+        parameters.max_chain_skip = max_chain_skip;
+        parameters.max_chain_iter = max_chain_iter;
+        parameters.min_seed_count = min_seed_count;
+        parameters.min_chain_score = min_chain_score;
+        parameters.chain_gap_scale = chain_gap_scale;
+        parameters.chain_skip_scale = chain_skip_scale;
+        parameters.simd_policy = simd_chaining_policy;
         switch (chaining_algorithm) {
-            case ChainingAlgorithmType::SIMD_MM2:   cp.chaining_mode = ChainingMode::SIMD_DP; break;
-            case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
-            // VULKAN_TILED_DP maps to SCALAR_DP only because ChainingMode has no
-            // Vulkan value and is not the dispatch selector; ChainStage selects
-            // the kernel from chaining_algorithm.
-            case ChainingAlgorithmType::VULKAN_TILED_DP:
-                                                    cp.chaining_mode = ChainingMode::SCALAR_DP; break;
-            case ChainingAlgorithmType::SCALAR_MM2:
-            default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
+            case ::bioseq::simd::chaining_algorithm::simd_minimap2:
+                parameters.chaining_mode =
+                    ::bioseq::chaining::chaining_mode::simd_dp;
+                break;
+            case ::bioseq::simd::chaining_algorithm::range_minimum_query:
+                parameters.chaining_mode =
+                    ::bioseq::chaining::chaining_mode::rmq;
+                break;
+            case ::bioseq::simd::chaining_algorithm::
+                    vulkan_tiled_dynamic_programming:
+                parameters.chaining_mode =
+                    ::bioseq::chaining::chaining_mode::scalar_dp;
+                break;
+            case ::bioseq::simd::chaining_algorithm::scalar_minimap2:
+            default:
+                parameters.chaining_mode =
+                    ::bioseq::chaining::chaining_mode::scalar_dp;
+                break;
         }
-        cp.vulkan_enabled = vulkan_enabled;
-        cp.coordinate_only = !do_cigar && !compute_divergence && !compute_mapq;
-        cp.prepare();
-        return cp;
+        parameters.vulkan_enabled = vulkan_enabled;
+        parameters.coordinate_only =
+            !do_cigar && !compute_divergence && !compute_mapq;
+        parameters.prepare();
+        return parameters;
     }
 };
 
-struct AlignRegion {
-    int32_t region_id       = 0;
-    int32_t parent          = -1;   ///< parent id (-1 = unset, ==region_id => primary)
-    int32_t score           = 0;    ///< chain score
-    int32_t original_score  = 0;    ///< initial chain score (before merging)
-    int32_t seed_count      = 0;    ///< number of seeds
-    int32_t anchor_start    = 0;    ///< offset in anchor array
+/**
+ * @brief Mutable chaining region and optional base-alignment result.
+ *
+ * Sequence coordinates retain the full sequence_size_t domain. Callers clamp
+ * potentially negative intermediate coordinates before assigning them here.
+ */
+struct alignment_region {
+    /** Region identifier. */
+    std::int32_t region_id = 0;
+    /** Parent identifier, or -1 when unset; self denotes a primary region. */
+    std::int32_t parent = -1;
+    /** Current chain score. */
+    std::int32_t score = 0;
+    /** Chain score before merging. */
+    std::int32_t original_score = 0;
+    /** Number of seeds in the chain. */
+    std::int32_t seed_count = 0;
+    /** Offset of the first region anchor in the anchor array. */
+    std::int32_t anchor_start = 0;
 
-    // DOC0263 §10.2 — absolute coordinates / lengths are `sequence_size_t`
-    // (uint64) so they carry the untruncated 64-bit anchor positions through
-    // to the MatchResult. Intermediate coordinate math that can go negative
-    // (e.g. ref_position + 1 - span) is done in signed int64 then clamped.
-    sequence_size_t query_start = 0;    ///< query start position
-    sequence_size_t query_end   = 0;    ///< query end position
-    sequence_size_t ref_start   = 0;    ///< reference start position
-    sequence_size_t ref_end     = 0;    ///< reference end position
-    int32_t reference_id    = 0;    ///< reference sequence id (0 in our case)
-    bool    is_reverse      = false;///< reverse strand
+    /** Query start coordinate. */
+    sequence_size_t query_start = 0;
+    /** Query end coordinate. */
+    sequence_size_t query_end = 0;
+    /** Reference start coordinate. */
+    sequence_size_t ref_start = 0;
+    /** Reference end coordinate. */
+    sequence_size_t ref_end = 0;
+    /** Reference sequence identifier. */
+    std::int32_t reference_id = 0;
+    /** Whether the region maps to the reverse strand. */
+    bool is_reverse = false;
 
-    sequence_size_t match_length = 0;   ///< seeded exact match length
-    sequence_size_t block_length = 0;   ///< seeded alignment block length
-    int32_t secondary_score = 0;    ///< best secondary score against this primary
-    int32_t secondary_count = 0;    ///< number of suboptimal mappings
+    /** Seeded exact-match length. */
+    sequence_size_t match_length = 0;
+    /** Seeded alignment-block length. */
+    sequence_size_t block_length = 0;
+    /** Best secondary score competing with this primary region. */
+    std::int32_t secondary_score = 0;
+    /** Number of retained suboptimal mappings. */
+    std::int32_t secondary_count = 0;
 
-    // DP alignment results (filled after alignment phase)
-    int32_t dp_score            = 0;
-    int32_t dp_max_score        = 0;    ///< max scoring segment
-    int32_t secondary_dp_max    = 0;    ///< best secondary DP score
-    bool    has_alignment       = false;///< whether DP alignment was performed
-    float   divergence          = -1.f; ///< divergence estimate
+    /** Dynamic-programming alignment score. */
+    std::int32_t dp_score = 0;
+    /** Maximum scoring dynamic-programming segment. */
+    std::int32_t dp_max_score = 0;
+    /** Best secondary dynamic-programming score. */
+    std::int32_t secondary_dp_max = 0;
+    /** Whether dynamic-programming alignment was performed. */
+    bool has_alignment = false;
+    /** Divergence estimate, or a negative value when unavailable. */
+    float divergence = -1.0f;
 
-    int32_t mapq            = 0;
+    /** Mapping quality. */
+    std::int32_t mapq = 0;
 
-    std::vector<CigarOp> cigar;
+    /** Traceback operations for the aligned region. */
+    std::vector<cigar_operation> cigar;
+    /** Exact unit-cost edit distance represented by cigar. */
     sequence_size_t edit_distance = 0;
 };
 
-struct ScalarMinimizerExecutionProof {
+/** @brief Saturating counters describing scalar minimizer execution. */
+struct scalar_minimizer_execution_stats {
+    /** Number of scalar minimizer calls. */
     std::uint64_t calls = 0;
+    /** Total input symbols processed by scalar minimizer calls. */
     std::uint64_t input_symbols = 0;
+    /** Whether any counter saturated. */
     bool saturated = false;
 
+    /**
+     * @brief Add a counter increment with saturation.
+     * @param destination Counter to update.
+     * @param increment Value to add.
+     * @param is_saturated Saturation state updated on overflow.
+     */
     static constexpr void add(
             std::uint64_t& destination,
             const std::uint64_t increment,
-            bool& saturated_flag) noexcept {
+            bool& is_saturated) noexcept {
         if (increment > (std::numeric_limits<std::uint64_t>::max)()
                             - destination) {
             destination = (std::numeric_limits<std::uint64_t>::max)();
-            saturated_flag = true;
+            is_saturated = true;
             return;
         }
         destination += increment;
     }
 
-    constexpr void record(const std::uint64_t symbols) noexcept {
-        add(calls, 1u, saturated);
+    /**
+     * @brief Record one scalar minimizer call and its input size.
+     * @param symbols Number of input symbols processed by the call.
+     */
+    constexpr void record_input(const std::uint64_t symbols) noexcept {
+        add(calls, std::uint64_t{1}, saturated);
         add(input_symbols, symbols, saturated);
     }
 
-    constexpr void combine(
-            const ScalarMinimizerExecutionProof& other) noexcept {
-        bool overflow = saturated || other.saturated;
-        add(calls, other.calls, overflow);
-        add(input_symbols, other.input_symbols, overflow);
-        saturated = overflow;
+    /**
+     * @brief Merge another execution sample into this aggregate.
+     * @param other Execution sample to merge.
+     */
+    constexpr void merge(
+            const scalar_minimizer_execution_stats& other) noexcept {
+        bool is_saturated = saturated || other.saturated;
+        add(calls, other.calls, is_saturated);
+        add(input_symbols, other.input_symbols, is_saturated);
+        saturated = is_saturated;
     }
 
-    [[nodiscard]] constexpr bool accepted(
-            const bool require_nonempty_work = true) const noexcept {
+    /**
+     * @brief Test whether the counters describe coherent non-saturated work.
+     * @param is_nonempty_work_required Whether at least one input symbol is
+     * required.
+     * @return `true` when the counter relationships are coherent.
+     */
+    [[nodiscard]] constexpr bool is_coherent(
+            const bool is_nonempty_work_required = true) const noexcept {
         return !saturated
             && calls > 0
-            && (!require_nonempty_work || input_symbols > 0);
+            && (!is_nonempty_work_required || input_symbols > 0);
     }
 
+    /** @brief Compare all counters and saturation state. */
     constexpr bool operator==(
-        const ScalarMinimizerExecutionProof&) const noexcept = default;
+        const scalar_minimizer_execution_stats&) const noexcept = default;
 };
 
-struct Ksw2BatchedExecutionProof {
-    std::uint64_t align_region_invocations = 0;
+static_assert(std::is_standard_layout_v<scalar_minimizer_execution_stats>);
+static_assert(std::is_trivially_copyable_v<scalar_minimizer_execution_stats>);
+
+/** @brief Saturating counters for batched KSW2 region execution. */
+struct ksw2_batched_execution_stats {
+    /** Number of alignment-region entry-point invocations. */
+    std::uint64_t alignment_region_invocations = 0;
+    /** Number of regions observed by all invocations. */
     std::uint64_t regions_seen = 0;
+    /** Number of deferred dynamic-programming fills collected. */
     std::uint64_t fills_collected = 0;
+    /** Number of non-empty fill calls executed. */
     std::uint64_t nonempty_fill_calls = 0;
+    /** Number of short-fill SIMD bucket dispatches. */
     std::uint64_t short_bucket_dispatches = 0;
+    /** Number of active lanes across short-fill bucket dispatches. */
     std::uint64_t short_bucket_lanes = 0;
+    /** Number of long-fill calls executed outside short buckets. */
     std::uint64_t long_fill_calls = 0;
+    /** Sum of query-by-target cell areas across non-empty fills. */
     std::uint64_t input_cell_area = 0;
+    /** Whether any counter or area calculation saturated. */
     bool saturated = false;
 
-    static constexpr void add(
-            std::uint64_t& destination,
-            const std::uint64_t increment,
-            bool& saturated_flag) noexcept {
-        ScalarMinimizerExecutionProof::add(
-            destination, increment, saturated_flag);
-    }
-
+    /**
+     * @brief Record one alignment-region invocation.
+     * @param region_count Number of regions presented to the invocation.
+     */
     constexpr void record_invocation(
             const std::uint64_t region_count) noexcept {
-        add(align_region_invocations, 1u, saturated);
-        add(regions_seen, region_count, saturated);
+        scalar_minimizer_execution_stats::add(
+            alignment_region_invocations, std::uint64_t{1}, saturated);
+        scalar_minimizer_execution_stats::add(
+            regions_seen, region_count, saturated);
     }
 
+    /**
+     * @brief Record deferred fills collected by one invocation.
+     * @param fill_count Number of collected fills.
+     */
     constexpr void record_collected_fills(
             const std::uint64_t fill_count) noexcept {
-        add(fills_collected, fill_count, saturated);
+        scalar_minimizer_execution_stats::add(
+            fills_collected, fill_count, saturated);
     }
 
+    /**
+     * @brief Record one short-fill bucket dispatch.
+     * @param lane_count Number of active lanes in the bucket.
+     */
     constexpr void record_short_bucket_dispatch(
             const std::uint64_t lane_count) noexcept {
-        add(short_bucket_dispatches, 1u, saturated);
-        add(short_bucket_lanes, lane_count, saturated);
+        scalar_minimizer_execution_stats::add(
+            short_bucket_dispatches, std::uint64_t{1}, saturated);
+        scalar_minimizer_execution_stats::add(
+            short_bucket_lanes, lane_count, saturated);
     }
 
+    /**
+     * @brief Record one non-empty dynamic-programming fill.
+     * @param query_symbols Query length in symbols.
+     * @param target_symbols Target length in symbols.
+     * @param is_long_fill Whether the fill used the long-fill route.
+     */
     constexpr void record_nonempty_fill(
             const std::uint64_t query_symbols,
             const std::uint64_t target_symbols,
-            const bool long_fill) noexcept {
-        add(nonempty_fill_calls, 1u, saturated);
-        if (long_fill) {
-            add(long_fill_calls, 1u, saturated);
+            const bool is_long_fill) noexcept {
+        scalar_minimizer_execution_stats::add(
+            nonempty_fill_calls, std::uint64_t{1}, saturated);
+        if (is_long_fill) {
+            scalar_minimizer_execution_stats::add(
+                long_fill_calls, std::uint64_t{1}, saturated);
         }
         if (query_symbols != 0u
             && target_symbols
@@ -382,32 +433,50 @@ struct Ksw2BatchedExecutionProof {
             saturated = true;
             return;
         }
-        add(input_cell_area,
-            query_symbols * target_symbols, saturated);
+        scalar_minimizer_execution_stats::add(
+            input_cell_area, query_symbols * target_symbols, saturated);
     }
 
-    constexpr void combine(
-            const Ksw2BatchedExecutionProof& other) noexcept {
-        bool overflow = saturated || other.saturated;
-        add(align_region_invocations,
-            other.align_region_invocations, overflow);
-        add(regions_seen, other.regions_seen, overflow);
-        add(fills_collected, other.fills_collected, overflow);
-        add(nonempty_fill_calls, other.nonempty_fill_calls, overflow);
-        add(short_bucket_dispatches,
-            other.short_bucket_dispatches, overflow);
-        add(short_bucket_lanes, other.short_bucket_lanes, overflow);
-        add(long_fill_calls, other.long_fill_calls, overflow);
-        add(input_cell_area, other.input_cell_area, overflow);
-        saturated = overflow;
+    /**
+     * @brief Merge another execution sample into this aggregate.
+     * @param other Execution sample to merge.
+     */
+    constexpr void merge(
+            const ksw2_batched_execution_stats& other) noexcept {
+        bool is_saturated = saturated || other.saturated;
+        scalar_minimizer_execution_stats::add(
+            alignment_region_invocations,
+            other.alignment_region_invocations, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            regions_seen, other.regions_seen, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            fills_collected, other.fills_collected, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            nonempty_fill_calls, other.nonempty_fill_calls, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            short_bucket_dispatches,
+            other.short_bucket_dispatches, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            short_bucket_lanes, other.short_bucket_lanes, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            long_fill_calls, other.long_fill_calls, is_saturated);
+        scalar_minimizer_execution_stats::add(
+            input_cell_area, other.input_cell_area, is_saturated);
+        saturated = is_saturated;
     }
 
-    [[nodiscard]] constexpr bool accepted(
-            const bool require_nonempty_work) const noexcept {
-        const bool short_route_coherent =
+    /**
+     * @brief Test whether all counters form a coherent execution sample.
+     * @param is_nonempty_work_required Whether the sample must include a
+     * non-empty region and fill.
+     * @return `true` when every counter relationship is coherent.
+     */
+    [[nodiscard]] constexpr bool is_coherent(
+            const bool is_nonempty_work_required) const noexcept {
+        const bool is_short_route_coherent =
             (short_bucket_dispatches == 0u)
                 == (short_bucket_lanes == 0u);
-        const bool calls_coherent = short_bucket_lanes
+        const bool is_call_accounting_coherent = short_bucket_lanes
                 <= (std::numeric_limits<std::uint64_t>::max)()
                     - long_fill_calls
             && nonempty_fill_calls
@@ -418,92 +487,120 @@ struct Ksw2BatchedExecutionProof {
                 == (input_cell_area == 0u)
             && input_cell_area >= nonempty_fill_calls;
         return !saturated
-            && align_region_invocations > 0u
-            && short_route_coherent
-            && calls_coherent
-            && (!require_nonempty_work
+            && alignment_region_invocations > 0u
+            && is_short_route_coherent
+            && is_call_accounting_coherent
+            && (!is_nonempty_work_required
                 || (regions_seen > 0u
                     && fills_collected > 0u
                     && nonempty_fill_calls > 0u));
     }
 
+    /** @brief Compare all counters and saturation state. */
     constexpr bool operator==(
-        const Ksw2BatchedExecutionProof&) const noexcept = default;
+        const ksw2_batched_execution_stats&) const noexcept = default;
 };
 
-static_assert([] {
-    Ksw2BatchedExecutionProof proof{};
-    proof.record_invocation(1u);
-    proof.record_collected_fills(2u);
-    proof.record_short_bucket_dispatch(1u);
-    proof.record_nonempty_fill(8u, 9u, false);
-    proof.record_nonempty_fill(300u, 400u, true);
-    return proof.accepted(true)
-        && proof.nonempty_fill_calls == 2u
-        && proof.input_cell_area == 120'072u;
-}());
+static_assert(std::is_standard_layout_v<ksw2_batched_execution_stats>);
+static_assert(std::is_trivially_copyable_v<ksw2_batched_execution_stats>);
 
-/** Exact fixed-target alignment functions for one logical alphabet. */
-template<sequence_alphabet Alphabet>
-struct AlignmentKernels final {
-    using View = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
-    using Matrix = ScoringMatrix<Alphabet>;
+/**
+ * @brief Fixed-target alignment functions for one logical alphabet.
+ * @tparam p_alphabet Logical sequence alphabet accepted by every callable.
+ */
+template <sequence_alphabet p_alphabet>
+struct alignment_kernels final {
+    /** Lazy sequence view accepted by the target-neutral callables. */
+    using view_type =
+        bioseq::storage::lazy_sequence_view<p_alphabet>;
+    /** Scoring matrix normalized for p_alphabet. */
+    using matrix_type = scoring_matrix<p_alphabet>;
 
-    using KswZ2 = KswAlignResult (*)(
-        bool, View, View, std::size_t, std::size_t, std::size_t, std::size_t,
-        const Matrix&, const KswZ2Params&);
-    using KswD2 = KswAlignResult (*)(
-        bool, View, View, std::size_t, std::size_t, std::size_t, std::size_t,
-        const Matrix&, KswD2Params);
-    using KswBatched = void (*)(
-        std::span<AlignRegion>,
-        std::span<const bioseq::chaining::Anchor>,
-        View, View, const Matrix&, const Minimap2Params&,
-        Ksw2BatchedExecutionProof*);
-    using PrepareBlock = BlockGlobalGapCertificatePlan (*)(
-        const Matrix&, const BlockAlignerParams&) noexcept;
-    using TryBlockGap = BlockPackedCertificateAttempt (*)(
-        bool, View, View, std::size_t, std::size_t, std::size_t, std::size_t,
-        const BlockGlobalGapCertificatePlan&) noexcept;
-    using BlockAlign = KswAlignResult (*)(
-        bool, bool, View, View,
+    /** Single-affine KSW2 callable. */
+    using align_ksw2_single_affine_kernel = ksw_alignment_result (*)(
+        bool, view_type, view_type,
         std::size_t, std::size_t, std::size_t, std::size_t,
-        const Matrix&, const BlockAlignerParams&,
-        BlockAlignerExecutionProof*, BlockAlignerConstructionEvidence*);
+        const matrix_type&, const ksw_single_affine_parameters&);
+    /** Dual-affine KSW2 callable. */
+    using align_ksw2_dual_affine_kernel = ksw_alignment_result (*)(
+        bool, view_type, view_type,
+        std::size_t, std::size_t, std::size_t, std::size_t,
+        const matrix_type&, ksw_dual_affine_parameters);
+    /** Cross-region batched KSW2 callable. */
+    using align_ksw2_batched_kernel = void (*)(
+        std::span<alignment_region>,
+        std::span<const bioseq::chaining::anchor>,
+        view_type, view_type, const matrix_type&, const minimap2_parameters&,
+        ksw2_batched_execution_stats*);
+    /** Block-aligner certificate preparation callable. */
+    using prepare_block_global_gap_certificate_kernel =
+        block_global_gap_certificate_plan (*)(
+        const matrix_type&, const block_aligner_parameters&) noexcept;
+    /** Certified block-gap attempt callable. */
+    using try_block_certified_gap_kernel = block_packed_certificate_attempt (*)(
+        bool, view_type, view_type,
+        std::size_t, std::size_t, std::size_t, std::size_t,
+        const block_global_gap_certificate_plan&) noexcept;
+    /** Full block-alignment callable. */
+    using align_block_kernel = ksw_alignment_result (*)(
+        bool, bool, view_type, view_type,
+        std::size_t, std::size_t, std::size_t, std::size_t,
+        const matrix_type&, const block_aligner_parameters&,
+        block_aligner_execution_stats*, block_aligner_construction_stats*);
 
-    KswZ2 ksw2_z2 = nullptr;
-    KswD2 ksw2_d2 = nullptr;
-    KswBatched ksw2_batched = nullptr;
-    PrepareBlock block_prepare = nullptr;
-    TryBlockGap block_try_certified_gap = nullptr;
-    BlockAlign block_align = nullptr;
+    /** Single-affine KSW2 implementation for p_alphabet. */
+    align_ksw2_single_affine_kernel align_ksw2_single_affine = nullptr;
+    /** Dual-affine KSW2 implementation for p_alphabet. */
+    align_ksw2_dual_affine_kernel align_ksw2_dual_affine = nullptr;
+    /** Batched KSW2 implementation for p_alphabet. */
+    align_ksw2_batched_kernel align_ksw2_batched = nullptr;
+    /** Block-aligner certificate preparation for p_alphabet. */
+    prepare_block_global_gap_certificate_kernel
+        prepare_block_global_gap_certificate = nullptr;
+    /** Certified block-gap implementation for p_alphabet. */
+    try_block_certified_gap_kernel try_block_certified_gap = nullptr;
+    /** Full block-alignment implementation for p_alphabet. */
+    align_block_kernel align_block = nullptr;
 };
 
-template<sequence_alphabet Alphabet>
-inline constexpr bool alignment_kernels_are_neutral =
-    std::is_standard_layout_v<AlignmentKernels<Alphabet>>
-    && std::is_trivially_copyable_v<AlignmentKernels<Alphabet>>;
+/**
+ * @brief Whether an alphabet table can cross the neutral dispatch boundary.
+ * @tparam p_alphabet Logical sequence alphabet represented by the table.
+ */
+template <sequence_alphabet p_alphabet>
+inline constexpr bool is_alignment_kernel_table_neutral =
+    std::is_standard_layout_v<alignment_kernels<p_alphabet>>
+    && std::is_trivially_copyable_v<alignment_kernels<p_alphabet>>;
 
-/** Return true only when every callable in one typed alignment table exists. */
-template<sequence_alphabet Alphabet>
-[[nodiscard]] constexpr bool alignment_kernels_complete(
-    const AlignmentKernels<Alphabet>& kernels) noexcept
+/**
+ * @brief Test whether every callable in a typed alignment table is bound.
+ * @tparam p_alphabet Logical sequence alphabet represented by the table.
+ * @param kernels Typed fixed-target alignment table to validate.
+ * @return `true` when every callable is non-null.
+ */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] constexpr bool is_alignment_kernel_table_complete(
+    const alignment_kernels<p_alphabet>& kernels) noexcept
 {
-    return kernels.ksw2_z2 != nullptr
-        && kernels.ksw2_d2 != nullptr
-        && kernels.ksw2_batched != nullptr
-        && kernels.block_prepare != nullptr
-        && kernels.block_try_certified_gap != nullptr
-        && kernels.block_align != nullptr;
+    return kernels.align_ksw2_single_affine != nullptr
+        && kernels.align_ksw2_dual_affine != nullptr
+        && kernels.align_ksw2_batched != nullptr
+        && kernels.prepare_block_global_gap_certificate != nullptr
+        && kernels.try_block_certified_gap != nullptr
+        && kernels.align_block != nullptr;
 }
 
-struct AlignmentTableEntry final {
+/** @brief Type-erased entry for one alphabet-specific alignment table. */
+struct alignment_table_entry final {
+    /** Scheduler-owned packed alphabet code. */
     std::uint8_t alphabet_code = 0;
+    /** Completeness result computed while the table retains its static type. */
     bool typed_table_complete = false;
+    /** Pointer to alignment_kernels for alphabet_code. */
     const void* typed_table = nullptr;
 };
 
-static_assert(std::is_standard_layout_v<AlignmentTableEntry>);
-static_assert(std::is_trivially_copyable_v<AlignmentTableEntry>);
+static_assert(std::is_standard_layout_v<alignment_table_entry>);
+static_assert(std::is_trivially_copyable_v<alignment_table_entry>);
 
-}  // namespace bioseq::simd
+} // namespace bioseq::simd

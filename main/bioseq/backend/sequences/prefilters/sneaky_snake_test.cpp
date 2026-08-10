@@ -4,7 +4,7 @@
  */
 #include "common.h"
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>
@@ -19,8 +19,7 @@ import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.prefilters.sneaky_snake_vulkan;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
-import bioseq.gpu.vulkan.phase_b_abi;
-import bioseq.gpu.vulkan.phase_c_abi;
+import bioseq.gpu.vulkan.abi;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {

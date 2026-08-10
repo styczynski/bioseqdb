@@ -21,8 +21,8 @@
 #include "bseq.h"
 #include "khash.h"
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.common.circular_append_buffer;
@@ -90,10 +90,10 @@ static void base_collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_i
 			mv->a[j].y += sum << 1;
 		if (opt->sdust_thres > 0) // mask low-complexity minimizers
 		{
-			bioseq_log<DBG>("Filter mm_dust_minier! {}", opt->sdust_thres);
+			bioseq_log<logging_level::debug>("Filter mm_dust_minier! {}", opt->sdust_thres);
 			mv->n = n + mm_dust_minier(km, mv->n - n, mv->a + n, qlens[i], seqs[i], opt->sdust_thres);
 		} else {
-			bioseq_log<DBG>("Filter not required.");
+			bioseq_log<logging_level::debug>("Filter not required.");
 		}
 		sum += qlens[i], n = mv->n;
 	}
@@ -611,7 +611,6 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 
 	base_collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
 
-	// bioseq_log<DBG>("TERMINATE");
 	// throw std::exception();
 
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);

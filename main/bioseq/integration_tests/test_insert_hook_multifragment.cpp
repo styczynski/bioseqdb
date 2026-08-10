@@ -4,7 +4,7 @@
 // build BOTH default on-insert indexes (minimizers_per_fragment + symbol_counts) from
 // the single insert, and produce mmsearch results byte-identical to the recompute
 // path (dna4, single whole-sequence segment => exact multiplicity).
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <set>
 #include <string>
 #include <tuple>

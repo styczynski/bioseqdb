@@ -1,11 +1,11 @@
 /*-------------------------------------------------------------------------
  *
- * vectorization/nodes/columnar_aggregator_node.cppm
+ * vectorization/nodes/aggregator_node.cppm
  *
  * Custom scan node that replaces nodeAgg.c for columnar+vectorised queries.
  * This is a lightly adapted port of the PostgreSQL aggregate executor
  * (see src/backend/executor/nodeAgg.c in the upstream tree). The node
- * consumes VectorTupleTableSlots produced by the columnar custom scan,
+ * consumes vector tuple-table slots produced by the columnar custom scan,
  * advances the aggregate transition functions in a batched manner and
  * materialises final-value tuples through the standard nodeAgg machinery.
  *
@@ -13,7 +13,11 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
+
+extern "C" {
+#include "nodes/extensible.h"
+}
 
 #include <algorithm>
 
@@ -115,17 +119,6 @@ module;
  *	  returned by AggCheckCallContext().  Also, some transition functions want
  *	  to store working state in addition to the nominal transition value; they
  *	  can use the memory context returned by AggCheckCallContext() to do that.
- *
- *	  Note: AggCheckCallContext() is available as of PostgreSQL 9.0.  The
- *	  AggState is available as context in earlier releases (back to 8.1),
- *	  but direct examination of the node is needed to use it before 9.0.
- *
- *	  As of 9.4, aggregate transition functions can also use AggGetAggref()
- *	  to get hold of the Aggref expression node for their aggregate call.
- *	  This is mainly intended for ordered-set aggregates, which are not
- *	  supported as window functions.  (A regular aggregate function would
- *	  need some fallback logic to use this, since there's no Aggref node
- *	  for a window function.)
  *
  *	  Grouping sets:
  *
@@ -264,11 +257,11 @@ module;
  */
 
 /*
- * PostgreSQL forward-declares HashAggSpill in execnodes.h; we fill in the
+ * PostgreSQL forward-declares hash_aggregate_spill in execnodes.h; we fill in the
  * body here in the global module fragment so the full layout shares linkage
  * with PG's internal declaration.
  */
-struct HashAggSpill
+struct hash_aggregate_spill
 {
 	int			npartitions;	/* number of partitions */
 	LogicalTape **partitions;	/* spill partition tapes */
@@ -278,7 +271,7 @@ struct HashAggSpill
 	hyperLogLogState *hll_card; /* cardinality estimate for contents */
 };
 
-struct HashAggBatch
+struct hash_aggregate_batch
 {
 	int			setno;			/* grouping set */
 	int			used_bits;		/* number of bits of hash already used */
@@ -287,35 +280,37 @@ struct HashAggBatch
 	double		input_card;		/* estimated group cardinality */
 };
 
-struct FindColsContext
+struct find_columns_context
 {
 	bool		is_aggref;		/* is under an aggref */
 	Bitmapset  *aggregated;		/* column references under an aggref */
 	Bitmapset  *unaggregated;	/* other column references */
 };
 
-export module bioseq.vector.aggregator_node;
+export module bioseq.postgres.vectorization.aggregator_node;
 
-import bioseq.common.mlogging;
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.vector.types;
-import bioseq.pg_utils.nodes;            // DOC0333 — pg_node_try_as, expression walker adapter (find_cols)
+import bioseq.common.logging;
+import bioseq.postgres.support;
+import bioseq.postgres.vectorization.types;
 
-using namespace bioseq::pg_utils;        // DOC0333 — node view/walker helpers live in bioseq::pg_utils
-
-/*
- * VectorAggState is the CustomScanState body for the vectorised aggregate
- * node (moved from the deleted nodes/columnar_aggregator_node.h). It wraps a
- * standard PG AggState which the custom node drives.
- */
-export struct VectorAggState
-{
-	CustomScanState css;
-	AggState *aggstate;
-};
+using bioseq::postgres::support::allocate_zeroed_array;
+using bioseq::postgres::support::allocate_zeroed_object;
+using bioseq::postgres::support::allocate_zeroed_storage;
+using bioseq::postgres::support::memory_context_scope;
+using bioseq::postgres::support::pg_expression_walk_cursor;
+using bioseq::postgres::support::pg_node_view;
+using bioseq::postgres::support::pg_walk_step;
+using bioseq::postgres::support::postgres_list;
+using bioseq::postgres::support::walk_pg_expression_including_root;
 
 namespace {
+
+/* Private CustomScanState body that drives PostgreSQL's aggregate executor. */
+struct vector_aggregate_state
+{
+	CustomScanState custom_scan_state;
+	AggState *aggregate_state;
+};
 
 /* Hash-aggregate spill tuning constants (file-local). */
 constexpr double HASHAGG_PARTITION_FACTOR = 1.50;
@@ -384,7 +379,7 @@ static void initialize_hash_entry(AggState *aggstate,
 								  TupleHashTable hashtable,
 								  TupleHashEntry entry);
 static void lookup_hash_entries(AggState *aggstate);
-static TupleTableSlot *agg_retrieve_direct(VectorAggState *vectoraggstate);
+static TupleTableSlot *agg_retrieve_direct(vector_aggregate_state *vector_state);
 static void agg_fill_hash_table(AggState *aggstate);
 static bool agg_refill_hash_table(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
@@ -395,16 +390,16 @@ static void hash_agg_update_metrics(AggState *aggstate, bool from_tape,
 									int npartitions);
 static void hashagg_finish_initial_spills(AggState *aggstate);
 static void hashagg_reset_spill_state(AggState *aggstate);
-static HashAggBatch *hashagg_batch_new(LogicalTape *input_tape, int setno,
+static hash_aggregate_batch *hashagg_batch_new(LogicalTape *input_tape, int setno,
 									   int64_t input_tuples, double input_card,
 									   int used_bits);
-static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp);
-static void hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *lts,
+static MinimalTuple hashagg_batch_read(hash_aggregate_batch *batch, uint32_t *hashp);
+static void hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *lts,
 							   int used_bits, double input_groups,
 							   double hashentrysize);
-static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
+static Size hashagg_spill_tuple(AggState *aggstate, hash_aggregate_spill *spill,
 								TupleTableSlot *slot, uint32_t hash);
-static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
+static void hashagg_spill_finish(AggState *aggstate, hash_aggregate_spill *spill,
 								 int setno);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
 static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
@@ -414,7 +409,8 @@ static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
 									  Oid aggdeserialfn, Datum initValue,
 									  bool initValueIsNull, Oid *inputTypes,
 									  int numArguments);
-static AggState * VExecInitAgg(Agg *node, EState *estate, int eflags);
+static AggState *initialize_vector_aggregate_executor(
+	Agg *node, EState *estate, int eflags);
 
 /*
  * Select the current grouping set; affects current_set and
@@ -597,7 +593,7 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 		pergroupstate->transValue = pertrans->initValue;
 	else
 	{
-		bioseq::pg_support::MemoryContextScope ctx_guard{
+		memory_context_scope ctx_guard{
 			aggstate->curaggcontext->ecxt_per_tuple_memory};
 		pergroupstate->transValue = datumCopy(pertrans->initValue,
 											  pertrans->transtypeByVal,
@@ -703,7 +699,7 @@ advance_transition_function(AggState *aggstate,
 			 * do not need to pfree the old transValue, since it's NULL.
 			 */
 			{
-				bioseq::pg_support::MemoryContextScope ctx_guard{
+				memory_context_scope ctx_guard{
 					aggstate->curaggcontext->ecxt_per_tuple_memory};
 				pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
 													  pertrans->transtypeByVal,
@@ -726,7 +722,7 @@ advance_transition_function(AggState *aggstate,
 	}
 
 	/* We run the transition functions in per-input-tuple memory context */
-	bioseq::pg_support::MemoryContextScope ctx_guard{
+	memory_context_scope ctx_guard{
 		aggstate->tmpcontext->ecxt_per_tuple_memory};
 
 	/* set up aggstate->curpertrans for AggGetAggref() */
@@ -853,7 +849,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 		 * function and transition function.
 		 */
 		MemoryContextReset(workcontext);
-		bioseq::pg_support::MemoryContextScope ctx_guard{workcontext};
+		memory_context_scope ctx_guard{workcontext};
 
 		/*
 		 * If DISTINCT mode, and not distinct from prior, skip it.
@@ -1007,10 +1003,9 @@ finalize_aggregate(AggState *aggstate,
 	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
 	bool		anynull = false;
 	int			i;
-	//ListCell   *lc;
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
-	bioseq::pg_support::MemoryContextScope ctx_guard{
+	memory_context_scope ctx_guard{
 		aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
@@ -1020,10 +1015,8 @@ finalize_aggregate(AggState *aggstate,
 	 * for the transition state value.
 	 */
 	i = 1;
-	for(auto expr : PList<ExprState>(peragg->aggdirectargs))
+	for (auto expr : postgres_list<ExprState>{peragg->aggdirectargs})
 	{
-		//ExprState  *expr = (ExprState *) lfirst(lc);
-
 		fcinfo->args[i].value = ExecEvalExpr(expr,
 											 aggstate->ss.ps.ps_ExprContext,
 											 &fcinfo->args[i].isnull);
@@ -1099,7 +1092,7 @@ finalize_partialaggregate(AggState *aggstate,
 {
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
-	bioseq::pg_support::MemoryContextScope ctx_guard{
+	memory_context_scope ctx_guard{
 		aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
@@ -1213,7 +1206,6 @@ prepare_projection_slot(AggState *aggstate, TupleTableSlot *slot, int currentSet
 			/* all_grouped_cols is arranged in desc order */
 			slot_getsomeattrs(slot, linitial_int(aggstate->all_grouped_cols));
 
-			// FIXME: int list foreach
 			foreach(lc, aggstate->all_grouped_cols)
 			{
 				int			attnum = lfirst_int(lc);
@@ -1328,8 +1320,8 @@ project_aggregates(AggState *aggstate)
  */
 struct find_cols_visitor {
 	[[nodiscard]] pg_walk_step
-	operator()(pg_expression_walk_cursor cursor, pg_node_view node, FindColsContext &context) const {
-		if (Var *var = node.try_as<Var>())
+	operator()(pg_expression_walk_cursor cursor, pg_node_view node, find_columns_context &context) const {
+		if (Var *var = node.try_cast<Var>())
 		{
 			/* setrefs.c should have set the varno to OUTER_VAR */
 			Assert(var->varno == OUTER_VAR);
@@ -1342,11 +1334,11 @@ struct find_cols_visitor {
 													  var->varattno);
 			return pg_walk_step::skip_subtree;
 		}
-		if (node.is<Aggref>())
+		if (node.is_type<Aggref>())
 		{
 			Assert(!context.is_aggref);
 			context.is_aggref = true;
-			cursor.descend(node.raw());
+			cursor.descend(node.get());
 			context.is_aggref = false;
 			return pg_walk_step::skip_subtree;
 		}
@@ -1362,7 +1354,7 @@ static void
 find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 {
 	Agg		   *agg = reinterpret_cast<Agg *>(aggstate->ss.ps.plan);
-	FindColsContext context;
+	find_columns_context context;
 
 	context.is_aggref = false;
 	context.aggregated = NULL;
@@ -1370,8 +1362,10 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 
 	/* Examine tlist and quals */
 	find_cols_visitor cols_visitor;
-	(void) pg_walk_expression_including_root(reinterpret_cast<Node *>(agg->plan.targetlist), context, cols_visitor);
-	(void) pg_walk_expression_including_root(reinterpret_cast<Node *>(agg->plan.qual), context, cols_visitor);
+	(void) walk_pg_expression_including_root(
+		reinterpret_cast<Node *>(agg->plan.targetlist), context, cols_visitor);
+	(void) walk_pg_expression_including_root(
+		reinterpret_cast<Node *>(agg->plan.qual), context, cols_visitor);
 
 	/* In some cases, grouping columns will not appear in the tlist */
 	for (int i = 0; i < agg->numCols; i++)
@@ -1453,7 +1447,7 @@ build_hash_table(AggState *aggstate, int setno, long nbuckets)
 	 */
 	additionalsize = aggstate->numtrans * sizeof(AggStatePerGroupData);
 
-	perhash->hashtable = BuildTupleHashTableExt(&aggstate->ss.ps,
+	perhash->hashtable = bioseq_build_tuple_hash_table(&aggstate->ss.ps,
 												perhash->hashslot->tts_tupleDescriptor,
 												perhash->numCols,
 												perhash->hashGrpColIdxHash,
@@ -1544,7 +1538,6 @@ find_hash_columns(AggState *aggstate)
 			Bitmapset  *grouped_cols = aggstate->phases[0].grouped_cols[j];
 			ListCell   *lc;
 
-			//FIXME: int list foreach
 			foreach(lc, aggstate->all_grouped_cols)
 			{
 				int			attnum = lfirst_int(lc);
@@ -1562,10 +1555,10 @@ find_hash_columns(AggState *aggstate)
 		 */
 		maxCols = bms_num_members(colnos) + perhash->numCols;
 
-		perhash->hashGrpColIdxInput =
-			make_array<AttrNumber>(maxCols);
-		perhash->hashGrpColIdxHash =
-			make_array<AttrNumber>(perhash->numCols);
+			perhash->hashGrpColIdxInput =
+				allocate_zeroed_array<AttrNumber>(maxCols);
+			perhash->hashGrpColIdxHash =
+				allocate_zeroed_array<AttrNumber>(perhash->numCols);
 
 		/* Add all the grouping columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
@@ -1828,12 +1821,13 @@ hash_agg_enter_spill_mode(AggState *aggstate)
 
 		aggstate->hash_tapeset = LogicalTapeSetCreate(true, NULL, -1);
 
-		aggstate->hash_spills = make_array<HashAggSpill>(aggstate->num_hashes);
+		aggstate->hash_spills =
+			allocate_zeroed_array<hash_aggregate_spill>(aggstate->num_hashes);
 
 		for (int setno = 0; setno < aggstate->num_hashes; setno++)
 		{
 			AggStatePerHash perhash = &aggstate->perhash[setno];
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
+			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
 
 			hashagg_spill_init(spill, aggstate->hash_tapeset, 0,
 							   perhash->aggnode->numGroups,
@@ -1991,7 +1985,7 @@ initialize_hash_entry(AggState *aggstate, TupleHashTable hashtable,
 		return;
 
 	pergroup = static_cast<AggStatePerGroup>(
-		tuple_hash_entry_alloc_additional_compat(
+		bioseq_prepare_tuple_hash_entry_additional(
 			hashtable, entry,
 			sizeof(AggStatePerGroupData) * aggstate->numtrans));
 
@@ -2058,11 +2052,11 @@ lookup_hash_entries(AggState *aggstate)
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
 			pergroup[setno] = static_cast<AggStatePerGroupData*>(
-				tuple_hash_entry_get_additional_compat(hashtable, entry));
+				bioseq_tuple_hash_entry_additional(hashtable, entry));
 		}
 		else
 		{
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
+			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
 			TupleTableSlot *slot = aggstate->tmpcontext->ecxt_outertuple;
 
 			if (spill->partitions == NULL)
@@ -2092,8 +2086,9 @@ lookup_hash_entries(AggState *aggstate)
 static TupleTableSlot *
 ExecAgg(PlanState *pstate)
 {
-	VectorAggState *vectoraggstate = reinterpret_cast<VectorAggState *>(pstate);
-	AggState *node = vectoraggstate->aggstate;
+	vector_aggregate_state *vector_state =
+		reinterpret_cast<vector_aggregate_state *>(pstate);
+	AggState *node = vector_state->aggregate_state;
 	TupleTableSlot *result = NULL;
 
 	CHECK_FOR_INTERRUPTS();
@@ -2112,7 +2107,7 @@ ExecAgg(PlanState *pstate)
 				break;
 			case AGG_PLAIN:
 			case AGG_SORTED:
-				result = agg_retrieve_direct(vectoraggstate);
+				result = agg_retrieve_direct(vector_state);
 				break;
 		}
 
@@ -2127,9 +2122,9 @@ ExecAgg(PlanState *pstate)
  * ExecAgg for non-hashed case
  */
 static TupleTableSlot *
-agg_retrieve_direct(VectorAggState *vectoraggstate)
+agg_retrieve_direct(vector_aggregate_state *vector_state)
 {
-	AggState *aggstate = vectoraggstate->aggstate;	
+	AggState *aggstate = vector_state->aggregate_state;
 	Agg		   *node = aggstate->phase->aggnode;
 	ExprContext *econtext;
 	ExprContext *tmpcontext;
@@ -2303,8 +2298,8 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 					outerslot = fetch_input_tuple(aggstate);
 					if (!TupIsNull(outerslot))
 					{
-						first_input_is_vector =
-							IsVectorTupleTableSlot(outerslot);
+							first_input_is_vector =
+								is_vector_tuple_table_slot(outerslot);
 						if (first_input_is_vector)
 						{
 							if (node->aggstrategy != AGG_PLAIN)
@@ -2329,12 +2324,8 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 						/*
 						 * If there was no input at all, we need to project
 						 * rows only if there are grouping sets of size 0.
-						 * Note that this implies that there can't be any
-						 * references to ungrouped Vars, which would otherwise
-						 * cause issues with the empty output slot.
-						 *
-						 * XXX: This is no longer true, we currently deal with
-						 * this in finalize_aggregates().
+						 * finalize_aggregates() handles references to ungrouped
+						 * Vars in the empty output slot.
 						 */
 						aggstate->input_done = true;
 
@@ -2395,7 +2386,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 				 */
 					for (;;)
 					{
-						if (!IsVectorTupleTableSlot(outerslot))
+						if (!is_vector_tuple_table_slot(outerslot))
 						{
 							ereport(ERROR,
 								(errcode(ERRCODE_INTERNAL_ERROR),
@@ -2433,11 +2424,11 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 						if (pertrans->aggref->aggstar)
 						{
 							const auto *vector_slot =
-								reinterpret_cast<VectorTupleTableSlot *>(outerslot);
+								reinterpret_cast<vector_tuple_table_slot_storage *>(outerslot);
 							pergroupstate->transValue = Int64GetDatum(
 								DatumGetInt64(pergroupstate->transValue)
 								+ static_cast<std::int64_t>(
-									vector_slot->dimension));
+									vector_slot->row_count));
 						}
 					}
 
@@ -2581,9 +2572,9 @@ agg_fill_hash_table(AggState *aggstate)
 static bool
 agg_refill_hash_table(AggState *aggstate)
 {
-	HashAggBatch *batch;
+	hash_aggregate_batch *batch;
 	AggStatePerHash perhash;
-	HashAggSpill spill;
+	hash_aggregate_spill spill;
 	LogicalTapeSet *tapeset = aggstate->hash_tapeset;
 	bool		spill_initialized = false;
 
@@ -2591,7 +2582,7 @@ agg_refill_hash_table(AggState *aggstate)
 		return false;
 
 	/* hash_batches is a stack, with the top item at the end of the list */
-	batch = static_cast<HashAggBatch*>(llast(aggstate->hash_batches));
+	batch = static_cast<hash_aggregate_batch*>(llast(aggstate->hash_batches));
 	aggstate->hash_batches = list_delete_last(aggstate->hash_batches);
 
 	hash_agg_set_limits(aggstate->hashentrysize, batch->input_card,
@@ -2670,7 +2661,7 @@ agg_refill_hash_table(AggState *aggstate)
 			if (isnew)
 				initialize_hash_entry(aggstate, perhash->hashtable, entry);
 			aggstate->hash_pergroup[batch->setno] = static_cast<AggStatePerGroupData*>(
-				tuple_hash_entry_get_additional_compat(perhash->hashtable, entry));
+				bioseq_tuple_hash_entry_additional(perhash->hashtable, entry));
 			advance_aggregates(aggstate);
 		}
 		else
@@ -2851,7 +2842,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 		ExecStoreVirtualTuple(firstSlot);
 
 		pergroup = static_cast<AggStatePerGroup>(
-			tuple_hash_entry_get_additional_compat(perhash->hashtable, entry));
+			bioseq_tuple_hash_entry_additional(perhash->hashtable, entry));
 
 		/*
 		 * Use the representative input tuple for any references to
@@ -2881,7 +2872,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
  * of partitions to create, and initializes them.
  */
 static void
-hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
+hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *tapeset, int used_bits,
 				   double input_groups, double hashentrysize)
 {
 	int			npartitions;
@@ -2890,9 +2881,9 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 	npartitions = hash_choose_num_partitions(input_groups, hashentrysize,
 											 used_bits, &partition_bits);
 
-	spill->partitions = make_array<LogicalTape*>(npartitions);
-	spill->ntuples = make_array<int64_t>(npartitions);
-	spill->hll_card = make_array<hyperLogLogState>(npartitions);
+	spill->partitions = allocate_zeroed_array<LogicalTape*>(npartitions);
+	spill->ntuples = allocate_zeroed_array<int64_t>(npartitions);
+	spill->hll_card = allocate_zeroed_array<hyperLogLogState>(npartitions);
 
 	for (int i = 0; i < npartitions; i++)
 		spill->partitions[i] = LogicalTapeCreate(tapeset);
@@ -2912,7 +2903,7 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
  * partition.
  */
 static Size
-hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
+hashagg_spill_tuple(AggState *aggstate, hash_aggregate_spill *spill,
 					TupleTableSlot *inputslot, uint32_t hash)
 {
 	TupleTableSlot *spillslot;
@@ -2974,14 +2965,14 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 /*
  * hashagg_batch_new
  *
- * Construct a HashAggBatch item, which represents one iteration of HashAgg to
+ * Construct a hash_aggregate_batch item, which represents one iteration of HashAgg to
  * be done.
  */
-static HashAggBatch *
+static hash_aggregate_batch *
 hashagg_batch_new(LogicalTape *input_tape, int setno,
 				  int64_t input_tuples, double input_card, int used_bits)
 {
-	HashAggBatch *batch = make0<HashAggBatch>();
+	hash_aggregate_batch *batch = allocate_zeroed_object<hash_aggregate_batch>();
 
 	batch->setno = setno;
 	batch->used_bits = used_bits;
@@ -2997,7 +2988,7 @@ hashagg_batch_new(LogicalTape *input_tape, int setno,
  * 		read the next tuple from a batch's tape.  Return NULL if no more.
  */
 static MinimalTuple
-hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
+hashagg_batch_read(hash_aggregate_batch *batch, uint32_t *hashp)
 {
 	LogicalTape *tape = batch->input_tape;
 	MinimalTuple tuple;
@@ -3009,27 +3000,27 @@ hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 	if (nread == 0)
 		return NULL;
 	if (nread != sizeof(uint32_t))
-		bioseq_report<ERR, PG>().code(errcode_for_file_access())
-			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(errcode_for_file_access())
+			.with_message("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 	if (hashp != NULL)
 		*hashp = hash;
 
 	nread = LogicalTapeRead(tape, &t_len, sizeof(t_len));
 	if (nread != sizeof(uint32_t))
-		bioseq_report<ERR, PG>().code(errcode_for_file_access())
-			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(errcode_for_file_access())
+			.with_message("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 
-	tuple = make1<MinimalTupleData>(t_len);
+	tuple = allocate_zeroed_storage<MinimalTupleData>(t_len);
 	tuple->t_len = t_len;
 
 	nread = LogicalTapeRead(tape,
 							static_cast<void *>(reinterpret_cast<char *>(tuple) + sizeof(uint32_t)),
 							t_len - sizeof(uint32_t));
 	if (nread != t_len - sizeof(uint32_t))
-		bioseq_report<ERR, PG>().code(errcode_for_file_access())
-			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+		bioseq_report<logging_level::error, logging_target::postgres>().with_sql_error_code(errcode_for_file_access())
+			.with_message("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), t_len - sizeof(uint32_t), nread);
 
 	return tuple;
@@ -3038,7 +3029,7 @@ hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 /*
  * hashagg_finish_initial_spills
  *
- * After a HashAggBatch has been processed, it may have spilled tuples to
+ * After a hash_aggregate_batch has been processed, it may have spilled tuples to
  * disk. If so, turn the spilled partitions into new batches that must later
  * be executed.
  */
@@ -3052,7 +3043,7 @@ hashagg_finish_initial_spills(AggState *aggstate)
 	{
 		for (setno = 0; setno < aggstate->num_hashes; setno++)
 		{
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
+			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
 
 			total_npartitions += spill->npartitions;
 			hashagg_spill_finish(aggstate, spill, setno);
@@ -3077,7 +3068,7 @@ hashagg_finish_initial_spills(AggState *aggstate)
  * Transform spill partitions into new batches.
  */
 static void
-hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
+hashagg_spill_finish(AggState *aggstate, hash_aggregate_spill *spill, int setno)
 {
 	int			i;
 	int			used_bits = 32 - spill->shift;
@@ -3088,7 +3079,7 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 	for (i = 0; i < spill->npartitions; i++)
 	{
 		LogicalTape *tape = spill->partitions[i];
-		HashAggBatch *new_batch;
+		hash_aggregate_batch *new_batch;
 		double		cardinality;
 
 		/* if the partition is empty, don't create a new batch of work */
@@ -3126,7 +3117,7 @@ hashagg_reset_spill_state(AggState *aggstate)
 
 		for (setno = 0; setno < aggstate->num_hashes; setno++)
 		{
-			HashAggSpill *spill = &aggstate->hash_spills[setno];
+			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
 
 			pfree(spill->ntuples);
 			pfree(spill->partitions);
@@ -3149,7 +3140,7 @@ hashagg_reset_spill_state(AggState *aggstate)
 
 
 /* -----------------
- * VExecInitAgg
+ * initialize_vector_aggregate_executor
  *
  *	Creates the run-time information for the agg node produced by the
  *	planner and initializes its outer subtree.
@@ -3157,7 +3148,7 @@ hashagg_reset_spill_state(AggState *aggstate)
  * -----------------
  */
 static AggState *
-VExecInitAgg(Agg *node, EState *estate, int eflags)
+initialize_vector_aggregate_executor(Agg *node, EState *estate, int eflags)
 {
 	AggState   *aggstate;
 	AggStatePerAgg peraggs;
@@ -3173,7 +3164,6 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	int			numtrans;
 	int			phase;
 	int			phaseidx;
-	//ListCell   *l;
 	Bitmapset  *all_grouped_cols = NULL;
 	int			numGroupingSets = 1;
 	int			numPhases;
@@ -3228,10 +3218,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		numGroupingSets = list_length(node->groupingSets);
 
-		for(auto agg : PList<Agg>(node->chain))
+		for (auto agg : postgres_list<Agg>{node->chain})
 		{
-			//Agg		   *agg = lfirst(l);
-
 			numGroupingSets = std::max(numGroupingSets,
 								  list_length(agg->groupingSets));
 
@@ -3250,16 +3238,14 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->numphases = numPhases;
 
 	aggstate->aggcontexts = reinterpret_cast<ExprContext **>(
-		make_array<ExprContext*>(numGroupingSets));
+		allocate_zeroed_array<ExprContext*>(numGroupingSets));
 
 	/*
 	 * Create expression contexts.  We need three or more, one for
 	 * per-input-tuple processing, one for per-output-tuple processing, one
 	 * for all the hashtables, and one for each grouping set.  The per-tuple
-	 * memory context of the per-grouping-set ExprContexts (aggcontexts)
-	 * replaces the standalone memory context formerly used to hold transition
-	 * values.  We cheat a little by using ExecAssignExprContext() to build
-	 * all of them.
+	 * memory context of the per-grouping-set ExprContexts (aggcontexts) holds
+	 * transition values. We use ExecAssignExprContext() to build all of them.
 	 *
 	 * NOTE: the details of what is stored in aggcontexts and what is stored
 	 * in the regular per-query memory context are driven by a simple
@@ -3359,10 +3345,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	numaggrefs = list_length(aggstate->aggs);
 	max_aggno = -1;
 	max_transno = -1;
-	for(auto aggref : PList<Aggref>(aggstate->aggs))
+	for (auto aggref : postgres_list<Aggref>{aggstate->aggs})
 	{
-		//Aggref	   *aggref = (Aggref *) lfirst(l);
-
 		max_aggno = std::max(max_aggno, aggref->aggno);
 		max_transno = std::max(max_transno, aggref->aggtransno);
 	}
@@ -3373,15 +3357,16 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * For each phase, prepare grouping set data and fmgr lookup data for
 	 * compare functions.  Accumulate all_grouped_cols in passing.
 	 */
-	aggstate->phases = make_array<AggStatePerPhaseData>(numPhases);
+	aggstate->phases = allocate_zeroed_array<AggStatePerPhaseData>(numPhases);
 
 	aggstate->num_hashes = numHashes;
 	if (numHashes)
 	{
-		aggstate->perhash = make_array<AggStatePerHashData>(numHashes);
+		aggstate->perhash = allocate_zeroed_array<AggStatePerHashData>(numHashes);
 		aggstate->phases[0].numsets = 0;
-		aggstate->phases[0].gset_lengths = make_array<int>(numHashes);
-		aggstate->phases[0].grouped_cols = make_array<Bitmapset*>(numHashes);
+		aggstate->phases[0].gset_lengths = allocate_zeroed_array<int>(numHashes);
+		aggstate->phases[0].grouped_cols =
+			allocate_zeroed_array<Bitmapset*>(numHashes);
 	}
 
 	phase = 0;
@@ -3440,11 +3425,12 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			if (num_sets)
 			{
-				phasedata->gset_lengths = make_array<int>(num_sets);
-				phasedata->grouped_cols = make_array<Bitmapset*>(num_sets);
+				phasedata->gset_lengths = allocate_zeroed_array<int>(num_sets);
+				phasedata->grouped_cols =
+					allocate_zeroed_array<Bitmapset*>(num_sets);
 
 				i = 0;
-				for(auto sublist : PList<List>(aggnode->groupingSets))
+				for (auto sublist : postgres_list<List>{aggnode->groupingSets})
 				{
 					int			current_length = list_length(sublist);
 					Bitmapset  *cols = NULL;
@@ -3484,7 +3470,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * need to be compared.
 				 */
 				phasedata->eqfunctions =
-					make_array<ExprState*>(aggnode->numCols);
+					allocate_zeroed_array<ExprState*>(aggnode->numCols);
 
 				/* for each grouping set */
 				for (i = 0; i < phasedata->numsets; i++)
@@ -3539,25 +3525,25 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * allocate my private per-agg working storage
 	 */
 	econtext = aggstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = make_array<Datum>(numaggs);
-	econtext->ecxt_aggnulls = make_array<bool>(numaggs);
+	econtext->ecxt_aggvalues = allocate_zeroed_array<Datum>(numaggs);
+	econtext->ecxt_aggnulls = allocate_zeroed_array<bool>(numaggs);
 
-	peraggs = make_array<AggStatePerAggData>(numaggs);
-	pertransstates = make_array<AggStatePerTransData>(numtrans);
+	peraggs = allocate_zeroed_array<AggStatePerAggData>(numaggs);
+	pertransstates = allocate_zeroed_array<AggStatePerTransData>(numtrans);
 
 	aggstate->peragg = peraggs;
 	aggstate->pertrans = pertransstates;
 
 
 	aggstate->all_pergroups =
-		make_array<AggStatePerGroup>(numGroupingSets + numHashes);
+		allocate_zeroed_array<AggStatePerGroup>(numGroupingSets + numHashes);
 	pergroups = aggstate->all_pergroups;
 
 	if (node->aggstrategy != AGG_HASHED)
 	{
 		for (i = 0; i < numGroupingSets; i++)
 		{
-			pergroups[i] = make_array<AggStatePerGroupData>(numaggs);
+			pergroups[i] = allocate_zeroed_array<AggStatePerGroupData>(numaggs);
 		}
 
 		aggstate->pergroups = pergroups;
@@ -3635,9 +3621,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * Perform lookups of aggregate function info, and initialize the
 	 * unchanging fields of the per-agg and per-trans data.
 	 */
-	for(auto aggref : PList<Aggref>(aggstate->aggs))
+	for (auto aggref : postgres_list<Aggref>{aggstate->aggs})
 	{
-		//Aggref	   *aggref = lfirst(l);
 		AggStatePerAgg peragg;
 		AggStatePerTrans pertrans;
 		Oid			aggTransFnInputTypes[FUNC_MAX_ARGS];
@@ -3671,7 +3656,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggTuple = SearchSysCache1(AGGFNOID,
 								   ObjectIdGetDatum(aggref->aggfnoid));
 		if (!HeapTupleIsValid(aggTuple))
-			bioseq_log<ERR, PG>( "cache lookup failed for aggregate {}",
+			bioseq_log<logging_level::error, logging_target::postgres>( "cache lookup failed for aggregate {}",
 				 aggref->aggfnoid);
 		aggform = reinterpret_cast<Form_pg_aggregate>(GETSTRUCT(aggTuple));
 
@@ -3713,7 +3698,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggserialfn))
-					bioseq_log<ERR, PG>( "serialfunc not provided for serialization aggregation");
+					bioseq_log<logging_level::error, logging_target::postgres>( "serialfunc not provided for serialization aggregation");
 				serialfn_oid = aggform->aggserialfn;
 			}
 
@@ -3724,7 +3709,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_COMBINE(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggdeserialfn))
-					bioseq_log<ERR, PG>( "deserialfunc not provided for deserialization aggregation");
+					bioseq_log<logging_level::error, logging_target::postgres>( "deserialfunc not provided for deserialization aggregation");
 				deserialfn_oid = aggform->aggdeserialfn;
 			}
 		}
@@ -3736,7 +3721,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			procTuple = SearchSysCache1(PROCOID,
 										ObjectIdGetDatum(aggref->aggfnoid));
 			if (!HeapTupleIsValid(procTuple))
-				bioseq_log<ERR, PG>( "cache lookup failed for function {}",
+				bioseq_log<logging_level::error, logging_target::postgres>( "cache lookup failed for function {}",
 					 aggref->aggfnoid);
 			aggOwner = (reinterpret_cast<Form_pg_proc>(GETSTRUCT(procTuple)))->proowner;
 			ReleaseSysCache(procTuple);
@@ -3835,7 +3820,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 				/* If not set then the planner messed up */
 				if (!OidIsValid(transfn_oid))
-					bioseq_log<ERR, PG>( "combinefn not set for aggregate function");
+					bioseq_log<logging_level::error, logging_target::postgres>( "combinefn not set for aggregate function");
 			}
 			else
 				transfn_oid = aggform->aggtransfn;
@@ -3886,9 +3871,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * since then.
 				 */
 				if (pertrans->transfn.fn_strict && aggtranstype == INTERNALOID)
-					bioseq_report<ERR, PG>()
-						.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
-						.msg("combine function with transition type {} must not be declared STRICT",
+					bioseq_report<logging_level::error, logging_target::postgres>()
+						.with_sql_error_code(ERRCODE_INVALID_FUNCTION_DEFINITION)
+						.with_message("combine function with transition type {} must not be declared STRICT",
 							 format_type_be(aggtranstype));
 			}
 			else
@@ -3920,9 +3905,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 					if (numAggTransFnArgs <= numDirectArgs ||
 						!IsBinaryCoercible(aggTransFnInputTypes[numDirectArgs],
 										   aggtranstype))
-						bioseq_report<ERR, PG>()
-							.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
-							.msg("aggregate {} needs to have compatible input type and transition type",
+						bioseq_report<logging_level::error, logging_target::postgres>()
+							.with_sql_error_code(ERRCODE_INVALID_FUNCTION_DEFINITION)
+							.with_message("aggregate {} needs to have compatible input type and transition type",
 								 aggref->aggfnoid);
 				}
 			}
@@ -3950,9 +3935,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * here anyway, just to be sure.)
 	 */
 	if (numaggrefs != list_length(aggstate->aggs))
-		bioseq_report<ERR, PG>()
-			.code(ERRCODE_GROUPING_ERROR)
-			.msg("aggregate function calls cannot be nested");
+		bioseq_report<logging_level::error, logging_target::postgres>()
+			.with_sql_error_code(ERRCODE_GROUPING_ERROR)
+			.with_message("aggregate function calls cannot be nested");
 
 	/*
 	 * Build expressions doing all the transition work at once. We build a
@@ -4084,7 +4069,9 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	fmgr_info(transfn_oid, &pertrans->transfn);
 	fmgr_info_set_expr(reinterpret_cast<Node *>(transfnexpr), &pertrans->transfn);
 
-	pertrans->transfn_fcinfo = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(numTransArgs));
+	pertrans->transfn_fcinfo =
+		allocate_zeroed_storage<FunctionCallInfoBaseData>(
+			SizeForFunctionCallInfo(numTransArgs));
 	InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
 							 &pertrans->transfn,
 							 numTransArgs,
@@ -4104,7 +4091,8 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr(reinterpret_cast<Node *>(serialfnexpr), &pertrans->serialfn);
 
 		pertrans->serialfn_fcinfo =
-			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
+			allocate_zeroed_storage<FunctionCallInfoBaseData>(
+				SizeForFunctionCallInfo(1));
 		InitFunctionCallInfoData(*pertrans->serialfn_fcinfo,
 								 &pertrans->serialfn,
 								 1,
@@ -4120,7 +4108,8 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr(reinterpret_cast<Node *>(deserialfnexpr), &pertrans->deserialfn);
 
 		pertrans->deserialfn_fcinfo =
-			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
+			allocate_zeroed_storage<FunctionCallInfoBaseData>(
+				SizeForFunctionCallInfo(2));
 		InitFunctionCallInfoData(*pertrans->deserialfn_fcinfo,
 								 &pertrans->deserialfn,
 								 2,
@@ -4199,18 +4188,17 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 		/* Extract the sort information for use later */
 		pertrans->sortColIdx =
-			make_array<AttrNumber>(numSortCols);
+			allocate_zeroed_array<AttrNumber>(numSortCols);
 		pertrans->sortOperators =
-			make_array<Oid>(numSortCols);
+			allocate_zeroed_array<Oid>(numSortCols);
 		pertrans->sortCollations =
-			make_array<Oid>(numSortCols);
+			allocate_zeroed_array<Oid>(numSortCols);
 		pertrans->sortNullsFirst =
-			make_array<bool>(numSortCols);
+			allocate_zeroed_array<bool>(numSortCols);
 
 		i = 0;
-		for(auto sortcl : PList<SortGroupClause>(sortlist))
+		for (auto sortcl : postgres_list<SortGroupClause>{sortlist})
 		{
-			//SortGroupClause *sortcl = (SortGroupClause *) lfirst(lc);
 			TargetEntry *tle = get_sortgroupclause_tle(sortcl, aggref->args);
 
 			/* the parser should have made sure of this */
@@ -4232,10 +4220,10 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		Assert(numArguments > 0);
 		Assert(list_length(aggref->aggdistinct) == numDistinctCols);
 
-		ops = make_array<Oid>(numDistinctCols);
+		ops = allocate_zeroed_array<Oid>(numDistinctCols);
 
 		i = 0;
-		for(auto groupClause : PList<SortGroupClause>(aggref->aggdistinct)) {
+		for (auto groupClause : postgres_list<SortGroupClause>{aggref->aggdistinct}) {
 			ops[i++] = groupClause->eqop;
 		}
 
@@ -4253,8 +4241,8 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		pfree(ops);
 	}
 
-	pertrans->sortstates = 
-		make_array<Tuplesortstate*>(numGroupingSets);
+	pertrans->sortstates =
+		allocate_zeroed_array<Tuplesortstate*>(numGroupingSets);
 }
 
 
@@ -4419,8 +4407,7 @@ ExecReScanAgg(AggState *node)
 
 	/*
 	 * With AGG_HASHED/MIXED, the hash table is allocated in a sub-context of
-	 * the hashcontext. This used to be an issue, but now, resetting a context
-	 * automatically deletes sub-contexts too.
+	 * the hashcontext. Resetting the hashcontext also deletes its sub-contexts.
 	 */
 	if (node->aggstrategy == AGG_HASHED || node->aggstrategy == AGG_MIXED)
 	{
@@ -4487,7 +4474,7 @@ ExecReScanAgg(AggState *node)
 int
 AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 {
-	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
+	if (AggState *aggstate = pg_node_view{fcinfo->context}.try_cast<AggState>())
 	{
 		if (aggcontext)
 		{
@@ -4497,7 +4484,8 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 		}
 		return AGG_CONTEXT_AGGREGATE;
 	}
-	if (WindowAggState *window_agg_state = pg_node_try_as<WindowAggState>(fcinfo->context))
+	if (WindowAggState *window_agg_state =
+			pg_node_view{fcinfo->context}.try_cast<WindowAggState>())
 	{
 		if (aggcontext)
 			*aggcontext = window_agg_state->curaggcontext;
@@ -4530,7 +4518,7 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 Aggref *
 AggGetAggref(FunctionCallInfo fcinfo)
 {
-	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
+	if (AggState *aggstate = pg_node_view{fcinfo->context}.try_cast<AggState>())
 	{
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
@@ -4567,7 +4555,7 @@ AggGetAggref(FunctionCallInfo fcinfo)
 bool
 AggStateIsShared(FunctionCallInfo fcinfo)
 {
-	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
+	if (AggState *aggstate = pg_node_view{fcinfo->context}.try_cast<AggState>())
 	{
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
@@ -4588,155 +4576,103 @@ AggStateIsShared(FunctionCallInfo fcinfo)
 }
 
 
-/* ----------------------------------------------------------------
- *						Parallel Query Support
- * ----------------------------------------------------------------
- */
-
-/* Parallel Execution */
-
-static Size 
-BioseqColumnAggNode_EstimateDSM(CustomScanState *node,
-							ParallelContext *pcxt)
-{
-	Size nbytes = 0;
-	return nbytes;
-}
-
-
-static void 
-BioseqColumnAggNode_InitializeDSM(CustomScanState *node,
-							  ParallelContext *pcxt,
-							  void *coordinate)
-{
-}
-
-
-static void 
-BioseqColumnAggNode_ReinitializeDSM(CustomScanState *node,
-								ParallelContext *pcxt,
-								void *coordinate)
-{
-}
-
-
-static void 
-BioseqColumnAggNode_InitializeWorker(CustomScanState *node,
-								 shm_toc *toc,
-								 void *coordinate)
-{
-}
-
 /* CustomScan Aggregator Node */
-#include "nodes/extensible.h"
+static Node *create_vector_aggregate_state(CustomScan *custom_plan);
 
+static void begin_vector_aggregate(CustomScanState *node, EState *estate, int eflags);
+static TupleTableSlot *execute_vector_aggregate(CustomScanState *node);
+static void end_vector_aggregate(CustomScanState *node);
 
-/* CustomScanMethods */
-static Node *CreateVectorAggState(CustomScan *custom_plan);
-
-/* CustomScanExecMethods */
-static void BeginVectorAgg(CustomScanState *node, EState *estate, int eflags);
-static TupleTableSlot *ExecVectorAgg(CustomScanState *node);
-static void EndVectorAgg(CustomScanState *node);
-static void ExplainAggNode(CustomScanState *node, List *ancestors, ExplainState *es);
-
-static CustomScanMethods VectorAggNodeMethods = {
+static const CustomScanMethods vector_aggregate_scan_methods = {
 	"VectorAggNode",		/* CustomName */
-	CreateVectorAggState,	/* CreateCustomScanState */
+	create_vector_aggregate_state,	/* CreateCustomScanState */
 };
 
-static CustomExecMethods VectorAggNodeExecMethods = {
+static const CustomExecMethods vector_aggregate_exec_methods = {
 	.CustomName = "VectorAggNode",
 
-	.BeginCustomScan = BeginVectorAgg,
-	.ExecCustomScan = ExecVectorAgg,
-	.EndCustomScan = EndVectorAgg,
+	.BeginCustomScan = begin_vector_aggregate,
+	.ExecCustomScan = execute_vector_aggregate,
+	.EndCustomScan = end_vector_aggregate,
 
-	.EstimateDSMCustomScan = BioseqColumnAggNode_EstimateDSM,
-	.InitializeDSMCustomScan = BioseqColumnAggNode_InitializeDSM,
-	.ReInitializeDSMCustomScan = BioseqColumnAggNode_ReinitializeDSM,
-	.InitializeWorkerCustomScan = BioseqColumnAggNode_InitializeWorker,
+	.EstimateDSMCustomScan = nullptr,
+	.InitializeDSMCustomScan = nullptr,
+	.ReInitializeDSMCustomScan = nullptr,
+	.InitializeWorkerCustomScan = nullptr,
 
-	.ExplainCustomScan = ExplainAggNode
+	.ExplainCustomScan = nullptr
 };
 
 
 static Node *
-CreateVectorAggState(CustomScan *custom_plan)
+create_vector_aggregate_state(CustomScan *custom_plan)
 {
-	VectorAggState *vas = reinterpret_cast<VectorAggState *>(newNode(
-		sizeof(VectorAggState), T_CustomScanState));
+	vector_aggregate_state *vector_state =
+		reinterpret_cast<vector_aggregate_state *>(newNode(
+			sizeof(vector_aggregate_state), T_CustomScanState));
 
-	CustomScanState *cscanstate = &vas->css;
-	cscanstate->methods = &VectorAggNodeExecMethods;
+	CustomScanState *custom_scan_state = &vector_state->custom_scan_state;
+	custom_scan_state->methods = &vector_aggregate_exec_methods;
 
-	return reinterpret_cast<Node *>(cscanstate);
+	return reinterpret_cast<Node *>(custom_scan_state);
 }
 
 
 static void
-BeginVectorAgg(CustomScanState *css, EState *estate, int eflags)
+begin_vector_aggregate(CustomScanState *custom_scan_state,
+					   EState *estate, int eflags)
 {
-	VectorAggState *vas = reinterpret_cast<VectorAggState *>(css);
-	CustomScan  *cscan = reinterpret_cast<CustomScan *>(css->ss.ps.plan);
-	Agg	*aggNode = reinterpret_cast<Agg *>(linitial(cscan->custom_plans));
+	vector_aggregate_state *vector_state =
+		reinterpret_cast<vector_aggregate_state *>(custom_scan_state);
+	CustomScan *custom_scan =
+		reinterpret_cast<CustomScan *>(custom_scan_state->ss.ps.plan);
+	Agg *aggregate_node =
+		reinterpret_cast<Agg *>(linitial(custom_scan->custom_plans));
 
 	/* Clean out the tuple table */
-	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
-	ExecClearTuple(css->ss.ss_ScanTupleSlot);
+	ExecClearTuple(custom_scan_state->ss.ps.ps_ResultTupleSlot);
+	ExecClearTuple(custom_scan_state->ss.ss_ScanTupleSlot);
 
+	vector_state->aggregate_state =
+		initialize_vector_aggregate_executor(aggregate_node, estate, eflags);
+	outerPlanState(vector_state) = outerPlanState(vector_state->aggregate_state);
 
-	vas->aggstate = VExecInitAgg(aggNode, estate, eflags);
+	/* Initialize result type and projection. */
+	ExecInitResultTypeTL(&vector_state->custom_scan_state.ss.ps);
 
-	// HYDRA: add leftree to custom agg
-	outerPlanState(vas) = outerPlanState(vas->aggstate);
-
-	 /*Initialize result type and projection. */
-	ExecInitResultTypeTL(&vas->css.ss.ps);
-
-	vas->css.ss.ps.ps_ResultTupleSlot = vas->aggstate->ss.ps.ps_ResultTupleSlot;
+	vector_state->custom_scan_state.ss.ps.ps_ResultTupleSlot =
+		vector_state->aggregate_state->ss.ps.ps_ResultTupleSlot;
 }
 
 
 static TupleTableSlot *
-ExecVectorAgg(CustomScanState *node)
+execute_vector_aggregate(CustomScanState *node)
 {
 	return ExecAgg(reinterpret_cast<PlanState *>(node));
 }
 
 
 static void
-EndVectorAgg(CustomScanState *node)
+end_vector_aggregate(CustomScanState *node)
 {
-	ExecEndAgg(reinterpret_cast<VectorAggState *>(node)->aggstate);
+	ExecEndAgg(reinterpret_cast<vector_aggregate_state *>(node)->aggregate_state);
 }
 
-
-static void
-ExplainAggNode(CustomScanState *node, List *ancestors, ExplainState *es)
-{
-
-}
 
 }  /* close outer extern "C" */
 
-/*
- * Public entry points for the planner hook: build a CustomScan for the
- * vectorised aggregate node and register its method table. Exported from the
- * module (the old cross-module forward-decl wrapper is dropped — module-attached
- * export already gives external linkage).
- */
+/* Public planner-hook entry points for construction and registration. */
 export CustomScan *
-bioseq_create_aggregator_node(void)
+create_vector_aggregate_scan(void)
 {
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(makeNode(CustomScan));
-	cscan->methods = &VectorAggNodeMethods;
+	cscan->methods = &vector_aggregate_scan_methods;
 	return cscan;
 }
 
 
 export void
-bioseq_register_aggregator_node(void)
+register_vector_aggregate_scan(void)
 {
-	RegisterCustomScanMethods(&VectorAggNodeMethods);
+	RegisterCustomScanMethods(&vector_aggregate_scan_methods);
 }

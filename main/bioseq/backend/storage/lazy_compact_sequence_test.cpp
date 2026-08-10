@@ -10,7 +10,7 @@
 // zero-copy + stitch, the encoded_iterator slot ring + bounded eviction,
 // BP iteration bit-identical to the baseline, and to_encoded_into parity.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <array>

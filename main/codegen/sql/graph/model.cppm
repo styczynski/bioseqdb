@@ -7,7 +7,6 @@ module;
 
 export module bioseq.codegen.sql.graph:model;
 
-import bioseq.codegen.clang_structural;
 import bioseq.codegen.sql.collector;
 
 export namespace bioseq::codegen::sql {
@@ -20,7 +19,7 @@ struct normalized_entity {
     std::size_t strongly_connected_component{};
 };
 
-struct legacy_fmgr_macro_owner {
+struct handwritten_fmgr_export_owner {
     std::string macro_name;
     std::string symbol;
     std::string source_module;
@@ -28,32 +27,20 @@ struct legacy_fmgr_macro_owner {
     std::size_t source_line{};
 };
 
-struct baseline_physical_statement {
-    std::string baseline_physical_id;
-    std::size_t baseline_ordinal{};
-    entity_kind kind{entity_kind::install_action};
-    std::string order_identity;
-    std::string source_module;
-    std::filesystem::path source_path;
-    std::string source_sha256;
-    clang_structural::source_range source_range;
-};
-
 struct sql_graph {
     std::string extension_name{"bioseq"};
     std::string extension_schema{"public"};
     std::string generated_module_prefix{"bioseq.sql.generated"};
     std::string fmgr_boundary_module{
-        "bioseq.pg_utils.sql_boundary"};
+        "bioseq.postgres.support.sql_boundary"};
     std::string fmgr_prelude{"bioseq_common"};
     std::string compiler_profile;
-    std::string clang_version;
+    std::string clang_release;
     std::string compilation_signature;
-    std::vector<legacy_fmgr_macro_owner> legacy_fmgr_macro_owners;
+    std::vector<handwritten_fmgr_export_owner>
+        handwritten_fmgr_export_owners;
     std::vector<collected_result_row> result_rows;
     std::vector<normalized_entity> entities;
-    std::vector<baseline_physical_statement>
-        expected_baseline_physical_statements;
 };
 
 }  // namespace bioseq::codegen::sql

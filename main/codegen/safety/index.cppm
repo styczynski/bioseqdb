@@ -17,7 +17,6 @@ export import :fact_producer;
 export import :fact_producer_contract_tests;
 export import :runtime_matrix;
 export import :dso;
-export import :fmgr_ledger;
 export import :analyzer_contract_tests;
 export import :contract_tests;
 export import :runtime_inventory;
@@ -26,6 +25,7 @@ export import :cli;
 
 export namespace bioseq::codegen::safety {
 
+/// Runs every compiled safety contract module.
 [[nodiscard]] inline int self_test() {
     try {
         run_safety_contract_self_tests();
@@ -41,9 +41,10 @@ export namespace bioseq::codegen::safety {
     }
 }
 
+/// Dispatches one safety command-line invocation.
 [[nodiscard]] inline int run(
     std::span<std::string_view const> args) {
-    return run_safety_cli(args);
+    return run_cli(args);
 }
 
 }  // namespace bioseq::codegen::safety

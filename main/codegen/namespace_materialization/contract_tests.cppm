@@ -23,7 +23,7 @@ import :model;
 import :manifest;
 import :renderer;
 import :validator;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
@@ -73,11 +73,11 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
 
 [[nodiscard]] inline std::string normalized_token_digest(
     std::string_view source) {
-    const clang_structural::translation_unit unit =
-        clang_structural::scan_token_slice(
+    const structural_analysis::translation_unit unit =
+        structural_analysis::scan_token_slice(
             "template_flatten_head_digest.cppm", source);
     std::ostringstream canonical;
-    for (const clang_structural::lexical_token& token : unit.tokens) {
+    for (const structural_analysis::lexical_token& token : unit.tokens) {
         canonical << token.spelling.size() << ':' << token.spelling << '\n';
     }
     require(!unit.tokens.empty(), "normalized token digest requires tokens");
@@ -86,7 +86,7 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
 
 [[nodiscard]] inline std::string declaration_head_digest(
     std::string_view source,
-    const clang_structural::declaration_record& declaration) {
+    const structural_analysis::declaration_record& declaration) {
     const auto& range = declaration.declaration_head_range;
     require(
         range.end.byte_offset > range.begin.byte_offset
@@ -119,7 +119,7 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
             "canonical directory identity");
     }
     const std::filesystem::path scheduler = repository_root
-        / "main/bioseq/backend/pg/scheduler/dispatch_processor_typed_template.cppm";
+        / "main/bioseq/backend/pg/scheduler/dispatch_processor/typed_template.cppm";
     if (!std::filesystem::is_regular_file(scheduler, error) || error) {
         throw std::runtime_error(
             "production scheduler materialization source is unavailable: "
@@ -145,8 +145,8 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
     std::string profile = "2") {
     const std::filesystem::path source_path = production_scheduler_source();
     const std::string source = read_file(source_path);
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice(source_path, source);
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(source_path, source);
     materialization_region region = extract_materialization_region(
         sliced, "bioseq.scheduler.dispatch_processor", source);
     topology_plan topology = build_topology_plan(std::move(region));
@@ -165,7 +165,7 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
         .name = "dispatch_processor_typed",
         .profile = std::move(profile),
         .enabled_ordinals = std::move(enabled),
-        .clang_version = "contract-test",
+        .clang_release = "contract-test",
         .compilation_signature = "contract-test",
         .compiler_module_inventory_sha256 =
             "00000000000000000000000000000000"
@@ -276,23 +276,27 @@ long root(std::uint8_t abi_code, int value) {
 
 [[nodiscard]] inline generation_plan fixture_plan() {
     const std::string source{fixture_source()};
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice("flatten_fixture.cppm", source);
+    const std::filesystem::path repository_root =
+        std::filesystem::absolute(".").lexically_normal();
+    const std::filesystem::path source_path =
+        repository_root / "flatten_fixture.cppm";
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(source_path, source);
     materialization_region region = extract_materialization_region(
         sliced, "fixture.output", source);
     topology_plan topology = build_topology_plan(std::move(region), 16u);
     validate_entry_ownership(topology);
     return generation_plan{
         .topology = std::move(topology),
-        .repository_root = ".",
-        .source_path = "flatten_fixture.cppm",
-        .output_root = "generated/flatten_fixture",
+        .repository_root = repository_root,
+        .source_path = source_path,
+        .output_root = repository_root / "generated/flatten_fixture",
         .source_text = source,
         .source_sha256 = sha256_hex(source),
         .name = "flatten_fixture",
         .profile = "2",
         .enabled_ordinals = {0u, 1u, 2u, 3u},
-        .clang_version = "contract-test",
+        .clang_release = "contract-test",
         .compilation_signature = "contract-test",
         .compiler_module_inventory_sha256 =
             "00000000000000000000000000000000"
@@ -311,27 +315,27 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
         require(
             !artifact.logical_coordinate_ordinals.empty(),
             "fixture declaration probe must cover an identity coordinate");
-        clang_structural::translation_unit probe;
+        structural_analysis::translation_unit probe;
         probe.source_path = plan.output_root / artifact.relative_path;
         probe.source_sha256 = sha256_hex(artifact.content);
-        probe.clang_version = plan.clang_version;
-        probe.mode = clang_structural::collection_mode::declaration_probe;
+        probe.clang_release = plan.clang_release;
+        probe.mode = structural_analysis::collection_mode::declaration_probe;
         probe.source_module.provided_module = artifact.module_name;
-        clang_structural::declaration_record identity;
+        structural_analysis::declaration_record identity;
         identity.stable_usr = "c:@F@fixture_probe_"
             + std::to_string(artifact.logical_coordinate_ordinals.front());
         identity.qualified_name = "fixture::probe_identity";
-        identity.provenance_id = "fixture-provenance-"
+        identity.source_identity = "fixture-provenance-"
             + std::to_string(artifact.logical_coordinate_ordinals.front());
-        identity.provenance_coordinate =
+        identity.source_coordinate =
             std::to_string(artifact.logical_coordinate_ordinals.front());
-        identity.linkage = clang_structural::entity_linkage::module;
+        identity.linkage = structural_analysis::entity_linkage::module;
         identity.attachment =
-            clang_structural::module_attachment::named_module;
+            structural_analysis::module_attachment::named_module;
         probe.declarations.push_back(std::move(identity));
         plan.declaration_probes.push_back(std::move(probe));
     }
-    plan.frontend_actions = frontend_action_ledger{
+    plan.frontend_actions = frontend_action_counts{
         .dependency_preparation_validations = 1u,
         .canonical_token_slice_scans = 2u,
         .signature_donor_token_slice_scans = 1u
@@ -397,9 +401,13 @@ enum class topology_mutation : std::uint8_t {
         "i64", "8")]])",
             R"("i32", "4")]])");
     }
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice(
-            "flatten_fixture_mutation.cppm", source);
+    const std::filesystem::path repository_root =
+        std::filesystem::absolute(".").lexically_normal();
+    const std::filesystem::path source_path =
+        repository_root / "flatten_fixture_mutation.cppm";
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(
+            source_path, source);
     materialization_region region = extract_materialization_region(
         sliced, "fixture.output", source);
     topology_plan topology = build_topology_plan(std::move(region), 16u);
@@ -407,15 +415,15 @@ enum class topology_mutation : std::uint8_t {
     std::vector<std::uint32_t> enabled = enabled_ordinals(topology, "2");
     return generation_plan{
         .topology = std::move(topology),
-        .repository_root = ".",
-        .source_path = "flatten_fixture_mutation.cppm",
-        .output_root = "generated/flatten_fixture_mutation",
+        .repository_root = repository_root,
+        .source_path = source_path,
+        .output_root = repository_root / "generated/flatten_fixture_mutation",
         .source_text = source,
         .source_sha256 = sha256_hex(source),
         .name = "flatten_fixture_mutation",
         .profile = "2",
         .enabled_ordinals = std::move(enabled),
-        .clang_version = "contract-test",
+        .clang_release = "contract-test",
         .compilation_signature = "contract-test",
         .compiler_module_inventory_sha256 =
             "00000000000000000000000000000000"
@@ -462,8 +470,8 @@ inline void verify_closed_grammar() {
         "closed grammar rejects concatenated literals");
     require_rejected(
         [] {
-            clang_structural::declaration_record declaration;
-            clang_structural::attribute_record attribute{
+            structural_analysis::declaration_record declaration;
+            structural_analysis::attribute_record attribute{
                 .argument_text =
                     R"("identity", "Bad", "i32", "int")",
             };
@@ -472,8 +480,8 @@ inline void verify_closed_grammar() {
         "group labels are lowercase stable identifiers");
     require_rejected(
         [] {
-            clang_structural::declaration_record declaration;
-            clang_structural::attribute_record attribute{
+            structural_analysis::declaration_record declaration;
+            structural_analysis::attribute_record attribute{
                 .argument_text =
                     R"("identity", "abi", "i32", "int;")",
             };
@@ -482,7 +490,7 @@ inline void verify_closed_grammar() {
         "replacement spellings reject declaration terminators");
     require_rejected(
         [] {
-            clang_structural::attribute_record attribute{
+            structural_analysis::attribute_record attribute{
                 .argument_text = R"("shape", "root", "root")",
             };
             static_cast<void>(parse_selection_attribute(attribute));
@@ -497,8 +505,8 @@ inline void verify_malformed_materialization_sources() {
     const auto reject_source = [](std::string source, std::string_view message) {
         require_rejected(
             [&source] {
-                const clang_structural::translation_unit sliced =
-                    clang_structural::scan_token_slice(
+                const structural_analysis::translation_unit sliced =
+                    structural_analysis::scan_token_slice(
                         "malformed_template_flatten.cppm", source);
                 materialization_region region = extract_materialization_region(
                     sliced, "fixture.output", source);
@@ -621,7 +629,7 @@ inline void verify_scheduler_highway_separation() {
     constexpr std::string_view output_module =
         "bioseq.scheduler.dispatch_processor";
     const auto scan = [](std::string source) {
-        return clang_structural::scan_token_slice(
+        return structural_analysis::scan_token_slice(
             "scheduler_highway_separation.cppm", source);
     };
     const auto source_with = [](std::string_view addition) {
@@ -637,7 +645,7 @@ inline void verify_scheduler_highway_separation() {
               "}\n";
     };
 
-    const clang_structural::translation_unit neutral = scan(source_with(
+    const structural_analysis::translation_unit neutral = scan(source_with(
         "import bioseq.highway.dispatch_contract;\n"
         "import bioseq.highway.dispatch_contract:pipeline;"));
     validate_scheduler_highway_source_separation(neutral, output_module);
@@ -647,7 +655,7 @@ inline void verify_scheduler_highway_separation() {
              std::string_view{
                  "bioseq.scheduler.dispatch_processor:highway_registry"},
          }) {
-        const clang_structural::translation_unit forbidden_import = scan(
+        const structural_analysis::translation_unit forbidden_import = scan(
             source_with("import " + std::string{imported} + ";"));
         require_rejected(
             [&forbidden_import] {
@@ -663,7 +671,7 @@ inline void verify_scheduler_highway_separation() {
              std::string_view{"HWY_EXPORT"},
              std::string_view{"HWY_DYNAMIC_DISPATCH"},
          }) {
-        const clang_structural::translation_unit forbidden_token = scan(
+        const structural_analysis::translation_unit forbidden_token = scan(
             source_with(
                 "namespace fixture_highway_token { inline constexpr int "
                 + std::string{token} + " = 1; }"));
@@ -676,7 +684,7 @@ inline void verify_scheduler_highway_separation() {
             "scheduler source accepted a forbidden Highway lexical token");
     }
 
-    const clang_structural::translation_unit simd_marked = scan(source_with(
+    const structural_analysis::translation_unit simd_marked = scan(source_with(
         "namespace [[bioseq::simd]] target { inline int value() { return 1; } }"));
     require_rejected(
         [&simd_marked] {
@@ -686,17 +694,17 @@ inline void verify_scheduler_highway_separation() {
         },
         "scheduler source accepted a bioseq::simd structural marker");
 
-    clang_structural::prepared_compilation_validation prepared;
+    structural_analysis::dependency_compilation_validation prepared;
     prepared.modules = {
-        clang_structural::preparation_module_identity{
+        structural_analysis::dependency_module_identity{
             .module_name = "bioseq.scheduler.dispatch_processor",
             .source_path = "dispatch_processor.cppm",
         },
-        clang_structural::preparation_module_identity{
+        structural_analysis::dependency_module_identity{
             .module_name = "bioseq.highway.dispatch_contract",
             .source_path = "highway_dispatch_contract.cppm",
         },
-        clang_structural::preparation_module_identity{
+        structural_analysis::dependency_module_identity{
             .module_name = "bioseq.highway.dispatch_contract:pipeline",
             .source_path = "highway_dispatch_pipeline_contract.cppm",
         },
@@ -708,9 +716,9 @@ inline void verify_scheduler_highway_separation() {
              std::string_view{
                  "bioseq.scheduler.dispatch_processor:highway_registry"},
          }) {
-        clang_structural::prepared_compilation_validation forbidden = prepared;
+        structural_analysis::dependency_compilation_validation forbidden = prepared;
         forbidden.modules.push_back(
-            clang_structural::preparation_module_identity{
+            structural_analysis::dependency_module_identity{
                 .module_name = std::string{provider},
                 .source_path = "forbidden_highway_provider.cppm",
             });
@@ -724,9 +732,9 @@ inline void verify_scheduler_highway_separation() {
 
     validate_scheduler_highway_source_separation(
         simd_marked, "fixture.unrelated_output");
-    clang_structural::prepared_compilation_validation unrelated = prepared;
+    structural_analysis::dependency_compilation_validation unrelated = prepared;
     unrelated.modules.push_back(
-        clang_structural::preparation_module_identity{
+        structural_analysis::dependency_module_identity{
             .module_name = "bioseq.highway.generated.linux.avx2",
             .source_path = "unrelated_policy_provider.cppm",
         });
@@ -1048,8 +1056,8 @@ inline void verify_production_declaration_heads_and_probes() {
             && !selector->content.contains(":cpu_preparation_support"),
         "scheduler preparation support must remain private to body-bearing units");
 
-    const clang_structural::translation_unit api_unit =
-        clang_structural::scan_token_slice(api->relative_path, api->content);
+    const structural_analysis::translation_unit api_unit =
+        structural_analysis::scan_token_slice(api->relative_path, api->content);
     const materialization_coordinate& representative =
         plan.topology.coordinates.front();
     for (const auto& [name, expected_digest] : expected_heads) {
@@ -1070,7 +1078,7 @@ inline void verify_production_declaration_heads_and_probes() {
             "authored scheduler declaration-head digest drifted");
 
         std::set<std::string, std::less<>> api_qualified_names;
-        for (const clang_structural::declaration_record& declaration :
+        for (const structural_analysis::declaration_record& declaration :
              api_unit.declarations) {
             if (declaration.name != name) continue;
             require(
@@ -1112,11 +1120,11 @@ inline void verify_production_declaration_heads_and_probes() {
                     "namespace " + std::string{identity} + " {")
                     == 1u,
             "each scheduler implementation must import preparation support and own its exact identity namespace");
-        const clang_structural::translation_unit implementation_unit =
-            clang_structural::scan_token_slice(
+        const structural_analysis::translation_unit implementation_unit =
+            structural_analysis::scan_token_slice(
                 implementation.relative_path, implementation.content);
         std::size_t definition_matches = 0u;
-        for (const clang_structural::declaration_record& declaration :
+        for (const structural_analysis::declaration_record& declaration :
              implementation_unit.declarations) {
             if (declaration.name != name) continue;
             ++definition_matches;
@@ -1247,13 +1255,13 @@ inline void verify_coordinate_axis_domains() {
 inline void verify_record_probe_provenance_placement() {
     constexpr std::string_view source =
         "namespace probe { struct scalar_type; }";
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice(
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(
             "record_probe_contract.cppm", source);
     require(
         sliced.declarations.size() == 1u
             && sliced.declarations.front().kind
-                == clang_structural::declaration_kind::record,
+                == structural_analysis::declaration_kind::record,
         "record probe fixture has one structural record declaration");
     generation_plan plan{.source_text = std::string{source}};
     owned_declaration entry{
@@ -1264,7 +1272,7 @@ inline void verify_record_probe_provenance_placement() {
         plan, entry, coordinate, true);
     const std::string expected =
         "struct [[bioseq::template_flatten_provenance(\""
-        + entry.declaration.provenance_id
+        + entry.declaration.source_identity
         + "\", \"7\")]] scalar_type";
     require(
         rendered == expected && !rendered.starts_with("[["),
@@ -1275,13 +1283,13 @@ inline void verify_record_probe_provenance_placement() {
 inline void verify_alias_probe_provenance_placement() {
     constexpr std::string_view source =
         "namespace probe { using scalar_type = int; }";
-    const clang_structural::translation_unit sliced =
-        clang_structural::scan_token_slice(
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(
             "alias_probe_contract.cppm", source);
     require(
         sliced.declarations.size() == 1u
             && sliced.declarations.front().kind
-                == clang_structural::declaration_kind::alias,
+                == structural_analysis::declaration_kind::alias,
         "alias probe fixture has one structural alias declaration");
     generation_plan plan{.source_text = std::string{source}};
     binding_record binding{
@@ -1307,7 +1315,7 @@ inline void verify_alias_probe_provenance_placement() {
         plan, binding, coordinate, true);
     const std::string expected =
         "using scalar_type [[bioseq::template_flatten_provenance(\""
-        + binding.declaration.provenance_id
+        + binding.declaration.source_identity
         + "\", \"7\")]] = long;\n";
     require(
         rendered == expected && !rendered.starts_with("[["),
@@ -1930,17 +1938,17 @@ inline void verify_preparation_action_trace_stamp_binding() {
         "profile=production\n"
         "prepare_action_trace_sha256="
         + sha256_hex(action_trace) + "\n";
-    validate_preparation_action_trace_stamp_binding(
+    validate_frontend_action_trace_stamp_binding(
         stamp, action_trace);
     require_rejected(
         [&] {
-            validate_preparation_action_trace_stamp_binding(
+            validate_frontend_action_trace_stamp_binding(
                 stamp, action_trace + " ");
         },
         "PREPARE stamp accepts independently substituted action-trace bytes");
     require_rejected(
         [&] {
-            validate_preparation_action_trace_stamp_binding(
+            validate_frontend_action_trace_stamp_binding(
                 replace_once(
                     stamp,
                     sha256_hex(action_trace),
@@ -1950,7 +1958,7 @@ inline void verify_preparation_action_trace_stamp_binding() {
         "PREPARE stamp accepts a stale action-trace digest");
     require_rejected(
         [&] {
-            validate_preparation_action_trace_stamp_binding(
+            validate_frontend_action_trace_stamp_binding(
                 stamp + "prepare_action_trace_sha256="
                     + sha256_hex(action_trace) + "\n",
                 action_trace);

@@ -17,9 +17,9 @@ import :openapi_parser;
 import :client_renderer;
 import :model;
 import bioseq.codegen.support;
-import bioseq.external.http_validation;
+import bioseq.common.http.validation;
 
-namespace http_validation = bioseq::external::http_validation;
+namespace http_validation = bioseq::common::http::validation;
 
 namespace bioseq::codegen::external {
 
@@ -261,7 +261,7 @@ operation: {}
             anonymous_security, anonymous_security["operation"]),
         "anonymous security alternative");
     require(
-        !http_validation::valid_header_name("Bad Header"),
+        !http_validation::is_valid_header_name("Bad Header"),
         "header token rejection");
     require(
         integration_scalar_literal(integration_scalar{

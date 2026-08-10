@@ -1,6 +1,6 @@
 // Differential tests for the PG-free H32 direct inverted-index prototype.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>

@@ -15,12 +15,13 @@ export namespace bioseq::codegen::highway {
 inline constexpr std::uint32_t manifest_schema_version = 1;
 inline constexpr std::string_view publication_policy = "highway";
 inline constexpr std::string_view publication_name = "highway";
+inline constexpr std::size_t highway_source_record_count = 16u;
 
 struct target_spec {
     std::string platform;
     std::string slug;
     std::string token;
-    std::string name_space;
+    std::string target_namespace;
     std::uint64_t bit{};
 };
 
@@ -45,14 +46,14 @@ struct required_slot_spec {
     std::string slot_field;
 };
 
-/** Test/benchmark-only ordinary implementation-unit template. */
+/** Unit-test-only ordinary implementation-unit template. */
 struct probe_spec {
     std::string key;
     std::filesystem::path path;
 };
 
 /** One bounded representation owner emitted beside a target's slot owners. */
-struct minimizer_repr_instance_spec {
+struct minimizer_representation_instance_spec {
     std::string owner_key;
     std::string algorithm;
     std::string source_key;
@@ -95,8 +96,8 @@ struct source_manifest {
     std::vector<slot_spec> slots;
     std::vector<required_slot_spec> required_slots;
     std::vector<probe_spec> unit_probes;
-    std::vector<probe_spec> bench_probes;
-    std::vector<minimizer_repr_instance_spec> minimizer_repr_instances;
+    std::vector<minimizer_representation_instance_spec>
+        minimizer_representation_instances;
     std::vector<domain_topology_expectation> domain_topologies;
 };
 
@@ -168,8 +169,7 @@ enum class artifact_kind : std::uint8_t {
     dispatch_inventory_implementation,
     test_support,
     unit_probe_implementation,
-    bench_probe_implementation,
-    minimizer_repr_instantiation,
+    minimizer_representation_instantiation,
 };
 
 struct generated_artifact {
@@ -185,7 +185,7 @@ struct generation_plan {
     target_manifest target_inventory;
     source_manifest source_inventory;
     std::vector<extracted_source> extracted_sources;
-    std::string clang_version;
+    std::string clang_release;
     std::string compilation_signature;
     std::vector<domain_topology_provenance> domain_topologies;
 };

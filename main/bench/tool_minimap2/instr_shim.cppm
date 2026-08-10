@@ -1,31 +1,10 @@
 /**
  * @file instr_shim.cppm
- * @brief C-callable trampolines into the bioseq instrumentation runtime.
+ * @brief C-linkage bridge from native minimap2 markers to instrumentation.
  *
- * The reference minimap2 sources under main/bench/tool_minimap2/minimap2/
- * are .c files compiled as C++ TUs. They cannot `import bioseq_instr;`
- * (regular TUs can in C++26, but the minimap2 sources only see plain
- * `#include "common.h"` in upstream form, so we keep them macro-driven).
- *
- * To wire those EASY_BLOCK call sites into our profiler without touching
- * the minimap2 sources beyond a single-line replacement, this module
- * imports bioseq_instr and exposes three extern-"C" functions:
- *
- *   bench_instr_region_register(name, file, line) — cold-path; resolves
- *      and caches a stable RegionDescriptor* for the given name.
- *   bench_instr_region_begin(desc)                — hot path; reads
- *      tls_profiler, returns t_begin_ns or 0 if profiling is off.
- *   bench_instr_region_end(desc, t_begin_ns)      — hot path; closes
- *      the region and updates the per-thread aggregate.
- *
- * The companion header (instr_shim.h) declares these in C linkage and
- * wraps them in a `BENCH_INSTR_BLOCK("name")` macro that mirrors the
- * shape of the original `EASY_BLOCK("name")` call sites we are replacing.
- *
- * Why a module unit, not a free header: the bioseq_instr API is defined
- * in C++26 modules (.cppm). Plain headers can't `import` them, but a
- * .cppm module unit can. The minimap2 .c files reach the shim via plain
- * extern "C" calls — no module dependency on their side.
+ * Native sources call the stable functions declared by `instr_shim.h`.
+ * This module keeps their C-linkage surface independent of the C++ module
+ * API while forwarding timing records into the benchmark thread profiler.
  */
 module;
 
@@ -33,76 +12,109 @@ module;
 
 export module bench.tool_minimap2.instr_shim;
 
-import bioseq.instr;
+import bioseq.instrumentation;
 
-namespace bench::tool_minimap2_instr_shim {
+namespace bioseq::bench::tool_minimap2_instrumentation {
 
-// Pin the trampolines to the canonical "timing only" args — the same
-// args the bench harness now installs (see report.cppm). Both sides of
-// the side-by-side comparison go through the same args so the per-region
-// overhead is identical and the delta is honest. The trampolines
-// short-circuit when no block is installed (i.e., outside the bench
-// harness or when profiling was runtime-disabled via set_runtime_enabled(false)).
-using args_t = bioseq::instr::context_args_profiling_timing_only;
+/** @brief Profiling policy shared with benchmark execution. */
+using profiling_configuration =
+    bioseq::instrumentation::benchmark_profiling_configuration;
 
-}  // namespace bench::tool_minimap2_instr_shim
+}  // namespace bioseq::bench::tool_minimap2_instrumentation
 
 extern "C" {
 
-/// Register-or-lookup a region by name. Cold path; intended to feed
-/// a static-local cache at the call site so subsequent visits cost only
-/// a single load.
+/**
+ * @brief Registers or finds a stable instrumentation region.
+ * @param[in] name Stable region key.
+ * @param[in] file Native source-file name retained for the C ABI.
+ * @param[in] line Native source line retained for the C ABI.
+ * @return Opaque address of the instrumentation descriptor.
+ */
 [[gnu::cold]]
 const void* bench_instr_region_register(
     const char* name,
     const char* /*file*/,
-    std::uint32_t /*line*/) noexcept
+    std::uint32_t /*line*/)
 {
-    // We discard file/line on the registration call: every shim
-    // invocation runs through this single trampoline so std::source_location
-    // would point at this function regardless. The descriptor's name is
-    // the only stable identity we expose. Dedup is by (name_hash, line)
-    // and since 'line' is fixed to register_region_static's own line,
-    // dedup degenerates to "by name", which is exactly what we want.
-    auto* desc = bioseq::instr::register_region_static(name);
-    return static_cast<const void*>(desc);
+    // The trampoline's own source location is common to every call, so the
+    // native marker name is the only meaningful stable identity here.
+    auto* descriptor =
+        bioseq::instrumentation::register_static_region(name);
+    return static_cast<const void*>(descriptor);
 }
 
-/// Open a region timer. Returns the t_begin_ns timestamp or 0 if
-/// profiling is currently disabled (no installed tls_profiler, or the
-/// process-wide flag is off, or the descriptor is invalid). The caller
-/// must pass the exact same desc + return value to ..._end().
+/**
+ * @brief Starts timing an instrumentation region.
+ * @param[in] descriptor_address Opaque registered descriptor address.
+ * @return Start time in nanoseconds, or zero when profiling is inactive.
+ */
 [[gnu::hot]]
-std::uint64_t bench_instr_region_begin(const void* desc_void) noexcept {
-    using args_t = bench::tool_minimap2_instr_shim::args_t;
-    if (!bioseq::instr::runtime_enabled()) return 0;
-    if (desc_void == nullptr) return 0;
-    const auto* desc = static_cast<const bioseq::instr::RegionDescriptor*>(desc_void);
-    if (desc->id == 0) return 0;
-    auto* prof = bioseq::instr::tls_profiler<args_t>;
-    if (prof == nullptr) return 0;
-    prof->stack_depth += 1;
-    return bioseq::instr::clock::now_ns();
+std::uint64_t bench_instr_region_begin(
+    const void* descriptor_address)
+{
+    using profiling_configuration =
+        bioseq::bench::tool_minimap2_instrumentation::profiling_configuration;
+    if (!bioseq::instrumentation::is_runtime_enabled()) {
+        return 0;
+    }
+    if (descriptor_address == nullptr) {
+        return 0;
+    }
+    const auto* descriptor = static_cast<
+        const bioseq::instrumentation::region_descriptor*>(
+            descriptor_address);
+    if (descriptor->id == 0) {
+        return 0;
+    }
+    auto* profiler = bioseq::instrumentation::active_thread_profiler<
+        profiling_configuration>;
+    if (profiler == nullptr) {
+        return 0;
+    }
+    profiler->stack_depth += 1;
+    return bioseq::instrumentation::clock::now_ns();
 }
 
-/// Close a region timer. No-op if t_begin_ns is 0 (i.e., the matching
-/// _begin call short-circuited). Otherwise records (now - t_begin) into
-/// the per-thread RegionAggregate for `desc`.
+/**
+ * @brief Finishes timing an instrumentation region.
+ * @param[in] descriptor_address Opaque registered descriptor address.
+ * @param[in] begin_time_ns Start value returned by `bench_instr_region_begin`.
+ */
 [[gnu::hot]]
-void bench_instr_region_end(const void* desc_void, std::uint64_t t_begin_ns) noexcept {
-    using args_t = bench::tool_minimap2_instr_shim::args_t;
-    if (t_begin_ns == 0) return;
-    if (desc_void == nullptr) return;
-    const auto* desc = static_cast<const bioseq::instr::RegionDescriptor*>(desc_void);
-    if (desc->id == 0) return;
-    const auto end_ns   = bioseq::instr::clock::now_ns();
-    const auto delta_ns = end_ns - t_begin_ns;
-    auto* prof = bioseq::instr::tls_profiler<args_t>;
-    if (prof == nullptr) return;
-    if (prof->stack_depth > 0) prof->stack_depth -= 1;
-    auto* agg = prof->aggregates.get_or_create(desc->id);
-    if (agg != nullptr) {
-        bioseq::instr::aggregate_record(*agg, delta_ns);
+void bench_instr_region_end(
+    const void* descriptor_address,
+    std::uint64_t begin_time_ns)
+{
+    using profiling_configuration =
+        bioseq::bench::tool_minimap2_instrumentation::profiling_configuration;
+    if (begin_time_ns == 0) {
+        return;
+    }
+    if (descriptor_address == nullptr) {
+        return;
+    }
+    const auto* descriptor = static_cast<
+        const bioseq::instrumentation::region_descriptor*>(
+            descriptor_address);
+    if (descriptor->id == 0) {
+        return;
+    }
+    const auto end_time_ns = bioseq::instrumentation::clock::now_ns();
+    const auto duration_ns = end_time_ns - begin_time_ns;
+    auto* profiler = bioseq::instrumentation::active_thread_profiler<
+        profiling_configuration>;
+    if (profiler == nullptr) {
+        return;
+    }
+    if (profiler->stack_depth > 0) {
+        profiler->stack_depth -= 1;
+    }
+    auto* aggregate = profiler->aggregates.find_or_create(descriptor->id);
+    if (aggregate != nullptr) {
+        bioseq::instrumentation::record_region_duration(
+            *aggregate,
+            duration_ns);
     }
 }
 

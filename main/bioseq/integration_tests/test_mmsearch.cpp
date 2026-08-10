@@ -15,8 +15,8 @@
 //   * SELECTs without an mmsearch qual on a `USING bioseq` table preserve the
 //     ordinary scan rows; mmsearch batching only engages for an owned qual.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 import bioseq.integration_tests.common;
 
 #include <array>

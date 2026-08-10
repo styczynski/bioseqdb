@@ -10,13 +10,13 @@
  *
  * The bit buffer holds up to 64 bits LSB-first. `refill()` fills the
  * buffer until either 8 bytes have been consumed from `_data` or the
- * buffer holds at least 57 bits (`kMaxPeekBits`). After `refill()` the
+ * buffer holds at least 57 bits (`maximum_peek_bits`). After `refill()` the
  * buffer holds in `[57, 63]` bits (assuming source has data); if source
  * runs out, the buffer holds all remaining bits.
  */
 module;
 
-#include "common.h"
+#include <libassert/assert.hpp>
 
 #include <bit>
 #include <cstddef>
@@ -25,13 +25,12 @@ module;
 
 export module bioseq.io.compression.bit_reader;
 
-import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 
 class bit_reader {
 public:
-    static constexpr std::size_t kBufferRefillSize = 128 * 1024;
+    static constexpr std::size_t buffer_refill_size = 128 * 1024;
     /// Max bits we can guarantee the buffer holds after a `refill()`
     /// call. Must be `<= 64 - 8` because `refill` shifts the loaded
     /// byte by `_bits_buffered`; with `<= 57`, the case
@@ -39,7 +38,7 @@ public:
     /// pushing bit 7 of that byte to position 64 (OUT of uint64_t),
     /// silently losing it. Keeping at most `64 - 8 = 56` ensures the
     /// loaded byte fully fits.
-    static constexpr std::size_t kMaxPeekBits      = sizeof(std::uint64_t) * 8 - 8;
+    static constexpr std::size_t maximum_peek_bits      = sizeof(std::uint64_t) * 8 - 8;
 
     bit_reader() = default;
 
@@ -52,11 +51,11 @@ public:
     bit_reader& operator=(bit_reader&&) = default;
 
     /// Peek N bits from the current position WITHOUT advancing. N is a
-    /// compile-time constant in [1, kMaxPeekBits].
+    /// compile-time constant in [1, maximum_peek_bits].
     template <std::size_t N>
     [[nodiscard]] std::uint64_t peek() noexcept {
-        static_assert(N >= 1 && N <= kMaxPeekBits,
-                      "bit_reader::peek<N>: N must be in [1, kMaxPeekBits].");
+        static_assert(N >= 1 && N <= maximum_peek_bits,
+                      "bit_reader::peek<N>: N must be in [1, maximum_peek_bits].");
         if (_bits_buffered < N) [[unlikely]] refill();
         return _bit_buffer & ((std::uint64_t{1} << N) - 1);
     }
@@ -64,8 +63,8 @@ public:
     /// Peek + advance. Same N constraints as `peek<N>()`.
     template <std::size_t N>
     [[nodiscard]] std::uint64_t read() noexcept {
-        static_assert(N >= 1 && N <= kMaxPeekBits,
-                      "bit_reader::read<N>: N must be in [1, kMaxPeekBits].");
+        static_assert(N >= 1 && N <= maximum_peek_bits,
+                      "bit_reader::read<N>: N must be in [1, maximum_peek_bits].");
         if (_bits_buffered < N) [[unlikely]] refill();
         const std::uint64_t result = _bit_buffer & ((std::uint64_t{1} << N) - 1);
         _bit_buffer  >>= N;
@@ -147,7 +146,7 @@ public:
     /// Fill the bit buffer. After this call the buffer holds at least
     /// `min(8 * remaining_bytes, 57)` bits.
     void refill() noexcept {
-        while (_bits_buffered <= kMaxPeekBits && _byte_cursor < _data.size()) {
+        while (_bits_buffered <= maximum_peek_bits && _byte_cursor < _data.size()) {
             const std::uint64_t byte =
                 static_cast<std::uint64_t>(_data[_byte_cursor]);
             _bit_buffer |= (byte << _bits_buffered);

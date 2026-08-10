@@ -8,7 +8,7 @@
  * by the suffix bits. Encoding `code_length=0` in the primary entry
  * means "long code; consult fallthrough".
  *
- * The fallthrough is a `std::array<uint16_t, kMaxFallthroughEntries>` —
+ * The fallthrough is a `std::array<uint16_t, maximum_fallthrough_entries>` —
  * not a `std::vector` — so `consteval`-built FIXED tables can land in an
  * `inline constexpr` static. RFC 1951 §3.2.6 shapes these for the FIXED
  * case (lit/len + distance); they're shared across every fixed-Huffman
@@ -16,7 +16,6 @@
  */
 module;
 
-#include "common.h"
 
 #include <array>
 #include <cstddef>
@@ -25,7 +24,6 @@ module;
 
 export module bioseq.io.compression.huffman;
 
-import bioseq.common.mlogging;
 import bioseq.io.compression.bit_reader;
 
 export namespace bioseq::io::compression {
@@ -33,9 +31,9 @@ export namespace bioseq::io::compression {
 namespace detail {
 
 /// Number of code-length codes in the precode (RFC 1951 §3.2.7).
-inline constexpr std::size_t kPrecodeAlphabet = 19;
+inline constexpr std::size_t precode_alphabet = 19;
 /// Maximum code length used by DEFLATE precode (lit/len/dist tables).
-inline constexpr std::size_t kPrecodeMaxBits  = 7;
+inline constexpr std::size_t precode_maximum_bits  = 7;
 
 /// FIXED lit/len Huffman code lengths from RFC 1951 §3.2.6:
 ///   symbols   0-143 → 8 bits
@@ -62,19 +60,19 @@ fixed_distance_code_lengths() noexcept {
 
 }  // namespace detail
 
-/// `kMaxFallthroughEntries` covers RFC 1951's worst case — 288-symbol
+/// `maximum_fallthrough_entries` covers RFC 1951's worst case — 288-symbol
 /// alphabet with all 15-bit codes. The 11-bit primary captures every
 /// code <= 11 bits; the residual is at most `Alphabet * 2^4 / 2^4`
 /// rounded up to the next 16-element cacheline.
 template <std::size_t PrimaryBits, std::size_t Alphabet>
 class canonical_huffman_decoder {
 public:
-    static constexpr std::size_t kPrimaryBits          = PrimaryBits;
-    static constexpr std::size_t kPrimarySize          = std::size_t{1} << PrimaryBits;
-    static constexpr std::size_t kMaxCodeBits          = 15;
-    static constexpr std::size_t kMaxFallthroughEntries =
+    static constexpr std::size_t primary_bit_count          = PrimaryBits;
+    static constexpr std::size_t primary_table_size          = std::size_t{1} << PrimaryBits;
+    static constexpr std::size_t maximum_code_bits          = 15;
+    static constexpr std::size_t maximum_fallthrough_entries =
         ((Alphabet * 16) + 15) & ~std::size_t{15};
-    static constexpr std::uint16_t kInvalidSymbol = 0xFFFF;
+    static constexpr std::uint16_t invalid_symbol = 0xFFFF;
 
     constexpr canonical_huffman_decoder() noexcept = default;
 
@@ -97,26 +95,26 @@ public:
     /// full `build()` would have set.
     [[nodiscard]] static constexpr bool is_valid_code_lengths(
         std::span<const std::uint8_t> code_lengths) noexcept {
-        std::array<std::uint32_t, kMaxCodeBits + 2> length_counts{};
+        std::array<std::uint32_t, maximum_code_bits + 2> length_counts{};
         for (auto length : code_lengths) {
-            if (length > kMaxCodeBits) return false;
+            if (length > maximum_code_bits) return false;
             ++length_counts[length];
         }
         length_counts[0] = 0;
 
         std::uint32_t total_assigned = 0;
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             total_assigned += length_counts[length];
         }
         if (total_assigned == 0) return false;
 
         std::uint32_t kraft_sum = 0;
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             kraft_sum += length_counts[length]
-                       * (std::uint32_t{1} << (kMaxCodeBits - length));
+                       * (std::uint32_t{1} << (maximum_code_bits - length));
         }
         const std::uint32_t kraft_target =
-            std::uint32_t{1} << kMaxCodeBits;
+            std::uint32_t{1} << maximum_code_bits;
         const bool single_one_bit =
             (total_assigned == 1u) && (length_counts[1] == 1u);
         return kraft_sum == kraft_target || single_one_bit;
@@ -124,10 +122,10 @@ public:
 
     [[nodiscard]] constexpr bool is_valid() const noexcept { return _is_valid; }
 
-    /// Decode the next symbol from `reader`. Returns `kInvalidSymbol`
+    /// Decode the next symbol from `reader`. Returns `invalid_symbol`
     /// on a malformed stream.
     [[nodiscard]] std::uint16_t decode(bit_reader& reader) const noexcept {
-        const std::uint64_t peeked = reader.peek<kPrimaryBits>();
+        const std::uint64_t peeked = reader.peek<primary_bit_count>();
         const std::uint16_t entry  = _primary[peeked];
         const std::uint8_t  code_length =
             static_cast<std::uint8_t>(entry & 0x0Fu);
@@ -143,29 +141,29 @@ public:
     /// Direct primary-table view for the Huffman fast loop (§5.3).
     /// Each entry packs `(symbol << 4) | code_length`; `code_length == 0`
     /// signals "consult fallthrough".
-    [[nodiscard]] std::span<const std::uint16_t, kPrimarySize>
+    [[nodiscard]] std::span<const std::uint16_t, primary_table_size>
     primary_table() const noexcept {
-        return std::span<const std::uint16_t, kPrimarySize>{
-            _primary.data(), kPrimarySize};
+        return std::span<const std::uint16_t, primary_table_size>{
+            _primary.data(), primary_table_size};
     }
 
 private:
     [[nodiscard]] std::uint16_t
     decode_fallthrough(bit_reader& reader) const noexcept {
         // Fall back to a slow per-bit walk via the canonical first-code-
-        // per-length table. Codes longer than kPrimaryBits land here.
-        // We probe each length from kPrimaryBits+1 to kMaxCodeBits and
+        // per-length table. Codes longer than primary_bit_count land here.
+        // We probe each length from primary_bit_count+1 to maximum_code_bits and
         // see if the prefix of that length matches an assigned code.
         std::uint64_t code_be = 0;
-        std::uint64_t accumulated = reader.peek<kMaxCodeBits>();
-        // Reverse PrimaryBits..kMaxCodeBits-1 of `accumulated`.
+        std::uint64_t accumulated = reader.peek<maximum_code_bits>();
+        // Reverse PrimaryBits..maximum_code_bits-1 of `accumulated`.
         // The fallthrough lookup uses a linear scan: we walk the
         // canonical table sorted by (length, code) and find the entry
         // whose `(canonical_code, length)` matches the read prefix.
         // Build the prefix MSB-first in `code_be` for comparison.
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             code_be = (code_be << 1) | ((accumulated >> (length - 1)) & 1u);
-            if (length <= kPrimaryBits) continue;
+            if (length <= primary_bit_count) continue;
             // The canonical prefix-code value for a code of `length`
             // bits sits in `_first_code_per_length[length]` and the
             // first symbol with that length sits in
@@ -175,19 +173,19 @@ private:
             const std::uint32_t first_code = _first_code_per_length[length];
             const std::uint32_t next_code  = _first_code_per_length[length + 1] >> 1;
             if (code_be < first_code) continue;
-            if (code_be < next_code || length == kMaxCodeBits) {
+            if (code_be < next_code || length == maximum_code_bits) {
                 const std::uint32_t base_offset =
                     _first_symbol_offset_per_length[length];
                 const std::uint32_t symbol_index = base_offset
                     + static_cast<std::uint32_t>(code_be - first_code);
                 if (symbol_index >= _canonical_symbols_count) {
-                    return kInvalidSymbol;
+                    return invalid_symbol;
                 }
                 reader.skip(length);
                 return _canonical_symbols[symbol_index];
             }
         }
-        return kInvalidSymbol;
+        return invalid_symbol;
     }
 
     /// In-place build. Returns true on success.
@@ -201,9 +199,9 @@ private:
         _canonical_symbols_count = 0;
 
         // Count how many codes have each length.
-        std::array<std::uint32_t, kMaxCodeBits + 2> length_counts{};
+        std::array<std::uint32_t, maximum_code_bits + 2> length_counts{};
         for (auto length : code_lengths) {
-            if (length > kMaxCodeBits) return false;
+            if (length > maximum_code_bits) return false;
             ++length_counts[length];
         }
         // RFC 1951 Appendix C: bl_count[0] must be 0 for the canonical
@@ -214,17 +212,17 @@ private:
         length_counts[0] = 0;
 
         // Compute first canonical code per length (MSB-first walk).
-        std::array<std::uint32_t, kMaxCodeBits + 2> next_code{};
+        std::array<std::uint32_t, maximum_code_bits + 2> next_code{};
         std::uint32_t code = 0;
         std::uint32_t total_assigned = 0;
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             code = (code + length_counts[length - 1]) << 1;
             next_code[length] = code;
             _first_code_per_length[length] = code;
             total_assigned += length_counts[length];
         }
-        _first_code_per_length[kMaxCodeBits + 1] =
-            (code + length_counts[kMaxCodeBits]) << 1;
+        _first_code_per_length[maximum_code_bits + 1] =
+            (code + length_counts[maximum_code_bits]) << 1;
 
         // Reject incomplete codes for non-trivial alphabets. A
         // single-symbol alphabet with one code of length 1 is valid.
@@ -233,7 +231,7 @@ private:
         // Completeness check (Kraft inequality). For a complete binary
         // prefix tree, sum_{L=1..MAX} N_L · 2^(MAX-L) must equal
         // 2^MAX exactly — anything less leaves uncovered leaves and
-        // means some bit patterns map to no symbol (kInvalidSymbol on
+        // means some bit patterns map to no symbol (invalid_symbol on
         // decode). Anything more would imply collisions which the
         // build couldn't represent. Without this, a precode-valid
         // dynamic block can still build malformed literal/distance
@@ -245,12 +243,12 @@ private:
         // with one symbol of length 1) covers only half the tree but
         // is still considered well-formed by RFC 1951 §3.2.7.
         std::uint32_t kraft_sum = 0;
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             kraft_sum += length_counts[length]
-                       * (std::uint32_t{1} << (kMaxCodeBits - length));
+                       * (std::uint32_t{1} << (maximum_code_bits - length));
         }
         const std::uint32_t kraft_target =
-            std::uint32_t{1} << kMaxCodeBits;
+            std::uint32_t{1} << maximum_code_bits;
         const bool single_one_bit =
             (total_assigned == 1u) && (length_counts[1] == 1u);
         if (kraft_sum != kraft_target && !single_one_bit) {
@@ -259,9 +257,9 @@ private:
 
         // Bucket-sort symbols by (length, symbol) to derive
         // `_canonical_symbols`.
-        std::array<std::uint32_t, kMaxCodeBits + 2> length_running_offset{};
+        std::array<std::uint32_t, maximum_code_bits + 2> length_running_offset{};
         std::uint32_t cursor = 0;
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             length_running_offset[length] = cursor;
             _first_symbol_offset_per_length[length] = cursor;
             cursor += length_counts[length];
@@ -279,13 +277,13 @@ private:
         // Each canonical code of length L expands to (1 << (PrimaryBits - L))
         // primary-table entries with the bits AFTER the code as the
         // varying part.
-        std::array<std::uint32_t, kMaxCodeBits + 2> per_length_code{};
-        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+        std::array<std::uint32_t, maximum_code_bits + 2> per_length_code{};
+        for (std::size_t length = 1; length <= maximum_code_bits; ++length) {
             per_length_code[length] = _first_code_per_length[length];
         }
         for (std::size_t symbol = 0; symbol < code_lengths.size(); ++symbol) {
             const std::uint8_t length = code_lengths[symbol];
-            if (length == 0 || length > kPrimaryBits) continue;
+            if (length == 0 || length > primary_bit_count) continue;
             const std::uint32_t canonical_code = per_length_code[length]++;
             // Reverse `canonical_code`'s low `length` bits to get the
             // LSB-first index into the primary table.
@@ -296,7 +294,7 @@ private:
             }
             const std::uint16_t entry = static_cast<std::uint16_t>(
                 (static_cast<std::uint32_t>(symbol) << 4) | length);
-            const std::size_t fanout = std::size_t{1} << (kPrimaryBits - length);
+            const std::size_t fanout = std::size_t{1} << (primary_bit_count - length);
             for (std::size_t variant = 0; variant < fanout; ++variant) {
                 const std::size_t index =
                     reversed | (variant << length);
@@ -307,27 +305,27 @@ private:
     }
 
     bool _is_valid = false;
-    alignas(64) std::array<std::uint16_t, kPrimarySize>           _primary{};
+    alignas(64) std::array<std::uint16_t, primary_table_size>           _primary{};
     /// Canonical sorted-by-length symbol list. Index = `first_symbol_offset[length]
     /// + (canonical_code - first_code[length])`.
-    alignas(64) std::array<std::uint16_t, kMaxFallthroughEntries> _canonical_symbols{};
+    alignas(64) std::array<std::uint16_t, maximum_fallthrough_entries> _canonical_symbols{};
     std::uint32_t _canonical_symbols_count = 0;
-    std::array<std::uint32_t, kMaxCodeBits + 2> _first_code_per_length{};
-    std::array<std::uint32_t, kMaxCodeBits + 2> _first_symbol_offset_per_length{};
+    std::array<std::uint32_t, maximum_code_bits + 2> _first_code_per_length{};
+    std::array<std::uint32_t, maximum_code_bits + 2> _first_symbol_offset_per_length{};
 };
 
 using lit_len_decoder  = canonical_huffman_decoder<11, 288>;
 using distance_decoder = canonical_huffman_decoder<9,  30>;
-using precode_decoder  = canonical_huffman_decoder<7,  detail::kPrecodeAlphabet>;
+using precode_decoder  = canonical_huffman_decoder<7,  detail::precode_alphabet>;
 
 /// FIXED Huffman tables (RFC 1951 §3.2.6) — same across every gzip file.
 /// `consteval` build runs at compile time; `inline` lets the linker
 /// share one copy across all translation units. ~10% of real-world
 /// blocks use FIXED encoding; this saves the per-block primary-table
 /// build on those.
-inline const lit_len_decoder kFixedLitLenDecoder =
+inline const lit_len_decoder fixed_literal_length_decoder =
     lit_len_decoder::build(detail::fixed_lit_len_code_lengths());
-inline const distance_decoder kFixedDistanceDecoder =
+inline const distance_decoder fixed_distance_decoder =
     distance_decoder::build(detail::fixed_distance_code_lengths());
 
 }  // namespace bioseq::io::compression

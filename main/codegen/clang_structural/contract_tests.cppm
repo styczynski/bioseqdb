@@ -44,11 +44,11 @@ module;
 #error "PREPARE contract tests require the repository root"
 #endif
 
-export module bioseq.codegen.clang_structural.contract_tests;
+export module bioseq.codegen.structural_analysis.contract_tests;
 
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 
-namespace bioseq::codegen::clang_structural::contract_detail {
+namespace bioseq::codegen::structural_analysis::contract_detail {
 
 struct configured_toolchain {
     std::filesystem::path clang_binary{
@@ -326,7 +326,7 @@ struct raw_command {
     };
 }
 
-[[nodiscard]] inline prepared_compilation_environment prepare(
+[[nodiscard]] inline dependency_compilation_environment prepare(
     const configured_toolchain& toolchain,
     const std::vector<std::filesystem::path>& sources,
     const std::filesystem::path& raw_database,
@@ -348,7 +348,7 @@ struct raw_command {
         "support");
 }
 
-[[nodiscard]] inline prepared_compilation_validation validate(
+[[nodiscard]] inline dependency_compilation_validation validate(
     const configured_toolchain& toolchain,
     const std::vector<std::filesystem::path>& sources,
     const std::filesystem::path& owned_database,
@@ -357,7 +357,7 @@ struct raw_command {
     std::string_view profile = "production",
     std::optional<std::string_view> clang_sha256 = std::nullopt,
     std::optional<std::filesystem::path> clang_binary = std::nullopt) {
-    return validate_prepared_compilation_environment(
+    return validate_dependency_compilation_environment(
         sources,
         owned_database,
         pcm_root,
@@ -375,7 +375,7 @@ struct raw_command {
 }
 
 inline void publish_prepared(
-    const prepared_compilation_environment& prepared,
+    const dependency_compilation_environment& prepared,
     const std::filesystem::path& owned_database,
     const std::filesystem::path& manifest) {
     write_file(owned_database, prepared.compile_database_json);
@@ -420,7 +420,7 @@ inline void publish_prepared(
 }
 
 [[nodiscard]] inline std::filesystem::path first_pcm_dependency(
-    const prepared_compilation_environment& prepared) {
+    const dependency_compilation_environment& prepared) {
     const auto pcm = std::ranges::find_if(
         prepared.dependencies,
         [](const std::filesystem::path& dependency) {
@@ -487,9 +487,9 @@ inline void assert_toolchain_exists(
         "configure-time tool hashes are not SHA-256 values");
 }
 
-}  // namespace bioseq::codegen::clang_structural::contract_detail
+}  // namespace bioseq::codegen::structural_analysis::contract_detail
 
-export namespace bioseq::codegen::clang_structural {
+export namespace bioseq::codegen::structural_analysis {
 
 inline void run_preparation_contract_self_tests() {
     using namespace contract_detail;
@@ -521,7 +521,7 @@ constexpr int indirect = 9;
         "token_slice_contract.cppm", token_slice_source);
     require(
         token_slice.mode == collection_mode::token_slice
-            && token_slice.schema_version == model_schema_version
+            && token_slice.schema_revision == k_model_schema_revision
             && token_slice.source_path
                 == std::filesystem::path{"token_slice_contract.cppm"}
             && !token_slice.source_sha256.empty(),
@@ -551,7 +551,7 @@ constexpr int indirect = 9;
         selected_namespace->is_inline
             && !selected_namespace->is_anonymous
             && !selected_namespace->is_reopened
-            && !selected_namespace->provenance_id.empty()
+            && !selected_namespace->source_identity.empty()
             && selected_namespace->stable_usr.empty(),
         "token-slice namespace mixed lexical and semantic identity facts");
     require(
@@ -586,14 +586,14 @@ constexpr int indirect = 9;
                 == attribute_placement::namespace_head
             && source_text(
                    token_slice_source,
-                   namespace_marker.range)
+                   namespace_marker.spelling_range)
                 == "bioseq::template_flatten(\"Alphabet\")"
             && source_text(
                    token_slice_source,
                    namespace_marker.argument_range) == "\"Alphabet\""
             && source_text(
                    token_slice_source,
-                   namespace_marker.complete_range)
+                   namespace_marker.removal_range)
                 == "[[bioseq::template_flatten(\"Alphabet\")]]",
         "token-slice namespace marker identity or source geometry changed");
 
@@ -641,9 +641,9 @@ constexpr int indirect = 9;
             selected_children,
             [](const declaration_record* declaration) {
                 return declaration->specifiers.direct_namespace_member
-                    && !declaration->provenance_id.empty()
+                    && !declaration->source_identity.empty()
                     && !declaration
-                            ->immediate_namespace_provenance_id.empty()
+                            ->immediate_namespace_source_identity.empty()
                     && declaration
                             ->immediate_namespace_stable_usr.empty()
                     && declaration->stable_usr.empty();
@@ -708,7 +708,7 @@ constexpr int indirect = 9;
                    table_marker->argument_range) == "\"small\""
             && source_text(
                    token_slice_source,
-                   table_marker->complete_range)
+                   table_marker->removal_range)
                 == "bioseq::template_flatten_when(\"small\"),",
         "token-slice shared attribute segment geometry is not removable");
 
@@ -751,7 +751,7 @@ constexpr int indirect = 9;
         map_marker != map_value.attributes.end()
             && source_text(
                    token_slice_source,
-                   map_marker->complete_range)
+                   map_marker->removal_range)
                 == "[[bioseq::template_flatten_entry(\"map\")]]",
         "token-slice function marker geometry changed");
 
@@ -789,11 +789,11 @@ constexpr int indirect = 9;
         "token-slice preprocessor geometry omitted a raw directive");
     const auto branch_if = std::ranges::find(
         token_slice.preprocessor_directives,
-        preprocessor_directive_kind::if_,
+        preprocessor_directive_kind::if_directive,
         &preprocessor_directive_record::kind);
     const auto branch_else = std::ranges::find(
         token_slice.preprocessor_directives,
-        preprocessor_directive_kind::else_,
+        preprocessor_directive_kind::else_directive,
         &preprocessor_directive_record::kind);
     const auto branch_endif = std::ranges::find(
         token_slice.preprocessor_directives,
@@ -861,11 +861,11 @@ scalar_type map_value(scalar_type value);
     const auto probed_scalar = std::ranges::find(
         declaration_probe.declarations,
         "canonical.cppm#declaration:101",
-        &declaration_record::provenance_id);
+        &declaration_record::source_identity);
     const auto probed_map = std::ranges::find(
         declaration_probe.declarations,
         "canonical.cppm#declaration:202",
-        &declaration_record::provenance_id);
+        &declaration_record::source_identity);
     require(
         probed_scalar != declaration_probe.declarations.end()
             && probed_map != declaration_probe.declarations.end(),
@@ -875,9 +875,9 @@ scalar_type map_value(scalar_type value);
             && !probed_map->stable_usr.empty()
             && probed_scalar->stable_usr != probed_map->stable_usr
             && !probed_scalar
-                    ->immediate_namespace_provenance_id.empty()
+                    ->immediate_namespace_source_identity.empty()
             && !probed_map
-                    ->immediate_namespace_provenance_id.empty()
+                    ->immediate_namespace_source_identity.empty()
             && !probed_scalar->immediate_namespace_stable_usr.empty()
             && probed_scalar->immediate_namespace_stable_usr
                 == probed_map->immediate_namespace_stable_usr,
@@ -897,8 +897,8 @@ scalar_type map_value(scalar_type value);
         "changed");
     require(
         std::ranges::contains(
-            probed_map->referenced_declaration_provenance_ids,
-            probed_scalar->provenance_id),
+            probed_map->referenced_declaration_source_identities,
+            probed_scalar->source_identity),
         "declaration probe did not link a referenced semantic declaration "
         "back to canonical provenance");
 
@@ -916,7 +916,7 @@ extern int global_value;
     const auto global_value = std::ranges::find(
         global_probe.declarations,
         "global.cpp#declaration:11",
-        &declaration_record::provenance_id);
+        &declaration_record::source_identity);
     require(
         global_value != global_probe.declarations.end()
             && global_value->attachment
@@ -1077,14 +1077,14 @@ namespace [[bioseq::similar]] decoy {}
                 const bool lambda =
                     callable.kind == callable_kind::lambda;
                 return (lambda
-                            ? callable.hwy_attr_insertion.byte_offset
+                            ? callable.highway_attribute_insertion.byte_offset
                                     >= callable.declaration_range.begin.byte_offset
-                                && callable.hwy_attr_insertion.byte_offset
+                                && callable.highway_attribute_insertion.byte_offset
                                     <= callable.body_range.begin.byte_offset
-                            : callable.hwy_attr_insertion.byte_offset
+                            : callable.highway_attribute_insertion.byte_offset
                                     >= callable.declaration_range.begin
                                            .byte_offset
-                                && callable.hwy_attr_insertion.byte_offset
+                                && callable.highway_attribute_insertion.byte_offset
                                     < callable.body_range.begin.byte_offset)
                     && callable.body_range.begin.byte_offset
                         < callable.body_range.end.byte_offset
@@ -1101,7 +1101,7 @@ namespace [[bioseq::similar]] decoy {}
     require(
         lambda != clang_namespace.callables.end()
             && simd_marker_source.substr(
-                lambda->hwy_attr_insertion.byte_offset,
+                lambda->highway_attribute_insertion.byte_offset,
                 std::string_view{" constexpr"}.size()) == " constexpr",
         "Clang structural scan did not place the lambda HWY_ATTR insertion "
         "immediately after its explicit parameter list; "
@@ -1112,7 +1112,7 @@ namespace [[bioseq::similar]] decoy {}
             [&](const callable_insertion_record& callable) {
                 return callable.kind == callable_kind::lambda
                     && simd_marker_source.substr(
-                        callable.hwy_attr_insertion.byte_offset,
+                        callable.highway_attribute_insertion.byte_offset,
                         std::string_view{" {"}.size()) == " {";
             }),
         "Clang structural scan did not place the parenthesis-free lambda "
@@ -1123,7 +1123,7 @@ namespace [[bioseq::similar]] decoy {}
             clang_namespace.callables,
             [&](const callable_insertion_record& callable) {
                 const std::size_t insertion =
-                    callable.hwy_attr_insertion.byte_offset;
+                    callable.highway_attribute_insertion.byte_offset;
                 return callable.kind == callable_kind::lambda
                     && insertion > 0u
                     && simd_marker_source[insertion - 1u] == '>'
@@ -1194,7 +1194,7 @@ namespace [[bioseq::similar]] decoy {}
     require(
         macro_map_value != clang_namespace.callables.end()
             && simd_marker_source.substr(
-                macro_map_value->hwy_attr_insertion.byte_offset,
+                macro_map_value->highway_attribute_insertion.byte_offset,
                 std::string_view{"FIXTURE_INLINE"}.size())
                 == "FIXTURE_INLINE",
         "Clang structural scan did not map a macro-prefixed callable "
@@ -1384,14 +1384,14 @@ inline int invoke() {
         dependency_compilation_manifest_authority(
             "support", guard_authority);
     const auto validate_guard_environment =
-        [&](const prepared_compilation_environment& prepared) {
+        [&](const dependency_compilation_environment& prepared) {
             publish_prepared(
                 prepared,
                 guard_owned_database,
                 guard_pcm_manifest);
-            validate_dependency_compilation_authority_seal(
+            validate_dependency_compilation_roots(
                 guard_authority, guard_owned_database);
-            return validate_prepared_compilation_environment(
+            return validate_dependency_compilation_environment(
                 guard_authority.root_source_paths,
                 guard_owned_database,
                 guard_pcm_root,
@@ -1408,53 +1408,53 @@ inline int invoke() {
                 guard_manifest_authority);
         };
     const auto count_actions =
-        [](const prepared_compilation_environment& prepared,
-           const preparation_action_kind kind,
-           const preparation_action_disposition disposition) {
+        [](const dependency_compilation_environment& prepared,
+           const frontend_action_kind kind,
+           const frontend_action_outcome outcome) {
             return std::ranges::count_if(
                 prepared.observed_actions,
-                [&](const preparation_action_record& action) {
+                [&](const frontend_action_record& action) {
                     return action.kind == kind
-                        && action.disposition == disposition;
+                        && action.outcome == outcome;
                 });
         };
 
-    const prepared_compilation_environment cold_guard =
+    const dependency_compilation_environment cold_guard =
         prepare_guard();
     require(
         cold_guard.observed_actions.size() == 7u
             && count_actions(
                    cold_guard,
-                   preparation_action_kind::canonical_token_slice,
-                   preparation_action_disposition::executed) == 1u
+                   frontend_action_kind::canonical_token_slice,
+                   frontend_action_outcome::executed) == 1u
             && count_actions(
                    cold_guard,
-                   preparation_action_kind::p1689_dependency_discovery,
-                   preparation_action_disposition::executed) == 2u
+                   frontend_action_kind::p1689_dependency_discovery,
+                   frontend_action_outcome::executed) == 2u
             && count_actions(
                    cold_guard,
-                   preparation_action_kind::make_dependency_scan,
-                   preparation_action_disposition::executed) == 2u
+                   frontend_action_kind::make_dependency_scan,
+                   frontend_action_outcome::executed) == 2u
             && count_actions(
                    cold_guard,
-                   preparation_action_kind::pcm_compilation,
-                   preparation_action_disposition::executed) == 2u,
+                   frontend_action_kind::pcm_compilation,
+                   frontend_action_outcome::executed) == 2u,
         "cold dependency-only PREPARE did not observe the exact token, "
         "P1689, make-dependency, and PCM action set");
-    const prepared_compilation_validation cold_guard_validation =
+    const dependency_compilation_validation cold_guard_validation =
         validate_guard_environment(cold_guard);
     const std::string cold_guard_trace =
-        render_preparation_action_trace(cold_guard);
+        render_frontend_action_trace(cold_guard);
     write_file(guard_action_trace, cold_guard_trace);
-    const preparation_action_trace_validation cold_trace_validation =
-        validate_preparation_action_trace(
+    const frontend_trace_validation cold_trace_validation =
+        validate_frontend_action_trace(
             guard_action_trace,
             guard_authority,
             cold_guard_validation);
     require(
-        cold_trace_validation.summary.canonical_token_slice_actions
+        cold_trace_validation.counts.canonical_token_slice_actions
                 == 1u
-            && cold_trace_validation.summary
+            && cold_trace_validation.counts
                     .canonical_semantic_frontend_actions
                 == 0u,
         "cold dependency-only action trace did not prove one canonical "
@@ -1509,7 +1509,7 @@ inline int invoke() {
             std::string(64u, '0')));
     require_failure(
         [&] {
-            static_cast<void>(validate_preparation_action_trace(
+            static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
                 cold_guard_validation));
@@ -1517,15 +1517,15 @@ inline int invoke() {
         "self-seal is invalid",
         "dependency-only action trace byte tamper");
 
-    prepared_compilation_environment semantic_tamper = cold_guard;
-    semantic_tamper.observed_actions.front().input_class =
-        preparation_input_class::signature_donor;
+    dependency_compilation_environment semantic_tamper = cold_guard;
+    semantic_tamper.observed_actions.front().input_role =
+        compilation_input_role::signature_donor;
     write_file(
         guard_action_trace,
-        render_preparation_action_trace(semantic_tamper));
+        render_frontend_action_trace(semantic_tamper));
     require_failure(
         [&] {
-            static_cast<void>(validate_preparation_action_trace(
+            static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
                 cold_guard_validation));
@@ -1533,14 +1533,14 @@ inline int invoke() {
         "canonical token-slice action has invalid",
         "dependency-only re-sealed semantic trace tamper");
 
-    prepared_compilation_environment closure_tamper = cold_guard;
+    dependency_compilation_environment closure_tamper = cold_guard;
     closure_tamper.compile_database_json.push_back(' ');
     write_file(
         guard_action_trace,
-        render_preparation_action_trace(closure_tamper));
+        render_frontend_action_trace(closure_tamper));
     require_failure(
         [&] {
-            static_cast<void>(validate_preparation_action_trace(
+            static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
                 cold_guard_validation));
@@ -1548,40 +1548,40 @@ inline int invoke() {
         "metadata differs from the validated",
         "dependency-only re-sealed closure trace tamper");
 
-    const prepared_compilation_environment warm_guard =
+    const dependency_compilation_environment warm_guard =
         prepare_guard();
     require(
         warm_guard.observed_actions.size() == 7u
             && count_actions(
                    warm_guard,
-                   preparation_action_kind::p1689_dependency_discovery,
-                   preparation_action_disposition::executed) == 2u
+                   frontend_action_kind::p1689_dependency_discovery,
+                   frontend_action_outcome::executed) == 2u
             && count_actions(
                    warm_guard,
-                   preparation_action_kind::make_dependency_scan,
-                   preparation_action_disposition::validated_cache_hit)
+                   frontend_action_kind::make_dependency_scan,
+                   frontend_action_outcome::validated_cache_hit)
                 == 2u
             && count_actions(
                    warm_guard,
-                   preparation_action_kind::pcm_compilation,
-                   preparation_action_disposition::validated_cache_hit)
+                   frontend_action_kind::pcm_compilation,
+                   frontend_action_outcome::validated_cache_hit)
                 == 2u,
         "warm dependency-only PREPARE did not authenticate exact scanner "
         "and PCM cache-hit actions");
-    const prepared_compilation_validation warm_guard_validation =
+    const dependency_compilation_validation warm_guard_validation =
         validate_guard_environment(warm_guard);
     write_file(
         guard_action_trace,
-        render_preparation_action_trace(warm_guard));
-    const preparation_action_trace_validation warm_trace_validation =
-        validate_preparation_action_trace(
+        render_frontend_action_trace(warm_guard));
+    const frontend_trace_validation warm_trace_validation =
+        validate_frontend_action_trace(
             guard_action_trace,
             guard_authority,
             warm_guard_validation);
     require(
-        warm_trace_validation.summary.canonical_token_slice_actions
+        warm_trace_validation.counts.canonical_token_slice_actions
                 == 1u
-            && warm_trace_validation.summary
+            && warm_trace_validation.counts
                     .canonical_semantic_frontend_actions
                 == 0u,
         "warm dependency-only action trace did not preserve the "
@@ -1599,30 +1599,30 @@ inline int invoke() {
     write_file(
         interrupted_pcm_depfile,
         "this is an intentionally malformed stale compiler depfile\n");
-    const prepared_compilation_environment recovered_guard =
+    const dependency_compilation_environment recovered_guard =
         prepare_guard();
     require(
         count_actions(
             recovered_guard,
-            preparation_action_kind::pcm_compilation,
-            preparation_action_disposition::executed) == 1u
+            frontend_action_kind::pcm_compilation,
+            frontend_action_outcome::executed) == 1u
             && count_actions(
                    recovered_guard,
-                   preparation_action_kind::pcm_compilation,
-                   preparation_action_disposition::validated_cache_hit)
+                   frontend_action_kind::pcm_compilation,
+                   frontend_action_outcome::validated_cache_hit)
                 == 1u,
         "an interrupted PCM tuple was not rebuilt while the committed "
         "sibling remained a validated hit");
     require(
         !std::filesystem::exists(interrupted_pcm_depfile),
         "recovered PCM publication retained its stale transient depfile");
-    const prepared_compilation_environment recovered_warm_guard =
+    const dependency_compilation_environment recovered_warm_guard =
         prepare_guard();
     require(
         count_actions(
             recovered_warm_guard,
-            preparation_action_kind::pcm_compilation,
-            preparation_action_disposition::validated_cache_hit) == 2u,
+            frontend_action_kind::pcm_compilation,
+            frontend_action_outcome::validated_cache_hit) == 2u,
         "a recovered PCM tuple did not become a warm validated hit");
 
     write_file(
@@ -1728,13 +1728,13 @@ inline int invoke() {
         render_compile_database(dual_profile_commands));
     const std::filesystem::path production_pcm_root =
         root / "pcm/production";
-    const prepared_compilation_environment first =
+    const dependency_compilation_environment first =
         prepare(
             toolchain,
             {conditional_root},
             raw_database,
             production_pcm_root);
-    const prepared_compilation_environment second =
+    const dependency_compilation_environment second =
         prepare(
             toolchain,
             {conditional_root},
@@ -1831,7 +1831,7 @@ inline int invoke() {
     write_file(
         permuted_database,
         render_compile_database(dual_profile_commands));
-    const prepared_compilation_environment permuted =
+    const dependency_compilation_environment permuted =
         prepare(
             toolchain,
             {conditional_root},
@@ -1862,7 +1862,7 @@ inline int invoke() {
     write_file(
         shuffled_database,
         render_compile_database(shuffled_commands));
-    const prepared_compilation_environment shuffled =
+    const dependency_compilation_environment shuffled =
         prepare(
             toolchain,
             {conditional_root},
@@ -1944,13 +1944,13 @@ inline int invoke() {
         lane_a / "pcm/production";
     const std::filesystem::path lane_b_pcm =
         lane_b / "pcm/production";
-    const prepared_compilation_environment lane_a_prepared =
+    const dependency_compilation_environment lane_a_prepared =
         prepare(
             toolchain,
             {conditional_root},
             lane_a_database,
             lane_a_pcm);
-    const prepared_compilation_environment lane_b_prepared =
+    const dependency_compilation_environment lane_b_prepared =
         prepare(
             toolchain,
             {conditional_root},
@@ -2087,7 +2087,7 @@ inline int invoke() {
         lane_c_database,
         render_compile_database(lane_commands(
             lane_c, "other_include")));
-    const prepared_compilation_environment lane_c_prepared =
+    const dependency_compilation_environment lane_c_prepared =
         prepare(
             toolchain,
             {conditional_root},
@@ -2106,7 +2106,7 @@ inline int invoke() {
         lane_a_prepared,
         lane_a_owned_database,
         lane_a_manifest);
-    const prepared_compilation_validation lane_a_validation =
+    const dependency_compilation_validation lane_a_validation =
         validate(
             toolchain,
             {conditional_root},
@@ -2124,7 +2124,7 @@ inline int invoke() {
         production_only,
         "export module fixture.production_only;\n"
         "export int semantically_changed_production_value();\n");
-    const prepared_compilation_environment semantic_mutation =
+    const dependency_compilation_environment semantic_mutation =
         prepare(
             toolchain,
             {conditional_root},
@@ -2152,7 +2152,7 @@ inline int invoke() {
     physical_toolchain.clang_binary = physical_clang;
     const std::filesystem::path compiler_identity_pcm_root =
         root / "pcm/compiler-identity";
-    const prepared_compilation_environment alias_prepared =
+    const dependency_compilation_environment alias_prepared =
         prepare(
             alias_toolchain,
             {conditional_root},
@@ -2165,7 +2165,7 @@ inline int invoke() {
     require(
         !compiler_identity_cleanup_error,
         "cannot reset the compiler-identity PCM fixture");
-    const prepared_compilation_environment physical_prepared =
+    const dependency_compilation_environment physical_prepared =
         prepare(
             physical_toolchain,
             {conditional_root},
@@ -2218,7 +2218,7 @@ inline int invoke() {
             different_clang_sentinel),
         "different compiler bytes were executed before authentication");
 
-    const prepared_compilation_environment test_prepared =
+    const dependency_compilation_environment test_prepared =
         prepare(
             toolchain,
             {conditional_root},
@@ -2270,7 +2270,7 @@ inline int invoke() {
             }));
     const std::filesystem::path partition_pcm_root =
         root / "pcm/partition";
-    const prepared_compilation_environment partition_prepared =
+    const dependency_compilation_environment partition_prepared =
         prepare(
             toolchain,
             {partition_consumer},
@@ -2297,7 +2297,7 @@ inline int invoke() {
         partition_prepared,
         partition_owned_database,
         partition_manifest);
-    const prepared_compilation_validation partition_validation =
+    const dependency_compilation_validation partition_validation =
         validate(
             toolchain,
             {partition_consumer},
@@ -2319,7 +2319,7 @@ inline int invoke() {
     const std::filesystem::path manifest =
         root / "pcm-manifest.json";
     publish_prepared(first, owned_database, manifest);
-    const prepared_compilation_validation valid =
+    const dependency_compilation_validation valid =
         validate(
             toolchain,
             {conditional_root},
@@ -2356,7 +2356,7 @@ inline int invoke() {
     write_file(
         dependency_scan_result,
         original_dependency_scan_result);
-    const prepared_compilation_validation restored_scan_validation =
+    const dependency_compilation_validation restored_scan_validation =
         validate(
             toolchain,
             {conditional_root},
@@ -2707,7 +2707,7 @@ inline int invoke() {
             "PREPARE contract test cannot create positive PCM-root "
             "symlink: " + symlink_error.message());
     }
-    const prepared_compilation_environment symlink_prepared =
+    const dependency_compilation_environment symlink_prepared =
         prepare(
             toolchain,
             {conditional_root},
@@ -2777,7 +2777,7 @@ inline int invoke() {
 
     const std::filesystem::path leaf_pcm_root =
         root / "linked-owned-leaf-pcm";
-    const prepared_compilation_environment leaf_prepared =
+    const dependency_compilation_environment leaf_prepared =
         prepare(
             toolchain,
             {conditional_root},
@@ -3079,7 +3079,7 @@ inline int invoke() {
             toolchain,
             invalid_root,
             unrelated_root));
-    const prepared_compilation_environment
+    const dependency_compilation_environment
         unrelated_ambiguous_prepared = prepare(
             toolchain,
             {unrelated_root},
@@ -3140,7 +3140,7 @@ inline int invoke() {
                 response_root,
                 response_source,
                 {"@" + quoted_response.string()})});
-    const prepared_compilation_environment quoted_prepared =
+    const dependency_compilation_environment quoted_prepared =
         prepare(
             toolchain,
             {response_source},
@@ -3159,7 +3159,7 @@ inline int invoke() {
                 "\"-DFROM_QUOTED_RESPONSE=1\""),
         "PREPARE did not expand and sanitize the response-file compiler "
         "temporary emission flag");
-    const prepared_compilation_environment quoted_control =
+    const dependency_compilation_environment quoted_control =
         prepare(
             toolchain,
             {response_source},
@@ -3178,7 +3178,7 @@ inline int invoke() {
         quoted_response,
         "\"-I" + include_with_spaces.string()
             + "\" -DFROM_QUOTED_RESPONSE=2 --save-temps=obj\n");
-    const prepared_compilation_environment
+    const dependency_compilation_environment
         quoted_response_mutation =
             prepare(
                 toolchain,
@@ -3197,7 +3197,7 @@ inline int invoke() {
     write_file(
         response_header,
         "#define BIOSEQ_PREPARE_RESPONSE_FIXTURE 2\n");
-    const prepared_compilation_environment
+    const dependency_compilation_environment
         quoted_header_mutation =
             prepare(
                 toolchain,
@@ -3224,7 +3224,7 @@ inline int invoke() {
     write_file(
         outer_response,
         "@" + inner_response.string() + "\n");
-    const prepared_compilation_environment nested_prepared =
+    const dependency_compilation_environment nested_prepared =
         prepare(
             toolchain,
             {response_source},
@@ -3299,7 +3299,7 @@ inline int invoke() {
     require(
         std::filesystem::is_regular_file(launcher),
         "exact GCC Highway launcher fixture is absent");
-    const prepared_compilation_environment launcher_prepared =
+    const dependency_compilation_environment launcher_prepared =
         prepare(
             toolchain,
             {response_source},
@@ -3325,4 +3325,4 @@ inline int invoke() {
         "owned Clang command retained the GCC launcher or compiler");
 }
 
-}  // namespace bioseq::codegen::clang_structural
+}  // namespace bioseq::codegen::structural_analysis

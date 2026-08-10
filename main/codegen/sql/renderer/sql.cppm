@@ -23,7 +23,7 @@ module;
 export module bioseq.codegen.sql.renderer:sql;
 
 import :model;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
 
@@ -37,7 +37,6 @@ namespace detail {
     static_cast<void>(graph);
     if (entity.source.kind == entity_kind::schema
         || entity.source.kind == entity_kind::access_method
-        || entity.source.kind == entity_kind::alter
         || entity.source.kind == entity_kind::comment
         || entity.source.kind == entity_kind::guc
         || entity.source.kind == entity_kind::guc_value
@@ -305,252 +304,50 @@ inline void trim_checked_sql_edge_newlines(std::string& value) {
         "checked SQL authority does not contain a string literal");
 }
 
-[[nodiscard]] inline bool compatibility_sql_horizontal_space(
-    char value) noexcept {
-    return value == ' ' || value == '\t';
-}
-
-[[nodiscard]] inline bool compatibility_sql_identifier_start(
+[[nodiscard]] inline bool sql_identifier_start(
     char value) noexcept {
     const unsigned char code = static_cast<unsigned char>(value);
     return value == '_' || std::isalpha(code) != 0;
 }
 
-[[nodiscard]] inline bool compatibility_sql_identifier_continue(
+[[nodiscard]] inline bool sql_identifier_continue(
     char value) noexcept {
     const unsigned char code = static_cast<unsigned char>(value);
     return value == '_' || std::isalnum(code) != 0;
 }
 
-[[nodiscard]] inline bool compatibility_sql_token_identifier_continue(
+[[nodiscard]] inline bool sql_token_identifier_continue(
     char value) noexcept {
     return value == '$'
-        || compatibility_sql_identifier_continue(value);
+        || sql_identifier_continue(value);
 }
 
 [[nodiscard]] inline std::optional<std::string_view>
-compatibility_sql_dollar_delimiter(
+sql_dollar_delimiter(
     std::string_view sql,
     std::size_t begin) noexcept {
     if (begin >= sql.size() || sql[begin] != '$'
         || begin + 1 >= sql.size()
         || (begin > 0
-            && compatibility_sql_token_identifier_continue(
+            && sql_token_identifier_continue(
                 sql[begin - 1]))) {
         return std::nullopt;
     }
     if (sql[begin + 1] == '$') {
         return sql.substr(begin, 2);
     }
-    if (!compatibility_sql_identifier_start(sql[begin + 1])) {
+    if (!sql_identifier_start(sql[begin + 1])) {
         return std::nullopt;
     }
     std::size_t cursor = begin + 2;
     while (cursor < sql.size()
-           && compatibility_sql_identifier_continue(sql[cursor])) {
+           && sql_identifier_continue(sql[cursor])) {
         ++cursor;
     }
     if (cursor >= sql.size() || sql[cursor] != '$') {
         return std::nullopt;
     }
     return sql.substr(begin, cursor - begin + 1);
-}
-
-inline void trim_compatibility_sql_horizontal_space(
-    std::string& output) {
-    while (!output.empty()
-           && compatibility_sql_horizontal_space(output.back())) {
-        output.pop_back();
-    }
-}
-
-inline void append_compatibility_sql_newline(std::string& output) {
-    trim_compatibility_sql_horizontal_space(output);
-    std::size_t newline_count = 0;
-    for (std::size_t cursor = output.size();
-         cursor > 0 && output[cursor - 1] == '\n';
-         --cursor) {
-        ++newline_count;
-    }
-    if (newline_count < 2) output.push_back('\n');
-}
-
-[[nodiscard]] inline bool compatibility_sql_line_is_indentation(
-    const std::string& output) noexcept {
-    const std::size_t line_begin = output.rfind('\n');
-    const std::size_t begin =
-        line_begin == std::string::npos ? 0 : line_begin + 1;
-    for (std::size_t cursor = begin; cursor < output.size(); ++cursor) {
-        if (!compatibility_sql_horizontal_space(output[cursor])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/**
- * Remove legacy line commentary without changing SQL tokens or quoted text.
- *
- * Dollar-quoted bodies, string literals, quoted identifiers, and nested block
- * comments are copied verbatim. Normal-state line endings and blank lines are
- * canonicalized so removing a run of comments cannot leave a large gap.
- */
-[[nodiscard]] inline std::string sanitize_compatibility_sql(
-    std::string_view sql) {
-    std::string output;
-    output.reserve(sql.size());
-
-    std::size_t cursor = 0;
-    while (cursor < sql.size()) {
-        if (sql.substr(cursor).starts_with("--")) {
-            const bool whole_line =
-                compatibility_sql_line_is_indentation(output);
-            trim_compatibility_sql_horizontal_space(output);
-            while (cursor < sql.size()
-                   && sql[cursor] != '\n'
-                   && sql[cursor] != '\r') {
-                ++cursor;
-            }
-            if (cursor < sql.size()) {
-                if (!whole_line) {
-                    append_compatibility_sql_newline(output);
-                }
-                if (sql[cursor] == '\r'
-                    && cursor + 1 < sql.size()
-                    && sql[cursor + 1] == '\n') {
-                    cursor += 2;
-                } else {
-                    ++cursor;
-                }
-            }
-            continue;
-        }
-
-        if (sql[cursor] == '\'') {
-            const bool backslash_escapes =
-                cursor > 0
-                && (sql[cursor - 1] == 'E'
-                    || sql[cursor - 1] == 'e')
-                && (cursor < 2
-                    || !compatibility_sql_token_identifier_continue(
-                        sql[cursor - 2]));
-            output.push_back(sql[cursor++]);
-            bool closed = false;
-            while (cursor < sql.size()) {
-                const char value = sql[cursor++];
-                output.push_back(value);
-                if (backslash_escapes && value == '\\'
-                    && cursor < sql.size()) {
-                    output.push_back(sql[cursor++]);
-                    continue;
-                }
-                if (value != '\'') continue;
-                if (cursor < sql.size() && sql[cursor] == '\'') {
-                    output.push_back(sql[cursor++]);
-                    continue;
-                }
-                closed = true;
-                break;
-            }
-            if (!closed) {
-                throw std::runtime_error(
-                    "unterminated compatibility SQL string literal");
-            }
-            continue;
-        }
-
-        if (sql[cursor] == '"') {
-            output.push_back(sql[cursor++]);
-            bool closed = false;
-            while (cursor < sql.size()) {
-                const char value = sql[cursor++];
-                output.push_back(value);
-                if (value != '"') continue;
-                if (cursor < sql.size() && sql[cursor] == '"') {
-                    output.push_back(sql[cursor++]);
-                    continue;
-                }
-                closed = true;
-                break;
-            }
-            if (!closed) {
-                throw std::runtime_error(
-                    "unterminated compatibility SQL quoted identifier");
-            }
-            continue;
-        }
-
-        if (const std::optional<std::string_view> delimiter =
-                compatibility_sql_dollar_delimiter(sql, cursor)) {
-            const std::size_t body_begin = cursor + delimiter->size();
-            const std::size_t body_end = sql.find(*delimiter, body_begin);
-            if (body_end == std::string_view::npos) {
-                throw std::runtime_error(
-                    "unterminated compatibility SQL dollar quote");
-            }
-            const std::size_t quoted_end =
-                body_end + delimiter->size();
-            output.append(sql.substr(cursor, quoted_end - cursor));
-            cursor = quoted_end;
-            continue;
-        }
-
-        if (sql.substr(cursor).starts_with("/*")) {
-            std::size_t depth = 0;
-            bool closed = false;
-            while (cursor < sql.size()) {
-                if (sql.substr(cursor).starts_with("/*")) {
-                    output.append("/*");
-                    cursor += 2;
-                    ++depth;
-                    continue;
-                }
-                if (sql.substr(cursor).starts_with("*/")) {
-                    output.append("*/");
-                    cursor += 2;
-                    if (--depth == 0) {
-                        closed = true;
-                        break;
-                    }
-                    continue;
-                }
-                output.push_back(sql[cursor++]);
-            }
-            if (!closed) {
-                throw std::runtime_error(
-                    "unterminated compatibility SQL block comment");
-            }
-            continue;
-        }
-
-        if (sql[cursor] == '\n' || sql[cursor] == '\r') {
-            append_compatibility_sql_newline(output);
-            if (sql[cursor] == '\r'
-                && cursor + 1 < sql.size()
-                && sql[cursor + 1] == '\n') {
-                cursor += 2;
-            } else {
-                ++cursor;
-            }
-            continue;
-        }
-
-        output.push_back(sql[cursor++]);
-    }
-
-    std::size_t begin = 0;
-    while (begin < output.size()
-           && std::isspace(
-               static_cast<unsigned char>(output[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = output.size();
-    while (end > begin
-           && std::isspace(
-               static_cast<unsigned char>(output[end - 1])) != 0) {
-        --end;
-    }
-    return output.substr(begin, end - begin);
 }
 
 [[nodiscard]] inline std::size_t top_level_statement_count(
@@ -582,7 +379,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
             if (depth != 0) {
                 throw std::runtime_error(
                     "unterminated SQL block comment while counting "
-                    "physical statements");
+                    "generated statements");
             }
             continue;
         }
@@ -610,7 +407,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
             }
             if (!closed) {
                 throw std::runtime_error(
-                    "unterminated SQL string while counting physical "
+                    "unterminated SQL string while counting generated "
                     "statements");
             }
             continue;
@@ -630,13 +427,13 @@ inline void append_compatibility_sql_newline(std::string& output) {
             }
             if (!closed) {
                 throw std::runtime_error(
-                    "unterminated SQL identifier while counting physical "
+                    "unterminated SQL identifier while counting generated "
                     "statements");
             }
             continue;
         }
         if (const std::optional<std::string_view> delimiter =
-                compatibility_sql_dollar_delimiter(sql, cursor)) {
+                sql_dollar_delimiter(sql, cursor)) {
             has_tokens = true;
             const std::size_t body_begin =
                 cursor + delimiter->size();
@@ -645,7 +442,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
             if (body_end == std::string_view::npos) {
                 throw std::runtime_error(
                     "unterminated SQL dollar quote while counting "
-                    "physical statements");
+                    "generated statements");
             }
             cursor = body_end + delimiter->size();
             continue;
@@ -657,7 +454,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
         } else if (value == ')') {
             if (parentheses == 0) {
                 throw std::runtime_error(
-                    "unbalanced SQL parentheses while counting physical "
+                    "unbalanced SQL parentheses while counting generated "
                     "statements");
             }
             --parentheses;
@@ -675,7 +472,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
     }
     if (parentheses != 0) {
         throw std::runtime_error(
-            "unbalanced SQL parentheses while counting physical statements");
+            "unbalanced SQL parentheses while counting generated statements");
     }
     if (has_tokens) ++count;
     return count;
@@ -1189,9 +986,9 @@ struct type_role_binding {
     const collected_entity& entity,
     const sql_graph& graph) {
     std::string result = render_parameters(entity);
-    if (entity.result.form != routine_result_form::named_out
+    if (entity.result.form != routine_result_form::named_output
         && entity.result.form
-            != routine_result_form::setof_named_out) {
+            != routine_result_form::named_output_set) {
         return result;
     }
     const collected_result_row& row =
@@ -1206,16 +1003,16 @@ struct type_role_binding {
 [[nodiscard]] inline std::string render_c_routine_result(
     const collected_entity& entity,
     const sql_graph& graph) {
-    if (entity.result.form == routine_result_form::returns_table) {
+    if (entity.result.form == routine_result_form::table_rows) {
         return "TABLE ("
             + render_result_columns(routine_result_row(entity, graph))
             + ")";
     }
     if (entity.result.form
-        == routine_result_form::setof_named_out) {
+        == routine_result_form::named_output_set) {
         return "SETOF record";
     }
-    if (entity.result.form == routine_result_form::named_out) {
+    if (entity.result.form == routine_result_form::named_output) {
         return "record";
     }
     return entity.result_sql_type;
@@ -1322,7 +1119,7 @@ struct type_role_binding {
         return result;
     }
     if (entity.declaration_kind
-        == clang_structural::declaration_kind::field) {
+        == structural_analysis::declaration_kind::field) {
         return entity.name;
     }
     return {};
@@ -1464,8 +1261,6 @@ struct type_role_binding {
 }
 
 struct natural_type_statement {
-    physical_statement_facet facet{
-        physical_statement_facet::primary};
     std::string text;
 };
 
@@ -1496,7 +1291,6 @@ natural_type_statements(
             });
         if (columns.empty()) {
             return {{
-                .facet = physical_statement_facet::primary,
                 .text = "CREATE TYPE " + qualified + ";",
             }};
         }
@@ -1527,7 +1321,6 @@ natural_type_statements(
             }
         }
         return {{
-            .facet = physical_statement_facet::primary,
             .text = result + "\n);",
         }};
     }
@@ -1629,12 +1422,9 @@ natural_type_statements(
     result += "\n);";
     return {
         natural_type_statement{
-            .facet = physical_statement_facet::base_type_shell,
             .text = "CREATE TYPE " + qualified + ";",
         },
         natural_type_statement{
-            .facet =
-                physical_statement_facet::base_type_definition,
             .text = std::move(result),
         },
     };
@@ -2212,10 +2002,9 @@ parse_numbered_references(
         relations.emplace_back(root_schema, root->source.name);
         for (const normalized_entity& candidate : graph.entities) {
             const bool child =
-                !candidate.source.typed_install_owner
-                && (candidate.source.kind == entity_kind::primary_key
+                candidate.source.kind == entity_kind::primary_key
                     || candidate.source.kind == entity_kind::unique
-                    || candidate.source.kind == entity_kind::index);
+                    || candidate.source.kind == entity_kind::index;
             if (child
                 && std::ranges::contains(
                     candidate.dependency_identities,
@@ -2263,17 +2052,12 @@ parse_numbered_references(
     const sql_graph& graph,
     const std::vector<const normalized_entity*>& children) {
     const collected_entity& source = entity.source;
-    if (source.typed_install_owner) {
-        return sanitize_compatibility_sql(extract_checked_sql(
-            source.initializer_expression, false));
-    }
     const std::string qualified = qualified_sql_name(entity, graph);
     switch (source.kind) {
-        case entity_kind::alter:
         case entity_kind::comment:
             throw std::runtime_error(
-                std::string{kind_name(source.kind)}
-                + " is only supported by a typed install-owner descriptor");
+                "comment is an internally synthesized SQL statement kind, "
+                "not an authored entity");
         case entity_kind::schema:
             return create_clause(source, false, true) + "SCHEMA "
                 + if_not_exists(source) + source.name + ";";
@@ -2487,7 +2271,7 @@ parse_numbered_references(
                 throw std::runtime_error(
                     "base type '" + source.name
                     + "' requires separate shell and definition "
-                      "physical statements");
+                      "generated statements");
             }
             return std::move(statements.front().text);
         }
@@ -2727,19 +2511,6 @@ parse_numbered_references(
             return opclass_statement(entity, graph);
         case entity_kind::catalog_dependencies:
             return catalog_dependencies_statement(entity, graph);
-        case entity_kind::install_action:
-            if (source.annotation_name != "install_action") {
-                throw std::runtime_error(
-                    "install action '" + source.annotation_name
-                    + "' has no complete typed lowering");
-            }
-            if (!find_option(source, "baseline_physical_id")
-                || !find_option(source, "migration_ledger_reason")) {
-                throw std::runtime_error(
-                    "install_action is missing its migration ledger");
-            }
-            return extract_checked_sql(
-                source.initializer_expression, false);
         case entity_kind::guc:
             throw std::runtime_error(
                 "GUC '" + source.name
@@ -2766,362 +2537,63 @@ parse_numbered_references(
 
 struct statement_candidate {
     const normalized_entity* owner{};
-    entity_kind statement_kind{entity_kind::install_action};
-    physical_statement_facet facet{
-        physical_statement_facet::primary};
-    std::optional<physical_statement_binding> binding;
-    std::size_t graph_ordinal{};
-    std::size_t facet_ordinal{};
+    entity_kind statement_kind{entity_kind::phase};
     std::string prefix;
     std::string text;
 };
-
-[[nodiscard]] inline std::string render_natural_statement_facet(
-    const normalized_entity& entity,
-    const sql_graph& graph,
-    const std::vector<const normalized_entity*>& children,
-    physical_statement_facet facet) {
-    switch (facet) {
-        case physical_statement_facet::primary:
-            return render_entity_statement(entity, graph, children);
-        case physical_statement_facet::catalog_comment: {
-            const std::optional<std::string> comment =
-                comment_statement(entity, graph);
-            if (!comment) {
-                throw std::runtime_error(
-                    "natural SQL owner '" + entity.stable_identity
-                    + "' has a catalog-comment physical binding but no "
-                      "explicit brief");
-            }
-            return *comment;
-        }
-        case physical_statement_facet::base_type_shell:
-        case physical_statement_facet::base_type_definition: {
-            if (entity.source.kind != entity_kind::type) {
-                throw std::runtime_error(
-                    "natural SQL owner '" + entity.stable_identity
-                    + "' uses a base-type physical facet on a non-type "
-                      "entity");
-            }
-            std::vector<natural_type_statement> statements =
-                natural_type_statements(entity, graph, children);
-            const auto statement = std::ranges::find(
-                statements, facet, &natural_type_statement::facet);
-            if (statement == statements.end()) {
-                throw std::runtime_error(
-                    "natural SQL type owner '" + entity.stable_identity
-                    + "' cannot render physical facet '"
-                    + std::string{physical_statement_facet_name(facet)}
-                    + "'");
-            }
-            return statement->text;
-        }
-    }
-    throw std::runtime_error(
-        "unhandled natural physical statement facet");
-}
-
-[[nodiscard]] inline std::string render_bound_statement(
-    const normalized_entity& entity,
-    const sql_graph& graph,
-    const std::vector<const normalized_entity*>& children,
-    const physical_statement_binding& binding) {
-    if (binding.render_source
-        == physical_render_source::compatibility_sql) {
-        if (binding.compatibility_sql_initializer.empty()) {
-            throw std::runtime_error(
-                "physical statement '"
-                + binding.baseline_physical_id
-                + "' owned by '" + entity.stable_identity
-                + "' has no compatibility SQL initializer");
-        }
-        return sanitize_compatibility_sql(extract_checked_sql(
-            binding.compatibility_sql_initializer, false));
-    }
-    return render_natural_statement_facet(
-        entity, graph, children, binding.facet);
-}
-
-[[nodiscard]] inline bool dependency_only_entity(
-    const normalized_entity& entity) {
-    return entity.source.kind == entity_kind::column
-        || entity.source.kind == entity_kind::type_role
-        || entity.source.kind == entity_kind::guc_value
-        || ((entity.source.kind == entity_kind::primary_key
-             || entity.source.kind == entity_kind::unique
-             || entity.source.kind == entity_kind::foreign_key
-             || entity.source.kind == entity_kind::check)
-            && !option_is(
-                entity.source, "placement", "alter_table"));
-}
-
-inline void validate_dependency_only_entity(
-    const normalized_entity& entity,
-    const sql_graph& graph) {
-    const normalized_entity* parent =
-        primary_parent(entity, graph);
-    bool valid_parent =
-        parent
-        && ((entity.source.kind == entity_kind::column
-             && (parent->source.kind == entity_kind::table
-                 || parent->source.kind == entity_kind::type))
-            || ((entity.source.kind == entity_kind::primary_key
-                 || entity.source.kind == entity_kind::unique
-                 || entity.source.kind == entity_kind::foreign_key
-                 || entity.source.kind == entity_kind::check)
-                && parent->source.kind == entity_kind::table)
-            || (entity.source.kind == entity_kind::type_role
-                && parent->source.kind == entity_kind::type)
-            || (entity.source.kind == entity_kind::guc_value
-                && parent->source.kind == entity_kind::guc));
-    if (entity.source.kind == entity_kind::type_role) {
-        valid_parent = std::ranges::any_of(
-            type_role_bindings(graph),
-            [&entity](const type_role_binding& binding) {
-                return binding.role->stable_identity
-                    == entity.stable_identity;
-            });
-    }
-    if (!valid_parent) {
-        throw std::runtime_error(
-            "dependency-only SQL entity '" + entity.stable_identity
-            + "' has no compatible natural parent");
-    }
-}
 
 inline void append_entity_statement_candidates(
     std::vector<statement_candidate>& result,
     const normalized_entity& entity,
     const sql_graph& graph,
     const std::vector<const normalized_entity*>& children,
-    std::size_t graph_ordinal,
     std::string prefix) {
     std::vector<statement_candidate> local;
-    const std::vector<physical_statement_binding> bindings =
-        effective_physical_statement_bindings(entity.source);
-    const bool has_bound_comment = std::ranges::any_of(
-        bindings,
-        [](const physical_statement_binding& binding) {
-            return binding.facet
-                == physical_statement_facet::catalog_comment;
-        });
-    local.reserve(bindings.size() + 3);
-    const auto append_bound =
-        [&local, &entity, &graph, &children, graph_ordinal](
-            const physical_statement_binding& binding) {
-            local.push_back(statement_candidate{
-                .owner = &entity,
-                .statement_kind = binding.kind,
-                .facet = binding.facet,
-                .binding = binding,
-                .graph_ordinal = graph_ordinal,
-                .facet_ordinal = local.size(),
-                .text = render_bound_statement(
-                    entity, graph, children, binding),
-            });
-        };
-    const auto append_unbound =
-        [&local, &entity, graph_ordinal](
-            physical_statement_facet facet,
-            std::string text) {
-            local.push_back(statement_candidate{
-                .owner = &entity,
-                .statement_kind = entity.source.kind,
-                .facet = facet,
-                .graph_ordinal = graph_ordinal,
-                .facet_ordinal = local.size(),
-                .text = std::move(text),
-            });
-        };
     if (entity.source.kind == entity_kind::type) {
-        std::vector<natural_type_statement> type_statements =
+        std::vector<natural_type_statement> statements =
             natural_type_statements(entity, graph, children);
-        std::vector<bool> consumed(bindings.size());
-        for (natural_type_statement& natural :
-             type_statements) {
-            bool bound = false;
-            for (std::size_t index = 0;
-                 index < bindings.size();
-                 ++index) {
-                if (bindings[index].facet != natural.facet) {
-                    continue;
-                }
-                append_bound(bindings[index]);
-                consumed[index] = true;
-                bound = true;
-            }
-            if (!bound) {
-                append_unbound(
-                    natural.facet, std::move(natural.text));
-            }
-        }
-        for (std::size_t index = 0;
-             index < bindings.size();
-             ++index) {
-            if (!consumed[index]) append_bound(bindings[index]);
-        }
-    } else if (!bindings.empty()) {
-        const bool has_bound_primary = std::ranges::any_of(
-            bindings,
-            [](const physical_statement_binding& binding) {
-                return binding.facet
-                    == physical_statement_facet::primary;
+        local.reserve(statements.size() + 1);
+        for (natural_type_statement& statement : statements) {
+            local.push_back(statement_candidate{
+                .owner = &entity,
+                .statement_kind = entity_kind::type,
+                .text = std::move(statement.text),
             });
-        if (!has_bound_primary) {
-            append_unbound(
-                physical_statement_facet::primary,
-                render_entity_statement(
-                    entity, graph, children));
-        }
-        for (const physical_statement_binding& binding :
-             bindings) {
-            append_bound(binding);
         }
     } else {
-        append_unbound(
-            physical_statement_facet::primary,
-            render_entity_statement(entity, graph, children));
+        local.push_back(statement_candidate{
+            .owner = &entity,
+            .statement_kind = entity.source.kind,
+            .text = render_entity_statement(entity, graph, children),
+        });
     }
 
-    if (!entity.source.companion && !has_bound_comment) {
+    if (!entity.source.companion) {
         if (const std::optional<std::string> comment =
                 comment_statement(entity, graph)) {
             local.push_back(statement_candidate{
                 .owner = &entity,
                 .statement_kind = entity_kind::comment,
-                .facet =
-                    physical_statement_facet::catalog_comment,
-                .graph_ordinal = graph_ordinal,
-                .facet_ordinal = local.size(),
                 .text = *comment,
             });
         }
     }
-    if (!local.empty()) {
-        local.front().prefix = std::move(prefix);
-        result.insert(
-            result.end(),
-            std::make_move_iterator(local.begin()),
-            std::make_move_iterator(local.end()));
-    }
+    local.front().prefix = std::move(prefix);
+    result.insert(
+        result.end(),
+        std::make_move_iterator(local.begin()),
+        std::make_move_iterator(local.end()));
 }
 
-inline void validate_and_order_statement_candidates(
-    std::vector<statement_candidate>& candidates,
-    const sql_graph& graph) {
-    std::map<
-        std::string,
-        const baseline_physical_statement*,
-        std::less<>>
-        expected_by_id;
-    for (const baseline_physical_statement& expected :
-         graph.expected_baseline_physical_statements) {
-        const std::size_t ordinal = parse_baseline_physical_ordinal(
-            expected.baseline_physical_id);
-        if (ordinal != expected.baseline_ordinal) {
-            throw std::runtime_error(
-                "baseline ledger entry '"
-                + expected.baseline_physical_id
-                + "' has an inconsistent numeric ordinal");
-        }
-        if (!expected_by_id.emplace(
-                expected.baseline_physical_id, &expected).second) {
-            throw std::runtime_error(
-                "baseline ledger contains duplicate physical ID '"
-                + expected.baseline_physical_id + "'");
-        }
-    }
-
-    std::map<std::string, std::string, std::less<>> rendered_by_id;
-    bool any_candidate_has_physical_id = false;
+inline void validate_statement_candidates(
+    const std::vector<statement_candidate>& candidates) {
     for (const statement_candidate& candidate : candidates) {
         if (top_level_statement_count(candidate.text) != 1) {
-            const std::string identity =
-                candidate.binding
-                    && !candidate.binding->baseline_physical_id.empty()
-                ? candidate.binding->baseline_physical_id
-                : candidate.owner->stable_identity;
             throw std::runtime_error(
-                "physical statement '" + identity
-                + "' must render exactly one top-level SQL statement");
+                "generated SQL owner '" + candidate.owner->stable_identity
+                + "' must render exactly one top-level statement per "
+                  "statement candidate");
         }
-        if (!candidate.binding
-            || candidate.binding->baseline_physical_id.empty()) {
-            continue;
-        }
-        any_candidate_has_physical_id = true;
-        const physical_statement_binding& binding =
-            *candidate.binding;
-        const std::size_t ordinal =
-            parse_baseline_physical_ordinal(
-                binding.baseline_physical_id);
-        if (binding.baseline_ordinal != 0
-            && binding.baseline_ordinal != ordinal) {
-            throw std::runtime_error(
-                "physical statement '"
-                + binding.baseline_physical_id
-                + "' has an inconsistent numeric ordinal");
-        }
-        const auto [previous, inserted] = rendered_by_id.emplace(
-            binding.baseline_physical_id,
-            candidate.owner->stable_identity);
-        if (!inserted) {
-            throw std::runtime_error(
-                "physical statement '"
-                + binding.baseline_physical_id
-                + "' is rendered by both '" + previous->second
-                + "' and '" + candidate.owner->stable_identity + "'");
-        }
-        if (expected_by_id.empty()) continue;
-        const auto expected =
-            expected_by_id.find(binding.baseline_physical_id);
-        if (expected == expected_by_id.end()) {
-            throw std::runtime_error(
-                "rendered unknown baseline physical statement '"
-                + binding.baseline_physical_id + "'");
-        }
-        if (expected->second->kind != binding.kind) {
-            throw std::runtime_error(
-                "baseline physical statement '"
-                + binding.baseline_physical_id
-                + "' changed SQL statement kind before rendering");
-        }
-    }
-    for (const auto& [physical_id, expected] : expected_by_id) {
-        static_cast<void>(expected);
-        if (!rendered_by_id.contains(physical_id)) {
-            throw std::runtime_error(
-                "baseline physical statement '" + physical_id
-                + "' was not rendered");
-        }
-    }
-    if (any_candidate_has_physical_id) {
-        std::ranges::stable_sort(
-            candidates,
-            [](const statement_candidate& left,
-               const statement_candidate& right) {
-                const bool left_bound =
-                    left.binding
-                    && !left.binding->baseline_physical_id.empty();
-                const bool right_bound =
-                    right.binding
-                    && !right.binding->baseline_physical_id.empty();
-                if (left_bound != right_bound) return left_bound;
-                if (left_bound) {
-                    return parse_baseline_physical_ordinal(
-                               left.binding->baseline_physical_id)
-                        < parse_baseline_physical_ordinal(
-                              right.binding->baseline_physical_id);
-                }
-                if (left.graph_ordinal != right.graph_ordinal) {
-                    return left.graph_ordinal < right.graph_ordinal;
-                }
-                if (left.facet_ordinal != right.facet_ordinal) {
-                    return left.facet_ordinal < right.facet_ordinal;
-                }
-                return left.owner->stable_identity
-                    < right.owner->stable_identity;
-            });
     }
 }
 
@@ -3189,11 +2661,9 @@ inline void validate_and_order_statement_candidates(
             entity,
             graph,
             children[entity.stable_identity],
-            graph_ordinal,
             std::exchange(pending_prefix, {}) + remarks);
     }
-    detail::validate_and_order_statement_candidates(
-        candidates, graph);
+    detail::validate_statement_candidates(candidates);
 
     artifact.sql =
         "-- complain if script is sourced in psql, rather than via CREATE EXTENSION\n"
@@ -3212,15 +2682,6 @@ inline void validate_and_order_statement_candidates(
                 candidate.owner->stable_identity,
             .text = std::move(candidate.text),
             .statement_kind = candidate.statement_kind,
-            .facet = candidate.facet,
-            .render_source =
-                candidate.binding
-                ? candidate.binding->render_source
-                : physical_render_source::natural_projection,
-            .baseline_physical_id =
-                candidate.binding
-                ? candidate.binding->baseline_physical_id
-                : std::string{},
         });
     }
     artifact.sql += pending_prefix;

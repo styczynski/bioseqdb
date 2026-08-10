@@ -23,8 +23,8 @@ namespace bioseq::codegen::website {
 /// @brief Renders a template against a flat string binding map.
 /// @param template_text Jinja template source.
 /// @param bindings String-valued bindings.
-/// @return The rendered document, throwing on any template/render error.
-[[nodiscard]] std::string render_template(
+/// @return The rendered output, throwing on any template/render error.
+[[nodiscard]] std::string render_inline_template(
     std::string_view template_text,
     const std::map<std::string, std::string, std::less<>>& bindings) {
     std::vector<std::pair<std::string, std::string>> flat;
@@ -35,7 +35,7 @@ namespace bioseq::codegen::website {
     std::string result;
     std::string error;
     const int status =
-        detail::render_jinja(std::string(template_text), flat, result, error);
+        detail::render_inline_template_impl(std::string(template_text), flat, result, error);
     if (status != 0) {
         throw std::runtime_error("template render failed: " + error);
     }
@@ -46,14 +46,14 @@ namespace bioseq::codegen::website {
 /// @param templates_dir Filesystem root of the template set (§14).
 /// @param template_name Logical template name (for example "landing.html.j2").
 /// @param json_context A JSON object serialized as text (page data).
-/// @return The rendered document; throws on any load/context/render error.
-[[nodiscard]] std::string render_page(
+/// @return The rendered output; throws on any load/context/render error.
+[[nodiscard]] std::string render_page_template(
     std::string_view templates_dir,
     std::string_view template_name,
     std::string_view json_context) {
     std::string result;
     std::string error;
-    const int status = detail::render_jinja_file(
+    const int status = detail::render_template_file_impl(
         std::string(templates_dir), std::string(template_name),
         std::string(json_context), result, error);
     if (status != 0) {
@@ -65,12 +65,12 @@ namespace bioseq::codegen::website {
 /// @brief Renders a template against a structured JSON object context.
 /// @param template_text Jinja template source.
 /// @param json_context A JSON object serialized as text (page data).
-/// @return The rendered document, throwing on any template/context/render error.
-[[nodiscard]] std::string render_template_json(
+/// @return The rendered output, throwing on any template/context/render error.
+[[nodiscard]] std::string render_inline_json_template(
     std::string_view template_text, std::string_view json_context) {
     std::string result;
     std::string error;
-    const int status = detail::render_jinja_json(
+    const int status = detail::render_inline_json_template_impl(
         std::string(template_text), std::string(json_context), result, error);
     if (status != 0) {
         throw std::runtime_error("template render failed: " + error);

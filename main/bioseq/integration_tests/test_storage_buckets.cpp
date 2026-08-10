@@ -10,8 +10,8 @@
 //   * TEMP parents are rejected.
 //   * UNLOGGED parents inherit UNLOGGED sub-tables.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;

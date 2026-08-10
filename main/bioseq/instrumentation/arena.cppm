@@ -1,10 +1,10 @@
 /**
  * @file instrumentation/arena.cppm
- * @brief Arena attribution scope and foonathan/memory tracker hook.
+ * @brief Scoped allocation attribution and allocator tracker hook.
  *
- * The ArenaScope<Args> RAII type stamps a kind into the per-thread
+ * The arena_scope<configuration_type> RAII type stamps a kind into the per-thread
  * profiler block; allocations through the matching foonathan/memory
- * tracker increment the per-arena counter. When Args::enable_arena_tracking
+ * tracker increment the per-arena counter. When configuration_type::enable_arena_tracking
  * is false the entire mechanism collapses (every if constexpr branch is
  * empty in the discarded instantiation).
  */
@@ -13,79 +13,81 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq.instr.arena;
+export module bioseq.instrumentation.arena;
 
-import bioseq.instr.config;
-import bioseq.instr.thread_state;
+import bioseq.instrumentation.configuration;
+import bioseq.instrumentation.profiler_state;
 
-export namespace bioseq::instr {
+export namespace bioseq::instrumentation {
 
-template<is_context_args Args>
-struct [[nodiscard]] ArenaScope {
-    arena_kind prev = arena_kind::none;
+template<profiling_configuration configuration_type>
+struct [[nodiscard]] arena_scope {
+    arena_kind previous_arena = arena_kind::none;
 
     [[gnu::always_inline]]
-    explicit ArenaScope(arena_kind k) noexcept {
-        if constexpr (Args::enable_arena_tracking) {
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            prev = prof->current_arena_kind();
-            prof->set_current_arena_kind(k);
+    explicit arena_scope(arena_kind kind) noexcept {
+        if constexpr (configuration_type::enable_arena_tracking) {
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            previous_arena = profiler->active_arena_kind();
+            profiler->set_active_arena(kind);
         } else {
-            (void)k;
+            (void)kind;
         }
     }
 
-    [[gnu::always_inline]] ~ArenaScope() noexcept {
-        if constexpr (Args::enable_arena_tracking) {
-            auto* prof = tls_profiler<Args>;
-            if (prof == nullptr) return;
-            prof->set_current_arena_kind(prev);
+    [[gnu::always_inline]] ~arena_scope() noexcept {
+        if constexpr (configuration_type::enable_arena_tracking) {
+            auto* profiler = active_thread_profiler<configuration_type>;
+            if (profiler == nullptr) return;
+            profiler->set_active_arena(previous_arena);
         }
     }
 
-    ArenaScope(const ArenaScope&) = delete;
-    ArenaScope& operator=(const ArenaScope&) = delete;
-    ArenaScope(ArenaScope&&) = delete;
-    ArenaScope& operator=(ArenaScope&&) = delete;
+    arena_scope(const arena_scope&) = delete;
+    arena_scope& operator=(const arena_scope&) = delete;
+    arena_scope(arena_scope&&) = delete;
+    arena_scope& operator=(arena_scope&&) = delete;
 };
 
-template<is_context_args Args>
+template<profiling_configuration configuration_type>
 [[nodiscard, gnu::always_inline]]
-inline ArenaScope<Args> arena(arena_kind k) noexcept {
-    return ArenaScope<Args>(k);
+inline arena_scope<configuration_type> arena(arena_kind kind) noexcept {
+    return arena_scope<configuration_type>(kind);
 }
 
 /// foonathan/memory-compatible tracker. Wire by composing into a memory
 /// arena (`memory::tracked_allocator<profile_tracker, ...>`) — bytes
 /// passed through this tracker are attributed to the currently-active
 /// arena_kind on the per-thread profiler block.
-template<is_context_args Args>
+template<profiling_configuration configuration_type>
 struct profile_tracker {
     [[gnu::always_inline]]
     void on_node_allocation(void*, std::size_t bytes, std::size_t) noexcept {
-        if constexpr (!Args::enable_arena_tracking) return;
-        auto* prof = tls_profiler<Args>;
-        if (prof == nullptr) return;
-        const auto k = prof->current_arena_kind();
-        if (k == arena_kind::none) return;
-        auto& c = prof->arena_counter(k);
-        c.bytes_live  += bytes;
-        c.bytes_total += bytes;
-        c.alloc_count += 1;
-        if (bytes > c.largest) c.largest = bytes;
+        if constexpr (!configuration_type::enable_arena_tracking) return;
+        auto* profiler = active_thread_profiler<configuration_type>;
+        if (profiler == nullptr) return;
+        const auto kind = profiler->active_arena_kind();
+        if (kind == arena_kind::none) return;
+        auto& counter = profiler->counter_for(kind);
+        counter.bytes_live += bytes;
+        counter.bytes_total += bytes;
+        counter.allocation_count += 1;
+        if (bytes > counter.largest_allocation_bytes) {
+            counter.largest_allocation_bytes = bytes;
+        }
     }
 
     [[gnu::always_inline]]
     void on_node_deallocation(void*, std::size_t bytes, std::size_t) noexcept {
-        if constexpr (!Args::enable_arena_tracking) return;
-        auto* prof = tls_profiler<Args>;
-        if (prof == nullptr) return;
-        const auto k = prof->current_arena_kind();
-        if (k == arena_kind::none) return;
-        auto& c = prof->arena_counter(k);
-        if (bytes <= c.bytes_live) c.bytes_live -= bytes;
-        else c.bytes_live = 0;
+        if constexpr (!configuration_type::enable_arena_tracking) return;
+        auto* profiler = active_thread_profiler<configuration_type>;
+        if (profiler == nullptr) return;
+        const auto kind = profiler->active_arena_kind();
+        if (kind == arena_kind::none) return;
+        auto& counter = profiler->counter_for(kind);
+        if (bytes <= counter.bytes_live) counter.bytes_live -= bytes;
+        else counter.bytes_live = 0;
     }
 
     [[gnu::always_inline]]
@@ -101,4 +103,4 @@ struct profile_tracker {
     }
 };
 
-}  // namespace bioseq::instr
+}  // namespace bioseq::instrumentation

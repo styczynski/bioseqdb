@@ -18,7 +18,6 @@
  */
 module;
 
-#include "common.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -38,12 +37,12 @@ module;
 
 export module bioseq.io.sinks;
 
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 
 export namespace bioseq::io {
 
 /// Result of one `write_at` call on a sink.
-struct write_result {
+struct sink_write_result {
     std::size_t bytes_written = 0;
     bool        has_error = false;
 };
@@ -57,7 +56,7 @@ concept io_sink = requires(sink_t& sink,
                             const std::uint8_t* src,
                             std::size_t size,
                             std::uint64_t offset) {
-    { sink.write_at(src, size, offset) } -> std::same_as<write_result>;
+    { sink.write_at(src, size, offset) } -> std::same_as<sink_write_result>;
     { sink.reserve_offset(size) } -> std::same_as<std::uint64_t>;
     { sink.last_error_message() } -> std::convertible_to<std::string>;
 };
@@ -127,10 +126,10 @@ public:
 
     /// Write `size` bytes starting at `offset`. Caller MUST have
     /// reserved this offset range via `reserve_offset(size)`.
-    [[nodiscard]] write_result write_at(const std::uint8_t* src,
+    [[nodiscard]] sink_write_result write_at(const std::uint8_t* src,
                                           std::size_t size,
                                           std::uint64_t offset) noexcept {
-        write_result result;
+        sink_write_result result;
         std::size_t bytes_remaining = size;
         const std::uint8_t* cursor = src;
         std::uint64_t cursor_offset = offset;
@@ -288,14 +287,14 @@ public:
     /// Write `size` bytes at `offset` via memcpy into the mapped
     /// region. Caller MUST have called `reserve_offset(size)` to
     /// claim this range. Overflow of the mmap'd capacity is caught
-    /// here and surfaced via `write_result::has_error` — the offset
+    /// here and surfaced via `sink_write_result::has_error` — the offset
     /// counter still advanced for concurrent callers but no memory
     /// is touched, so the file is left valid up to the last
     /// successful write.
-    [[nodiscard]] write_result write_at(const std::uint8_t* src,
+    [[nodiscard]] sink_write_result write_at(const std::uint8_t* src,
                                           std::size_t size,
                                           std::uint64_t offset) noexcept {
-        write_result result;
+        sink_write_result result;
         if (offset + size > _capacity) {
             _last_error_message = fmt::format(
                 "mmap_pwrite_sink: write at offset {} of size {} exceeds "

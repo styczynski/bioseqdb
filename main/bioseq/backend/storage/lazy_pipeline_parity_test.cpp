@@ -14,7 +14,7 @@
 // the live psql proof in DOC0272 Appendix A); the chunked end-to-end path is
 // proven here.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <cstdint>

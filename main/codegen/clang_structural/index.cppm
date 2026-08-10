@@ -5,11 +5,17 @@ module;
 #include <string_view>
 #include <vector>
 
-export module bioseq.codegen.clang_structural;
+export module bioseq.codegen.structural_analysis;
 
 export import :model;
 
-export namespace bioseq::codegen::clang_structural {
+export namespace bioseq::codegen::structural_analysis {
+
+/// Returns a normalized forward-slash source identity. Repository sources are
+/// relative to the source root below `main/`; absolute, parent-traversing, and
+/// already-prefixed identity spellings are never returned.
+[[nodiscard]] std::string repository_source_identity(
+    const std::filesystem::path& source_path);
 
 /// Performs the production syntax-only collection pass. This API uses Clang's
 /// raw lexer but never creates a CompilerInstance, runs Sema, emits a BMI, or
@@ -23,7 +29,7 @@ export namespace bioseq::codegen::clang_structural {
 
 /// Semantically validates a generated body-free declaration surrogate. The
 /// call fails if a function body or default member initializer survives in the
-/// probe and records declaration-probe provenance/linkage/module facts.
+/// probe and records declaration identity, linkage, and module facts.
 [[nodiscard]] translation_unit scan_declaration_probe_from_code(
     const std::filesystem::path& source_path,
     std::string_view body_free_source,
@@ -81,13 +87,13 @@ export namespace bioseq::codegen::clang_structural {
     std::string_view source,
     const std::vector<std::string>& compiler_arguments);
 
-/// Reports the linked Clang version used for structural collection.
-[[nodiscard]] std::string clang_api_version();
+/// Returns the linked Clang release used for structural collection.
+[[nodiscard]] std::string linked_clang_release();
 
 /// Normalizes the selected raw CMake commands to the linked Clang profile,
 /// builds the named-module closure into a content-keyed PCM root, and returns
-/// the owned compilation database plus incremental-build evidence.
-[[nodiscard]] prepared_compilation_environment
+/// the owned compilation database plus incremental-build state.
+[[nodiscard]] dependency_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& raw_compile_database,
@@ -107,7 +113,7 @@ prepare_compilation_environment(
 /// interface, then delegates to ordinary PREPARE. Unlike the dependency-only
 /// API below, every canonical source is a compiler root and receives an owned
 /// content-keyed BMI in the isolated closure.
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& signature_source_path,
@@ -128,7 +134,7 @@ prepare_compilation_environment(
 /// canonical scan-only source. The canonical body-bearing input is tokenized,
 /// is never selected as a PREPARE root, and is never passed to a compiler
 /// action. The donor must be distinct from the canonical source.
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_dependency_compilation_environment(
     const std::filesystem::path& canonical_source_path,
     const std::filesystem::path& signature_source_path,
@@ -148,7 +154,7 @@ prepare_dependency_compilation_environment(
 /// Vector form for multi-source raw-token materialization policies. The union
 /// donor/import-provider closure is prepared once; every canonical source
 /// remains a raw-token-only input excluded from compiler roots and commands.
-[[nodiscard]] prepared_compilation_environment
+[[nodiscard]] dependency_compilation_environment
 prepare_dependency_compilation_environment(
     const std::vector<std::filesystem::path>& canonical_source_paths,
     const std::filesystem::path& signature_source_path,
@@ -184,31 +190,31 @@ derive_dependency_compilation_authority(
 /// Requires the isolated owned database to contain exactly the currently
 /// derived dependency roots. Digest staleness is checked by passing
 /// `dependency_compilation_manifest_authority` to manifest validation.
-void validate_dependency_compilation_authority_seal(
+void validate_dependency_compilation_roots(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database);
 
-/// Renders the deterministic, self-sealed record of every raw-token,
+/// Renders the deterministic, integrity-protected record of every raw-token,
 /// discovery, dependency-syntax, and PCM action observed by PREPARE. The
-/// document is evidence only and is deliberately absent from compilation,
-/// topology, and generated-artifact identities.
-[[nodiscard]] std::string render_preparation_action_trace(
-    const prepared_compilation_environment& prepared);
+/// record is diagnostic output and is absent from compilation, topology, and
+/// generated-artifact identities.
+[[nodiscard]] std::string render_frontend_action_trace(
+    const dependency_compilation_environment& environment);
 
 /// Authenticates a PREPARE action trace and joins every semantic action to the
 /// validated PCM closure. Canonical inputs must have exactly one token-slice
 /// action and no semantic frontend action.
-[[nodiscard]] preparation_action_trace_validation
-validate_preparation_action_trace(
+[[nodiscard]] frontend_trace_validation
+validate_frontend_action_trace(
     const std::filesystem::path& action_trace,
     const dependency_compilation_authority& dependency_authority,
-    const prepared_compilation_validation& prepared);
+    const dependency_compilation_validation& environment);
 
 /// Verifies that an owned compile database and every mapped PCM still match
 /// the PREPARE manifest, selected profile, authority, toolchain, and source
 /// dependency closure before structural collection begins.
-[[nodiscard]] prepared_compilation_validation
-validate_prepared_compilation_environment(
+[[nodiscard]] dependency_compilation_validation
+validate_dependency_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& compile_database,
     const std::filesystem::path& pcm_root,
@@ -233,4 +239,4 @@ validate_prepared_compilation_environment(
 [[nodiscard]] translation_unit scan_translation_unit(
     const std::filesystem::path& source_path);
 
-}  // namespace bioseq::codegen::clang_structural
+}  // namespace bioseq::codegen::structural_analysis

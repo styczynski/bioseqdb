@@ -3,15 +3,14 @@
  * column/metadata/seq_sub_table.cppm
  *
  * Narrow storage_metadata partition for sequence sub-table catalog rows.
- * DOC0329: the field-number constants + free functions are now folded into
- * SubTableRow (tuple ctor) and SubTableManager (snake_case static methods);
- * this facade re-exports just those two types.
+ * The row owns tuple decoding and the manager owns catalog operations; this
+ * partition exposes only those two semantic interfaces.
  *
  *-------------------------------------------------------------------------
  */
-export module bioseq.storage.metadata:seq_sub_table;
+export module bioseq.postgres.storage.metadata:seq_sub_table;
 
 import :core;
 
-export using ::SubTableRow;
-export using ::SubTableManager;
+export using ::sequence_sub_table_row;
+export using ::sequence_sub_table_manager;

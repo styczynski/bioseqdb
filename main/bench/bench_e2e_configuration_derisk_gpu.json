@@ -1,12 +1,12 @@
 {
   "params": {
     "bioseq_block_gpu_dp_gpu_seed_just_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C GPU frontend; index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend; index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
       "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "scheduler concurrency mode"}
     },
     "bioseq_block_gpu_dp_gpu_seed_no_index": {
-      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C GPU frontend; load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend; load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute"},
       "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "off = pure from-scratch no-index measure"},
       "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "scheduler concurrency mode"}

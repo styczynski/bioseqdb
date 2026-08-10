@@ -19,7 +19,7 @@
 // failure mode the prompt described where index scans returned
 // empty/NULL aggregates while non-index scans worked.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <string>
 

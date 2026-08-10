@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/index.cppm
- * @brief Thin public facade for durable POSIX file I/O primitives.
+ * @brief Public crash-durable POSIX file I/O facade.
  */
 export module bioseq.common.durable_file_io;
 

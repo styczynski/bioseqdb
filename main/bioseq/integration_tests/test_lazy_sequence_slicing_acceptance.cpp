@@ -1,7 +1,7 @@
 // DOC0377 §§17.1-17.2: normative SQL acceptance matrix.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 
 #include <algorithm>
 #include <array>

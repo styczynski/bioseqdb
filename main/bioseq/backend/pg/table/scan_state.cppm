@@ -1,232 +1,199 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file scan_state.cppm
+ * @brief Standard-layout executor state for Bioseq custom scans.
  *
- * table/scan_state.cppm
- *
- * BioseqScanState is the state object passed between the lifecycle hooks
- * of the bioseq custom scan node (BeginCustomScan, ExecCustomScan,
- * EndCustomScan, ReScanCustomScan, ExplainCustomScan, the parallel DSM
- * hooks). PostgreSQL passes around an opaque CustomScanState* and expects
- * the extension to cast it back to its concrete state type; we exploit
- * the fact that CustomScanState is the first member of the layout to
- * make those casts safe and uniform.
- *
- * BioseqIndexScanState plays the same role for the bioseq IndexScan
- * custom node. Both wrappers expose helper methods so call sites no
- * longer have to spell out C-style casts every time they need to move
- * between the bioseq state and the underlying CustomScanState/Node.
- *
- * Layout invariant: every state struct keeps CustomScanState as its
- * first member and is verified to be standard-layout, so the
- * reinterpret-cast across the C ABI continues to round-trip cleanly.
- *
- *-------------------------------------------------------------------------
+ * PostgreSQL owns the embedded `CustomScanState` and passes its address through
+ * C callbacks. Each Bioseq wrapper keeps that object first, remains
+ * standard-layout, and centralizes every boundary cast.
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <new>
 #include <type_traits>
 
 export module bioseq.postgres.table.scan_state;
 
-import bioseq.vector.types;
-import bioseq.storage.metadata;   // DOC0322 §9.2 — ParallelBioseqColumnScan (was types.h)
-import bioseq.pg_utils.lists;
-import bioseq.pg_utils.bitmapset;
 export import bioseq.postgres.table.alignment_execution;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.support;
+import bioseq.postgres.vectorization.types;
 
-/*
- * Vectorization-related per-scan state. Kept as a nested struct so that
- * callers can clearly tell vectorization metadata apart from the rest of
- * BioseqScanState.
- */
-export struct BioseqScanVectorizationState
-{
-    bool vectorizationEnabled;
-    bool vectorizationAggregate;
-    TupleTableSlot* scanVectorSlot;
-    TupleTableSlot* resultVectorSlot;
-    uint32_t vectorPendingRowNumber;
-    uint32_t vectorRowIndex;
-    PList<Node> vectorizedQualList;
-    PList<Node> constructedVectorizedQualList;
-    PIntList attrNeededList;
+/// @brief Vectorization-specific state retained by one columnar custom scan.
+export struct scan_vectorization_state {
+    /// @brief Whether vectorized execution is active.
+    bool is_enabled;
+    /// @brief Whether the vectorized plan computes an aggregate.
+    bool is_aggregate;
+    /// @brief Input vector slot owned by the scan.
+    TupleTableSlot* scan_vector_slot;
+    /// @brief Output vector slot owned by the scan.
+    TupleTableSlot* result_vector_slot;
+    /// @brief First row not yet emitted from the current vector.
+    std::uint32_t pending_row_number;
+    /// @brief Current row position within the vector.
+    std::uint32_t row_index;
+    /// @brief Planned vectorized qualifiers.
+    bioseq::postgres::support::postgres_list<Node> qualifiers;
+    /// @brief Executor-owned rewritten vectorized qualifiers.
+    bioseq::postgres::support::postgres_list<Node> constructed_qualifiers;
+    /// @brief One-based attribute numbers required by vectorized execution.
+    bioseq::postgres::support::postgres_integer_list attributes_needed;
 };
 
-/*
- * BioseqScanState is the per-execution state for a bioseq columnar custom
- * scan. CustomScanState must be the first field for the cast helpers
- * (from_node, from_custom_scan_state, as_node) to be valid.
+/**
+ * @brief Per-execution state for the Bioseq columnar custom scan.
+ *
+ * Non-standard-layout runtime owners remain behind `runtime_state`; the
+ * concrete runtime is created and destroyed by the custom-scan owner.
  */
-export struct BioseqScanState
-{
-    CustomScanState custom_scanstate;
-    PBitmapset attrNeeded;
-
-    ExprContext* css_RuntimeContext;
-    PList<Node> qual;
-
-    ParallelBioseqColumnScan parallelBioseqColumnScan;
-
-    BioseqScanVectorizationState vectorization;
-
+export struct scan_state {
+    /// @brief PostgreSQL custom-scan base; must remain the first member.
+    CustomScanState custom_scan_state;
+    /// @brief Zero-based bitmap of physical attributes to materialize.
+    bioseq::postgres::support::postgres_bitmapset attributes_needed;
+    /// @brief Expression context used for runtime qualifier evaluation.
+    ExprContext* runtime_expression_context;
+    /// @brief Storage qualifiers retained by the scan.
+    bioseq::postgres::support::postgres_list<Node> qualifiers;
+    /// @brief PostgreSQL parallel-scan coordination record.
+    parallel_column_scan_handle parallel_scan;
+    /// @brief Vectorized execution state.
+    scan_vectorization_state vectorization;
+    /// @brief Snapshot used by the column reader.
     Snapshot snapshot;
-    bool snapshotRegisteredByUs;
+    /// @brief Whether this scan must unregister `snapshot` during cleanup.
+    bool owns_snapshot_registration;
+    /// @brief Opaque pointer to the custom-scan runtime owner.
+    void* runtime_state;
 
-    /*
-     * Per-scan runtime, owned by BioseqScanState. Stored as a `void*`
-     * opaque pointer so the std::vector / std::map / TupleDispatchBuffer
-     * fields it really points at don't drag non-standard-layout state
-     * into this struct (BioseqScanState must remain standard-layout for
-     * the reinterpret_cast across the Postgres C ABI to round-trip). The
-     * concrete type is `BioseqScanRuntime`, defined inside
-     * columnar_customscan.cppm; that file is the only one that
-     * dereferences the pointer. Allocated in
-     * BioseqColumnScan_CreateCustomScanState and released in
-     * BioseqColumnScan_EndCustomScan.
-     *
-     * Owning this state per-scan-state (rather than as a file static)
-     * is what lets a single backend run two BioseqScan nodes
-     * concurrently — a precondition for working CROSS / LEFT joins.
-     */
-    void* runtime;
-
-    /*
-     * Reinterpret a CustomScanState* received from PostgreSQL back into
-     * a BioseqScanState*. Safe because custom_scanstate is the first
-     * field; static_assert on standard-layout below guarantees the cast
-     * stays valid.
-     */
-    [[nodiscard]] static BioseqScanState* from_custom_scan_state(CustomScanState* state) {
-        return reinterpret_cast<BioseqScanState*>(state);
+    /// @brief Reinterprets PostgreSQL's callback pointer as Bioseq scan state.
+    /// @param state PostgreSQL custom-scan state pointer.
+    /// @return The enclosing Bioseq state.
+    [[nodiscard]] static scan_state* from_custom_scan_state(
+        CustomScanState* state) noexcept {
+        return reinterpret_cast<scan_state*>(state);
     }
 
-    /* Same as above for callers that hold a generic Node*. */
-    [[nodiscard]] static BioseqScanState* from_node(Node* node) {
-        return reinterpret_cast<BioseqScanState*>(node);
+    /// @brief Reinterprets a generic PostgreSQL node as Bioseq scan state.
+    /// @param node Node whose first object is the embedded custom-scan state.
+    /// @return The enclosing Bioseq state.
+    [[nodiscard]] static scan_state* from_node(Node* node) noexcept {
+        return reinterpret_cast<scan_state*>(node);
     }
 
-    /*
-     * Allocate a fresh BioseqScanState via PostgreSQL's newNode() helper,
-     * tagged as T_CustomScanState so the executor recognises it.
-     */
-    [[nodiscard]] static BioseqScanState* allocate() {
-        auto* state = ::new (palloc0(sizeof(BioseqScanState))) BioseqScanState{};
-        reinterpret_cast<Node*>(&state->custom_scanstate)->type = T_CustomScanState;
+    /// @brief Allocates zeroed scan state in PostgreSQL's active memory context.
+    /// @return A state tagged as `T_CustomScanState`.
+    [[nodiscard]] static scan_state* allocate() {
+        auto* state = ::new (palloc0(sizeof(scan_state))) scan_state{};
+        reinterpret_cast<Node*>(&state->custom_scan_state)->type = T_CustomScanState;
         return state;
     }
 
-    /* Reverse direction: hand a Node* back to PostgreSQL. */
-    [[nodiscard]] Node* as_node() {
-        return reinterpret_cast<Node*>(&custom_scanstate);
+    /// @brief Returns the embedded state through PostgreSQL's generic node type.
+    [[nodiscard]] Node* as_node() noexcept {
+        return reinterpret_cast<Node*>(&custom_scan_state);
     }
 
-    /* Hand back the embedded CustomScanState* (non-cast accessor). */
-    [[nodiscard]] CustomScanState* as_custom_scan_state() {
-        return &custom_scanstate;
+    /// @brief Returns the embedded PostgreSQL custom-scan state.
+    [[nodiscard]] CustomScanState* as_custom_scan_state() noexcept {
+        return &custom_scan_state;
     }
 
-    /* Convenience accessor: the nested ScanState used by the executor. */
-    [[nodiscard]] ScanState* scan_state() {
-        return &custom_scanstate.ss;
+    /// @brief Returns the embedded PostgreSQL scan executor state.
+    [[nodiscard]] ScanState* executor_scan_state() noexcept {
+        return &custom_scan_state.ss;
     }
 
-    /* Convenience accessor: the PlanState shared by the executor. */
-    [[nodiscard]] PlanState* plan_state() {
-        return &custom_scanstate.ss.ps;
+    /// @brief Returns the embedded PostgreSQL plan executor state.
+    [[nodiscard]] PlanState* executor_plan_state() noexcept {
+        return &custom_scan_state.ss.ps;
     }
 
-    /* Convenience accessor: the relation being scanned. */
-    [[nodiscard]] Relation current_relation() {
-        return custom_scanstate.ss.ss_currentRelation;
+    /// @brief Returns the relation currently scanned by PostgreSQL.
+    [[nodiscard]] Relation current_relation() noexcept {
+        return custom_scan_state.ss.ss_currentRelation;
     }
 
-    /*
-     * Returns the CustomScan plan node that this state was built from.
-     * Centralises the `reinterpret_cast<CustomScan*>(ss.ps.plan)` cast
-     * that call sites would otherwise duplicate.
-     */
-    [[nodiscard]] CustomScan* custom_scan_plan() {
-        return reinterpret_cast<CustomScan*>(custom_scanstate.ss.ps.plan);
+    /// @brief Returns the CustomScan plan that created this state.
+    [[nodiscard]] CustomScan* custom_scan_plan() noexcept {
+        return reinterpret_cast<CustomScan*>(custom_scan_state.ss.ps.plan);
     }
 };
 
-/*
- * BioseqIndexScanState is the per-execution state for the bioseq
- * IndexScan wrapper. As with BioseqScanState, the first field must be a
- * CustomScanState so reinterpret-casts from PostgreSQL round-trip.
- */
-export struct BioseqIndexScanState
-{
-    CustomScanState css;
-    IndexScanState* indexscan_state;
+/// @brief Per-execution state for the Bioseq IndexScan wrapper node.
+export struct index_scan_state {
+    /// @brief PostgreSQL custom-scan base; must remain the first member.
+    CustomScanState custom_scan_state;
+    /// @brief Executor state of the wrapped PostgreSQL IndexScan.
+    IndexScanState* index_scan_executor_state;
 
-    [[nodiscard]] static BioseqIndexScanState* from_custom_scan_state(CustomScanState* state) {
-        return reinterpret_cast<BioseqIndexScanState*>(state);
+    /// @brief Reinterprets PostgreSQL's callback pointer as index-scan state.
+    [[nodiscard]] static index_scan_state* from_custom_scan_state(
+        CustomScanState* state) noexcept {
+        return reinterpret_cast<index_scan_state*>(state);
     }
 
-    [[nodiscard]] static BioseqIndexScanState* from_node(Node* node) {
-        return reinterpret_cast<BioseqIndexScanState*>(node);
+    /// @brief Reinterprets a generic PostgreSQL node as index-scan state.
+    [[nodiscard]] static index_scan_state* from_node(Node* node) noexcept {
+        return reinterpret_cast<index_scan_state*>(node);
     }
 
-    [[nodiscard]] static BioseqIndexScanState* from_plan_state(PlanState* plan_state) {
-        return reinterpret_cast<BioseqIndexScanState*>(plan_state);
+    /// @brief Reinterprets PostgreSQL plan state as the enclosing index-scan state.
+    [[nodiscard]] static index_scan_state* from_plan_state(
+        PlanState* state) noexcept {
+        return reinterpret_cast<index_scan_state*>(state);
     }
 
-    [[nodiscard]] static BioseqIndexScanState* allocate() {
-        auto* state = ::new (palloc0(sizeof(BioseqIndexScanState))) BioseqIndexScanState{};
-        reinterpret_cast<Node*>(&state->css)->type = T_CustomScanState;
+    /// @brief Allocates zeroed index-scan state in the active memory context.
+    [[nodiscard]] static index_scan_state* allocate() {
+        auto* state = ::new (palloc0(sizeof(index_scan_state))) index_scan_state{};
+        reinterpret_cast<Node*>(&state->custom_scan_state)->type = T_CustomScanState;
         return state;
     }
 
-    [[nodiscard]] Node* as_node() {
-        return reinterpret_cast<Node*>(&css);
+    /// @brief Returns the embedded state through PostgreSQL's generic node type.
+    [[nodiscard]] Node* as_node() noexcept {
+        return reinterpret_cast<Node*>(&custom_scan_state);
     }
 
-    [[nodiscard]] CustomScanState* as_custom_scan_state() {
-        return &css;
+    /// @brief Returns the embedded PostgreSQL custom-scan state.
+    [[nodiscard]] CustomScanState* as_custom_scan_state() noexcept {
+        return &custom_scan_state;
     }
 
-    [[nodiscard]] PlanState* plan_state() {
-        return &css.ss.ps;
+    /// @brief Returns the embedded PostgreSQL plan executor state.
+    [[nodiscard]] PlanState* executor_plan_state() noexcept {
+        return &custom_scan_state.ss.ps;
     }
 
-    /*
-     * Returns the CustomScan plan node that wraps the inner IndexScan
-     * so call sites don't have to spell out the reinterpret_cast.
-     */
-    [[nodiscard]] CustomScan* custom_scan_plan() {
-        return reinterpret_cast<CustomScan*>(css.ss.ps.plan);
+    /// @brief Returns the CustomScan plan wrapping the inner IndexScan.
+    [[nodiscard]] CustomScan* custom_scan_plan() noexcept {
+        return reinterpret_cast<CustomScan*>(custom_scan_state.ss.ps.plan);
     }
 
-    /*
-     * Returns the inner IndexScan plan node that we wrapped. The plan
-     * is stored as the first (and only) entry of the outer CustomScan's
-     * custom_plans list, so this centralises the PList indexing +
-     * reinterpret_cast sequence that call sites would otherwise repeat.
-     */
-    [[nodiscard]] IndexScan* inner_index_scan_plan() {
+    /// @brief Returns the wrapped PostgreSQL IndexScan plan node.
+    [[nodiscard]] IndexScan* inner_index_scan_plan() noexcept {
         return reinterpret_cast<IndexScan*>(
-            PList<Plan>(custom_scan_plan()->custom_plans).first());
+            bioseq::postgres::support::postgres_list<Plan>(custom_scan_plan()->custom_plans).first());
     }
 };
 
-/*
- * Layout invariants. Both wrappers are reinterpret_cast'd back and forth
- * across the PostgreSQL C ABI, so they must stay standard-layout. If a
- * future field promotes either struct to non-standard-layout the C
- * boundary would silently corrupt memory; static_assert catches that at
- * compile time.
- */
-static_assert(std::is_standard_layout_v<BioseqScanVectorizationState>,
-              "BioseqScanVectorizationState must remain standard-layout (memcpy / reinterpret_cast safety)");
-static_assert(std::is_standard_layout_v<BioseqScanState>,
-              "BioseqScanState must remain standard-layout (cast to/from CustomScanState* must be valid)");
-static_assert(std::is_standard_layout_v<BioseqIndexScanState>,
-              "BioseqIndexScanState must remain standard-layout (cast to/from CustomScanState* must be valid)");
-static_assert(offsetof(BioseqScanState, custom_scanstate) == 0,
-              "BioseqScanState::custom_scanstate must be the first field");
-static_assert(offsetof(BioseqIndexScanState, css) == 0,
-              "BioseqIndexScanState::css must be the first field");
+static_assert(
+    std::is_standard_layout_v<scan_vectorization_state>,
+    "scan_vectorization_state must remain standard-layout");
+static_assert(
+    std::is_standard_layout_v<scan_state>,
+    "scan_state must remain standard-layout across CustomScanState callbacks");
+static_assert(
+    std::is_standard_layout_v<index_scan_state>,
+    "index_scan_state must remain standard-layout across CustomScanState callbacks");
+static_assert(
+    offsetof(scan_state, custom_scan_state) == 0,
+    "scan_state::custom_scan_state must remain the first member");
+static_assert(
+    offsetof(index_scan_state, custom_scan_state) == 0,
+    "index_scan_state::custom_scan_state must remain the first member");

@@ -5,7 +5,7 @@ module;
 #include <exception>
 #include <optional>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "catalog/pg_type_d.h"
 #include "executor/execExpr.h"
@@ -19,7 +19,7 @@ extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:subscript;
+export module bioseq.postgres.types.compact_sequence:subscript;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -27,7 +27,7 @@ import :tree_types;
 import :view_session;
 import :packed_output;
 import :letter;
-import bioseq.pg_utils;
+import bioseq.postgres.support;
 import bioseq.storage.coordinates;
 
 export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
@@ -187,7 +187,7 @@ inline void seq_fetch_subscript_impl(ExprState*, ExprEvalStep* op, ExprContext*)
 /* PostgreSQL invokes sbs_fetch directly from executor expression evaluation,
  * after the fmgr subscript handler has returned its SubscriptRoutines.  Keep
  * that actual callback as a no-escape C++ boundary: source reads deliberately
- * surface PostgreSQL ERROR as PostgresErrorAsCpp only long enough to unwind
+ * surface PostgreSQL ERROR as postgres_error only long enough to unwind
  * their read-session owners.  At this seam the exact ErrorData is transferred
  * back to PostgreSQL after the exception object and every fetch-local C++
  * owner have been destroyed. */
@@ -202,7 +202,7 @@ inline void seq_fetch_subscript(ExprState* expression,
     try {
         seq_fetch_subscript_impl(expression, op, context);
         return;
-    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+    } catch (bioseq::postgres::support::postgres_error& error) {
         exact_error = error.release_error_data();
     } catch (std::exception const& error) {
         strlcpy(detail,
@@ -266,7 +266,7 @@ void* seq_subscript_handler(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
-    std::optional<bioseq::pg_utils::subscript_handler_context> input)
+    std::optional<bioseq::postgres::support::subscript_handler> input)
 {
     static_cast<void>(input);
     static const SubscriptRoutines routines = {

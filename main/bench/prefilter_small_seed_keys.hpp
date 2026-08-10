@@ -5,7 +5,7 @@
 #include <optional>
 #include <string_view>
 
-namespace bioseq::bench_prefilters::small_seed {
+namespace bioseq::bench::prefilters::small_seed {
 
 /// Resolve the fixed edit threshold encoded by a small-seed benchmark key.
 /// Keeping this selector shared between production and its config regression
@@ -37,7 +37,8 @@ is_gatekeeper_algorithm(std::string_view algorithm) noexcept
     return fixed_max_edits_for_algorithm(algorithm).has_value();
 }
 
-struct HardwareValidationEvidence {
+/** Hardware execution evidence required before publishing a small-seed row. */
+struct hardware_validation_evidence {
     bool input_valid = false;
     bool backend_available = false;
     bool validation_performed = false;
@@ -49,7 +50,7 @@ struct HardwareValidationEvidence {
 /// Fail-closed evidence predicate used before a small-seed row may emit
 /// performance measurements into its blocking comparison rules.
 [[nodiscard]] constexpr bool has_required_hardware_validation(
-    const HardwareValidationEvidence& evidence) noexcept
+    const hardware_validation_evidence& evidence) noexcept
 {
     return evidence.input_valid
         && evidence.backend_available
@@ -58,4 +59,4 @@ struct HardwareValidationEvidence {
         && evidence.result_count == evidence.expected_result_count;
 }
 
-}  // namespace bioseq::bench_prefilters::small_seed
+}  // namespace bioseq::bench::prefilters::small_seed

@@ -14,13 +14,15 @@
  *   * strict_alphabet mode rejection of stray bytes;
  *   * async pipeline mode round-trip.
  */
-#include "common_tests.h"
-#include "common.h"
+#include <tests/support/common.hpp>
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
 #include <string>
 #include <utility>
@@ -30,10 +32,10 @@
 
 #include <kseq++/seqio.hpp>
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
-import bioseq.io.public_api;
+import bioseq.io.reader;
 import bioseq.io.options;
 import bioseq.io.sources;
 import bioseq.io.compression.parallel_gzip_source;
@@ -99,7 +101,8 @@ std::string decode_to_ascii(const SequenceRange& seq) {
 
 }  // namespace
 
-TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -113,7 +116,7 @@ TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip", "[io-test-correctness]") {
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -137,7 +140,8 @@ TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip", "[io-test-correctness]") {
     fs::remove(path);
 }
 
-TEST_CASE("bioseq_io: multi-line FASTA dna4", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: multi-line FASTA dna4",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -154,7 +158,7 @@ TEST_CASE("bioseq_io: multi-line FASTA dna4", "[io-test-correctness]") {
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -174,7 +178,8 @@ TEST_CASE("bioseq_io: multi-line FASTA dna4", "[io-test-correctness]") {
     fs::remove(path);
 }
 
-TEST_CASE("bioseq_io: CRLF line endings", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: CRLF line endings",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -185,7 +190,7 @@ TEST_CASE("bioseq_io: CRLF line endings", "[io-test-correctness]") {
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -204,7 +209,8 @@ TEST_CASE("bioseq_io: CRLF line endings", "[io-test-correctness]") {
     fs::remove(path);
 }
 
-TEST_CASE("bioseq_io: empty file", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: empty file",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -214,7 +220,7 @@ TEST_CASE("bioseq_io: empty file", "[io-test-correctness]") {
     std::vector<std::string> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -231,7 +237,8 @@ TEST_CASE("bioseq_io: empty file", "[io-test-correctness]") {
     fs::remove(path);
 }
 
-TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -249,7 +256,7 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip", "[io-test-correctness]") {
     std::vector<record> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTQ>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -281,7 +288,8 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip", "[io-test-correctness]") {
 // Phase 6 hardening tests
 // =====================================================================
 
-TEST_CASE("bioseq_io: multi-line FASTQ qual", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: multi-line FASTQ qual",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -305,7 +313,7 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual", "[io-test-correctness]") {
     std::vector<record> got;
     std::vector<std::string> errs;
 
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTQ>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -330,7 +338,7 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual", "[io-test-correctness]") {
 }
 
 TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
-          "[io-test-correctness]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -390,7 +398,7 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
         std::vector<std::pair<std::string, std::string>> got;
         std::vector<std::string> errs;
 
-        auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
             path,
             [&](batch_t&& batch) {
                 for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -414,7 +422,7 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
 }
 
 TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
-          "[io-test-correctness]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -453,7 +461,7 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         // Our reader.
         std::vector<std::pair<std::string, std::string>> ours;
         std::vector<std::string> ours_errs;
-        auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
             path,
             [&](batch_t&& batch) {
                 for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -493,7 +501,8 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
     }
 }
 
-TEST_CASE("bioseq_io: mmap path round-trip", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: mmap path round-trip",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -510,7 +519,7 @@ TEST_CASE("bioseq_io: mmap path round-trip", "[io-test-correctness]") {
 
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -531,7 +540,8 @@ TEST_CASE("bioseq_io: mmap path round-trip", "[io-test-correctness]") {
     fs::remove(path);
 }
 
-TEST_CASE("bioseq_io: gzip path round-trip", "[io-test-correctness]") {
+TEST_CASE("bioseq_io: gzip path round-trip",
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -546,7 +556,7 @@ TEST_CASE("bioseq_io: gzip path round-trip", "[io-test-correctness]") {
 
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
@@ -567,7 +577,7 @@ TEST_CASE("bioseq_io: gzip path round-trip", "[io-test-correctness]") {
 }
 
 TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
-          "[io-test-correctness]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -602,7 +612,7 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     std::mutex got_mutex;
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
-    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+    auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
         [&](batch_t&& batch) {
             std::vector<std::pair<std::string, std::string>> local;
@@ -639,11 +649,10 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
 // =====================================================================
 //
 // Decompresses the real-human FASTQ test file with both backends and
-// reports the first byte where they diverge. Hidden behind tag
-// `[diag-pgzip-divergence]` so the regular suite doesn't run it on
-// the 1.9 GiB corpus.
+// reports the first byte where they diverge. The large-memory resource tag
+// identifies the 1.9 GiB corpus requirement for focused selection.
 TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
-          "[.][diag-pgzip-divergence]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem][resource:large_memory]") {
     const std::string path =
         std::string{BIOSEQ_IO_TEST_DATA_DIR}
         + "/1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz";
@@ -729,7 +738,7 @@ TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
 }
 
 TEST_CASE("bioseq_io: pgzip multi-thread vs zlib first divergence",
-          "[.][diag-pgzip-mt-divergence]") {
+          "[component:bioseq][layer:integration][feature:io][resource:filesystem][resource:large_memory]") {
     const std::string path =
         std::string{BIOSEQ_IO_TEST_DATA_DIR}
         + "/1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz";

@@ -3,7 +3,7 @@
  * @brief DOC0335 generic generator tests.
  */
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <array>

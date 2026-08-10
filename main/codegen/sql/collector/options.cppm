@@ -388,7 +388,7 @@ namespace detail {
 }  // namespace detail
 
 [[nodiscard]] inline std::vector<option_value> parse_options(
-    const clang_structural::attribute_record& attribute) {
+    const structural_analysis::attribute_record& attribute) {
     std::vector<option_value> result;
     if (detail::collector_trim(attribute.argument_text).empty()) {
         return result;
@@ -429,7 +429,7 @@ namespace detail {
         result.push_back(option_value{
             .name = std::move(name),
             .expression = std::move(expression),
-            .range = attribute.range,
+            .range = attribute.spelling_range,
         });
     }
     if (attribute.name == "guc_value") {
@@ -468,13 +468,13 @@ namespace detail {
 }
 
 [[nodiscard]] inline std::vector<dependency_reference> parse_dependencies(
-    const clang_structural::attribute_record& attribute) {
+    const structural_analysis::attribute_record& attribute) {
     std::vector<dependency_reference> result;
     for (const std::string& expression :
          detail::split_top_level(attribute.argument_text)) {
         result.push_back(dependency_reference{
             .expression = detail::canonical_expression(expression),
-            .range = attribute.range,
+            .range = attribute.spelling_range,
         });
     }
     if (result.empty()) {

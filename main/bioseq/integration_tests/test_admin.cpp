@@ -1,7 +1,7 @@
 // Integration coverage for the Bioseq administration views and the native
 // table-option functions.
 
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <cstddef>
 #include <cstdint>

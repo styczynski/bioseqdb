@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -16,10 +16,10 @@ import :alignment_hook_contract;
 
 namespace bioseq::pg::detail {
 
-[[nodiscard]] AlignmentExecutorFrame* find_alignment_frame(
+[[nodiscard]] alignment_executor_frame* find_alignment_frame(
 		QueryDesc* query_desc) noexcept
 {
-	for (const AlignmentQueryRegistryEntry& entry : alignment_query_registry) {
+	for (const alignment_query_registry_entry& entry : alignment_query_registry) {
 		if (entry.key == query_desc) {
 			return entry.frame;
 		}
@@ -27,10 +27,10 @@ namespace bioseq::pg::detail {
 	return nullptr;
 }
 
-[[nodiscard]] AlignmentExecutorFrame* find_alignment_frame(
+[[nodiscard]] alignment_executor_frame* find_alignment_frame(
 		EState* estate) noexcept
 {
-	for (const AlignmentEstateRegistryEntry& entry : alignment_estate_registry) {
+	for (const alignment_estate_registry_entry& entry : alignment_estate_registry) {
 		if (entry.key == estate) {
 			return entry.frame;
 		}
@@ -38,7 +38,7 @@ namespace bioseq::pg::detail {
 	return nullptr;
 }
 
-void register_alignment_frame(AlignmentExecutorFrame* frame)
+void register_alignment_frame(alignment_executor_frame* frame)
 {
 	if (frame == nullptr || frame->query_desc == nullptr || frame->estate == nullptr) {
 		ereport(ERROR,
@@ -53,9 +53,9 @@ void register_alignment_frame(AlignmentExecutorFrame* frame)
 	}
 	alignment_frames.push_back(frame);
 	alignment_query_registry.push_back(
-		AlignmentQueryRegistryEntry{frame->query_desc, frame});
+		alignment_query_registry_entry{frame->query_desc, frame});
 	alignment_estate_registry.push_back(
-		AlignmentEstateRegistryEntry{frame->estate, frame});
+		alignment_estate_registry_entry{frame->estate, frame});
 }
 
 } // namespace bioseq::pg::detail

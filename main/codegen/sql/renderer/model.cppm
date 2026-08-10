@@ -13,12 +13,7 @@ struct rendered_statement {
     std::string id;
     std::string entity_identity;
     std::string text;
-    entity_kind statement_kind{entity_kind::install_action};
-    physical_statement_facet facet{
-        physical_statement_facet::primary};
-    physical_render_source render_source{
-        physical_render_source::natural_projection};
-    std::string baseline_physical_id;
+    entity_kind statement_kind{entity_kind::phase};
 };
 
 struct rendered_sql_artifact {

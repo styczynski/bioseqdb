@@ -32,18 +32,20 @@ export module bioseq.parallelism.pool;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.common.context;
-import bioseq.instr.clock;
+import bioseq.instrumentation.clock;
 
 namespace otbb = oneapi::tbb;
 
 namespace bioseq::parallelism::detail {
 
-struct PoolImpl {
+/// Private oneTBB arena ownership kept out of the exported class layout.
+struct pool_implementation {
     std::optional<otbb::task_arena> arena;
 };
 
-struct TaskGroupImpl {
-    std::shared_ptr<PoolImpl> pool;
+/// Private task-group ownership tied to the pool arena lifetime.
+struct task_group_implementation {
+    std::shared_ptr<pool_implementation> pool;
     otbb::task_group group;
 };
 
@@ -51,26 +53,30 @@ struct TaskGroupImpl {
 
 export namespace bioseq::parallelism {
 
+/// Non-owning callback used while draining scheduler-controlled resources.
 struct tracked_noexcept_callback {
   void *argument{};
   void (*invoke)(void *) noexcept {};
 };
 
+/// Cleanup callbacks registered for one tracked scheduler job.
 struct tracked_job_resources {
   tracked_noexcept_callback cancel{};
   tracked_noexcept_callback join{};
   tracked_noexcept_callback backings{};
 };
 
+/// Generation-checked slot handle for a tracked scheduler job.
 struct tracked_job_handle {
   std::uint32_t slot_index{};
   std::uint64_t generation{};
 };
 
+/// Fixed-layout terminal outcome copied across the scheduler boundary.
 struct tracked_job_outcome {
-  bool drained{};
-  bool incomplete{};
-  bool failed{};
+  bool is_drained{};
+  bool is_incomplete{};
+  bool has_failure{};
   std::uint8_t reserved{};
   std::uint32_t sqlstate{};
   std::uint16_t message_length{};
@@ -80,10 +86,12 @@ struct tracked_job_outcome {
 static_assert(std::is_trivially_copyable_v<tracked_job_outcome>);
 static_assert(std::is_standard_layout_v<tracked_job_outcome>);
 
+/// Caller-owned inline storage for one worker's scheduler scope.
 struct tracked_worker_scope_storage {
   alignas(std::max_align_t) std::array<std::byte, 64> bytes{};
 };
 
+/// Callback table connecting pool tasks to scheduler job accounting.
 struct tracked_job_observer {
   void *context{};
   bool (*enroll)(void *, tracked_job_resources,
@@ -125,6 +133,7 @@ restore_tracked_job_observer(tracked_job_observer previous) noexcept {
   detail::active_tracked_job_observer = previous;
 }
 
+/// Non-owning executable task reference used by tracked submissions.
 struct tracked_task_ref {
   void *argument{};
   void (*invoke)(void *){};
@@ -154,6 +163,7 @@ struct tracked_task_submission {
 static_assert(std::is_trivially_copyable_v<tracked_task_submission>);
 static_assert(std::is_standard_layout_v<tracked_task_submission>);
 
+/// Result of attempting to enqueue a tracked task.
 enum class tracked_submit_status : std::uint8_t {
   submitted = 0u,
   invalid,
@@ -162,50 +172,52 @@ enum class tracked_submit_status : std::uint8_t {
   transition_rejected,
 };
 
-class ScopedTaskGroup {
+/// Move-only oneTBB task group that joins before releasing its arena owner.
+class scoped_task_group {
 public:
-  ScopedTaskGroup() = default;
-  ScopedTaskGroup(const ScopedTaskGroup &) = delete;
-  ScopedTaskGroup &operator=(const ScopedTaskGroup &) = delete;
-  ScopedTaskGroup(ScopedTaskGroup &&) noexcept = default;
-  ScopedTaskGroup &operator=(ScopedTaskGroup &&) noexcept = default;
-  ~ScopedTaskGroup() { wait(); }
+  scoped_task_group() = default;
+  scoped_task_group(const scoped_task_group &) = delete;
+  scoped_task_group &operator=(const scoped_task_group &) = delete;
+  scoped_task_group(scoped_task_group &&) noexcept = default;
+  scoped_task_group &operator=(scoped_task_group &&) noexcept = default;
+  ~scoped_task_group() { wait(); }
 
   void run(task_body body);
   void wait();
 
 private:
-  friend class GlobalPool;
-  explicit ScopedTaskGroup(std::shared_ptr<detail::TaskGroupImpl> impl)
-      : impl_(std::move(impl)) {}
+  friend class global_pool;
+  explicit scoped_task_group(std::shared_ptr<detail::task_group_implementation> implementation)
+      : implementation_(std::move(implementation)) {}
 
-  std::shared_ptr<detail::TaskGroupImpl> impl_;
+  std::shared_ptr<detail::task_group_implementation> implementation_;
 };
 
-class GlobalPool {
+/// Process-wide facade over the pipeline's oneTBB task arena.
+class global_pool {
 public:
-  static GlobalPool &instance() noexcept {
-    static GlobalPool pool;
+  static global_pool &instance() noexcept {
+    static global_pool pool;
     return pool;
   }
 
-  void configure(const PoolConfig &config);
+  void configure(const pool_config &config);
   void ensure_configured() const;
   void shutdown() noexcept;
   void shutdown_at_exit() noexcept;
-  void restart(const PoolConfig &config);
+  void restart(const pool_config &config);
 
-  [[nodiscard]] unsigned max_concurrency() const noexcept {
-    return max_concurrency_;
+  [[nodiscard]] unsigned maximum_concurrency() const noexcept {
+    return maximum_concurrency_;
   }
-  [[nodiscard]] unsigned live_workers() const noexcept {
-    return live_workers_.load(std::memory_order_relaxed);
+  [[nodiscard]] unsigned live_worker_count() const noexcept {
+    return live_worker_count_.load(std::memory_order_relaxed);
   }
-  [[nodiscard]] PipelineConcurrencyMode mode() const noexcept {
-    return static_cast<PipelineConcurrencyMode>(
+  [[nodiscard]] pipeline_concurrency_mode get_mode() const noexcept {
+    return static_cast<pipeline_concurrency_mode>(
         mode_.load(std::memory_order_relaxed));
   }
-  void set_mode(PipelineConcurrencyMode mode) noexcept {
+  void set_mode(pipeline_concurrency_mode mode) noexcept {
     mode_.store(static_cast<std::uint8_t>(mode), std::memory_order_relaxed);
   }
   [[nodiscard]] std::uint32_t adopted_generation() const noexcept {
@@ -214,10 +226,10 @@ public:
   void set_adopted_generation(std::uint32_t generation) noexcept {
     adopted_generation_.store(generation, std::memory_order_relaxed);
   }
-  [[nodiscard]] bool active() const noexcept {
+  [[nodiscard]] bool is_active() const noexcept {
     return configured_.load(std::memory_order_acquire);
   }
-  [[nodiscard]] SchedulerStats &stats() noexcept { return stats_; }
+  [[nodiscard]] scheduler_stats &get_scheduler_stats() noexcept { return scheduler_stats_; }
 
   void parallel_for(std::size_t begin, std::size_t end, std::size_t grain,
                     const range_body &body) const;
@@ -243,45 +255,52 @@ public:
   [[nodiscard]] bool invoke_worker_probe_noexcept(
       void *argument, bool (*callback)(void *) noexcept) const noexcept;
 
-  // DOC0346 — TBB parallel sort wrapped in the pool's arena (mirrors
-  // parallel_for). Defined inline because it is a template; the wrapper keeps
-  // oneTBB the ONLY module that includes its headers (guideline Top-rule).
-  template <class RandomIt, class Compare>
-  void parallel_sort(RandomIt first, RandomIt last, Compare comp) {
+  /// Sort inside the owned arena so the configured concurrency ceiling applies.
+  template <class p_random_iterator, class p_compare>
+  void parallel_sort(
+      p_random_iterator first,
+      p_random_iterator last,
+      p_compare compare) {
     ensure_configured();
     if (last <= first) {
       return;
     }
-    if (max_concurrency_ <= 1) {
-      std::sort(first, last, comp);
+    if (maximum_concurrency_ <= 1) {
+      std::sort(first, last, compare);
       return;
     }
-    const auto impl = impl_;
-    impl->arena->execute(
-        [first, last, &comp] { otbb::parallel_sort(first, last, comp); });
+    const auto implementation = implementation_;
+    implementation->arena->execute(
+        [first, last, &compare] {
+          otbb::parallel_sort(first, last, compare);
+        });
   }
 
-  template <class RandomIt, class Compare>
-  void parallel_sort_tracked(RandomIt first, RandomIt last, Compare comp,
-                             tracked_job_observer observer) {
+  /// Sort through the tracked-job observer lifecycle without nested dispatch.
+  template <class p_random_iterator, class p_compare>
+  void parallel_sort_tracked(
+      p_random_iterator first,
+      p_random_iterator last,
+      p_compare compare,
+      tracked_job_observer observer) {
     ensure_configured();
-    if (!observer || last <= first || max_concurrency_ <= 1) {
-      parallel_sort(first, last, std::move(comp));
+    if (!observer || last <= first || maximum_concurrency_ <= 1) {
+      parallel_sort(first, last, std::move(compare));
       return;
     }
     struct sort_task_context {
-      GlobalPool *pool;
-      RandomIt first;
-      RandomIt last;
-      Compare *compare;
-    } task_context{this, first, last, std::addressof(comp)};
+      global_pool *pool;
+      p_random_iterator first;
+      p_random_iterator last;
+      p_compare *compare;
+    } task_context{this, first, last, std::addressof(compare)};
     tracked_task_submission submission{};
     const tracked_task_ref task{
         .argument = std::addressof(task_context),
         .invoke =
             +[](void *argument) {
               auto *context = static_cast<sort_task_context *>(argument);
-              /* The comparator consumes only already-admitted resident
+              /* The comparator consumes only already-is_admitted resident
                * facades.  It performs no materialization, so nested TBB
                * comparator tasks deliberately inherit no trace sink. */
               context->pool->parallel_sort(context->first, context->last,
@@ -292,98 +311,98 @@ public:
                                                      task, observer);
     const auto outcome =
         join_and_drain_tracked_task_noexcept(std::addressof(submission));
-    if (status != tracked_submit_status::submitted || !outcome.drained ||
-        outcome.incomplete || outcome.failed) {
+    if (status != tracked_submit_status::submitted || !outcome.is_drained ||
+        outcome.is_incomplete || outcome.has_failure) {
       throw std::runtime_error(outcome.message_length == 0u
                                    ? "tracked parallel sort did not complete"
                                    : outcome.message.data());
     }
   }
 
-  [[nodiscard]] ScopedTaskGroup make_task_group();
+  [[nodiscard]] scoped_task_group make_task_group();
 
-  struct BatchTicket {
+  struct batch_ticket {
     std::size_t slot = 0;
     std::int64_t queries = 0;
   };
-  [[nodiscard]] BatchTicket begin_batch(std::int64_t query_count) noexcept;
-  void end_batch(BatchTicket ticket) noexcept;
-  void cancel_batch(BatchTicket ticket) noexcept;
+  [[nodiscard]] batch_ticket begin_batch(std::int64_t query_count) noexcept;
+  void end_batch(batch_ticket ticket) noexcept;
+  void cancel_batch(batch_ticket ticket) noexcept;
   void reset_stats(std::uint64_t now_ns) noexcept;
 
 private:
-  GlobalPool() = default;
+  global_pool() = default;
   void teardown_locked(bool join) noexcept;
 
-  std::mutex lifecycle_mu_;
-  SchedulerStats stats_{};
+  std::mutex lifecycle_mutex_;
+  scheduler_stats scheduler_stats_{};
   std::atomic<std::uint8_t> mode_{0};
   std::atomic<std::uint32_t> adopted_generation_{0};
-  std::atomic<unsigned> live_workers_{0};
+  std::atomic<unsigned> live_worker_count_{0};
   std::atomic<bool> configured_{false};
-  unsigned max_concurrency_ = 1;
-  std::shared_ptr<detail::PoolImpl> impl_;
+  unsigned maximum_concurrency_ = 1;
+  std::shared_ptr<detail::pool_implementation> implementation_;
 };
 
-[[nodiscard]] unsigned default_concurrency() noexcept {
+[[nodiscard]] unsigned default_concurrency_limit() noexcept {
   const int value = otbb::info::default_concurrency();
   return value <= 0 ? 1u : static_cast<unsigned>(value);
 }
 
-void GlobalPool::configure(const PoolConfig &config) {
-  std::lock_guard<std::mutex> guard(lifecycle_mu_);
+void global_pool::configure(const pool_config &config) {
+  std::lock_guard<std::mutex> guard(lifecycle_mutex_);
   teardown_locked(true);
 
-  const unsigned requested = config.max_concurrency == 0
-                                 ? default_concurrency()
-                                 : config.max_concurrency;
-  max_concurrency_ = std::max(1u, requested);
+  const unsigned requested = config.maximum_concurrency == 0
+                                 ? default_concurrency_limit()
+                                 : config.maximum_concurrency;
+  maximum_concurrency_ = std::max(1u, requested);
   mode_.store(static_cast<std::uint8_t>(config.mode),
               std::memory_order_relaxed);
 
-  auto impl = std::make_shared<detail::PoolImpl>();
-  impl->arena.emplace(static_cast<int>(max_concurrency_));
-  impl->arena->initialize();
-  impl_ = std::move(impl);
-  live_workers_.store(max_concurrency_, std::memory_order_relaxed);
+  auto implementation = std::make_shared<detail::pool_implementation>();
+  implementation->arena.emplace(static_cast<int>(maximum_concurrency_));
+  implementation->arena->initialize();
+  implementation_ = std::move(implementation);
+  live_worker_count_.store(maximum_concurrency_, std::memory_order_relaxed);
   configured_.store(true, std::memory_order_release);
 }
 
-void GlobalPool::ensure_configured() const {
-  if (active()) {
+void global_pool::ensure_configured() const {
+  if (is_active()) {
     return;
   }
-  // GlobalPool has a private constructor, so every instance is the mutable
+  // global_pool has a private constructor, so every instance is the mutable
   // process singleton even when execution is requested through a const view.
-  instance().configure(PoolConfig{});
+  instance().configure(pool_config{});
 }
 
-void GlobalPool::teardown_locked(bool join) noexcept {
+void global_pool::teardown_locked(bool join) noexcept {
   configured_.store(false, std::memory_order_release);
-  live_workers_.store(0, std::memory_order_relaxed);
-  if (impl_) {
-    if (join && impl_->arena) {
-      impl_->arena->execute([] {});
+  live_worker_count_.store(0, std::memory_order_relaxed);
+  if (implementation_) {
+    if (join && implementation_->arena) {
+      implementation_->arena->execute([] {});
     }
-    impl_.reset();
+    implementation_.reset();
   }
 }
 
-void GlobalPool::shutdown() noexcept {
-  std::lock_guard<std::mutex> guard(lifecycle_mu_);
+void global_pool::shutdown() noexcept {
+  std::lock_guard<std::mutex> guard(lifecycle_mutex_);
   teardown_locked(true);
 }
 
-void GlobalPool::shutdown_at_exit() noexcept {
-  std::lock_guard<std::mutex> guard(lifecycle_mu_);
+void global_pool::shutdown_at_exit() noexcept {
+  std::lock_guard<std::mutex> guard(lifecycle_mutex_);
   teardown_locked(false);
 }
 
-void GlobalPool::restart(const PoolConfig& config) {
+void global_pool::restart(const pool_config& config) {
     configure(config);
 }
 
-void GlobalPool::parallel_for(
+void global_pool::parallel_for(
         std::size_t begin,
         std::size_t end,
         std::size_t grain,
@@ -393,12 +412,12 @@ void GlobalPool::parallel_for(
         return;
     }
     const std::size_t effective_grain = std::max<std::size_t>(1, grain);
-    if (max_concurrency_ <= 1 || (end - begin) <= effective_grain) {
+    if (maximum_concurrency_ <= 1 || (end - begin) <= effective_grain) {
         body(begin, end);
         return;
     }
-    const auto impl = impl_;
-    impl->arena->execute([begin, end, effective_grain, &body] {
+    const auto implementation = implementation_;
+    implementation->arena->execute([begin, end, effective_grain, &body] {
         otbb::parallel_for(
             otbb::blocked_range<std::size_t>(begin, end, effective_grain),
             [&body](const otbb::blocked_range<std::size_t>& range) {
@@ -407,7 +426,7 @@ void GlobalPool::parallel_for(
     });
 }
 
-void GlobalPool::parallel_for_with_context(
+void global_pool::parallel_for_with_context(
         std::size_t begin,
         std::size_t end,
         std::size_t grain,
@@ -417,7 +436,7 @@ void GlobalPool::parallel_for_with_context(
         return;
     }
     const std::size_t effective_grain = std::max<std::size_t>(1, grain);
-    if (max_concurrency_ <= 1 || (end - begin) <= effective_grain) {
+    if (maximum_concurrency_ <= 1 || (end - begin) <= effective_grain) {
         if (context::current_or_null() != nullptr) {
             body(begin, end);
         } else {
@@ -429,8 +448,8 @@ void GlobalPool::parallel_for_with_context(
     }
 
     otbb::enumerable_thread_specific<context::context> region_contexts;
-    const auto impl = impl_;
-    impl->arena->execute([begin, end, effective_grain, &body,
+    const auto implementation = implementation_;
+    implementation->arena->execute([begin, end, effective_grain, &body,
                           &region_contexts] {
       otbb::parallel_for(
           otbb::blocked_range<std::size_t>(begin, end, effective_grain),
@@ -446,15 +465,15 @@ void GlobalPool::parallel_for_with_context(
     });
 }
 
-bool GlobalPool::invoke_worker_probe_noexcept(
+bool global_pool::invoke_worker_probe_noexcept(
     void *argument, bool (*callback)(void *) noexcept) const noexcept {
   if (callback == nullptr) {
     return false;
   }
   try {
     ensure_configured();
-    const auto impl = impl_;
-    if (impl == nullptr || !impl->arena.has_value()) {
+    const auto implementation = implementation_;
+    if (implementation == nullptr || !implementation->arena.has_value()) {
       return false;
     }
     struct probe_state {
@@ -464,7 +483,7 @@ bool GlobalPool::invoke_worker_probe_noexcept(
       bool result{false};
     };
     auto state = std::make_shared<probe_state>();
-    impl->arena->enqueue([state, argument, callback] {
+    implementation->arena->enqueue([state, argument, callback] {
       const bool result = callback(argument);
       {
         std::lock_guard<std::mutex> guard(state->mutex);
@@ -561,7 +580,7 @@ void execute_tracked_pool_task(tracked_task_submission *submission) noexcept {
 
 export namespace bioseq::parallelism {
 
-tracked_submit_status GlobalPool::submit_tracked_task_noexcept(
+tracked_submit_status global_pool::submit_tracked_task_noexcept(
     tracked_task_submission *submission, tracked_task_ref task,
     tracked_job_observer observer) noexcept {
   if (submission == nullptr || !task || !observer) {
@@ -582,8 +601,8 @@ tracked_submit_status GlobalPool::submit_tracked_task_noexcept(
   submission->enrolled = 1u;
   try {
     ensure_configured();
-    const auto impl = impl_;
-    impl->arena->enqueue(
+    const auto implementation = implementation_;
+    implementation->arena->enqueue(
         [submission] { execute_tracked_pool_task(submission); });
   } catch (...) {
     handoff_tracked_pool_failure(submission,
@@ -599,7 +618,7 @@ tracked_submit_status GlobalPool::submit_tracked_task_noexcept(
   return tracked_submit_status::submitted;
 }
 
-tracked_job_outcome GlobalPool::join_and_drain_tracked_task_noexcept(
+tracked_job_outcome global_pool::join_and_drain_tracked_task_noexcept(
     tracked_task_submission *submission) noexcept {
   if (submission == nullptr) {
     return {};
@@ -615,25 +634,25 @@ tracked_job_outcome GlobalPool::join_and_drain_tracked_task_noexcept(
         submission, "tracked pool task rejected its finished transition");
   }
   tracked_job_outcome outcome{};
-  const bool drained =
+  const bool is_drained =
       submission->observer.drain(submission->observer.context,
                                  submission->handle, std::addressof(outcome));
-  outcome.drained = drained;
-  outcome.failed = outcome.failed || submission->worker_failed != 0u;
+  outcome.is_drained = is_drained;
+  outcome.has_failure = outcome.has_failure || submission->worker_failed != 0u;
   submission->outcome = outcome;
-  if (drained) {
+  if (is_drained) {
     submission->enrolled = 0u;
     submission->scheduled = 0u;
   }
   return outcome;
 }
 
-void GlobalPool::parallel_for_with_context_tracked(
+void global_pool::parallel_for_with_context_tracked(
     std::size_t begin, std::size_t end, std::size_t grain,
     const range_body &body, tracked_job_observer observer) {
   ensure_configured();
   const std::size_t effective_grain = std::max<std::size_t>(1u, grain);
-  if (!observer || end <= begin || max_concurrency_ <= 1u ||
+  if (!observer || end <= begin || maximum_concurrency_ <= 1u ||
       end - begin <= effective_grain) {
     parallel_for_with_context(begin, end, grain, body);
     return;
@@ -672,8 +691,8 @@ void GlobalPool::parallel_for_with_context_tracked(
   }
   for (std::size_t index = 0u; index < submissions.size(); ++index) {
     if (statuses[index] != tracked_submit_status::submitted ||
-        !outcomes[index].drained || outcomes[index].incomplete ||
-        outcomes[index].failed) {
+        !outcomes[index].is_drained || outcomes[index].is_incomplete ||
+        outcomes[index].has_failure) {
       throw std::runtime_error(outcomes[index].message_length == 0u
                                    ? "tracked parallel range did not complete"
                                    : outcomes[index].message.data());
@@ -681,82 +700,82 @@ void GlobalPool::parallel_for_with_context_tracked(
   }
 }
 
-ScopedTaskGroup GlobalPool::make_task_group() {
+scoped_task_group global_pool::make_task_group() {
   ensure_configured();
-  auto group = std::make_shared<detail::TaskGroupImpl>();
-  group->pool = impl_;
-  return ScopedTaskGroup{std::move(group)};
+  auto group = std::make_shared<detail::task_group_implementation>();
+  group->pool = implementation_;
+  return scoped_task_group{std::move(group)};
 }
 
-GlobalPool::BatchTicket
-GlobalPool::begin_batch(std::int64_t query_count) noexcept {
+global_pool::batch_ticket
+global_pool::begin_batch(std::int64_t query_count) noexcept {
   const std::uint64_t seq =
-      stats_.inflight_seq.fetch_add(1, std::memory_order_acq_rel);
+      scheduler_stats_.inflight_seq.fetch_add(1, std::memory_order_acq_rel);
   const std::size_t slot =
-      static_cast<std::size_t>(seq % SchedulerStats::kInflightSlots);
+      static_cast<std::size_t>(seq % scheduler_stats::k_inflight_slots);
   const std::uint64_t now =
-      static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-  stats_.inflight_submit_ns[slot].store(now, std::memory_order_release);
-  stats_.batches_scheduled.fetch_add(1, std::memory_order_acq_rel);
-  stats_.batches_in_flight.fetch_add(1, std::memory_order_acq_rel);
-  stats_.queries_waiting.fetch_add(query_count, std::memory_order_acq_rel);
-  return BatchTicket{slot, query_count};
+      static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
+  scheduler_stats_.inflight_submit_ns[slot].store(now, std::memory_order_release);
+  scheduler_stats_.batches_scheduled.fetch_add(1, std::memory_order_acq_rel);
+  scheduler_stats_.batches_in_flight.fetch_add(1, std::memory_order_acq_rel);
+  scheduler_stats_.queries_waiting.fetch_add(query_count, std::memory_order_acq_rel);
+  return batch_ticket{slot, query_count};
 }
 
-void GlobalPool::end_batch(BatchTicket ticket) noexcept {
-  stats_.batches_processed.fetch_add(1, std::memory_order_acq_rel);
-  stats_.queries_processed.fetch_add(
+void global_pool::end_batch(batch_ticket ticket) noexcept {
+  scheduler_stats_.batches_processed.fetch_add(1, std::memory_order_acq_rel);
+  scheduler_stats_.queries_processed.fetch_add(
       static_cast<std::uint64_t>(std::max<std::int64_t>(0, ticket.queries)),
       std::memory_order_acq_rel);
   cancel_batch(ticket);
 }
 
-void GlobalPool::cancel_batch(BatchTicket ticket) noexcept {
-    stats_.batches_in_flight.fetch_sub(1, std::memory_order_acq_rel);
-    stats_.queries_waiting.fetch_sub(ticket.queries, std::memory_order_acq_rel);
-    if (ticket.slot < SchedulerStats::kInflightSlots) {
-        stats_.inflight_submit_ns[ticket.slot].store(0, std::memory_order_release);
+void global_pool::cancel_batch(batch_ticket ticket) noexcept {
+    scheduler_stats_.batches_in_flight.fetch_sub(1, std::memory_order_acq_rel);
+    scheduler_stats_.queries_waiting.fetch_sub(ticket.queries, std::memory_order_acq_rel);
+    if (ticket.slot < scheduler_stats::k_inflight_slots) {
+        scheduler_stats_.inflight_submit_ns[ticket.slot].store(0, std::memory_order_release);
     }
 }
 
-void GlobalPool::reset_stats(std::uint64_t now_ns) noexcept {
-    stats_.batches_scheduled.store(0, std::memory_order_release);
-    stats_.batches_processed.store(0, std::memory_order_release);
-    stats_.batches_in_flight.store(0, std::memory_order_release);
-    stats_.queries_waiting.store(0, std::memory_order_release);
-    stats_.queries_processed.store(0, std::memory_order_release);
-    stats_.rate_window_start_ns.store(now_ns, std::memory_order_release);
-    stats_.rate_window_start_queries.store(0, std::memory_order_release);
-    stats_.restart_ns.store(now_ns, std::memory_order_release);
-    for (std::size_t slot = 0; slot < SchedulerStats::kInflightSlots; ++slot) {
-        stats_.inflight_submit_ns[slot].store(0, std::memory_order_release);
+void global_pool::reset_stats(std::uint64_t now_ns) noexcept {
+    scheduler_stats_.batches_scheduled.store(0, std::memory_order_release);
+    scheduler_stats_.batches_processed.store(0, std::memory_order_release);
+    scheduler_stats_.batches_in_flight.store(0, std::memory_order_release);
+    scheduler_stats_.queries_waiting.store(0, std::memory_order_release);
+    scheduler_stats_.queries_processed.store(0, std::memory_order_release);
+    scheduler_stats_.rate_window_start_ns.store(now_ns, std::memory_order_release);
+    scheduler_stats_.rate_window_start_queries.store(0, std::memory_order_release);
+    scheduler_stats_.restart_ns.store(now_ns, std::memory_order_release);
+    for (std::size_t slot = 0; slot < scheduler_stats::k_inflight_slots; ++slot) {
+        scheduler_stats_.inflight_submit_ns[slot].store(0, std::memory_order_release);
     }
-    stats_.inflight_seq.store(0, std::memory_order_release);
+    scheduler_stats_.inflight_seq.store(0, std::memory_order_release);
 }
 
-void ScopedTaskGroup::run(task_body body) {
-    if (!impl_ || !impl_->pool || !impl_->pool->arena) {
+void scoped_task_group::run(task_body body) {
+    if (!implementation_ || !implementation_->pool || !implementation_->pool->arena) {
         body();
         return;
     }
     auto body_ptr = std::make_shared<task_body>(std::move(body));
-    impl_->pool->arena->execute([group_impl = impl_, body_ptr = std::move(body_ptr)] {
-        group_impl->group.run([body_ptr = std::move(body_ptr)] {
+    implementation_->pool->arena->execute([group_implementation = implementation_, body_ptr = std::move(body_ptr)] {
+        group_implementation->group.run([body_ptr = std::move(body_ptr)] {
             (*body_ptr)();
         });
     });
 }
 
-void ScopedTaskGroup::wait() {
-    if (!impl_) {
+void scoped_task_group::wait() {
+    if (!implementation_) {
         return;
     }
-    if (impl_->pool && impl_->pool->arena) {
-        impl_->pool->arena->execute([group_impl = impl_] {
-            group_impl->group.wait();
+    if (implementation_->pool && implementation_->pool->arena) {
+        implementation_->pool->arena->execute([group_implementation = implementation_] {
+            group_implementation->group.wait();
         });
     }
-    impl_.reset();
+    implementation_.reset();
 }
 
 } // namespace bioseq::parallelism

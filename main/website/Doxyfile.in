@@ -44,7 +44,7 @@ WARN_LOGFILE           = @BIOSEQ_WEBSITE_DOXYGEN_WARN_LOG@
 
 # Neutralize PostgreSQL registration macros so a future configured public unit
 # containing them parses cleanly. CXX_PG_FUNCTION_INFO_V1 is declared at
-# main/bioseq/include2/headers/pg_compat.h:19-28; keep this list in sync with it.
+# main/bioseq/backend/pg/include/bioseq/pg_compat.h; keep this list in sync with it.
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = YES
 PREDEFINED             = "CXX_PG_FUNCTION_INFO_V1(funcname)=" \

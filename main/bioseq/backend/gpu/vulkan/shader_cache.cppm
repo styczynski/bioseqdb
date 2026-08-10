@@ -3,7 +3,6 @@
  * @brief Supervisor-built Vulkan shader metallib cache for MoltenVK backends.
  */
 module;
-#include "common.h"
 
 #include <algorithm>
 #include <array>
@@ -67,8 +66,9 @@ extern char** environ;
 
 export module bioseq.gpu.vulkan.shader_cache;
 
+import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
-import bioseq.common.mlogging;
+import bioseq.common.logging;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_layout;
 import bioseq.gpu.vulkan.shader_variants;
@@ -76,51 +76,57 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::gpu::vulkan {
 
-template <class... Args>
-[[nodiscard]] inline std::string shader_cache_message(Args&&... args)
+/// @brief Formats one shader-cache diagnostic without constraining argument types.
+template <class... p_argument_types>
+[[nodiscard]] inline std::string shader_cache_message(
+    p_argument_types&&... arguments)
 {
     std::ostringstream out;
-    (out << ... << std::forward<Args>(args));
+    (out << ... << std::forward<p_argument_types>(arguments));
     return out.str();
 }
 
-enum class ShaderCacheErrc : std::uint32_t {
-    Ok = 0,
-    NoToolchain,
-    Glslang,
-    SpirvToMsl,
-    MetalSpawn,
-    MetalExit,
-    MetallibWrite,
-    MetaIo,
-    AbiScan,
-    DlsymMissing,
-    QueueFull,
-    SupervisorGone,
-    Timeout
+/// @brief Stable error categories returned by shader-cache orchestration.
+enum class shader_cache_error : std::uint32_t {
+    ok = 0,
+    no_toolchain = 1,
+    glslang = 2,
+    spirv_to_msl = 3,
+    metal_spawn = 4,
+    metal_exit = 5,
+    metallib_write = 6,
+    metadata_io = 7,
+    abi_scan = 8,
+    dynamic_symbol_missing = 9,
+    queue_full = 10,
+    supervisor_gone = 11,
+    timeout = 12,
 };
 
-struct ShaderCacheMeta {
+/// @brief Fixed metadata stored next to one compiled shader artifact.
+struct shader_cache_metadata {
     std::uint32_t magic = 0xB10C0CACu;
-    std::uint32_t version = 1;
-    ShaderVariantKey key{};
+    std::uint32_t wire_revision = 1u;
+    shader_variant_key key{};
     std::uint32_t wg_x = 1;
     std::uint32_t wg_y = 1;
     std::uint32_t wg_z = 1;
     std::uint32_t entry_len = 0;
 };
-static_assert(std::is_standard_layout_v<ShaderCacheMeta>);
+static_assert(std::is_standard_layout_v<shader_cache_metadata>);
 
-struct ShaderModuleLoad {
+/// @brief Loaded Vulkan shader module and its dispatch geometry.
+struct shader_module_load {
     VkShaderModule module = VK_NULL_HANDLE;
     std::string entry_name;
     std::uint32_t wg_x = 1;
     std::uint32_t wg_y = 1;
     std::uint32_t wg_z = 1;
 };
-static_assert(std::is_nothrow_move_constructible_v<ShaderModuleLoad>);
+static_assert(std::is_nothrow_move_constructible_v<shader_module_load>);
 
-struct MoltenVkShaderModuleCode {
+/// @brief MoltenVK shader-module bytes retained under memory admission.
+struct moltenvk_shader_module_code {
     // Declared first so words release before the transient permit.
     bioseq::parallelism::MemoryPermit permit;
     std::vector<std::uint32_t> words;
@@ -132,24 +138,24 @@ struct MoltenVkShaderModuleCode {
     bool admission_saturated = false;
 };
 
-struct MslVersion {
+/// @brief Metal shading-language level requested from SPIRV-Cross.
+struct msl_version {
     std::uint32_t major = 3;
     std::uint32_t minor = 2;
     std::uint32_t patch = 0;
 };
 
-struct ShaderCacheBuildInputs {
-    VulkanStaticVariantInputs variants{};
-    MslVersion msl{};
+/// @brief Static inputs that define a shader-cache build identity.
+struct shader_cache_build_inputs {
+    vulkan_static_variant_inputs variants{};
+    msl_version msl{};
     std::string moltenvk_build = "conservative";
     std::string device_uuid = "conservative";
 };
 
-enum class SealedShaderCacheArtifactKind : std::uint32_t {
-    // Wire value 0 was used by an abandoned placeholder command library.
-    // It remains reserved so v1 manifests cannot be reinterpreted as a
-    // different artifact kind. Exact MoltenVK command sources are not yet an
-    // immutable AOT artifact and therefore never appear in a sealed seed.
+/// @brief Serialized artifact categories in a sealed shader-cache seed.
+enum class sealed_shader_cache_artifact_kind : std::uint32_t {
+    // Wire value 0 remains reserved and cannot identify a seed artifact.
     reserved_command_metallib = 0,
     shader_meta = 1,
     shader_metallib = 2,
@@ -157,78 +163,82 @@ enum class SealedShaderCacheArtifactKind : std::uint32_t {
     metal_binary_archive_qualification = 4,
 };
 
-struct SealedShaderCacheArtifact {
-    SealedShaderCacheArtifactKind kind =
-        SealedShaderCacheArtifactKind::reserved_command_metallib;
+/// @brief Manifest descriptor for one sealed shader-cache artifact.
+struct sealed_shader_cache_artifact {
+    sealed_shader_cache_artifact_kind kind =
+        sealed_shader_cache_artifact_kind::reserved_command_metallib;
     std::uint32_t key_index = (std::numeric_limits<std::uint32_t>::max)();
     std::string filename;
     std::uint64_t size = 0;
     std::array<std::uint8_t, 32> sha256{};
 
     [[nodiscard]] bool operator==(
-        const SealedShaderCacheArtifact&) const noexcept = default;
+        const sealed_shader_cache_artifact&) const noexcept = default;
 };
 
-struct SealedShaderCacheManifest {
+/// @brief Canonical manifest for one immutable shader-cache seed.
+struct sealed_shader_cache_manifest {
     std::string cache_digest;
-    std::vector<ShaderVariantKey> keys;
-    std::vector<SealedShaderCacheArtifact> artifacts;
+    std::vector<shader_variant_key> keys;
+    std::vector<sealed_shader_cache_artifact> artifacts;
     std::array<std::uint8_t, 32> seed_sha256{};
     std::uint64_t seed_size = 0;
     std::uint64_t manifest_checksum = 0;
 };
 
-struct MetalArchiveNegativeErrorFingerprint {
+/// @brief Stable NSError identity captured from the archive negative control.
+struct metal_archive_negative_error_fingerprint {
     std::string domain;
     std::int64_t code = 0;
 
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_accepted() const noexcept {
         return !domain.empty() && domain.size() <= 1024u
             && domain.find('\0') == std::string::npos;
     }
     [[nodiscard]] bool operator==(
-        const MetalArchiveNegativeErrorFingerprint&) const noexcept = default;
+        const metal_archive_negative_error_fingerprint&) const noexcept = default;
 };
 
-struct MetalArchiveQualificationReceipt {
-    std::uint32_t wire_version = 0u;
-    ShaderVariantKey shader_key{};
+/// @brief Evidence that one Metal binary archive matches its helper and metallib.
+struct metal_archive_qualification_receipt {
+    std::uint32_t wire_revision = 0u;
+    shader_variant_key shader_key{};
     std::uint64_t metallib_size = 0u;
     std::array<std::uint8_t, 32> metallib_sha256{};
     std::string entry_name;
     std::uint64_t max_total_threads_per_threadgroup = 0u;
     bool threadgroup_size_is_multiple = false;
-    MetalArchiveNegativeErrorFingerprint negative_error;
+    metal_archive_negative_error_fingerprint negative_error;
     std::uint64_t archive_size = 0u;
     std::array<std::uint8_t, 32> archive_sha256{};
-    std::uint32_t helper_protocol_version = 0u;
+    std::uint32_t helper_wire_revision = 0u;
     std::string helper_build_identity;
     std::string helper_source;
     std::uint64_t helper_executable_size = 0u;
     std::array<std::uint8_t, 32> helper_executable_sha256{};
     std::uint64_t helper_metal_registry_id = 0u;
 
-    [[nodiscard]] bool diagnostic_valid() const noexcept {
-        return (wire_version == 1u || wire_version == 2u)
+    [[nodiscard]] bool is_diagnostic_valid() const noexcept {
+        return wire_revision == 2u
             && max_total_threads_per_threadgroup > 0u
             && max_total_threads_per_threadgroup <= 1024u
-            && negative_error.accepted() && archive_size != 0u
+            && negative_error.is_accepted() && archive_size != 0u
             && std::any_of(
                 archive_sha256.begin(), archive_sha256.end(),
                 [](std::uint8_t byte) { return byte != 0u; });
     }
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_accepted() const noexcept {
         const auto nonzero_digest = [](const auto& digest) {
             return std::any_of(
                 digest.begin(), digest.end(),
                 [](std::uint8_t byte) { return byte != 0u; });
         };
-        return diagnostic_valid() && wire_version == 2u
-            && valid_shader_variant_key(shader_key)
+        return is_diagnostic_valid()
+            && is_shader_variant_key_valid(shader_key)
             && metallib_size != 0u && nonzero_digest(metallib_sha256)
             && !entry_name.empty() && entry_name.size() <= 1024u
             && entry_name.find('\0') == std::string::npos
-            && helper_protocol_version == 2u
+            && helper_wire_revision == 2u
             && !helper_build_identity.empty()
             && helper_build_identity.size() <= 1024u
             && helper_build_identity.find('\0') == std::string::npos
@@ -238,30 +248,30 @@ struct MetalArchiveQualificationReceipt {
             && nonzero_digest(helper_executable_sha256)
             && helper_metal_registry_id != 0u;
     }
-    [[nodiscard]] bool production_accepted() const noexcept {
-        return accepted() && helper_source == "installed-sibling"
-            && helper_build_identity == "bioseq_gpu_archive_builder_v2";
+    [[nodiscard]] bool is_production_accepted() const noexcept {
+        return is_accepted() && helper_source == "installed-sibling"
+            && helper_build_identity == "bioseq_gpu_archive_builder";
     }
     [[nodiscard]] bool operator==(
-        const MetalArchiveQualificationReceipt&) const noexcept = default;
+        const metal_archive_qualification_receipt&) const noexcept = default;
 };
 
 [[nodiscard]] std::expected<void, std::string>
 validate_metal_archive_receipt_against_process_helper(
-    const MetalArchiveQualificationReceipt& receipt);
+    const metal_archive_qualification_receipt& receipt);
 
-/// One exact artifact byte image retained from the single sealed-seed load.
+/// @brief One exact artifact byte image retained from the single sealed-seed load.
 /// The descriptor and bytes are immutable after the private seed constructor
 /// publishes the image.
-struct SealedShaderCacheArtifactImage {
-    SealedShaderCacheArtifact descriptor;
+struct sealed_shader_cache_artifact_image {
+    sealed_shader_cache_artifact descriptor;
     std::vector<std::byte> bytes;
 };
 
-/// Loader-originated evidence for one complete process-local seed image.
+/// @brief Loader-originated evidence for one complete process-local seed image.
 /// Construction is private: runtime configuration cannot manufacture the
 /// counters or copy them from manifest metadata without executing the loader.
-class SealedShaderCacheSeedReceipt {
+class sealed_shader_cache_seed_receipt {
 public:
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
@@ -296,7 +306,7 @@ public:
     [[nodiscard]] bool admission_saturated() const noexcept {
         return admission_saturated_;
     }
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_accepted() const noexcept {
         return identity_ != 0u && load_count_ == 1u
             && manifest_read_count_ == 1u && artifact_read_count_ != 0u
             && manifest_bytes_ != 0u && artifact_bytes_ != 0u
@@ -308,7 +318,7 @@ public:
     }
 
 private:
-    SealedShaderCacheSeedReceipt(
+    sealed_shader_cache_seed_receipt(
         std::uint64_t identity,
         std::uint64_t artifact_read_count,
         std::uint64_t manifest_bytes,
@@ -331,40 +341,40 @@ private:
     std::uint64_t retained_capacity_bytes_ = 0u;
     bool admission_saturated_ = false;
 
-    friend class SealedShaderCacheSeedImage;
+    friend class sealed_shader_cache_seed_image;
 };
 
-/// Complete immutable shader seed retained by one backend process. Every
+/// @brief Complete immutable shader seed retained by one backend process. Every
 /// consumer receives spans into these exact verified reads; no consumer needs
 /// to reopen a cache pathname after this image is installed.
-class SealedShaderCacheSeedImage {
+class sealed_shader_cache_seed_image {
 public:
-    SealedShaderCacheSeedImage(const SealedShaderCacheSeedImage&) = delete;
-    SealedShaderCacheSeedImage& operator=(
-        const SealedShaderCacheSeedImage&) = delete;
-    SealedShaderCacheSeedImage(SealedShaderCacheSeedImage&&) noexcept = default;
-    SealedShaderCacheSeedImage& operator=(
-        SealedShaderCacheSeedImage&&) noexcept = delete;
+    sealed_shader_cache_seed_image(const sealed_shader_cache_seed_image&) = delete;
+    sealed_shader_cache_seed_image& operator=(
+        const sealed_shader_cache_seed_image&) = delete;
+    sealed_shader_cache_seed_image(sealed_shader_cache_seed_image&&) noexcept = default;
+    sealed_shader_cache_seed_image& operator=(
+        sealed_shader_cache_seed_image&&) noexcept = delete;
 
-    [[nodiscard]] const SealedShaderCacheManifest& manifest() const noexcept {
+    [[nodiscard]] const sealed_shader_cache_manifest& manifest() const noexcept {
         return manifest_;
     }
     [[nodiscard]] std::span<const std::byte> manifest_bytes() const noexcept {
         return manifest_bytes_;
     }
-    [[nodiscard]] std::span<const SealedShaderCacheArtifactImage>
+    [[nodiscard]] std::span<const sealed_shader_cache_artifact_image>
     artifacts() const noexcept {
         return artifacts_;
     }
-    [[nodiscard]] const SealedShaderCacheSeedReceipt& receipt() const noexcept {
+    [[nodiscard]] const sealed_shader_cache_seed_receipt& receipt() const noexcept {
         return receipt_;
     }
-    [[nodiscard]] const SealedShaderCacheArtifactImage* artifact(
+    [[nodiscard]] const sealed_shader_cache_artifact_image* artifact(
         std::size_t ordinal) const noexcept {
         return ordinal < artifacts_.size() ? &artifacts_[ordinal] : nullptr;
     }
-    [[nodiscard]] bool accepted() const noexcept {
-        return receipt_.accepted()
+    [[nodiscard]] bool is_accepted() const noexcept {
+        return receipt_.is_accepted()
             && artifacts_.size() == manifest_.artifacts.size()
             && receipt_.artifact_read_count() == artifacts_.size()
             && receipt_.artifact_bytes() == manifest_.seed_size
@@ -373,22 +383,22 @@ public:
                 == receipt_.retained_capacity_bytes();
     }
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
-        using bioseq::parallelism::saturating_add;
-        using bioseq::parallelism::saturating_mul;
-        std::uint64_t owned = sizeof(SealedShaderCacheSeedImage);
+        using bioseq::common::saturating_add;
+        using bioseq::common::saturating_mul;
+        std::uint64_t owned = sizeof(sealed_shader_cache_seed_image);
         owned = saturating_add(
             owned, static_cast<std::uint64_t>(manifest_.cache_digest.capacity()));
         owned = saturating_add(
             owned,
             saturating_mul(
                 static_cast<std::uint64_t>(manifest_.keys.capacity()),
-                sizeof(ShaderVariantKey)));
+                sizeof(shader_variant_key)));
         owned = saturating_add(
             owned,
             saturating_mul(
                 static_cast<std::uint64_t>(manifest_.artifacts.capacity()),
-                sizeof(SealedShaderCacheArtifact)));
-        for (const SealedShaderCacheArtifact& artifact : manifest_.artifacts) {
+                sizeof(sealed_shader_cache_artifact)));
+        for (const sealed_shader_cache_artifact& artifact : manifest_.artifacts) {
             owned = saturating_add(
                 owned,
                 static_cast<std::uint64_t>(artifact.filename.capacity()));
@@ -400,8 +410,8 @@ public:
             owned,
             saturating_mul(
                 static_cast<std::uint64_t>(artifacts_.capacity()),
-                sizeof(SealedShaderCacheArtifactImage)));
-        for (const SealedShaderCacheArtifactImage& artifact : artifacts_) {
+                sizeof(sealed_shader_cache_artifact_image)));
+        for (const sealed_shader_cache_artifact_image& artifact : artifacts_) {
             owned = saturating_add(
                 owned,
                 static_cast<std::uint64_t>(
@@ -413,10 +423,10 @@ public:
     }
 
 private:
-    SealedShaderCacheSeedImage(
-        SealedShaderCacheManifest manifest,
+    sealed_shader_cache_seed_image(
+        sealed_shader_cache_manifest manifest,
         std::vector<std::byte> manifest_bytes,
-        std::vector<SealedShaderCacheArtifactImage> artifacts,
+        std::vector<sealed_shader_cache_artifact_image> artifacts,
         std::uint64_t receipt_identity,
         std::uint64_t artifact_read_count,
         std::uint64_t loaded_manifest_bytes,
@@ -446,53 +456,53 @@ private:
     // Declared first so reverse member destruction releases every admitted
     // allocation before returning the lifetime permit to the controller.
     bioseq::parallelism::MemoryPermit permit_;
-    SealedShaderCacheManifest manifest_;
+    sealed_shader_cache_manifest manifest_;
     std::vector<std::byte> manifest_bytes_;
-    std::vector<SealedShaderCacheArtifactImage> artifacts_;
-    SealedShaderCacheSeedReceipt receipt_;
+    std::vector<sealed_shader_cache_artifact_image> artifacts_;
+    sealed_shader_cache_seed_receipt receipt_;
 
-    friend std::expected<SealedShaderCacheSeedImage, std::string>
+    friend std::expected<sealed_shader_cache_seed_image, std::string>
     load_validated_sealed_shader_cache_seed(
         const std::filesystem::path&,
         std::string_view,
-        std::span<const ShaderVariantKey>);
+        std::span<const shader_variant_key>);
 };
 
-/// Exact immutable inputs retained from the same reads whose sizes and
+/// @brief Exact immutable inputs retained from the same reads whose sizes and
 /// SHA-256 values were checked against the sealed manifest. Module creation
 /// consumes these bytes directly and never reopens a cache pathname.
-struct SealedShaderCacheKeyImage {
-    SealedShaderCacheManifest manifest;
-    ShaderVariantKey key{};
-    ShaderCacheMeta meta{};
+struct sealed_shader_cache_key_image {
+    sealed_shader_cache_manifest manifest;
+    shader_variant_key key{};
+    shader_cache_metadata meta{};
     std::string entry_name;
     std::vector<std::byte> metallib_bytes;
 };
 
-/// Borrowed view into a process-owned seed image. The caller must keep the
+/// @brief Borrowed view into a process-owned seed image. The caller must keep the
 /// seed alive until module creation returns.
-struct SealedShaderCacheKeyView {
-    ShaderVariantKey key{};
-    ShaderCacheMeta meta{};
+struct sealed_shader_cache_key_view {
+    shader_variant_key key{};
+    shader_cache_metadata meta{};
     std::string entry_name;
     std::span<const std::byte> metallib_bytes;
 };
 
-template <class Service>
-concept is_runtime_compile_service = requires(Service& service, ShaderVariantKey key) {
+template <class p_service>
+concept is_runtime_compile_service = requires(p_service& service, shader_variant_key key) {
     { service.ensure_variant_compiled(key) } -> std::same_as<std::expected<void, std::string>>;
 };
 
 [[nodiscard]] inline std::filesystem::path cache_metallib_path(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_dir / (cache_file_stem(key) + ".metallib");
 }
 
 [[nodiscard]] inline std::filesystem::path cache_binary_archive_path(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_dir / (cache_file_stem(key) + ".metalar");
 }
@@ -506,18 +516,18 @@ cache_binary_archive_qualification_path(
 
 [[nodiscard]] inline std::vector<std::filesystem::path> cache_binary_archive_paths(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
-    constexpr std::uint32_t conservative_moltenvk_cap = 256u;
-    const ShaderWorkgroupSize workgroup = expected_shader_workgroup_size(key);
+    constexpr std::uint32_t k_conservative_moltenvk_cap = 256u;
+    const shader_workgroup_size workgroup = expected_shader_workgroup_size(key);
     const std::uint64_t exact_threads =
         static_cast<std::uint64_t>(workgroup.x)
         * static_cast<std::uint64_t>(workgroup.y)
         * static_cast<std::uint64_t>(workgroup.z);
     std::vector<std::filesystem::path> paths{cache_binary_archive_path(cache_dir, key)};
-    if (exact_threads != conservative_moltenvk_cap) {
+    if (exact_threads != k_conservative_moltenvk_cap) {
         paths.push_back(cache_dir / (cache_file_stem(key) + ".max_threads_"
-                                     + std::to_string(conservative_moltenvk_cap)
+                                     + std::to_string(k_conservative_moltenvk_cap)
                                      + ".metalar"));
     }
     return paths;
@@ -525,7 +535,7 @@ cache_binary_archive_qualification_path(
 
 [[nodiscard]] inline std::filesystem::path cache_meta_path(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_dir / (cache_file_stem(key) + ".meta");
 }
@@ -547,22 +557,22 @@ cache_binary_archive_qualification_path(
         info.version, ' ', info.machine);
 }
 
-struct RunCaptureLimits {
+struct run_capture_limits {
     std::size_t maximum_output_bytes = 4u << 20u;
     std::chrono::milliseconds timeout = std::chrono::minutes(5);
 };
 
-struct RunCaptureInheritedFd {
+struct run_capture_inherited_fd {
     int source_fd = -1;
     int target_fd = -1;
 };
 
-class CaptureFileDescriptor {
+class capture_file_descriptor {
 public:
-    explicit CaptureFileDescriptor(int fd = -1) noexcept : fd_(fd) {}
-    CaptureFileDescriptor(const CaptureFileDescriptor&) = delete;
-    CaptureFileDescriptor& operator=(const CaptureFileDescriptor&) = delete;
-    ~CaptureFileDescriptor() noexcept { close_now(); }
+    explicit capture_file_descriptor(int fd = -1) noexcept : fd_(fd) {}
+    capture_file_descriptor(const capture_file_descriptor&) = delete;
+    capture_file_descriptor& operator=(const capture_file_descriptor&) = delete;
+    ~capture_file_descriptor() noexcept { close_now(); }
 
     [[nodiscard]] int get() const noexcept { return fd_; }
     [[nodiscard]] int release() noexcept { return std::exchange(fd_, -1); }
@@ -575,12 +585,12 @@ private:
     int fd_ = -1;
 };
 
-class CaptureSpawnFileActions {
+class capture_spawn_file_actions {
 public:
-    CaptureSpawnFileActions() = default;
-    CaptureSpawnFileActions(const CaptureSpawnFileActions&) = delete;
-    CaptureSpawnFileActions& operator=(const CaptureSpawnFileActions&) = delete;
-    ~CaptureSpawnFileActions() noexcept {
+    capture_spawn_file_actions() = default;
+    capture_spawn_file_actions(const capture_spawn_file_actions&) = delete;
+    capture_spawn_file_actions& operator=(const capture_spawn_file_actions&) = delete;
+    ~capture_spawn_file_actions() noexcept {
         if (initialized_) (void)::posix_spawn_file_actions_destroy(&actions_);
     }
 
@@ -604,12 +614,12 @@ private:
     bool initialized_ = false;
 };
 
-class CaptureSpawnAttributes {
+class capture_spawn_attributes {
 public:
-    CaptureSpawnAttributes() = default;
-    CaptureSpawnAttributes(const CaptureSpawnAttributes&) = delete;
-    CaptureSpawnAttributes& operator=(const CaptureSpawnAttributes&) = delete;
-    ~CaptureSpawnAttributes() noexcept {
+    capture_spawn_attributes() = default;
+    capture_spawn_attributes(const capture_spawn_attributes&) = delete;
+    capture_spawn_attributes& operator=(const capture_spawn_attributes&) = delete;
+    ~capture_spawn_attributes() noexcept {
         if (initialized_) (void)::posix_spawnattr_destroy(&attributes_);
     }
 
@@ -631,15 +641,15 @@ private:
     bool initialized_ = false;
 };
 
-class CapturedChildProcess {
+class captured_child_process {
 public:
-    CapturedChildProcess(int read_fd, pid_t pid) noexcept
+    captured_child_process(int read_fd, pid_t pid) noexcept
         : read_fd_(read_fd), pid_(pid) {}
 
-    CapturedChildProcess(const CapturedChildProcess&) = delete;
-    CapturedChildProcess& operator=(const CapturedChildProcess&) = delete;
+    captured_child_process(const captured_child_process&) = delete;
+    captured_child_process& operator=(const captured_child_process&) = delete;
 
-    ~CapturedChildProcess() noexcept {
+    ~captured_child_process() noexcept {
         close_read();
         if (!completed_) terminate_group_and_reap();
     }
@@ -657,36 +667,36 @@ public:
     void mark_completed() noexcept { completed_ = true; }
 
 private:
-    enum class ReapProbe : std::uint8_t {
+    enum class reap_probe : std::uint8_t {
         running,
         reaped,
         no_longer_a_child,
         error,
     };
 
-    [[nodiscard]] ReapProbe probe_reap() noexcept {
-        if (direct_child_reaped_) return ReapProbe::reaped;
+    [[nodiscard]] reap_probe probe_reap() noexcept {
+        if (direct_child_reaped_) return reap_probe::reaped;
         int status = 0;
         for (;;) {
             const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
             if (waited == pid_) {
                 direct_child_reaped_ = true;
-                return ReapProbe::reaped;
+                return reap_probe::reaped;
             }
-            if (waited == 0) return ReapProbe::running;
+            if (waited == 0) return reap_probe::running;
             if (waited < 0 && errno == EINTR) continue;
             if (waited < 0 && errno == ECHILD) {
                 direct_child_reaped_ = true;
-                return ReapProbe::no_longer_a_child;
+                return reap_probe::no_longer_a_child;
             }
-            return ReapProbe::error;
+            return reap_probe::error;
         }
     }
 
     void terminate_group_and_reap() noexcept {
         if (pid_ <= 0) return;
-        const ReapProbe before = probe_reap();
-        if (before == ReapProbe::no_longer_a_child) return;
+        const reap_probe before = probe_reap();
+        if (before == reap_probe::no_longer_a_child) return;
         // POSIX_SPAWN_SETPGROUP made the child PID the process-group ID, so
         // ordinary descendants cannot outlive a timeout or continue touching
         // helper outputs after capture rejection.
@@ -695,9 +705,9 @@ private:
         const auto deadline = std::chrono::steady_clock::now()
             + std::chrono::seconds(1);
         while (std::chrono::steady_clock::now() < deadline) {
-            const ReapProbe probe = probe_reap();
-            if (probe == ReapProbe::reaped
-                || probe == ReapProbe::no_longer_a_child) {
+            const reap_probe probe = probe_reap();
+            if (probe == reap_probe::reaped
+                || probe == reap_probe::no_longer_a_child) {
                 return;
             }
             (void)::poll(nullptr, 0u, 5);
@@ -713,8 +723,8 @@ private:
 
 [[nodiscard]] inline std::expected<std::string, std::string> run_capture(
     std::span<const std::string> args,
-    RunCaptureLimits limits = {},
-    std::span<const RunCaptureInheritedFd> inherited_fds = {})
+    run_capture_limits limits = {},
+    std::span<const run_capture_inherited_fd> inherited_fds = {})
 {
     if (args.empty()) {
         return std::unexpected("empty command");
@@ -727,8 +737,8 @@ private:
     if (::pipe(pipe_fds) != 0) {
         return std::unexpected(shader_cache_message("pipe failed: errno ", errno));
     }
-    CaptureFileDescriptor read_owner{pipe_fds[0]};
-    CaptureFileDescriptor write_owner{pipe_fds[1]};
+    capture_file_descriptor read_owner{pipe_fds[0]};
+    capture_file_descriptor write_owner{pipe_fds[1]};
     const auto set_close_on_exec = [](int fd) noexcept -> int {
         const int flags = ::fcntl(fd, F_GETFD, 0);
         if (flags < 0) return errno;
@@ -748,7 +758,7 @@ private:
             cloexec_error));
     }
 
-    CaptureSpawnFileActions actions;
+    capture_spawn_file_actions actions;
     if (const int action_error = actions.initialize(); action_error != 0) {
         return std::unexpected(shader_cache_message(
             args[0], " could not initialize spawn actions: errno ",
@@ -768,7 +778,7 @@ private:
         }
     }
     for (std::size_t index = 0u; index < inherited_fds.size(); ++index) {
-        const RunCaptureInheritedFd inherited = inherited_fds[index];
+        const run_capture_inherited_fd inherited = inherited_fds[index];
         if (inherited.source_fd < 0 || inherited.target_fd < 3
             || inherited.source_fd == inherited.target_fd) {
             return std::unexpected(
@@ -789,7 +799,7 @@ private:
         }
     }
 
-    CaptureSpawnAttributes attributes;
+    capture_spawn_attributes attributes;
     if (const int attribute_error = attributes.initialize_process_group();
         attribute_error != 0) {
         return std::unexpected(shader_cache_message(
@@ -811,7 +821,7 @@ private:
     if (rc != 0) {
         return std::unexpected(shader_cache_message(args[0], " spawn failed: errno ", rc));
     }
-    CapturedChildProcess child{read_owner.release(), pid};
+    captured_child_process child{read_owner.release(), pid};
     const int original_flags = ::fcntl(child.read_fd(), F_GETFL, 0);
     if (original_flags < 0
         || ::fcntl(child.read_fd(), F_SETFL, original_flags | O_NONBLOCK) != 0) {
@@ -917,7 +927,7 @@ private:
 }
 
 [[nodiscard]] inline std::string shader_cache_digest_hex(
-    const ShaderCacheBuildInputs& inputs)
+    const shader_cache_build_inputs& inputs)
 {
     std::uint64_t hash = bioseq::common::fnv1a_64("bioseq-shader-cache-v1");
     hash = bioseq::common::hash_combine_64(hash, inputs.moltenvk_build);
@@ -936,9 +946,9 @@ private:
     hash = bioseq::common::hash_combine_64(
         hash, "bioseq-spirv-to-msl-resource-abi-v2");
 
-    for_each_static_shader_variant(inputs.variants, [&hash](const ShaderVariantKey& key) {
-        const ShaderKind kind = checked_shader_kind(key.kind);
-        const DescriptorLayoutKind descriptor_layout = descriptor_layout_for(kind);
+    for_each_static_shader_variant(inputs.variants, [&hash](const shader_variant_key& key) {
+        const shader_kind kind = checked_shader_kind(key.kind);
+        const descriptor_layout_kind descriptor_layout = descriptor_layout_for(kind);
         hash = bioseq::common::hash_combine_64(hash, key.kind);
         hash = bioseq::common::hash_combine_64(hash, key.tile_size);
         hash = bioseq::common::hash_combine_64(hash, key.local_size);
@@ -957,38 +967,9 @@ private:
     return out.str();
 }
 
-/// Content identity for an explicitly requested grouped32 ABI2 preseed. This
-/// does not participate in the production supervisor cache digest or AOT set;
-/// callers can record/compare it when measuring an inactive preseed operation.
-[[nodiscard]] inline std::string grouped32_inactive_shader_set_digest_hex()
-{
-    std::uint64_t hash = bioseq::common::fnv1a_64(
-        "bioseq-grouped32-inactive-preseed-v1");
-    for_each_inactive_grouped32_shader_variant(
-        [&hash](const ShaderVariantKey& key) {
-            const ShaderKind kind = checked_shader_kind(key.kind);
-            const auto layout = descriptor_layout_for(kind);
-            hash = bioseq::common::hash_combine_64(hash, key.kind);
-            hash = bioseq::common::hash_combine_64(hash, key.tile_size);
-            hash = bioseq::common::hash_combine_64(hash, key.local_size);
-            hash = bioseq::common::hash_combine_64(hash, key.max_span);
-            hash = bioseq::common::hash_combine_64(
-                hash, static_cast<std::uint32_t>(layout));
-            hash = bioseq::common::hash_combine_64(
-                hash, descriptor_binding_count(layout));
-            hash = bioseq::common::hash_combine_64(
-                hash, push_constant_size(kind));
-            hash = bioseq::common::hash_combine_64(
-                hash, shader_body_for_digest(kind));
-        });
-    std::ostringstream out;
-    out << std::hex << std::setfill('0') << std::setw(16) << hash;
-    return out.str();
-}
-
 namespace sealed_shader_cache_detail {
 
-class Sha256 {
+class sha256_hasher {
 private:
     std::array<std::uint32_t, 8> state_{
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
@@ -997,7 +978,7 @@ private:
     std::size_t buffered_ = 0;
     std::uint64_t total_bytes_ = 0;
 
-    inline static constexpr std::array<std::uint32_t, 64> round_constants{
+    inline static constexpr std::array<std::uint32_t, 64> k_round_constants{
         0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
         0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
         0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
@@ -1053,7 +1034,7 @@ private:
                 ^ std::rotr(e, 11) ^ std::rotr(e, 25);
             const std::uint32_t choose = (e & f) ^ (~e & g);
             const std::uint32_t temporary1 = h + sum1 + choose
-                + round_constants[index] + words[index];
+                + k_round_constants[index] + words[index];
             const std::uint32_t sum0 = std::rotr(a, 2)
                 ^ std::rotr(a, 13) ^ std::rotr(a, 22);
             const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
@@ -1254,17 +1235,17 @@ public:
 }
 
 [[nodiscard]] inline std::expected<void, std::string> validate_spirv_layout(
-    const ShaderVariantKey& key,
+    const shader_variant_key& key,
     std::span<const std::uint32_t> spirv)
 {
-    const SpirvLayoutScan scan = scan_spirv_layout(spirv);
-    const ShaderKind kind = checked_shader_kind(key.kind);
-    if (kind == ShaderKind::chain_tiled_dp_u64) {
+    const spirv_layout_scan scan = scan_spirv_layout(spirv);
+    const shader_kind kind = checked_shader_kind(key.kind);
+    if (kind == shader_kind::chain_tiled_dp_u64) {
         if (!scan.has_array_stride(24) || !scan.has_struct_offsets({0u, 8u, 16u, 20u})) {
             return std::unexpected("SPIR-V chain_tiled_dp_u64 ABI mismatch");
         }
     }
-    if (kind == ShaderKind::seed_lookup_anchors
+    if (kind == shader_kind::seed_lookup_anchors
         && (!scan.has_binding(0) || !scan.has_binding(1)
             || !scan.has_binding(2) || !scan.has_binding(3)
             || !scan.has_binding(4) || !scan.has_binding(5)
@@ -1272,19 +1253,13 @@ public:
             || !scan.has_struct_offsets({0u, 8u, 16u, 20u}))) {
         return std::unexpected("SPIR-V seed_lookup_anchors ABI mismatch");
     }
-    if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
+    if (kind == shader_kind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
         return std::unexpected("SPIR-V sort_anchors_bitonic range stride mismatch");
     }
-    if (kind == ShaderKind::generate_units
+    if (kind == shader_kind::generate_units
         && (!scan.has_binding(0) || !scan.has_binding(1)
             || !scan.has_array_stride(key.max_span / 8u))) {
         return std::unexpected("SPIR-V generate_units layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_persisted_directory_select
-        && (!scan.has_binding(0) || !scan.has_binding(1)
-            || !scan.has_binding(2) || !scan.has_binding(3))) {
-        return std::unexpected(
-            "SPIR-V persisted directory selection layout mismatch");
     }
     const auto binding_scalar = [&scan](std::uint32_t binding,
                                         std::uint32_t stride) {
@@ -1299,206 +1274,14 @@ public:
                 0u, binding,
                 std::span<const std::uint32_t>{offsets.begin(), offsets.size()});
     };
-    const auto core_push = [&scan]() {
-        constexpr std::array<std::uint32_t, 18> offsets{
-            0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u,
-            36u, 40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u};
-        return scan.has_push_constant_offsets(offsets);
-    };
-    const auto partition = [&]() {
-        return binding_struct(0u, 64u,
-            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u,
-             40u, 48u, 56u, 60u});
-    };
-    const auto control = [&]() {
-        return binding_struct(1u, 12u, {0u, 4u, 8u});
-    };
-    const auto query_record = [&]() {
-        return binding_struct(3u, 48u,
-            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u, 44u});
-    };
-    const auto query_minimizer = [&]() {
-        return binding_struct(4u, 16u, {0u, 4u, 8u, 12u});
-    };
-    const auto occurrence = [&]() {
-        return binding_struct(5u, 16u, {0u, 4u, 8u, 12u});
-    };
-    const auto query_state = [&]() {
-        return binding_struct(6u, 16u, {0u, 4u, 8u, 12u});
-    };
-    const auto validation = [&]() {
-        return binding_struct(8u, 32u,
-            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u});
-    };
-    const auto adapter_state_core = [&]() {
-        return binding_struct(12u, 32u,
-            {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u});
-    };
-    const auto complete_core_layout = [&]() {
-        return partition() && control() && binding_scalar(2u, 4u)
-            && query_record() && query_minimizer() && occurrence()
-            && query_state()
-            && binding_struct(7u, 24u, {0u, 8u, 16u, 20u})
-            && validation()
-            && binding_struct(9u, 12u, {0u, 4u, 8u})
-            && binding_struct(10u, 16u, {0u, 8u, 12u})
-            && binding_struct(11u, 24u, {0u, 4u, 8u, 12u, 16u})
-            && adapter_state_core() && core_push();
-    };
-    const bool grouped32_core_kind =
-        kind == ShaderKind::phase_c_grouped32_validate
-        || kind == ShaderKind::phase_c_grouped32_accumulate_occurrences
-        || kind == ShaderKind::phase_c_grouped32_finalize_max_occ
-        || kind == ShaderKind::phase_c_grouped32_allocate_anchor_prefix
-        || kind == ShaderKind::phase_c_grouped32_build_sort_segments
-        || kind == ShaderKind::phase_c_grouped32_emit_global_anchors
-        || kind == ShaderKind::phase_c_grouped32_clear_state
-        || kind == ShaderKind::phase_c_grouped32_finalize_validation;
-    if (grouped32_core_kind && !complete_core_layout()) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 complete core layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_validate
-        && (!partition() || !control() || !binding_scalar(2u, 4u)
-            || !query_record() || !query_minimizer() || !validation()
-            || !binding_struct(9u, 12u, {0u, 4u, 8u})
-            || !adapter_state_core() || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 validation layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_accumulate_occurrences
-        && (!partition() || !control() || !query_record()
-            || !query_minimizer() || !occurrence() || !validation()
-            || !adapter_state_core() || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 occurrence layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_finalize_max_occ
-        && (!query_record() || !query_minimizer() || !occurrence()
-            || !query_state() || !validation() || !adapter_state_core()
-            || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 finalize layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_allocate_anchor_prefix
-        && (!query_record() || !occurrence() || !query_state()
-            || !validation() || !adapter_state_core() || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 prefix layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_build_sort_segments
-        && (!query_record() || !query_state() || !validation()
-            || !binding_struct(11u, 24u, {0u, 4u, 8u, 12u, 16u})
-            || !adapter_state_core() || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 sort-ownership layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_emit_global_anchors
-        && (!partition() || !control() || !binding_scalar(2u, 4u)
-            || !query_record() || !query_minimizer() || !occurrence()
-            || !binding_struct(7u, 24u, {0u, 8u, 16u, 20u})
-            || !validation()
-            || !binding_struct(10u, 16u, {0u, 8u, 12u})
-            || !adapter_state_core() || !core_push())) {
-        return std::unexpected(
-            "SPIR-V grouped32 ABI2 anchor-emission layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_adapt_query_sketch
-        || kind == ShaderKind::phase_c_grouped32_finalize_query_adapter) {
-        constexpr std::array<std::uint32_t, 16> push_offsets{
-            0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u,
-            32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u};
-        const bool ok = binding_scalar(0u, 4u)
-            && binding_scalar(1u, 4u) && binding_scalar(2u, 4u)
-            && binding_struct(3u, 48u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u})
-            && binding_struct(4u, 48u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u, 44u})
-            && binding_struct(5u, 16u, {0u, 4u, 8u, 12u})
-            && binding_struct(6u, 32u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u})
-            && binding_struct(7u, 32u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u})
-            && binding_struct(8u, 12u, {0u, 4u, 8u})
-            && scan.has_push_constant_offsets(push_offsets);
-        if (!ok) return std::unexpected(
-            "SPIR-V grouped32 ABI2 sketch-adapter layout mismatch");
-    }
-    if (kind == ShaderKind::phase_c_grouped32_prepare_indirect) {
-        constexpr std::array<std::uint32_t, 12> push_offsets{
-            0u, 4u, 8u, 12u, 16u, 20u,
-            24u, 28u, 32u, 36u, 40u, 44u};
-        const bool ok = partition() && query_record() && validation()
-            && binding_struct(9u, 12u, {0u, 4u, 8u})
-            && adapter_state_core()
-            && scan.has_push_constant_offsets(push_offsets);
-        if (!ok) return std::unexpected(
-            "SPIR-V grouped32 ABI2 indirect-preparation layout mismatch");
-    }
-    const bool grouped32_stream_kind =
-        kind == ShaderKind::phase_c_grouped32_stream_control
-        || kind == ShaderKind::phase_c_grouped32_stream_authorize
-        || kind == ShaderKind::phase_c_grouped32_stream_position
-        || kind == ShaderKind::phase_c_grouped32_stream_seal;
-    if (grouped32_stream_kind) {
-        constexpr std::array<std::uint32_t, 20> push_offsets{
-            0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u,
-            40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u, 72u, 76u};
-        const auto stream_partition = [&binding_struct]() {
-            return binding_struct(0u, 64u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u,
-                 40u, 48u, 56u, 60u});
-        };
-        const auto stream_query_record = [&binding_struct]() {
-            return binding_struct(2u, 48u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 40u, 44u});
-        };
-        const auto stream_query_minimizer = [&binding_struct]() {
-            return binding_struct(3u, 16u, {0u, 4u, 8u, 12u});
-        };
-        const auto stream_occurrence = [&binding_struct]() {
-            return binding_struct(4u, 16u, {0u, 4u, 8u, 12u});
-        };
-        const auto stream_match = [&binding_struct]() {
-            return binding_struct(5u, 16u, {0u, 4u, 8u, 12u});
-        };
-        const auto stream_state = [&binding_struct]() {
-            return binding_struct(6u, 64u,
-                {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u,
-                 40u, 44u, 48u, 52u, 56u, 60u});
-        };
-        const auto stream_anchor = [&binding_struct]() {
-            return binding_struct(8u, 24u, {0u, 8u, 16u, 20u});
-        };
-        const bool push_ok = scan.has_push_constant_offsets(push_offsets);
-        bool layout_ok = push_ok && stream_state();
-        if (kind == ShaderKind::phase_c_grouped32_stream_control) {
-            layout_ok = layout_ok && stream_partition()
-                && binding_scalar(1u, 4u) && stream_query_record()
-                && stream_query_minimizer() && stream_occurrence()
-                && stream_match() && binding_scalar(7u, 4u);
-        } else if (kind == ShaderKind::phase_c_grouped32_stream_authorize) {
-            layout_ok = layout_ok && stream_occurrence() && stream_match()
-                && binding_scalar(7u, 4u);
-        } else if (kind == ShaderKind::phase_c_grouped32_stream_position) {
-            layout_ok = layout_ok && stream_partition()
-                && binding_scalar(1u, 4u) && stream_query_record()
-                && stream_query_minimizer() && stream_occurrence()
-                && stream_match() && stream_anchor();
-        } else {
-            layout_ok = layout_ok && stream_occurrence() && stream_anchor();
-        }
-        if (!layout_ok) return std::unexpected(
-            "SPIR-V grouped32 bounded-stream layout mismatch");
-    }
-    if (kind == ShaderKind::align_extend_banded_affine
+    if (kind == shader_kind::align_extend_banded_affine
         && (!scan.has_binding(0) || !scan.has_binding(1)
             || !scan.has_binding(2) || !scan.has_binding(3)
             || !scan.has_array_stride(4) || !scan.has_array_stride(16)
             || !scan.has_array_stride(32))) {
         return std::unexpected("SPIR-V alignment extension layout mismatch");
     }
-    if (kind == ShaderKind::align_extend_simple_cigar
+    if (kind == shader_kind::align_extend_simple_cigar
         && (!scan.has_binding(0) || !scan.has_binding(1)
             || !scan.has_binding(2) || !scan.has_binding(3)
             || !scan.has_binding(4) || !scan.has_binding(5)
@@ -1507,7 +1290,7 @@ public:
         return std::unexpected(
             "SPIR-V alignment CIGAR extension layout mismatch");
     }
-    if ((kind == ShaderKind::sneaky_snake_rank_batch
+    if ((kind == shader_kind::sneaky_snake_rank_batch
          || is_gatekeeper_rank_batch_kind(kind))
         && (!binding_scalar(0u, 4u)
             || !binding_scalar(1u, 4u)
@@ -1521,7 +1304,7 @@ public:
     return {};
 }
 
-struct MslCompileResult {
+struct msl_compile_result {
     std::string msl;
     std::string entry_name;
     std::uint32_t wg_x = 1;
@@ -1531,10 +1314,10 @@ struct MslCompileResult {
     std::uint32_t buffer_size_buffer_index = 25u;
 };
 
-[[nodiscard]] inline std::expected<MslCompileResult, std::string> spirv_to_msl(
+[[nodiscard]] inline std::expected<msl_compile_result, std::string> spirv_to_msl(
     std::vector<std::uint32_t> spirv,
-    const ShaderVariantKey& key,
-    MslVersion version)
+    const shader_variant_key& key,
+    msl_version version)
 {
     try {
         spirv_cross::CompilerMSL compiler(std::move(spirv));
@@ -1547,7 +1330,7 @@ struct MslCompileResult {
         options.buffer_size_buffer_index = 25u;
         compiler.set_msl_options(options);
 
-        const ShaderKind kind = checked_shader_kind(key.kind);
+        const shader_kind kind = checked_shader_kind(key.kind);
         const std::uint32_t push_size = push_constant_size(kind);
         const std::uint32_t binding_count =
             descriptor_binding_count(descriptor_layout_for(kind));
@@ -1618,7 +1401,7 @@ struct MslCompileResult {
             add_storage_binding(0u, binding, 1u, base + binding);
         }
 
-        MslCompileResult result{};
+        msl_compile_result result{};
         result.msl = compiler.compile();
         result.entry_name =
             compiler.get_cleansed_entry_point_name("main", spv::ExecutionModelGLCompute);
@@ -1627,7 +1410,7 @@ struct MslCompileResult {
         result.wg_z = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2);
         result.needs_buffer_size_buffer = compiler.needs_buffer_size_buffer();
         result.buffer_size_buffer_index = options.buffer_size_buffer_index;
-        const ShaderWorkgroupSize expected = expected_shader_workgroup_size(key);
+        const shader_workgroup_size expected = expected_shader_workgroup_size(key);
         if (result.wg_x != expected.x || result.wg_y != expected.y
             || result.wg_z != expected.z) {
             return std::unexpected(shader_cache_message(
@@ -1642,41 +1425,41 @@ struct MslCompileResult {
 }
 
 [[nodiscard]] inline std::vector<std::byte> meta_to_bytes(
-    const ShaderCacheMeta& meta,
+    const shader_cache_metadata& meta,
     std::string_view entry_name)
 {
-    std::vector<std::byte> bytes(sizeof(ShaderCacheMeta) + entry_name.size());
+    std::vector<std::byte> bytes(sizeof(shader_cache_metadata) + entry_name.size());
     std::memcpy(bytes.data(), &meta, sizeof(meta));
     std::memcpy(bytes.data() + sizeof(meta), entry_name.data(), entry_name.size());
     return bytes;
 }
 
-[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string>
+[[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 parse_cache_meta_bytes(
     std::span<const std::byte> bytes,
     std::string* entry_name)
 {
-    if (bytes.size() < sizeof(ShaderCacheMeta)) {
+    if (bytes.size() < sizeof(shader_cache_metadata)) {
         return std::unexpected("meta too small");
     }
-    ShaderCacheMeta meta{};
+    shader_cache_metadata meta{};
     std::memcpy(&meta, bytes.data(), sizeof(meta));
-    if (meta.magic != 0xB10C0CACu || meta.version != 1) {
-        return std::unexpected("meta magic/version mismatch");
+    if (meta.magic != 0xB10C0CACu || meta.wire_revision != 1u) {
+        return std::unexpected("metadata magic or wire revision mismatch");
     }
     if (meta.entry_len > 64u
-        || sizeof(ShaderCacheMeta) + meta.entry_len > bytes.size()) {
+        || sizeof(shader_cache_metadata) + meta.entry_len > bytes.size()) {
         return std::unexpected("meta entry length invalid");
     }
     if (entry_name != nullptr) {
         entry_name->assign(
-            reinterpret_cast<const char*>(bytes.data() + sizeof(ShaderCacheMeta)),
+            reinterpret_cast<const char*>(bytes.data() + sizeof(shader_cache_metadata)),
             meta.entry_len);
     }
     return meta;
 }
 
-[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string> read_meta(
+[[nodiscard]] inline std::expected<shader_cache_metadata, std::string> read_meta(
     const std::filesystem::path& path,
     std::string* entry_name)
 {
@@ -1687,7 +1470,7 @@ parse_cache_meta_bytes(
     input.seekg(0, std::ios::end);
     const std::streamoff size = input.tellg();
     input.seekg(0, std::ios::beg);
-    if (size < static_cast<std::streamoff>(sizeof(ShaderCacheMeta))) {
+    if (size < static_cast<std::streamoff>(sizeof(shader_cache_metadata))) {
         return std::unexpected("meta too small");
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
@@ -1698,10 +1481,10 @@ parse_cache_meta_bytes(
     return parse_cache_meta_bytes(bytes, entry_name);
 }
 
-[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string>
+[[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 compatible_cache_meta_from_bytes(
     std::span<const std::byte> bytes,
-    const ShaderVariantKey& key,
+    const shader_variant_key& key,
     std::string* entry_name)
 {
     std::string entry;
@@ -1715,7 +1498,7 @@ compatible_cache_meta_from_bytes(
     if (entry.empty()) {
         return std::unexpected("meta entry name is empty");
     }
-    const ShaderWorkgroupSize expected = expected_shader_workgroup_size(key);
+    const shader_workgroup_size expected = expected_shader_workgroup_size(key);
     if (meta->wg_x != expected.x
         || meta->wg_y != expected.y
         || meta->wg_z != expected.z) {
@@ -1730,10 +1513,10 @@ compatible_cache_meta_from_bytes(
     return *meta;
 }
 
-[[nodiscard]] inline std::expected<ShaderCacheMeta, std::string>
+[[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 read_compatible_cache_meta(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
+    const shader_variant_key& key,
     std::string* entry_name)
 {
     std::ifstream input(cache_meta_path(cache_dir, key), std::ios::binary);
@@ -1743,7 +1526,7 @@ read_compatible_cache_meta(
     input.seekg(0, std::ios::end);
     const std::streamoff size = input.tellg();
     input.seekg(0, std::ios::beg);
-    if (size < static_cast<std::streamoff>(sizeof(ShaderCacheMeta))) {
+    if (size < static_cast<std::streamoff>(sizeof(shader_cache_metadata))) {
         return std::unexpected("meta too small");
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
@@ -1783,7 +1566,7 @@ read_compatible_cache_meta(
 [[nodiscard]] inline std::expected<void, std::string>
 cache_metallib_entry_status(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     if (auto meta = read_compatible_cache_meta(cache_dir, key, nullptr); !meta) {
         return std::unexpected(shader_cache_message(
@@ -1795,7 +1578,7 @@ cache_metallib_entry_status(
 
 [[nodiscard]] inline bool cache_metallib_entry_complete(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_metallib_entry_status(cache_dir, key).has_value();
 }
@@ -1803,7 +1586,7 @@ cache_metallib_entry_status(
 [[nodiscard]] inline std::expected<void, std::string>
 cache_binary_archive_status(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
 #if !defined(__APPLE__)
     (void)cache_dir;
@@ -1828,14 +1611,14 @@ cache_binary_archive_status(
 
 [[nodiscard]] inline bool cache_binary_archive_complete(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_binary_archive_status(cache_dir, key).has_value();
 }
 
 [[nodiscard]] inline std::expected<void, std::string> cache_entry_status(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     if (auto metallib = cache_metallib_entry_status(cache_dir, key); !metallib) {
         return metallib;
@@ -1845,53 +1628,53 @@ cache_binary_archive_status(
 
 [[nodiscard]] inline bool cache_entry_complete(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key)
+    const shader_variant_key& key)
 {
     return cache_entry_status(cache_dir, key).has_value();
 }
 
 namespace sealed_shader_cache_detail {
 
-inline constexpr std::string_view manifest_magic = "BSCSEED3";
-inline constexpr std::uint32_t manifest_version = 3u;
-inline constexpr std::size_t maximum_manifest_bytes = 16u << 20u;
-inline constexpr std::size_t maximum_seed_artifact_bytes = 1u << 30u;
-inline constexpr std::uint64_t maximum_seed_image_bytes = 512ull << 20u;
-inline constexpr std::size_t maximum_seed_image_artifacts = 16'384u;
-inline constexpr std::uint32_t maximum_manifest_keys = 4096u;
-inline constexpr std::uint32_t maximum_manifest_artifacts = 65536u;
-inline constexpr std::uint32_t maximum_manifest_filename_bytes = 512u;
-using SealBeforeIdentityCheckHook = void (*)() noexcept;
+inline constexpr std::string_view k_manifest_magic = "BSCSEED3";
+inline constexpr std::uint32_t k_manifest_wire_revision = 3u;
+inline constexpr std::size_t k_maximum_manifest_bytes = 16u << 20u;
+inline constexpr std::size_t k_maximum_seed_artifact_bytes = 1u << 30u;
+inline constexpr std::uint64_t k_maximum_seed_image_bytes = 512ull << 20u;
+inline constexpr std::size_t k_maximum_seed_image_artifacts = 16'384u;
+inline constexpr std::uint32_t k_maximum_manifest_keys = 4096u;
+inline constexpr std::uint32_t k_maximum_manifest_artifacts = 65536u;
+inline constexpr std::uint32_t k_maximum_manifest_filename_bytes = 512u;
+using seal_before_identity_check_hook = void (*)() noexcept;
 
-struct ExpectedArtifact {
-    SealedShaderCacheArtifactKind kind =
-        SealedShaderCacheArtifactKind::reserved_command_metallib;
+struct expected_artifact {
+    sealed_shader_cache_artifact_kind kind =
+        sealed_shader_cache_artifact_kind::reserved_command_metallib;
     std::uint32_t key_index = (std::numeric_limits<std::uint32_t>::max)();
     std::string filename;
     std::filesystem::path path;
 };
 
 [[nodiscard]] inline bool shader_key_less(
-    const ShaderVariantKey& lhs,
-    const ShaderVariantKey& rhs) noexcept
+    const shader_variant_key& lhs,
+    const shader_variant_key& rhs) noexcept
 {
     return std::tie(lhs.kind, lhs.tile_size, lhs.local_size, lhs.max_span)
         < std::tie(rhs.kind, rhs.tile_size, rhs.local_size, rhs.max_span);
 }
 
-[[nodiscard]] inline std::expected<std::vector<ShaderVariantKey>, std::string>
-canonical_keys(std::span<const ShaderVariantKey> requested)
+[[nodiscard]] inline std::expected<std::vector<shader_variant_key>, std::string>
+canonical_keys(std::span<const shader_variant_key> requested)
 {
     if (requested.empty()) {
         return std::unexpected("sealed shader cache key set is empty");
     }
-    if (requested.size() > maximum_manifest_keys) {
+    if (requested.size() > k_maximum_manifest_keys) {
         return std::unexpected(shader_cache_message(
-            "sealed shader cache key count exceeds ", maximum_manifest_keys));
+            "sealed shader cache key count exceeds ", k_maximum_manifest_keys));
     }
-    std::vector<ShaderVariantKey> keys(requested.begin(), requested.end());
-    for (const ShaderVariantKey& key : keys) {
-        if (!valid_shader_variant_key(key)) {
+    std::vector<shader_variant_key> keys(requested.begin(), requested.end());
+    for (const shader_variant_key& key : keys) {
+        if (!is_shader_variant_key_valid(key)) {
             return std::unexpected(shader_cache_message(
                 "sealed shader cache contains invalid key ",
                 cache_file_stem(key)));
@@ -1916,25 +1699,25 @@ canonical_keys(std::span<const ShaderVariantKey> requested)
 [[nodiscard]] inline bool safe_filename(std::string_view filename) noexcept
 {
     return !filename.empty()
-        && filename.size() <= maximum_manifest_filename_bytes
+        && filename.size() <= k_maximum_manifest_filename_bytes
         && filename != "." && filename != ".."
         && filename.find('/') == std::string_view::npos
         && filename.find('\\') == std::string_view::npos
         && filename.find('\0') == std::string_view::npos;
 }
 
-[[nodiscard]] inline std::expected<std::vector<ExpectedArtifact>, std::string>
+[[nodiscard]] inline std::expected<std::vector<expected_artifact>, std::string>
 expected_artifacts(
     const std::filesystem::path& cache_dir,
-    std::span<const ShaderVariantKey> canonical)
+    std::span<const shader_variant_key> canonical)
 {
-    std::vector<ExpectedArtifact> artifacts;
+    std::vector<expected_artifact> artifacts;
     artifacts.reserve(canonical.size() * 6u);
     const auto append = [&artifacts](
-            SealedShaderCacheArtifactKind kind,
+            sealed_shader_cache_artifact_kind kind,
             std::uint32_t key_index,
             const std::filesystem::path& path) {
-        artifacts.push_back(ExpectedArtifact{
+        artifacts.push_back(expected_artifact{
             .kind = kind,
             .key_index = key_index,
             .filename = path.filename().string(),
@@ -1947,32 +1730,32 @@ expected_artifacts(
         }
         const std::uint32_t key_index = static_cast<std::uint32_t>(index);
         append(
-            SealedShaderCacheArtifactKind::shader_meta,
+            sealed_shader_cache_artifact_kind::shader_meta,
             key_index,
             cache_meta_path(cache_dir, canonical[index]));
         append(
-            SealedShaderCacheArtifactKind::shader_metallib,
+            sealed_shader_cache_artifact_kind::shader_metallib,
             key_index,
             cache_metallib_path(cache_dir, canonical[index]));
         for (const std::filesystem::path& archive :
              cache_binary_archive_paths(cache_dir, canonical[index])) {
             append(
-                SealedShaderCacheArtifactKind::metal_binary_archive,
+                sealed_shader_cache_artifact_kind::metal_binary_archive,
                 key_index,
                 archive);
             append(
-                SealedShaderCacheArtifactKind::
+                sealed_shader_cache_artifact_kind::
                     metal_binary_archive_qualification,
                 key_index,
                 cache_binary_archive_qualification_path(archive));
         }
     }
-    if (artifacts.size() > maximum_manifest_artifacts) {
+    if (artifacts.size() > k_maximum_manifest_artifacts) {
         return std::unexpected(shader_cache_message(
             "sealed shader cache artifact count exceeds ",
-            maximum_manifest_artifacts));
+            k_maximum_manifest_artifacts));
     }
-    for (const ExpectedArtifact& artifact : artifacts) {
+    for (const expected_artifact& artifact : artifacts) {
         if (!safe_filename(artifact.filename)) {
             return std::unexpected(shader_cache_message(
                 "unsafe generated shader cache filename: ", artifact.filename));
@@ -1982,7 +1765,7 @@ expected_artifacts(
         const auto duplicate = std::find_if(
             artifacts.begin() + static_cast<std::ptrdiff_t>(index + 1u),
             artifacts.end(),
-            [&artifacts, index](const ExpectedArtifact& candidate) {
+            [&artifacts, index](const expected_artifact& candidate) {
                 return candidate.filename == artifacts[index].filename;
             });
         if (duplicate != artifacts.end()) {
@@ -2054,7 +1837,7 @@ read_regular_file(
     return bytes;
 }
 
-struct RegularFileIdentity {
+struct regular_file_identity {
     std::uint64_t device = 0u;
     std::uint64_t inode = 0u;
     std::uint64_t size = 0u;
@@ -2063,21 +1846,21 @@ struct RegularFileIdentity {
     std::int64_t changed_seconds = 0;
     std::int64_t changed_nanoseconds = 0;
 
-    [[nodiscard]] bool operator==(const RegularFileIdentity&) const noexcept =
+    [[nodiscard]] bool operator==(const regular_file_identity&) const noexcept =
         default;
 };
 
-struct StableRegularFileImage {
+struct stable_regular_file_image {
     std::vector<std::byte> bytes;
-    RegularFileIdentity identity{};
+    regular_file_identity identity{};
 };
 
-class ScopedFileDescriptor {
+class scoped_file_descriptor {
 public:
-    explicit ScopedFileDescriptor(int fd) noexcept : fd_(fd) {}
-    ScopedFileDescriptor(const ScopedFileDescriptor&) = delete;
-    ScopedFileDescriptor& operator=(const ScopedFileDescriptor&) = delete;
-    ~ScopedFileDescriptor() {
+    explicit scoped_file_descriptor(int fd) noexcept : fd_(fd) {}
+    scoped_file_descriptor(const scoped_file_descriptor&) = delete;
+    scoped_file_descriptor& operator=(const scoped_file_descriptor&) = delete;
+    ~scoped_file_descriptor() {
         if (fd_ >= 0) (void)::close(fd_);
     }
     [[nodiscard]] int close_now() noexcept {
@@ -2089,10 +1872,10 @@ private:
     int fd_ = -1;
 };
 
-[[nodiscard]] inline RegularFileIdentity regular_file_identity(
+[[nodiscard]] inline regular_file_identity regular_file_identity(
     const struct stat& value) noexcept
 {
-    RegularFileIdentity result{
+    regular_file_identity result{
         .device = static_cast<std::uint64_t>(value.st_dev),
         .inode = static_cast<std::uint64_t>(value.st_ino),
         .size = static_cast<std::uint64_t>(value.st_size),
@@ -2111,7 +1894,7 @@ private:
     return result;
 }
 
-[[nodiscard]] inline std::expected<StableRegularFileImage, std::string>
+[[nodiscard]] inline std::expected<stable_regular_file_image, std::string>
 read_stable_regular_file(
     const std::filesystem::path& path,
     std::string_view artifact,
@@ -2124,9 +1907,9 @@ read_stable_regular_file(
             artifact, " stable open failed for ", path.string(),
             ": errno ", errno));
     }
-    ScopedFileDescriptor fd_owner{fd};
+    scoped_file_descriptor fd_owner{fd};
     const auto fail = [&path, artifact](std::string_view reason)
-        -> std::expected<StableRegularFileImage, std::string> {
+        -> std::expected<stable_regular_file_image, std::string> {
         const int saved = errno;
         return std::unexpected(shader_cache_message(
             artifact, ' ', reason, " for ", path.string(),
@@ -2140,7 +1923,7 @@ read_stable_regular_file(
         || exact_bytes > (std::numeric_limits<std::size_t>::max)()) {
         return fail("stable pre-read identity invalid");
     }
-    StableRegularFileImage image{};
+    stable_regular_file_image image{};
     image.bytes.resize(static_cast<std::size_t>(exact_bytes));
     std::size_t consumed = 0u;
     while (consumed < image.bytes.size()) {
@@ -2170,7 +1953,7 @@ read_stable_regular_file(
 
 [[nodiscard]] inline bool same_regular_file_identity(
     const std::filesystem::path& path,
-    const RegularFileIdentity& expected) noexcept
+    const regular_file_identity& expected) noexcept
 {
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return false;
@@ -2182,13 +1965,13 @@ read_stable_regular_file(
     return accepted;
 }
 
-struct StableRegularFileDigest {
+struct stable_regular_file_digest {
     std::uint64_t size = 0u;
     std::array<std::uint8_t, 32> sha256{};
-    RegularFileIdentity identity{};
+    regular_file_identity identity{};
 };
 
-[[nodiscard]] inline std::expected<StableRegularFileDigest, std::string>
+[[nodiscard]] inline std::expected<stable_regular_file_digest, std::string>
 stream_stable_regular_file_digest(
     const std::filesystem::path& path,
     std::string_view artifact,
@@ -2200,7 +1983,7 @@ stream_stable_regular_file_digest(
             artifact, " stream open failed for ", path.string(),
             ": errno ", errno));
     }
-    ScopedFileDescriptor fd_owner{fd};
+    scoped_file_descriptor fd_owner{fd};
     struct stat before {};
     if (::fstat(fd, &before) != 0 || !S_ISREG(before.st_mode)
         || before.st_size <= 0
@@ -2209,9 +1992,9 @@ stream_stable_regular_file_digest(
             artifact, " stream pre-read identity invalid for ",
             path.string()));
     }
-    constexpr std::size_t scratch_bytes = 64u << 10u;
-    std::array<std::byte, scratch_bytes> scratch{};
-    Sha256 hasher;
+    constexpr std::size_t k_scratch_bytes = 64u << 10u;
+    std::array<std::byte, k_scratch_bytes> scratch{};
+    sha256_hasher hasher;
     std::uint64_t streamed = 0u;
     for (;;) {
         const ssize_t count = ::read(fd, scratch.data(), scratch.size());
@@ -2247,7 +2030,7 @@ stream_stable_regular_file_digest(
             artifact, " stream close failed for ", path.string(),
             ": errno ", errno));
     }
-    return StableRegularFileDigest{
+    return stable_regular_file_digest{
         .size = streamed,
         .sha256 = hasher.finalize(),
         .identity = regular_file_identity(after),
@@ -2257,7 +2040,7 @@ stream_stable_regular_file_digest(
 [[nodiscard]] inline std::array<std::uint8_t, 32> sha256(
     std::span<const std::byte> bytes) noexcept
 {
-    Sha256 hasher;
+    sha256_hasher hasher;
     hasher.update(bytes);
     return hasher.finalize();
 }
@@ -2267,15 +2050,15 @@ stream_stable_regular_file_digest(
     std::string>
 seed_identity(
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> keys,
-    std::span<const SealedShaderCacheArtifact> artifacts)
+    std::span<const shader_variant_key> keys,
+    std::span<const sealed_shader_cache_artifact> artifacts)
 {
-    Sha256 hasher;
+    sha256_hasher hasher;
     hasher.update("bioseq-sealed-shader-seed-v1");
     hasher.update_little_endian(cache_digest.size());
     hasher.update(cache_digest);
     hasher.update_little_endian(keys.size());
-    for (const ShaderVariantKey& key : keys) {
+    for (const shader_variant_key& key : keys) {
         hasher.update_little_endian(key.kind);
         hasher.update_little_endian(key.tile_size);
         hasher.update_little_endian(key.local_size);
@@ -2283,7 +2066,7 @@ seed_identity(
     }
     hasher.update_little_endian(artifacts.size());
     std::uint64_t seed_size = 0u;
-    for (const SealedShaderCacheArtifact& artifact : artifacts) {
+    for (const sealed_shader_cache_artifact& artifact : artifacts) {
         if (artifact.size > (std::numeric_limits<std::uint64_t>::max)()
                 - seed_size) {
             return std::unexpected("sealed shader cache seed size overflow");
@@ -2330,34 +2113,34 @@ inline void append_digest(
 [[nodiscard]] inline std::expected<
     std::pair<std::vector<std::byte>, std::uint64_t>,
     std::string>
-serialize_manifest(const SealedShaderCacheManifest& manifest)
+serialize_manifest(const sealed_shader_cache_manifest& manifest)
 {
     if (!valid_digest(manifest.cache_digest)) {
         return std::unexpected("sealed shader cache digest is not lowercase hex16");
     }
     if (manifest.keys.empty()
-        || manifest.keys.size() > maximum_manifest_keys
+        || manifest.keys.size() > k_maximum_manifest_keys
         || manifest.artifacts.empty()
-        || manifest.artifacts.size() > maximum_manifest_artifacts) {
+        || manifest.artifacts.size() > k_maximum_manifest_artifacts) {
         return std::unexpected("sealed shader cache manifest count is invalid");
     }
     std::vector<std::byte> bytes;
     bytes.reserve(256u + manifest.artifacts.size() * 128u);
-    append_text(bytes, manifest_magic);
-    append_u32(bytes, manifest_version);
+    append_text(bytes, k_manifest_magic);
+    append_u32(bytes, k_manifest_wire_revision);
     append_u32(bytes, 0u);
     append_u32(bytes, static_cast<std::uint32_t>(manifest.cache_digest.size()));
     append_u32(bytes, static_cast<std::uint32_t>(manifest.keys.size()));
     append_u32(bytes, static_cast<std::uint32_t>(manifest.artifacts.size()));
     append_u32(bytes, 0u);
     append_text(bytes, manifest.cache_digest);
-    for (const ShaderVariantKey& key : manifest.keys) {
+    for (const shader_variant_key& key : manifest.keys) {
         append_u32(bytes, key.kind);
         append_u32(bytes, key.tile_size);
         append_u32(bytes, key.local_size);
         append_u32(bytes, key.max_span);
     }
-    for (const SealedShaderCacheArtifact& artifact : manifest.artifacts) {
+    for (const sealed_shader_cache_artifact& artifact : manifest.artifacts) {
         if (!safe_filename(artifact.filename)) {
             return std::unexpected(shader_cache_message(
                 "unsafe shader cache manifest filename: ", artifact.filename));
@@ -2374,19 +2157,19 @@ serialize_manifest(const SealedShaderCacheManifest& manifest)
     append_digest(bytes, manifest.seed_sha256);
     const std::uint64_t checksum = manifest_checksum(bytes);
     append_u64(bytes, checksum);
-    if (bytes.size() > maximum_manifest_bytes) {
+    if (bytes.size() > k_maximum_manifest_bytes) {
         return std::unexpected("sealed shader cache manifest is too large");
     }
     return std::pair{std::move(bytes), checksum};
 }
 
-class ManifestReader {
+class manifest_reader {
 private:
     std::span<const std::byte> bytes_;
     std::size_t cursor_ = 0u;
 
 public:
-    explicit ManifestReader(std::span<const std::byte> bytes) noexcept
+    explicit manifest_reader(std::span<const std::byte> bytes) noexcept
         : bytes_(bytes)
     {}
 
@@ -2449,16 +2232,15 @@ public:
     }
 };
 
-inline constexpr std::string_view archive_qualification_magic = "BAMISS01";
-inline constexpr std::uint32_t archive_qualification_legacy_version = 1u;
-inline constexpr std::uint32_t archive_qualification_version = 2u;
-inline constexpr std::size_t maximum_archive_qualification_bytes = 4096u;
+inline constexpr std::string_view k_archive_qualification_magic = "BAMISS01";
+inline constexpr std::uint32_t k_archive_qualification_wire_revision = 2u;
+inline constexpr std::size_t k_maximum_archive_qualification_bytes = 4096u;
 
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
 serialize_metal_archive_qualification_receipt(
-    const MetalArchiveQualificationReceipt& receipt)
+    const metal_archive_qualification_receipt& receipt)
 {
-    if (!receipt.accepted()) {
+    if (!receipt.is_accepted()) {
         return std::unexpected("Metal archive qualification receipt is incomplete");
     }
     std::vector<std::byte> bytes;
@@ -2467,8 +2249,8 @@ serialize_metal_archive_qualification_receipt(
         + receipt.negative_error.domain.size()
         + receipt.helper_build_identity.size()
         + receipt.helper_source.size());
-    append_text(bytes, archive_qualification_magic);
-    append_u32(bytes, archive_qualification_version);
+    append_text(bytes, k_archive_qualification_magic);
+    append_u32(bytes, k_archive_qualification_wire_revision);
     append_u32(bytes, 0u);
     append_u32(bytes, receipt.shader_key.kind);
     append_u32(bytes, receipt.shader_key.tile_size);
@@ -2485,7 +2267,7 @@ serialize_metal_archive_qualification_receipt(
     append_u64(bytes, std::bit_cast<std::uint64_t>(receipt.negative_error.code));
     append_u64(bytes, receipt.archive_size);
     append_digest(bytes, receipt.archive_sha256);
-    append_u32(bytes, receipt.helper_protocol_version);
+    append_u32(bytes, receipt.helper_wire_revision);
     append_u32(
         bytes,
         static_cast<std::uint32_t>(receipt.helper_build_identity.size()));
@@ -2499,72 +2281,34 @@ serialize_metal_archive_qualification_receipt(
     append_text(bytes, receipt.helper_build_identity);
     append_text(bytes, receipt.helper_source);
     append_u64(bytes, manifest_checksum(bytes));
-    if (bytes.size() > maximum_archive_qualification_bytes) {
+    if (bytes.size() > k_maximum_archive_qualification_bytes) {
         return std::unexpected("Metal archive qualification receipt is too large");
     }
     return bytes;
 }
 
-[[nodiscard]] inline std::expected<MetalArchiveQualificationReceipt, std::string>
+[[nodiscard]] inline std::expected<metal_archive_qualification_receipt, std::string>
 parse_metal_archive_qualification_receipt(
     std::span<const std::byte> bytes)
 {
-    constexpr std::size_t minimum_fixed_bytes = 8u + 2u * 4u + 8u;
-    if (bytes.size() < minimum_fixed_bytes
-        || bytes.size() > maximum_archive_qualification_bytes) {
+    constexpr std::size_t k_minimum_fixed_bytes = 8u + 2u * 4u + 8u;
+    if (bytes.size() < k_minimum_fixed_bytes
+        || bytes.size() > k_maximum_archive_qualification_bytes) {
         return std::unexpected("Metal archive qualification receipt size is invalid");
     }
     const std::size_t checksum_offset = bytes.size() - sizeof(std::uint64_t);
-    ManifestReader reader(bytes);
-    auto magic = reader.text(archive_qualification_magic.size());
-    auto version = reader.u32();
+    manifest_reader reader(bytes);
+    auto magic = reader.text(k_archive_qualification_magic.size());
+    auto wire_revision = reader.u32();
     auto reserved = reader.u32();
-    if (!magic || !version || !reserved
-        || *magic != archive_qualification_magic || *reserved != 0u) {
+    if (!magic || !wire_revision || !reserved
+        || *magic != k_archive_qualification_magic || *reserved != 0u) {
         return std::unexpected(
             "Metal archive qualification receipt header is invalid");
     }
-    if (*version == archive_qualification_legacy_version) {
-        auto max_threads = reader.u64();
-        auto multiple = reader.u32();
-        auto domain_size = reader.u32();
-        auto code_bits = reader.u64();
-        auto archive_size = reader.u64();
-        auto archive_sha = reader.digest();
-        if (!max_threads || !multiple || !domain_size || !code_bits
-            || !archive_size || !archive_sha || *multiple > 1u
-            || *domain_size == 0u || *domain_size > 1024u) {
-            return std::unexpected(
-                "legacy Metal archive qualification receipt is invalid");
-        }
-        auto domain = reader.text(*domain_size);
-        auto stored_checksum = reader.u64();
-        if (!domain || !stored_checksum || !reader.at_end()
-            || *stored_checksum
-                != manifest_checksum(bytes.first(checksum_offset))) {
-            return std::unexpected(
-                "legacy Metal archive qualification receipt payload is invalid");
-        }
-        MetalArchiveQualificationReceipt diagnostic{
-            .wire_version = archive_qualification_legacy_version,
-            .max_total_threads_per_threadgroup = *max_threads,
-            .threadgroup_size_is_multiple = *multiple != 0u,
-            .negative_error = MetalArchiveNegativeErrorFingerprint{
-                .domain = std::move(*domain),
-                .code = std::bit_cast<std::int64_t>(*code_bits),
-            },
-            .archive_size = *archive_size,
-            .archive_sha256 = *archive_sha,
-        };
-        if (!diagnostic.diagnostic_valid() || diagnostic.accepted()) {
-            return std::unexpected(
-                "legacy Metal archive qualification receipt values are invalid");
-        }
-        return diagnostic;
-    }
-    if (*version != archive_qualification_version) {
+    if (*wire_revision != k_archive_qualification_wire_revision) {
         return std::unexpected(
-            "Metal archive qualification receipt version is unsupported");
+            "Metal archive qualification receipt wire revision is unsupported");
     }
     auto key_kind = reader.u32();
     auto key_tile = reader.u32();
@@ -2579,7 +2323,7 @@ parse_metal_archive_qualification_receipt(
     auto code_bits = reader.u64();
     auto archive_size = reader.u64();
     auto archive_sha = reader.digest();
-    auto helper_protocol = reader.u32();
+    auto helper_wire_revision = reader.u32();
     auto helper_build_size = reader.u32();
     auto helper_source_size = reader.u32();
     auto reserved2 = reader.u32();
@@ -2589,7 +2333,7 @@ parse_metal_archive_qualification_receipt(
     if (!key_kind || !key_tile || !key_local || !key_span
         || !metallib_size || !metallib_sha || !entry_size
         || !max_threads || !multiple || !domain_size || !code_bits
-        || !archive_size || !archive_sha || !helper_protocol
+        || !archive_size || !archive_sha || !helper_wire_revision
         || !helper_build_size || !helper_source_size || !reserved2
         || !helper_executable_size || !helper_executable_sha
         || !helper_registry_id) {
@@ -2617,9 +2361,9 @@ parse_metal_archive_qualification_receipt(
         return std::unexpected(
             "Metal archive qualification receipt checksum mismatch");
     }
-    MetalArchiveQualificationReceipt receipt{
-        .wire_version = archive_qualification_version,
-        .shader_key = ShaderVariantKey{
+    metal_archive_qualification_receipt receipt{
+        .wire_revision = k_archive_qualification_wire_revision,
+        .shader_key = shader_variant_key{
             .kind = *key_kind,
             .tile_size = *key_tile,
             .local_size = *key_local,
@@ -2630,62 +2374,64 @@ parse_metal_archive_qualification_receipt(
         .entry_name = std::move(*entry_name),
         .max_total_threads_per_threadgroup = *max_threads,
         .threadgroup_size_is_multiple = *multiple != 0u,
-        .negative_error = MetalArchiveNegativeErrorFingerprint{
+        .negative_error = metal_archive_negative_error_fingerprint{
             .domain = std::move(*domain),
             .code = std::bit_cast<std::int64_t>(*code_bits),
         },
         .archive_size = *archive_size,
         .archive_sha256 = *archive_sha,
-        .helper_protocol_version = *helper_protocol,
+        .helper_wire_revision = *helper_wire_revision,
         .helper_build_identity = std::move(*helper_build),
         .helper_source = std::move(*helper_source),
         .helper_executable_size = *helper_executable_size,
         .helper_executable_sha256 = *helper_executable_sha,
         .helper_metal_registry_id = *helper_registry_id,
     };
-    if (!receipt.accepted()) {
+    if (!receipt.is_accepted()) {
         return std::unexpected(
             "Metal archive qualification receipt values are invalid");
     }
     return receipt;
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 parse_manifest(std::span<const std::byte> bytes)
 {
-    if (bytes.size() > maximum_manifest_bytes) {
+    if (bytes.size() > k_maximum_manifest_bytes) {
         return std::unexpected("sealed shader cache manifest is too large");
     }
-    if (bytes.size() < manifest_magic.size() + 6u * sizeof(std::uint32_t)
+    if (bytes.size() < k_manifest_magic.size() + 6u * sizeof(std::uint32_t)
             + 16u + sizeof(std::uint64_t) + 32u + sizeof(std::uint64_t)) {
         return std::unexpected("sealed shader cache manifest is too small");
     }
-    ManifestReader reader(bytes);
-    auto magic = reader.text(manifest_magic.size());
-    if (!magic || *magic != manifest_magic) {
+    manifest_reader reader(bytes);
+    auto magic = reader.text(k_manifest_magic.size());
+    if (!magic || *magic != k_manifest_magic) {
         return std::unexpected("sealed shader cache manifest magic mismatch");
     }
-    auto version = reader.u32();
+    auto wire_revision = reader.u32();
     auto reserved0 = reader.u32();
     auto digest_size = reader.u32();
     auto key_count = reader.u32();
     auto artifact_count = reader.u32();
     auto reserved1 = reader.u32();
-    if (!version || !reserved0 || !digest_size || !key_count
+    if (!wire_revision || !reserved0 || !digest_size || !key_count
         || !artifact_count || !reserved1) {
         return std::unexpected("sealed shader cache manifest header is truncated");
     }
-    if (*version != manifest_version || *reserved0 != 0u || *reserved1 != 0u) {
-        return std::unexpected("sealed shader cache manifest version/reserved mismatch");
+    if (*wire_revision != k_manifest_wire_revision
+        || *reserved0 != 0u || *reserved1 != 0u) {
+        return std::unexpected(
+            "sealed shader cache manifest wire revision or reserved field mismatch");
     }
     if (*digest_size != 16u
-        || *key_count == 0u || *key_count > maximum_manifest_keys
+        || *key_count == 0u || *key_count > k_maximum_manifest_keys
         || *artifact_count == 0u
-        || *artifact_count > maximum_manifest_artifacts) {
+        || *artifact_count > k_maximum_manifest_artifacts) {
         return std::unexpected("sealed shader cache manifest header count is invalid");
     }
 
-    SealedShaderCacheManifest manifest{};
+    sealed_shader_cache_manifest manifest{};
     auto cache_digest = reader.text(*digest_size);
     if (!cache_digest || !valid_digest(*cache_digest)) {
         return std::unexpected("sealed shader cache manifest digest is invalid");
@@ -2700,7 +2446,7 @@ parse_manifest(std::span<const std::byte> bytes)
         if (!kind || !tile_size || !local_size || !max_span) {
             return std::unexpected("sealed shader cache key table is truncated");
         }
-        manifest.keys.push_back(ShaderVariantKey{
+        manifest.keys.push_back(shader_variant_key{
             .kind = *kind,
             .tile_size = *tile_size,
             .local_size = *local_size,
@@ -2721,10 +2467,10 @@ parse_manifest(std::span<const std::byte> bytes)
         }
         if (*raw_kind
                 > static_cast<std::uint32_t>(
-                    SealedShaderCacheArtifactKind::
+                    sealed_shader_cache_artifact_kind::
                         metal_binary_archive_qualification)
             || *filename_size == 0u
-            || *filename_size > maximum_manifest_filename_bytes
+            || *filename_size > k_maximum_manifest_filename_bytes
             || *reserved != 0u || *size == 0u) {
             return std::unexpected("sealed shader cache artifact record is invalid");
         }
@@ -2732,8 +2478,8 @@ parse_manifest(std::span<const std::byte> bytes)
         if (!filename || !safe_filename(*filename)) {
             return std::unexpected("sealed shader cache artifact filename is unsafe");
         }
-        manifest.artifacts.push_back(SealedShaderCacheArtifact{
-            .kind = static_cast<SealedShaderCacheArtifactKind>(*raw_kind),
+        manifest.artifacts.push_back(sealed_shader_cache_artifact{
+            .kind = static_cast<sealed_shader_cache_artifact_kind>(*raw_kind),
             .key_index = *key_index,
             .filename = std::move(*filename),
             .size = *size,
@@ -2762,9 +2508,9 @@ parse_manifest(std::span<const std::byte> bytes)
 
 [[nodiscard]] inline std::expected<void, std::string> validate_shape(
     const std::filesystem::path& cache_dir,
-    const SealedShaderCacheManifest& manifest,
+    const sealed_shader_cache_manifest& manifest,
     std::string_view expected_digest,
-    std::span<const ShaderVariantKey> expected_keys)
+    std::span<const shader_variant_key> expected_keys)
 {
     if (!valid_digest(expected_digest) || manifest.cache_digest != expected_digest) {
         return std::unexpected(shader_cache_message(
@@ -2784,8 +2530,8 @@ parse_manifest(std::span<const std::byte> bytes)
             manifest.artifacts.size(), " expected=", expected->size()));
     }
     for (std::size_t index = 0u; index < expected->size(); ++index) {
-        const SealedShaderCacheArtifact& actual = manifest.artifacts[index];
-        const ExpectedArtifact& wanted = (*expected)[index];
+        const sealed_shader_cache_artifact& actual = manifest.artifacts[index];
+        const expected_artifact& wanted = (*expected)[index];
         if (actual.kind != wanted.kind
             || actual.key_index != wanted.key_index
             || actual.filename != wanted.filename) {
@@ -2806,7 +2552,7 @@ parse_manifest(std::span<const std::byte> bytes)
 
 [[nodiscard]] inline std::expected<void, std::string>
 validate_artifact_bytes(
-    const SealedShaderCacheArtifact& artifact,
+    const sealed_shader_cache_artifact& artifact,
     std::span<const std::byte> bytes)
 {
     if (bytes.size() != artifact.size) {
@@ -2826,12 +2572,12 @@ validate_artifact_bytes(
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
 load_validated_artifact_bytes(
     const std::filesystem::path& cache_dir,
-    const SealedShaderCacheArtifact& artifact)
+    const sealed_shader_cache_artifact& artifact)
 {
     auto bytes = read_regular_file(
         cache_dir / artifact.filename,
         "sealed shader cache artifact",
-        maximum_seed_artifact_bytes);
+        k_maximum_seed_artifact_bytes);
     if (!bytes) return std::unexpected(bytes.error());
     if (auto valid = validate_artifact_bytes(artifact, *bytes); !valid) {
         return std::unexpected(valid.error());
@@ -2841,7 +2587,7 @@ load_validated_artifact_bytes(
 
 [[nodiscard]] inline std::expected<void, std::string> validate_artifact(
     const std::filesystem::path& cache_dir,
-    const SealedShaderCacheArtifact& artifact)
+    const sealed_shader_cache_artifact& artifact)
 {
     auto bytes = load_validated_artifact_bytes(cache_dir, artifact);
     if (!bytes) return std::unexpected(bytes.error());
@@ -2850,28 +2596,28 @@ load_validated_artifact_bytes(
 
 [[nodiscard]] inline std::expected<void, std::string> validate_all_artifacts(
     const std::filesystem::path& cache_dir,
-    const SealedShaderCacheManifest& manifest)
+    const sealed_shader_cache_manifest& manifest)
 {
-    for (const SealedShaderCacheArtifact& artifact : manifest.artifacts) {
+    for (const sealed_shader_cache_artifact& artifact : manifest.artifacts) {
         if (auto valid = validate_artifact(cache_dir, artifact); !valid) {
             return valid;
         }
     }
-    for (const ShaderVariantKey& key : manifest.keys) {
+    for (const shader_variant_key& key : manifest.keys) {
         if (auto status = cache_entry_status(cache_dir, key); !status) {
             return std::unexpected(shader_cache_message(
                 "sealed shader cache entry is incompatible for ",
                 cache_file_stem(key), ": ", status.error()));
         }
     }
-    std::optional<MetalArchiveNegativeErrorFingerprint> common_negative_error;
-    using HelperIdentity = std::tuple<
+    std::optional<metal_archive_negative_error_fingerprint> common_negative_error;
+    using helper_identity = std::tuple<
         std::uint32_t, std::string, std::string, std::uint64_t,
         std::array<std::uint8_t, 32>, std::uint64_t>;
-    std::optional<HelperIdentity> common_helper;
-    for (const SealedShaderCacheArtifact& archive : manifest.artifacts) {
+    std::optional<helper_identity> common_helper;
+    for (const sealed_shader_cache_artifact& archive : manifest.artifacts) {
         if (archive.kind
-            != SealedShaderCacheArtifactKind::metal_binary_archive) {
+            != sealed_shader_cache_artifact_kind::metal_binary_archive) {
             continue;
         }
         const std::string qualification_filename =
@@ -2880,9 +2626,9 @@ load_validated_artifact_bytes(
             manifest.artifacts.begin(),
             manifest.artifacts.end(),
             [&archive, &qualification_filename](
-                const SealedShaderCacheArtifact& candidate) {
+                const sealed_shader_cache_artifact& candidate) {
                 return candidate.kind
-                        == SealedShaderCacheArtifactKind::
+                        == sealed_shader_cache_artifact_kind::
                             metal_binary_archive_qualification
                     && candidate.key_index == archive.key_index
                     && candidate.filename == qualification_filename;
@@ -2903,9 +2649,9 @@ load_validated_artifact_bytes(
                 "Metal archive qualification invalid for ", archive.filename,
                 ": ", qualification.error()));
         }
-        if (!qualification->production_accepted()) {
+        if (!qualification->is_production_accepted()) {
             return std::unexpected(shader_cache_message(
-                "Metal archive qualification is not production v2 for ",
+                "Metal archive qualification is not production-qualified for ",
                 archive.filename));
         }
 #if defined(__APPLE__)
@@ -2928,14 +2674,14 @@ load_validated_artifact_bytes(
             return std::unexpected(
                 "Metal archive qualification key index is out of range");
         }
-        const ShaderVariantKey& key = manifest.keys[archive.key_index];
+        const shader_variant_key& key = manifest.keys[archive.key_index];
         const std::string stem = cache_file_stem(key);
         const auto metallib_artifact = std::find_if(
             manifest.artifacts.begin(), manifest.artifacts.end(),
             [archive_key = archive.key_index, &stem](
-                const SealedShaderCacheArtifact& candidate) {
+                const sealed_shader_cache_artifact& candidate) {
                 return candidate.kind
-                        == SealedShaderCacheArtifactKind::shader_metallib
+                        == sealed_shader_cache_artifact_kind::shader_metallib
                     && candidate.key_index == archive_key
                     && candidate.filename == stem + ".metallib";
             });
@@ -2962,7 +2708,7 @@ load_validated_artifact_bytes(
                 "Metal archive qualification has unknown descriptor cap for ",
                 archive.filename));
         }
-        const ShaderWorkgroupSize workgroup =
+        const shader_workgroup_size workgroup =
             expected_shader_workgroup_size(key);
         const std::uint64_t exact_threads =
             static_cast<std::uint64_t>(workgroup.x)
@@ -2984,8 +2730,8 @@ load_validated_artifact_bytes(
                 "Metal archive qualifications disagree on NSError fingerprint");
         }
         common_negative_error = qualification->negative_error;
-        HelperIdentity helper_identity{
-            qualification->helper_protocol_version,
+        helper_identity helper_identity{
+            qualification->helper_wire_revision,
             qualification->helper_build_identity,
             qualification->helper_source,
             qualification->helper_executable_size,
@@ -3005,17 +2751,17 @@ load_validated_artifact_bytes(
     return {};
 }
 
-[[nodiscard]] inline const SealedShaderCacheArtifactImage*
+[[nodiscard]] inline const sealed_shader_cache_artifact_image*
 find_artifact_image(
-    std::span<const SealedShaderCacheArtifactImage> images,
-    SealedShaderCacheArtifactKind kind,
+    std::span<const sealed_shader_cache_artifact_image> images,
+    sealed_shader_cache_artifact_kind kind,
     std::uint32_t key_index,
     std::string_view filename) noexcept
 {
     const auto image = std::find_if(
         images.begin(), images.end(),
         [kind, key_index, filename](
-            const SealedShaderCacheArtifactImage& candidate) {
+            const sealed_shader_cache_artifact_image& candidate) {
             return candidate.descriptor.kind == kind
                 && candidate.descriptor.key_index == key_index
                 && candidate.descriptor.filename == filename;
@@ -3023,13 +2769,13 @@ find_artifact_image(
     return image == images.end() ? nullptr : &*image;
 }
 
-/// Validate all semantic relationships using only the retained artifact
+/// @brief Validate all semantic relationships using only the retained artifact
 /// bytes. File size/SHA validation happened during their one loader read.
 [[nodiscard]] inline std::expected<void, std::string>
 validate_all_artifact_images(
     const std::filesystem::path& cache_dir,
-    const SealedShaderCacheManifest& manifest,
-    std::span<const SealedShaderCacheArtifactImage> images)
+    const sealed_shader_cache_manifest& manifest,
+    std::span<const sealed_shader_cache_artifact_image> images)
 {
     if (images.size() != manifest.artifacts.size()) {
         return std::unexpected(
@@ -3046,14 +2792,14 @@ validate_all_artifact_images(
 
     for (std::size_t key_ordinal = 0u;
          key_ordinal < manifest.keys.size(); ++key_ordinal) {
-        const ShaderVariantKey& key = manifest.keys[key_ordinal];
+        const shader_variant_key& key = manifest.keys[key_ordinal];
         const std::uint32_t key_index = static_cast<std::uint32_t>(key_ordinal);
         const std::string stem = cache_file_stem(key);
         const auto* metadata = find_artifact_image(
-            images, SealedShaderCacheArtifactKind::shader_meta,
+            images, sealed_shader_cache_artifact_kind::shader_meta,
             key_index, stem + ".meta");
         const auto* metallib = find_artifact_image(
-            images, SealedShaderCacheArtifactKind::shader_metallib,
+            images, sealed_shader_cache_artifact_kind::shader_metallib,
             key_index, stem + ".metallib");
         if (metadata == nullptr || metallib == nullptr
             || metallib->bytes.empty()) {
@@ -3070,16 +2816,16 @@ validate_all_artifact_images(
         }
     }
 
-    std::optional<MetalArchiveNegativeErrorFingerprint> common_negative_error;
-    using SeedHelperIdentity = std::tuple<
+    std::optional<metal_archive_negative_error_fingerprint> common_negative_error;
+    using seed_helper_identity = std::tuple<
         std::uint32_t, std::string, std::string, std::uint64_t,
         std::array<std::uint8_t, 32>, std::uint64_t>;
-    std::optional<SeedHelperIdentity> common_helper;
-    for (const SealedShaderCacheArtifactImage& archive : images) {
+    std::optional<seed_helper_identity> common_helper;
+    for (const sealed_shader_cache_artifact_image& archive : images) {
         if (archive.descriptor.kind
-            != SealedShaderCacheArtifactKind::metal_binary_archive) {
+            != sealed_shader_cache_artifact_kind::metal_binary_archive) {
             if (archive.descriptor.kind
-                == SealedShaderCacheArtifactKind::reserved_command_metallib) {
+                == sealed_shader_cache_artifact_kind::reserved_command_metallib) {
                 return std::unexpected(
                     "sealed shader cache seed contains forbidden placeholder command artifact");
             }
@@ -3089,7 +2835,7 @@ validate_all_artifact_images(
             archive.descriptor.filename + ".qualification";
         const auto* qualification_image = find_artifact_image(
             images,
-            SealedShaderCacheArtifactKind::metal_binary_archive_qualification,
+            sealed_shader_cache_artifact_kind::metal_binary_archive_qualification,
             archive.descriptor.key_index, qualification_filename);
         if (qualification_image == nullptr) {
             return std::unexpected(shader_cache_message(
@@ -3103,9 +2849,9 @@ validate_all_artifact_images(
                 "Metal archive qualification invalid for ",
                 archive.descriptor.filename, ": ", qualification.error()));
         }
-        if (!qualification->production_accepted()) {
+        if (!qualification->is_production_accepted()) {
             return std::unexpected(shader_cache_message(
-                "Metal archive qualification is not production v2 for ",
+                "Metal archive qualification is not production-qualified for ",
                 archive.descriptor.filename));
         }
 #if defined(__APPLE__)
@@ -3128,18 +2874,18 @@ validate_all_artifact_images(
             return std::unexpected(
                 "Metal archive qualification key index is out of range");
         }
-        const ShaderVariantKey& key =
+        const shader_variant_key& key =
             manifest.keys[archive.descriptor.key_index];
         const std::string stem = cache_file_stem(key);
         const auto* metallib = find_artifact_image(
-            images, SealedShaderCacheArtifactKind::shader_metallib,
+            images, sealed_shader_cache_artifact_kind::shader_metallib,
             archive.descriptor.key_index, stem + ".metallib");
         const auto* metadata = find_artifact_image(
-            images, SealedShaderCacheArtifactKind::shader_meta,
+            images, sealed_shader_cache_artifact_kind::shader_meta,
             archive.descriptor.key_index, stem + ".meta");
         std::string expected_entry_name;
         auto meta = metadata == nullptr
-            ? std::expected<ShaderCacheMeta, std::string>{
+            ? std::expected<shader_cache_metadata, std::string>{
                 std::unexpected("metadata missing")}
             : compatible_cache_meta_from_bytes(
                 metadata->bytes, key, &expected_entry_name);
@@ -3165,7 +2911,7 @@ validate_all_artifact_images(
                 "Metal archive qualification has unknown descriptor cap for ",
                 archive.descriptor.filename));
         }
-        const ShaderWorkgroupSize workgroup = expected_shader_workgroup_size(key);
+        const shader_workgroup_size workgroup = expected_shader_workgroup_size(key);
         const std::uint64_t exact_threads =
             static_cast<std::uint64_t>(workgroup.x)
             * static_cast<std::uint64_t>(workgroup.y)
@@ -3185,8 +2931,8 @@ validate_all_artifact_images(
                 "Metal archive qualifications disagree on NSError fingerprint");
         }
         common_negative_error = qualification->negative_error;
-        SeedHelperIdentity helper_identity{
-            qualification->helper_protocol_version,
+        seed_helper_identity helper_identity{
+            qualification->helper_wire_revision,
             qualification->helper_build_identity,
             qualification->helper_source,
             qualification->helper_executable_size,
@@ -3207,41 +2953,41 @@ validate_all_artifact_images(
 }
 
 [[nodiscard]] inline std::uint64_t sealed_seed_receipt_identity(
-    const SealedShaderCacheManifest& manifest,
+    const sealed_shader_cache_manifest& manifest,
     std::uint64_t artifact_read_count,
     std::uint64_t manifest_bytes,
     std::uint64_t artifact_bytes,
     std::uint64_t load_ns) noexcept
 {
-    constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
-    constexpr std::uint64_t fnv_prime = 1099511628211ull;
-    std::uint64_t identity = fnv_offset;
+    constexpr std::uint64_t k_fnv_offset = 1469598103934665603ull;
+    constexpr std::uint64_t k_fnv_prime = 1099511628211ull;
+    std::uint64_t identity = k_fnv_offset;
     const auto append_u64_to_identity = [&identity](std::uint64_t value) {
-        constexpr std::uint64_t local_fnv_prime = 1099511628211ull;
+        constexpr std::uint64_t k_local_fnv_prime = 1099511628211ull;
         for (std::uint32_t shift = 0u; shift != 64u; shift += 8u) {
             identity ^= static_cast<std::uint8_t>(value >> shift);
-            identity *= local_fnv_prime;
+            identity *= k_local_fnv_prime;
         }
     };
     for (const std::uint8_t byte : manifest.seed_sha256) {
         identity ^= byte;
-        identity *= fnv_prime;
+        identity *= k_fnv_prime;
     }
     append_u64_to_identity(manifest.manifest_checksum);
     append_u64_to_identity(artifact_read_count);
     append_u64_to_identity(manifest_bytes);
     append_u64_to_identity(artifact_bytes);
     append_u64_to_identity(load_ns);
-    return identity == 0u ? fnv_offset : identity;
+    return identity == 0u ? k_fnv_offset : identity;
 }
 
 [[nodiscard]] inline std::uint64_t seed_image_preallocation_peak_bytes(
-    const SealedShaderCacheManifest& manifest,
+    const sealed_shader_cache_manifest& manifest,
     std::uint64_t manifest_bytes) noexcept
 {
-    using bioseq::parallelism::saturating_add;
-    using bioseq::parallelism::saturating_mul;
-    std::uint64_t retained = sizeof(SealedShaderCacheSeedImage);
+    using bioseq::common::saturating_add;
+    using bioseq::common::saturating_mul;
+    std::uint64_t retained = sizeof(sealed_shader_cache_seed_image);
     retained = saturating_add(retained, manifest_bytes);
     retained = saturating_add(
         retained, static_cast<std::uint64_t>(manifest.cache_digest.size()));
@@ -3249,15 +2995,15 @@ validate_all_artifact_images(
         retained,
         saturating_mul(
             static_cast<std::uint64_t>(manifest.keys.size()),
-            sizeof(ShaderVariantKey)));
+            sizeof(shader_variant_key)));
     retained = saturating_add(
         retained,
         saturating_mul(
             static_cast<std::uint64_t>(manifest.artifacts.size()),
-            sizeof(SealedShaderCacheArtifact)
-                + sizeof(SealedShaderCacheArtifactImage)));
+            sizeof(sealed_shader_cache_artifact)
+                + sizeof(sealed_shader_cache_artifact_image)));
     std::uint64_t maximum_transient_artifact = 0u;
-    for (const SealedShaderCacheArtifact& artifact : manifest.artifacts) {
+    for (const sealed_shader_cache_artifact& artifact : manifest.artifacts) {
         retained = saturating_add(
             retained,
             saturating_mul(
@@ -3268,11 +3014,11 @@ validate_all_artifact_images(
     retained = saturating_add(retained, manifest.seed_size);
     const std::uint64_t retained_headroom = saturating_mul(
         retained,
-        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        bioseq::parallelism::k_vector_preallocation_headroom_factor);
     return saturating_add(retained_headroom, maximum_transient_artifact);
 }
 
-struct ManifestAdmissionProbe {
+struct manifest_admission_probe {
     std::uint64_t file_bytes = 0u;
     std::uint64_t seed_bytes = 0u;
     std::uint32_t key_count = 0u;
@@ -3308,34 +3054,34 @@ struct ManifestAdmissionProbe {
     std::uint32_t key_count,
     std::uint32_t artifact_count) noexcept
 {
-    using bioseq::parallelism::saturating_add;
-    using bioseq::parallelism::saturating_mul;
-    std::uint64_t retained = sizeof(SealedShaderCacheSeedImage);
+    using bioseq::common::saturating_add;
+    using bioseq::common::saturating_mul;
+    std::uint64_t retained = sizeof(sealed_shader_cache_seed_image);
     retained = saturating_add(retained, manifest_bytes);
     retained = saturating_add(retained, 16u);
     retained = saturating_add(
         retained,
-        saturating_mul(key_count, sizeof(ShaderVariantKey)));
+        saturating_mul(key_count, sizeof(shader_variant_key)));
     retained = saturating_add(
         retained,
         saturating_mul(
             artifact_count,
-            sizeof(SealedShaderCacheArtifact)
-                + sizeof(SealedShaderCacheArtifactImage)
-                + 2u * maximum_manifest_filename_bytes));
+            sizeof(sealed_shader_cache_artifact)
+                + sizeof(sealed_shader_cache_artifact_image)
+                + 2u * k_maximum_manifest_filename_bytes));
     retained = saturating_add(retained, seed_bytes);
     retained = saturating_mul(
-        retained, bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        retained, bioseq::parallelism::k_vector_preallocation_headroom_factor);
     // During each exact read the retained image and one incoming artifact may
     // coexist. The largest possible artifact is the entire bounded seed.
     return saturating_add(retained, seed_bytes);
 }
 
-[[nodiscard]] inline std::expected<ManifestAdmissionProbe, std::string>
+[[nodiscard]] inline std::expected<manifest_admission_probe, std::string>
 probe_manifest_for_admission(const std::filesystem::path& path)
 {
-    constexpr std::size_t header_bytes = 32u;
-    constexpr std::size_t tail_bytes = 48u;
+    constexpr std::size_t k_header_bytes = 32u;
+    constexpr std::size_t k_tail_bytes = 48u;
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         return std::unexpected(shader_cache_message(
@@ -3345,17 +3091,17 @@ probe_manifest_for_admission(const std::filesystem::path& path)
     if (::fstat(fd, &stat_before) != 0 || !S_ISREG(stat_before.st_mode)
         || stat_before.st_size <= 0
         || static_cast<std::uint64_t>(stat_before.st_size)
-            > maximum_manifest_bytes
+            > k_maximum_manifest_bytes
         || static_cast<std::uint64_t>(stat_before.st_size)
-            < header_bytes + tail_bytes) {
+            < k_header_bytes + k_tail_bytes) {
         const int saved = errno;
         ::close(fd);
         return std::unexpected(shader_cache_message(
             "sealed shader cache manifest probe stat/size invalid: errno ",
             saved));
     }
-    std::array<std::byte, header_bytes> header{};
-    std::array<std::byte, tail_bytes> tail{};
+    std::array<std::byte, k_header_bytes> header{};
+    std::array<std::byte, k_tail_bytes> tail{};
     const auto read_exact = [fd](std::span<std::byte> destination,
                                  off_t offset) noexcept {
         std::size_t consumed = 0u;
@@ -3384,10 +3130,10 @@ probe_manifest_for_admission(const std::filesystem::path& path)
         && stat_after.st_mtime == stat_before.st_mtime;
     ::close(fd);
     if (!read_ok || !stable
-        || std::memcmp(header.data(), manifest_magic.data(),
-                       manifest_magic.size()) != 0
+        || std::memcmp(header.data(), k_manifest_magic.data(),
+                       k_manifest_magic.size()) != 0
         || probe_u32(std::span<const std::byte, 4>{header.data() + 8u, 4u})
-            != manifest_version
+            != k_manifest_wire_revision
         || probe_u32(std::span<const std::byte, 4>{header.data() + 12u, 4u})
             != 0u
         || probe_u32(std::span<const std::byte, 4>{header.data() + 16u, 4u})
@@ -3397,7 +3143,7 @@ probe_manifest_for_admission(const std::filesystem::path& path)
         return std::unexpected(
             "sealed shader cache manifest admission probe is invalid");
     }
-    ManifestAdmissionProbe result{};
+    manifest_admission_probe result{};
     result.file_bytes = static_cast<std::uint64_t>(stat_before.st_size);
     result.key_count = probe_u32(
         std::span<const std::byte, 4>{header.data() + 20u, 4u});
@@ -3405,11 +3151,11 @@ probe_manifest_for_admission(const std::filesystem::path& path)
         std::span<const std::byte, 4>{header.data() + 24u, 4u});
     result.seed_bytes = probe_u64(
         std::span<const std::byte, 8>{tail.data(), 8u});
-    if (result.key_count == 0u || result.key_count > maximum_manifest_keys
+    if (result.key_count == 0u || result.key_count > k_maximum_manifest_keys
         || result.artifact_count == 0u
-        || result.artifact_count > maximum_seed_image_artifacts
+        || result.artifact_count > k_maximum_seed_image_artifacts
         || result.seed_bytes == 0u
-        || result.seed_bytes > maximum_seed_image_bytes) {
+        || result.seed_bytes > k_maximum_seed_image_bytes) {
         return std::unexpected(
             "sealed shader cache manifest admission probe exceeds bounded ownership");
     }
@@ -3424,16 +3170,16 @@ probe_manifest_for_admission(const std::filesystem::path& path)
     return result;
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 read_manifest_shape(
     const std::filesystem::path& cache_dir,
     std::string_view expected_digest,
-    std::span<const ShaderVariantKey> expected_keys)
+    std::span<const shader_variant_key> expected_keys)
 {
     auto bytes = read_regular_file(
         sealed_shader_cache_manifest_path(cache_dir),
         "sealed shader cache manifest",
-        maximum_manifest_bytes);
+        k_maximum_manifest_bytes);
     if (!bytes) return std::unexpected(bytes.error());
     auto manifest = parse_manifest(*bytes);
     if (!manifest) return std::unexpected(manifest.error());
@@ -3447,18 +3193,18 @@ read_manifest_shape(
 
 } // namespace sealed_shader_cache_detail
 
-[[nodiscard]] inline std::expected<std::vector<ShaderVariantKey>, std::string>
+[[nodiscard]] inline std::expected<std::vector<shader_variant_key>, std::string>
 canonical_sealed_shader_cache_keys(
-    std::span<const ShaderVariantKey> requested_keys)
+    std::span<const shader_variant_key> requested_keys)
 {
     return sealed_shader_cache_detail::canonical_keys(requested_keys);
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheSeedImage, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_seed_image, std::string>
 load_validated_sealed_shader_cache_seed(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> expected_keys)
+    std::span<const shader_variant_key> expected_keys)
 {
     using namespace sealed_shader_cache_detail;
     const auto started = std::chrono::steady_clock::now();
@@ -3480,16 +3226,16 @@ load_validated_sealed_shader_cache_seed(
             admission_failure.allocatable_after_reservations_bytes));
     }
     auto manifest_bytes = read_regular_file(
-        manifest_path, "sealed shader cache manifest", maximum_manifest_bytes,
+        manifest_path, "sealed shader cache manifest", k_maximum_manifest_bytes,
         admission_probe->file_bytes);
     if (!manifest_bytes) return std::unexpected(manifest_bytes.error());
     auto manifest = parse_manifest(*manifest_bytes);
     if (!manifest) return std::unexpected(manifest.error());
-    if (manifest->seed_size > maximum_seed_image_bytes
+    if (manifest->seed_size > k_maximum_seed_image_bytes
         || manifest->seed_size
             > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::size_t>::max)())
-        || manifest->artifacts.size() > maximum_seed_image_artifacts) {
+        || manifest->artifacts.size() > k_maximum_seed_image_artifacts) {
         return std::unexpected(shader_cache_message(
             "sealed shader cache process image exceeds bounded ownership: bytes=",
             manifest->seed_size, " artifacts=", manifest->artifacts.size()));
@@ -3517,10 +3263,10 @@ load_validated_sealed_shader_cache_seed(
             "sealed shader cache seed admission probe underestimated ownership");
     }
 
-    std::vector<SealedShaderCacheArtifactImage> images;
+    std::vector<sealed_shader_cache_artifact_image> images;
     images.reserve(manifest->artifacts.size());
     std::uint64_t artifact_bytes = 0u;
-    for (const SealedShaderCacheArtifact& artifact : manifest->artifacts) {
+    for (const sealed_shader_cache_artifact& artifact : manifest->artifacts) {
         auto bytes = load_validated_artifact_bytes(cache_dir, artifact);
         if (!bytes) return std::unexpected(bytes.error());
         if (bytes->size()
@@ -3529,7 +3275,7 @@ load_validated_sealed_shader_cache_seed(
                 "sealed shader cache seed loaded byte count overflow");
         }
         artifact_bytes += static_cast<std::uint64_t>(bytes->size());
-        images.push_back(SealedShaderCacheArtifactImage{
+        images.push_back(sealed_shader_cache_artifact_image{
             .descriptor = artifact,
             .bytes = std::move(*bytes),
         });
@@ -3558,28 +3304,28 @@ load_validated_sealed_shader_cache_seed(
     const std::uint64_t load_ns = static_cast<std::uint64_t>(elapsed);
     const std::uint64_t receipt_identity = sealed_seed_receipt_identity(
         *manifest, artifact_read_count, manifest_size, artifact_bytes, load_ns);
-    SealedShaderCacheSeedImage image{
+    sealed_shader_cache_seed_image image{
         std::move(*manifest), std::move(*manifest_bytes), std::move(images),
         receipt_identity, artifact_read_count, manifest_size, artifact_bytes,
         load_ns, admission_probe->peak_admitted_bytes, std::move(*permit)};
-    if (!image.reconcile_admission() || !image.accepted()) {
+    if (!image.reconcile_admission() || !image.is_accepted()) {
         return std::unexpected(
             "sealed shader cache seed loader produced invalid receipt evidence");
     }
     return std::move(image);
 }
 
-/// Install-once process owner for an immutable seed. Both production and
+/// @brief Install-once process owner for an immutable seed. Both production and
 /// focused tests use this exact store, so a second acquisition proves reuse of
 /// the original loader receipt rather than a fresh filesystem validation.
-class SealedShaderCacheProcessStore {
+class sealed_shader_cache_process_store {
 public:
     [[nodiscard]] std::expected<std::shared_ptr<
-        const SealedShaderCacheSeedImage>, std::string>
+        const sealed_shader_cache_seed_image>, std::string>
     load_once(
         const std::filesystem::path& cache_dir,
         std::string_view digest,
-        std::span<const ShaderVariantKey> requested_keys)
+        std::span<const shader_variant_key> requested_keys)
     {
         auto canonical = canonical_sealed_shader_cache_keys(requested_keys);
         if (!canonical) return std::unexpected(canonical.error());
@@ -3597,9 +3343,9 @@ public:
         auto loaded = load_validated_sealed_shader_cache_seed(
             cache_dir, digest, *canonical);
         if (!loaded) return std::unexpected(loaded.error());
-        auto retained = std::make_shared<const SealedShaderCacheSeedImage>(
+        auto retained = std::make_shared<const sealed_shader_cache_seed_image>(
             std::move(*loaded));
-        if (!retained->accepted()) {
+        if (!retained->is_accepted()) {
             return std::unexpected(
                 "process shader seed has invalid loader-originated evidence");
         }
@@ -3609,7 +3355,7 @@ public:
         return retained;
     }
 
-    [[nodiscard]] std::shared_ptr<const SealedShaderCacheSeedImage>
+    [[nodiscard]] std::shared_ptr<const sealed_shader_cache_seed_image>
     snapshot() const {
         std::lock_guard<std::mutex> guard(mutex_);
         return image_;
@@ -3623,18 +3369,18 @@ public:
 private:
     mutable std::mutex mutex_;
     std::filesystem::path cache_dir_;
-    std::shared_ptr<const SealedShaderCacheSeedImage> image_;
+    std::shared_ptr<const sealed_shader_cache_seed_image> image_;
     std::uint64_t filesystem_load_count_ = 0u;
 };
 
 namespace sealed_shader_cache_detail {
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest_impl(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> requested_keys,
-    SealBeforeIdentityCheckHook before_identity_check)
+    std::span<const shader_variant_key> requested_keys,
+    seal_before_identity_check_hook before_identity_check)
 {
     if (!valid_digest(cache_digest)) {
         return std::unexpected("sealed shader cache digest is not lowercase hex16");
@@ -3643,13 +3389,13 @@ seal_shader_cache_manifest_impl(
     if (!keys) return std::unexpected(keys.error());
     auto expected = expected_artifacts(cache_dir, *keys);
     if (!expected) return std::unexpected(expected.error());
-    if (expected->size() > maximum_seed_image_artifacts) {
+    if (expected->size() > k_maximum_seed_image_artifacts) {
         return std::unexpected(shader_cache_message(
             "cannot seal shader cache seed beyond artifact cap: artifacts=",
             expected->size()));
     }
 
-    const auto artifact_file_size = [](const ExpectedArtifact& artifact)
+    const auto artifact_file_size = [](const expected_artifact& artifact)
         -> std::expected<std::uint64_t, std::string> {
         std::error_code error;
         const std::filesystem::file_status status =
@@ -3662,7 +3408,7 @@ seal_shader_cache_manifest_impl(
         }
         const std::uintmax_t size =
             std::filesystem::file_size(artifact.path, error);
-        if (error || size == 0u || size > maximum_seed_artifact_bytes
+        if (error || size == 0u || size > k_maximum_seed_artifact_bytes
             || size > (std::numeric_limits<std::uint64_t>::max)()) {
             return std::unexpected(shader_cache_message(
                 "cannot seal invalid shader artifact size ",
@@ -3673,25 +3419,25 @@ seal_shader_cache_manifest_impl(
 
     std::uint64_t preflight_seed_bytes = 0u;
     std::uint64_t preflight_max_artifact = 0u;
-    for (const ExpectedArtifact& artifact : *expected) {
+    for (const expected_artifact& artifact : *expected) {
         auto size = artifact_file_size(artifact);
         if (!size) return std::unexpected(size.error());
-        if (*size > maximum_seed_image_bytes - preflight_seed_bytes) {
+        if (*size > k_maximum_seed_image_bytes - preflight_seed_bytes) {
             return std::unexpected(shader_cache_message(
                 "cannot seal shader cache seed beyond byte cap: bytes>",
-                maximum_seed_image_bytes));
+                k_maximum_seed_image_bytes));
         }
         preflight_seed_bytes += *size;
         preflight_max_artifact = std::max(preflight_max_artifact, *size);
     }
     const std::uint64_t estimated_manifest_bytes =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             256u + static_cast<std::uint64_t>(keys->size())
-                    * sizeof(ShaderVariantKey),
-            bioseq::parallelism::saturating_mul(
+                    * sizeof(shader_variant_key),
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(expected->size()),
-                56u + maximum_manifest_filename_bytes));
-    if (estimated_manifest_bytes > maximum_manifest_bytes) {
+                56u + k_maximum_manifest_filename_bytes));
+    if (estimated_manifest_bytes > k_maximum_manifest_bytes) {
         return std::unexpected(
             "cannot seal shader cache seed with oversized manifest");
     }
@@ -3719,10 +3465,10 @@ seal_shader_cache_manifest_impl(
     exact_sizes.reserve(expected->size());
     std::uint64_t confirmed_seed_bytes = 0u;
     std::uint64_t confirmed_max_artifact = 0u;
-    for (const ExpectedArtifact& artifact : *expected) {
+    for (const expected_artifact& artifact : *expected) {
         auto size = artifact_file_size(artifact);
         if (!size) return std::unexpected(size.error());
-        if (*size > maximum_seed_image_bytes - confirmed_seed_bytes) {
+        if (*size > k_maximum_seed_image_bytes - confirmed_seed_bytes) {
             return std::unexpected(
                 "shader cache seed grew beyond cap during seal admission");
         }
@@ -3736,23 +3482,23 @@ seal_shader_cache_manifest_impl(
             "shader cache seed artifact sizes changed during seal admission");
     }
 
-    SealedShaderCacheManifest manifest{};
+    sealed_shader_cache_manifest manifest{};
     manifest.cache_digest = std::string(cache_digest);
     manifest.keys = *keys;
     manifest.artifacts.reserve(expected->size());
-    std::vector<SealedShaderCacheArtifactImage> images;
+    std::vector<sealed_shader_cache_artifact_image> images;
     images.reserve(expected->size());
-    std::vector<RegularFileIdentity> stable_identities;
+    std::vector<regular_file_identity> stable_identities;
     stable_identities.reserve(expected->size());
     for (std::size_t ordinal = 0u; ordinal < expected->size(); ++ordinal) {
-        const ExpectedArtifact& artifact = (*expected)[ordinal];
+        const expected_artifact& artifact = (*expected)[ordinal];
         auto stable = read_stable_regular_file(
             artifact.path,
             "shader cache seed artifact",
             exact_sizes[ordinal],
-            maximum_seed_artifact_bytes);
+            k_maximum_seed_artifact_bytes);
         if (!stable) return std::unexpected(stable.error());
-        SealedShaderCacheArtifact descriptor{
+        sealed_shader_cache_artifact descriptor{
             .kind = artifact.kind,
             .key_index = artifact.key_index,
             .filename = artifact.filename,
@@ -3760,7 +3506,7 @@ seal_shader_cache_manifest_impl(
             .sha256 = sha256(stable->bytes),
         };
         manifest.artifacts.push_back(descriptor);
-        images.push_back(SealedShaderCacheArtifactImage{
+        images.push_back(sealed_shader_cache_artifact_image{
             .descriptor = std::move(descriptor),
             .bytes = std::move(stable->bytes),
         });
@@ -3772,8 +3518,8 @@ seal_shader_cache_manifest_impl(
     manifest.seed_sha256 = seed->first;
     manifest.seed_size = seed->second;
     if (manifest.seed_size != confirmed_seed_bytes
-        || manifest.seed_size > maximum_seed_image_bytes
-        || manifest.artifacts.size() > maximum_seed_image_artifacts) {
+        || manifest.seed_size > k_maximum_seed_image_bytes
+        || manifest.artifacts.size() > k_maximum_seed_image_artifacts) {
         return std::unexpected(
             "shader cache seed candidate exceeds admitted publication bounds");
     }
@@ -3821,32 +3567,32 @@ seal_shader_cache_manifest_impl(
 
 }  // namespace sealed_shader_cache_detail
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> requested_keys)
+    std::span<const shader_variant_key> requested_keys)
 {
     return sealed_shader_cache_detail::seal_shader_cache_manifest_impl(
         cache_dir, cache_digest, requested_keys, nullptr);
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 seal_shader_cache_manifest_for_test(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> requested_keys,
-    sealed_shader_cache_detail::SealBeforeIdentityCheckHook before_identity_check)
+    std::span<const shader_variant_key> requested_keys,
+    sealed_shader_cache_detail::seal_before_identity_check_hook before_identity_check)
 {
     return sealed_shader_cache_detail::seal_shader_cache_manifest_impl(
         cache_dir, cache_digest, requested_keys, before_identity_check);
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 load_validated_sealed_shader_cache_manifest(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> expected_keys)
+    std::span<const shader_variant_key> expected_keys)
 {
     auto seed = load_validated_sealed_shader_cache_seed(
         cache_dir, cache_digest, expected_keys);
@@ -3854,16 +3600,16 @@ load_validated_sealed_shader_cache_manifest(
     return seed->manifest();
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheKeyView, std::string>
-sealed_shader_cache_key_view(
-    const SealedShaderCacheSeedImage& seed,
-    const ShaderVariantKey& requested_key)
+[[nodiscard]] inline std::expected<sealed_shader_cache_key_view, std::string>
+make_sealed_shader_cache_key_view(
+    const sealed_shader_cache_seed_image& seed,
+    const shader_variant_key& requested_key)
 {
-    if (!seed.accepted()) {
+    if (!seed.is_accepted()) {
         return std::unexpected(
             "sealed shader cache process image has invalid loader receipt");
     }
-    const SealedShaderCacheManifest& manifest = seed.manifest();
+    const sealed_shader_cache_manifest& manifest = seed.manifest();
     const auto key = std::find(
         manifest.keys.begin(), manifest.keys.end(), requested_key);
     if (key == manifest.keys.end()) {
@@ -3875,17 +3621,17 @@ sealed_shader_cache_key_view(
         std::distance(manifest.keys.begin(), key));
     const std::string stem = cache_file_stem(requested_key);
     const auto* metadata = sealed_shader_cache_detail::find_artifact_image(
-        seed.artifacts(), SealedShaderCacheArtifactKind::shader_meta,
+        seed.artifacts(), sealed_shader_cache_artifact_kind::shader_meta,
         key_index, stem + ".meta");
     const auto* metallib = sealed_shader_cache_detail::find_artifact_image(
-        seed.artifacts(), SealedShaderCacheArtifactKind::shader_metallib,
+        seed.artifacts(), sealed_shader_cache_artifact_kind::shader_metallib,
         key_index, stem + ".metallib");
     if (metadata == nullptr || metallib == nullptr
         || metallib->bytes.empty()) {
         return std::unexpected(shader_cache_message(
             "sealed shader cache key view incomplete for ", stem));
     }
-    SealedShaderCacheKeyView view{};
+    sealed_shader_cache_key_view view{};
     view.key = requested_key;
     auto meta = compatible_cache_meta_from_bytes(
         metadata->bytes, requested_key, &view.entry_name);
@@ -3899,17 +3645,17 @@ sealed_shader_cache_key_view(
     return view;
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheKeyImage, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_key_image, std::string>
 load_sealed_shader_cache_key_image(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> expected_keys,
-    const ShaderVariantKey& requested_key)
+    std::span<const shader_variant_key> expected_keys,
+    const shader_variant_key& requested_key)
 {
     auto seed = load_validated_sealed_shader_cache_seed(
         cache_dir, cache_digest, expected_keys);
     if (!seed) return std::unexpected(seed.error());
-    const SealedShaderCacheManifest& manifest = seed->manifest();
+    const sealed_shader_cache_manifest& manifest = seed->manifest();
     const auto key = std::find(
         manifest.keys.begin(), manifest.keys.end(), requested_key);
     if (key == manifest.keys.end()) {
@@ -3919,17 +3665,17 @@ load_sealed_shader_cache_key_image(
     }
     const std::uint32_t key_index = static_cast<std::uint32_t>(
         std::distance(manifest.keys.begin(), key));
-    SealedShaderCacheKeyImage image{};
+    sealed_shader_cache_key_image image{};
     image.manifest = manifest;
     image.key = requested_key;
     bool metadata_loaded = false;
     bool metallib_loaded = false;
-    for (const SealedShaderCacheArtifactImage& artifact : seed->artifacts()) {
+    for (const sealed_shader_cache_artifact_image& artifact : seed->artifacts()) {
         if (artifact.descriptor.key_index != key_index) {
             continue;
         }
         switch (artifact.descriptor.kind) {
-        case SealedShaderCacheArtifactKind::shader_meta: {
+        case sealed_shader_cache_artifact_kind::shader_meta: {
             auto meta = compatible_cache_meta_from_bytes(
                 artifact.bytes, requested_key, &image.entry_name);
             if (!meta) {
@@ -3941,14 +3687,14 @@ load_sealed_shader_cache_key_image(
             metadata_loaded = true;
             break;
         }
-        case SealedShaderCacheArtifactKind::shader_metallib:
+        case sealed_shader_cache_artifact_kind::shader_metallib:
             image.metallib_bytes = artifact.bytes;
             metallib_loaded = true;
             break;
-        case SealedShaderCacheArtifactKind::metal_binary_archive:
-        case SealedShaderCacheArtifactKind::metal_binary_archive_qualification:
+        case sealed_shader_cache_artifact_kind::metal_binary_archive:
+        case sealed_shader_cache_artifact_kind::metal_binary_archive_qualification:
             break;
-        case SealedShaderCacheArtifactKind::reserved_command_metallib:
+        case sealed_shader_cache_artifact_kind::reserved_command_metallib:
             return std::unexpected(
                 "sealed shader cache contains forbidden placeholder command artifact");
         }
@@ -3961,12 +3707,12 @@ load_sealed_shader_cache_key_image(
     return image;
 }
 
-[[nodiscard]] inline std::expected<SealedShaderCacheManifest, std::string>
+[[nodiscard]] inline std::expected<sealed_shader_cache_manifest, std::string>
 load_sealed_shader_cache_manifest_for_key(
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> expected_keys,
-    const ShaderVariantKey& requested_key)
+    std::span<const shader_variant_key> expected_keys,
+    const shader_variant_key& requested_key)
 {
     auto image = load_sealed_shader_cache_key_image(
         cache_dir, cache_digest, expected_keys, requested_key);
@@ -3974,17 +3720,17 @@ load_sealed_shader_cache_manifest_for_key(
     return std::move(image->manifest);
 }
 
-struct QualifiedMetalArchiveHelper {
+struct qualified_metal_archive_helper {
     bioseq::parallelism::MemoryPermit permit;
     std::filesystem::path path;
-    sealed_shader_cache_detail::RegularFileIdentity identity{};
+    sealed_shader_cache_detail::regular_file_identity identity{};
     std::uint64_t executable_size = 0u;
     std::array<std::uint8_t, 32> executable_sha256{};
     std::vector<std::byte> executable_bytes;
     std::string source;
     std::uint64_t hash_passes = 0u;
 
-    [[nodiscard]] bool accepted() const noexcept {
+    [[nodiscard]] bool is_accepted() const noexcept {
         return permit && permit.bytes() == owned_capacity_bytes()
             && !path.empty() && executable_size != 0u && hash_passes == 1u
             && executable_bytes.size() == executable_size
@@ -3996,8 +3742,8 @@ struct QualifiedMetalArchiveHelper {
     }
 
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
-        using bioseq::parallelism::saturating_add;
-        std::uint64_t owned = sizeof(QualifiedMetalArchiveHelper);
+        using bioseq::common::saturating_add;
+        std::uint64_t owned = sizeof(qualified_metal_archive_helper);
         owned = saturating_add(
             owned, static_cast<std::uint64_t>(path.native().capacity()));
         owned = saturating_add(
@@ -4008,7 +3754,7 @@ struct QualifiedMetalArchiveHelper {
     }
 };
 
-[[nodiscard]] inline std::expected<QualifiedMetalArchiveHelper, std::string>
+[[nodiscard]] inline std::expected<qualified_metal_archive_helper, std::string>
 load_qualified_metal_archive_helper()
 {
 #if !defined(__APPLE__)
@@ -4054,15 +3800,15 @@ load_qualified_metal_archive_helper()
     }
     if (path_status.st_size <= 0
         || static_cast<std::uint64_t>(path_status.st_size)
-            > sealed_shader_cache_detail::maximum_seed_artifact_bytes) {
+            > sealed_shader_cache_detail::k_maximum_seed_artifact_bytes) {
         return std::unexpected("archive helper executable size is invalid");
     }
     const std::uint64_t admission_peak =
-        bioseq::parallelism::saturating_add(
-            bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_add(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(path_status.st_size),
-                bioseq::parallelism::kVectorPreallocationHeadroomFactor),
-            sizeof(QualifiedMetalArchiveHelper) + 4096u);
+                bioseq::parallelism::k_vector_preallocation_headroom_factor),
+            sizeof(qualified_metal_archive_helper) + 4096u);
     bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
     auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
         .try_reserve(admission_peak, &admission_failure);
@@ -4073,7 +3819,7 @@ load_qualified_metal_archive_helper()
     auto image = sealed_shader_cache_detail::read_stable_regular_file(
         path, "qualified Metal archive helper",
         static_cast<std::uint64_t>(path_status.st_size),
-        sealed_shader_cache_detail::maximum_seed_artifact_bytes);
+        sealed_shader_cache_detail::k_maximum_seed_artifact_bytes);
     if (!image) return std::unexpected(image.error());
     struct stat after_status {};
     if (::lstat(path.c_str(), &after_status) != 0
@@ -4086,7 +3832,7 @@ load_qualified_metal_archive_helper()
         return std::unexpected(
             "archive helper identity changed during process qualification");
     }
-    QualifiedMetalArchiveHelper helper{
+    qualified_metal_archive_helper helper{
         .permit = std::move(*permit),
         .path = std::move(path),
         .identity = image->identity,
@@ -4104,17 +3850,17 @@ load_qualified_metal_archive_helper()
             "archive helper executable ownership admission saturated");
     }
     helper.permit.shrink_to(retained);
-    if (!helper.accepted()) {
+    if (!helper.is_accepted()) {
         return std::unexpected("archive helper qualification is incomplete");
     }
     return helper;
 #endif
 }
 
-class QualifiedMetalArchiveHelperProcessStore {
+class qualified_metal_archive_helper_process_store {
 public:
     [[nodiscard]] std::expected<
-        std::shared_ptr<const QualifiedMetalArchiveHelper>, std::string>
+        std::shared_ptr<const qualified_metal_archive_helper>, std::string>
     load_once()
     {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -4127,7 +3873,7 @@ public:
         }
         filesystem_hash_count_ += loaded->hash_passes;
         auto retained =
-            std::make_shared<const QualifiedMetalArchiveHelper>(
+            std::make_shared<const qualified_metal_archive_helper>(
                 std::move(*loaded));
         result_.emplace(std::move(retained));
         return *result_;
@@ -4159,37 +3905,38 @@ public:
 private:
     mutable std::mutex mutex_;
     std::optional<std::expected<
-        std::shared_ptr<const QualifiedMetalArchiveHelper>, std::string>>
+        std::shared_ptr<const qualified_metal_archive_helper>, std::string>>
         result_;
     std::uint64_t filesystem_hash_count_ = 0u;
     std::uint64_t qualification_attempt_count_ = 0u;
 };
 
-[[nodiscard]] inline QualifiedMetalArchiveHelperProcessStore&
-qualified_metal_archive_helper_process_store() noexcept
+[[nodiscard]] inline qualified_metal_archive_helper_process_store&
+qualified_metal_archive_helper_process_store_instance() noexcept
 {
-    static QualifiedMetalArchiveHelperProcessStore store;
+    static qualified_metal_archive_helper_process_store store;
     return store;
 }
 
 [[nodiscard]] inline std::expected<void, std::string>
 validate_metal_archive_receipt_against_process_helper(
-    const MetalArchiveQualificationReceipt& receipt)
+    const metal_archive_qualification_receipt& receipt)
 {
-    if (!receipt.production_accepted()) {
+    if (!receipt.is_production_accepted()) {
         return std::unexpected(
-            "archive receipt is not production qualification v2");
+            "archive receipt is not production-qualified");
     }
-    auto helper = qualified_metal_archive_helper_process_store().load_once();
+    auto helper =
+        qualified_metal_archive_helper_process_store_instance().load_once();
     if (!helper) return std::unexpected(helper.error());
-    const QualifiedMetalArchiveHelper& current = **helper;
+    const qualified_metal_archive_helper& current = **helper;
     if (current.source != receipt.helper_source
         || current.executable_size != receipt.helper_executable_size
         || current.executable_sha256 != receipt.helper_executable_sha256
         || current.hash_passes != 1u
-        || qualified_metal_archive_helper_process_store()
+        || qualified_metal_archive_helper_process_store_instance()
                 .filesystem_hash_count() != 1u
-        || qualified_metal_archive_helper_process_store()
+        || qualified_metal_archive_helper_process_store_instance()
                 .qualification_attempt_count() != 1u) {
         return std::unexpected(
             "archive receipt does not match current once-qualified helper executable");
@@ -4200,7 +3947,8 @@ validate_metal_archive_receipt_against_process_helper(
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string>
 metal_archive_helper_path()
 {
-    auto helper = qualified_metal_archive_helper_process_store().load_once();
+    auto helper =
+        qualified_metal_archive_helper_process_store_instance().load_once();
     if (!helper) return std::unexpected(helper.error());
     return (*helper)->path;
 }
@@ -4208,24 +3956,24 @@ metal_archive_helper_path()
 [[nodiscard]] inline bool archive_helper_transcript_is_exact_success(
     std::string_view transcript) noexcept
 {
-    constexpr std::string_view success_line = "RESULT: ok\n";
+    constexpr std::string_view k_success_line = "RESULT: ok\n";
     const std::size_t result_marker = transcript.find("RESULT:");
-    return transcript.size() >= success_line.size()
-        && transcript.substr(transcript.size() - success_line.size())
-            == success_line
-        && result_marker == transcript.size() - success_line.size();
+    return transcript.size() >= k_success_line.size()
+        && transcript.substr(transcript.size() - k_success_line.size())
+            == k_success_line
+        && result_marker == transcript.size() - k_success_line.size();
 }
 
-[[nodiscard]] inline std::expected<MetalArchiveNegativeErrorFingerprint, std::string>
+[[nodiscard]] inline std::expected<metal_archive_negative_error_fingerprint, std::string>
 parse_archive_helper_negative_error_fingerprint(
     std::string_view transcript)
 {
-    constexpr std::string_view prefix =
+    constexpr std::string_view k_prefix =
         "NEGATIVE_CONTROL_NSError domain_hex=";
-    constexpr std::string_view code_separator = " code=";
-    const std::size_t marker = transcript.find(prefix);
+    constexpr std::string_view k_code_separator = " code=";
+    const std::size_t marker = transcript.find(k_prefix);
     if (marker == std::string_view::npos
-        || transcript.find(prefix, marker + prefix.size())
+        || transcript.find(k_prefix, marker + k_prefix.size())
             != std::string_view::npos
         || (marker != 0u && transcript[marker - 1u] != '\n')) {
         return std::unexpected(
@@ -4237,10 +3985,10 @@ parse_archive_helper_negative_error_fingerprint(
             "archive helper negative-control fingerprint line is unterminated");
     }
     const std::string_view payload = transcript.substr(
-        marker + prefix.size(), line_end - marker - prefix.size());
-    const std::size_t code_marker = payload.find(code_separator);
+        marker + k_prefix.size(), line_end - marker - k_prefix.size());
+    const std::size_t code_marker = payload.find(k_code_separator);
     if (code_marker == std::string_view::npos
-        || payload.find(code_separator, code_marker + code_separator.size())
+        || payload.find(k_code_separator, code_marker + k_code_separator.size())
             != std::string_view::npos) {
         return std::unexpected(
             "archive helper negative-control fingerprint fields are invalid");
@@ -4268,7 +4016,7 @@ parse_archive_helper_negative_error_fingerprint(
         domain.push_back(static_cast<char>((high << 4) | low));
     }
     const std::string_view code_text = payload.substr(
-        code_marker + code_separator.size());
+        code_marker + k_code_separator.size());
     std::int64_t code = 0;
     const auto [end, error] = std::from_chars(
         code_text.data(), code_text.data() + code_text.size(), code);
@@ -4276,88 +4024,90 @@ parse_archive_helper_negative_error_fingerprint(
         return std::unexpected(
             "archive helper negative-control NSError code is invalid");
     }
-    MetalArchiveNegativeErrorFingerprint fingerprint{
+    metal_archive_negative_error_fingerprint fingerprint{
         .domain = std::move(domain),
         .code = code,
     };
-    if (!fingerprint.accepted()) {
+    if (!fingerprint.is_accepted()) {
         return std::unexpected(
             "archive helper negative-control NSError fingerprint is empty");
     }
     return fingerprint;
 }
 
-struct ArchiveHelperQualificationV2 {
-    std::uint32_t protocol_version = 0u;
+struct archive_helper_qualification {
+    std::uint32_t wire_revision = 0u;
     std::string build_identity;
     std::uint64_t metal_registry_id = 0u;
 };
 
-[[nodiscard]] inline std::expected<ArchiveHelperQualificationV2, std::string>
-parse_archive_helper_qualification_v2(std::string_view transcript)
+[[nodiscard]] inline std::expected<archive_helper_qualification, std::string>
+parse_archive_helper_qualification(std::string_view transcript)
 {
-    constexpr std::string_view prefix =
-        "HELPER_QUALIFICATION_V2 protocol=";
-    constexpr std::string_view build_separator = " build=";
-    constexpr std::string_view registry_separator = " registry_id=";
-    const std::size_t marker = transcript.find(prefix);
+    constexpr std::string_view k_prefix =
+        "HELPER_QUALIFICATION wire_revision=";
+    constexpr std::string_view k_build_separator = " build=";
+    constexpr std::string_view k_registry_separator = " registry_id=";
+    const std::size_t marker = transcript.find(k_prefix);
     if (marker == std::string_view::npos
-        || transcript.find(prefix, marker + prefix.size())
+        || transcript.find(k_prefix, marker + k_prefix.size())
             != std::string_view::npos
         || (marker != 0u && transcript[marker - 1u] != '\n')) {
         return std::unexpected(
-            "archive helper v2 qualification line is missing or repeated");
+            "archive helper qualification line is missing or repeated");
     }
     const std::size_t line_end = transcript.find('\n', marker);
     if (line_end == std::string_view::npos) {
         return std::unexpected(
-            "archive helper v2 qualification line is unterminated");
+            "archive helper qualification line is unterminated");
     }
     const std::string_view payload = transcript.substr(
-        marker + prefix.size(), line_end - marker - prefix.size());
-    const std::size_t build_marker = payload.find(build_separator);
-    const std::size_t registry_marker = payload.find(registry_separator);
+        marker + k_prefix.size(), line_end - marker - k_prefix.size());
+    const std::size_t build_marker = payload.find(k_build_separator);
+    const std::size_t registry_marker = payload.find(k_registry_separator);
     if (build_marker == std::string_view::npos
         || registry_marker == std::string_view::npos
         || build_marker >= registry_marker
-        || payload.find(build_separator, build_marker + 1u)
+        || payload.find(k_build_separator, build_marker + 1u)
             != std::string_view::npos
-        || payload.find(registry_separator, registry_marker + 1u)
+        || payload.find(k_registry_separator, registry_marker + 1u)
             != std::string_view::npos) {
         return std::unexpected(
-            "archive helper v2 qualification fields are invalid");
+            "archive helper qualification fields are invalid");
     }
-    const std::string_view protocol_text = payload.substr(0u, build_marker);
+    const std::string_view wire_revision_text = payload.substr(0u, build_marker);
     const std::string_view build = payload.substr(
-        build_marker + build_separator.size(),
-        registry_marker - build_marker - build_separator.size());
+        build_marker + k_build_separator.size(),
+        registry_marker - build_marker - k_build_separator.size());
     const std::string_view registry_text = payload.substr(
-        registry_marker + registry_separator.size());
-    std::uint32_t protocol = 0u;
+        registry_marker + k_registry_separator.size());
+    std::uint32_t wire_revision = 0u;
     std::uint64_t registry = 0u;
-    const auto [protocol_end, protocol_error] = std::from_chars(
-        protocol_text.data(), protocol_text.data() + protocol_text.size(),
-        protocol);
+    const auto [wire_revision_end, wire_revision_error] = std::from_chars(
+        wire_revision_text.data(),
+        wire_revision_text.data() + wire_revision_text.size(),
+        wire_revision);
     const auto [registry_end, registry_error] = std::from_chars(
         registry_text.data(), registry_text.data() + registry_text.size(),
         registry);
-    if (protocol_error != std::errc{}
-        || protocol_end != protocol_text.data() + protocol_text.size()
+    if (wire_revision_error != std::errc{}
+        || wire_revision_end
+            != wire_revision_text.data() + wire_revision_text.size()
         || registry_error != std::errc{}
         || registry_end != registry_text.data() + registry_text.size()
-        || protocol != 2u || registry == 0u
-        || build != "bioseq_gpu_archive_builder_v2") {
+        || wire_revision != 2u || registry == 0u
+        || build != "bioseq_gpu_archive_builder") {
         return std::unexpected(
-            "archive helper v2 protocol, build, or registry identity is invalid");
+            "archive helper wire revision, build, or registry identity is invalid");
     }
-    return ArchiveHelperQualificationV2{
-        .protocol_version = protocol,
+    return archive_helper_qualification{
+        .wire_revision = wire_revision,
         .build_identity = std::string(build),
         .metal_registry_id = registry,
     };
 }
 
-inline constexpr int archive_helper_metallib_child_fd = 197;
+inline constexpr int k_archive_helper_metallib_child_fd = 197;
 
 [[nodiscard]] inline std::expected<void, std::string>
 write_and_verify_exact_fd(int fd, std::span<const std::byte> bytes)
@@ -4405,21 +4155,21 @@ write_and_verify_exact_fd(int fd, std::span<const std::byte> bytes)
     return {};
 }
 
-class StagedArchiveHelperInvocation {
+class staged_archive_helper_invocation {
 public:
-    StagedArchiveHelperInvocation() = default;
-    StagedArchiveHelperInvocation(const StagedArchiveHelperInvocation&) = delete;
-    StagedArchiveHelperInvocation& operator=(
-        const StagedArchiveHelperInvocation&) = delete;
-    StagedArchiveHelperInvocation(
-        StagedArchiveHelperInvocation&& other) noexcept
+    staged_archive_helper_invocation() = default;
+    staged_archive_helper_invocation(const staged_archive_helper_invocation&) = delete;
+    staged_archive_helper_invocation& operator=(
+        const staged_archive_helper_invocation&) = delete;
+    staged_archive_helper_invocation(
+        staged_archive_helper_invocation&& other) noexcept
         : directory_(std::exchange(other.directory_, {})),
           helper_path_(std::exchange(other.helper_path_, {})),
           helper_fd_(std::exchange(other.helper_fd_, -1)),
           metallib_fd_(std::exchange(other.metallib_fd_, -1)),
           helper_identity_(other.helper_identity_),
           helper_linked_(std::exchange(other.helper_linked_, false)) {}
-    ~StagedArchiveHelperInvocation() noexcept { cleanup(); }
+    ~staged_archive_helper_invocation() noexcept { cleanup(); }
 
     [[nodiscard]] const std::filesystem::path& helper_path() const noexcept {
         return helper_path_;
@@ -4490,21 +4240,21 @@ private:
     std::filesystem::path helper_path_;
     int helper_fd_ = -1;
     int metallib_fd_ = -1;
-    sealed_shader_cache_detail::RegularFileIdentity helper_identity_{};
+    sealed_shader_cache_detail::regular_file_identity helper_identity_{};
     bool helper_linked_ = false;
 
-    friend std::expected<StagedArchiveHelperInvocation, std::string>
+    friend std::expected<staged_archive_helper_invocation, std::string>
     stage_archive_helper_invocation(
-        const QualifiedMetalArchiveHelper&,
+        const qualified_metal_archive_helper&,
         int);
 };
 
-[[nodiscard]] inline std::expected<StagedArchiveHelperInvocation, std::string>
+[[nodiscard]] inline std::expected<staged_archive_helper_invocation, std::string>
 stage_archive_helper_invocation(
-    const QualifiedMetalArchiveHelper& helper,
+    const qualified_metal_archive_helper& helper,
     int metallib_fd)
 {
-    if (!helper.accepted() || metallib_fd < 0) {
+    if (!helper.is_accepted() || metallib_fd < 0) {
         return std::unexpected(
             "private archive helper staging inputs are incomplete");
     }
@@ -4528,7 +4278,7 @@ stage_archive_helper_invocation(
         return std::unexpected(
             "private archive helper directory creation failed");
     }
-    StagedArchiveHelperInvocation staged;
+    staged_archive_helper_invocation staged;
     staged.directory_ = directory;
     if (::chmod(staged.directory_.c_str(), S_IRWXU) != 0) {
         return std::unexpected(
@@ -4573,7 +4323,7 @@ stage_archive_helper_invocation(
         sealed_shader_cache_detail::regular_file_identity(helper_status);
     // Do not carry a writable executable descriptor across posix_spawn.
     // Darwin may reject execution while the vnode is still open for writing,
-    // and the retained proof should hold only a non-mutating descriptor.
+    // and the retained qualification should hold only a non-mutating descriptor.
     if (::close(std::exchange(staged.helper_fd_, -1)) != 0) {
         return std::unexpected(
             "private archive helper writable descriptor did not close");
@@ -4599,7 +4349,7 @@ stage_archive_helper_invocation(
         ::fcntl(
             metallib_fd,
             F_DUPFD_CLOEXEC,
-            archive_helper_metallib_child_fd + 1);
+            k_archive_helper_metallib_child_fd + 1);
     struct stat source_metallib {};
     struct stat inherited_metallib {};
     if (staged.metallib_fd_ < 0
@@ -4619,8 +4369,8 @@ stage_archive_helper_invocation(
 
 [[nodiscard]] inline std::expected<void, std::string> ensure_binary_archive(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
-    const ShaderCacheMeta& meta,
+    const shader_variant_key& key,
+    const shader_cache_metadata& meta,
     std::string_view entry_name,
     bool force_requalify = false)
 {
@@ -4670,11 +4420,11 @@ stage_archive_helper_invocation(
         }
     }
     const auto helper =
-        qualified_metal_archive_helper_process_store().load_once();
+        qualified_metal_archive_helper_process_store_instance().load_once();
     if (!helper) {
         return std::unexpected(helper.error());
     }
-    const QualifiedMetalArchiveHelper& qualified_helper = **helper;
+    const qualified_metal_archive_helper& qualified_helper = **helper;
     const std::filesystem::path metallib_path =
         cache_metallib_path(cache_dir, key);
     const int metallib_fd = ::open(
@@ -4683,17 +4433,17 @@ stage_archive_helper_invocation(
         return std::unexpected(
             "qualified Metal shader library open failed");
     }
-    CaptureFileDescriptor metallib_fd_owner{metallib_fd};
+    capture_file_descriptor metallib_fd_owner{metallib_fd};
     struct stat metallib_before {};
     if (::fstat(metallib_fd, &metallib_before) != 0
         || !S_ISREG(metallib_before.st_mode)
         || metallib_before.st_size <= 0
         || static_cast<std::uint64_t>(metallib_before.st_size)
-            > sealed_shader_cache_detail::maximum_seed_artifact_bytes) {
+            > sealed_shader_cache_detail::k_maximum_seed_artifact_bytes) {
         return std::unexpected(
             "qualified Metal shader library identity is invalid");
     }
-    sealed_shader_cache_detail::Sha256 metallib_hasher;
+    sealed_shader_cache_detail::sha256_hasher metallib_hasher;
     std::array<std::byte, 64u << 10u> metallib_scratch{};
     std::uint64_t metallib_size = 0u;
     for (;;) {
@@ -4731,10 +4481,10 @@ stage_archive_helper_invocation(
     // forked backend can match the descriptor without invoking MTLCompilerService.
     const std::vector<std::uint64_t> archive_thread_caps = [](
             std::uint64_t exact_threads) {
-        constexpr std::uint64_t conservative_moltenvk_cap = 256u;
+        constexpr std::uint64_t k_conservative_moltenvk_cap = 256u;
         std::vector<std::uint64_t> caps{exact_threads};
-        if (exact_threads != conservative_moltenvk_cap) {
-            caps.push_back(conservative_moltenvk_cap);
+        if (exact_threads != k_conservative_moltenvk_cap) {
+            caps.push_back(k_conservative_moltenvk_cap);
         }
         return caps;
     }(shader_threads);
@@ -4772,7 +4522,7 @@ stage_archive_helper_invocation(
         }
         const std::vector<std::string> args{
             staged_helper->helper_path().string(),
-            "/dev/fd/" + std::to_string(archive_helper_metallib_child_fd),
+            "/dev/fd/" + std::to_string(k_archive_helper_metallib_child_fd),
             tmp_path.string(),
             std::string(entry_name),
             std::to_string(max_threads),
@@ -4785,14 +4535,14 @@ stage_archive_helper_invocation(
                 "private archive helper identity changed before execution");
         }
         const std::array inherited_fds{
-            RunCaptureInheritedFd{
+            run_capture_inherited_fd{
                 .source_fd = staged_helper->metallib_fd(),
-                .target_fd = archive_helper_metallib_child_fd,
+                .target_fd = k_archive_helper_metallib_child_fd,
             },
         };
         auto result = run_capture(
             args,
-            RunCaptureLimits{
+            run_capture_limits{
                 .maximum_output_bytes = 64u << 10u,
                 .timeout = std::chrono::minutes(2),
             },
@@ -4840,12 +4590,12 @@ stage_archive_helper_invocation(
                 cache_file_stem(key), ": ", negative_error.error()));
         }
         auto helper_qualification =
-            parse_archive_helper_qualification_v2(*result);
+            parse_archive_helper_qualification(*result);
         if (!helper_qualification) {
             std::filesystem::remove(tmp_path, ec);
             std::filesystem::remove(qualification_tmp, ec);
             return std::unexpected(shader_cache_message(
-                "MTLBinaryArchive helper returned invalid v2 provenance for ",
+                "MTLBinaryArchive helper returned invalid qualification provenance for ",
                 cache_file_stem(key), ": ", helper_qualification.error()));
         }
         if (!std::filesystem::exists(tmp_path, ec) || ec
@@ -4860,14 +4610,14 @@ stage_archive_helper_invocation(
             sealed_shader_cache_detail::stream_stable_regular_file_digest(
             tmp_path,
             "qualified Metal binary archive",
-            sealed_shader_cache_detail::maximum_seed_artifact_bytes);
+            sealed_shader_cache_detail::k_maximum_seed_artifact_bytes);
         if (!archive_digest) {
             std::filesystem::remove(tmp_path, ec);
             return std::unexpected(archive_digest.error());
         }
-        const MetalArchiveQualificationReceipt receipt{
-            .wire_version =
-                sealed_shader_cache_detail::archive_qualification_version,
+        const metal_archive_qualification_receipt receipt{
+            .wire_revision = sealed_shader_cache_detail::
+                k_archive_qualification_wire_revision,
             .shader_key = key,
             .metallib_size = metallib_size,
             .metallib_sha256 = metallib_sha256,
@@ -4877,8 +4627,7 @@ stage_archive_helper_invocation(
             .negative_error = std::move(*negative_error),
             .archive_size = archive_digest->size,
             .archive_sha256 = archive_digest->sha256,
-            .helper_protocol_version =
-                helper_qualification->protocol_version,
+            .helper_wire_revision = helper_qualification->wire_revision,
             .helper_build_identity =
                 std::move(helper_qualification->build_identity),
             .helper_source = qualified_helper.source,
@@ -4934,7 +4683,7 @@ stage_archive_helper_invocation(
     return static_cast<std::uint32_t>(kMVKMagicNumberMSLCompiledCode);
 }
 
-[[nodiscard]] inline std::expected<MoltenVkShaderModuleCode, std::string>
+[[nodiscard]] inline std::expected<moltenvk_shader_module_code, std::string>
 make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes)
 {
     if (metallib_bytes.empty()) {
@@ -4946,17 +4695,17 @@ make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes)
         return std::unexpected("metallib module size overflow");
     }
 
-    MoltenVkShaderModuleCode code{};
+    moltenvk_shader_module_code code{};
     code.header_size_bytes = sizeof(MVKMSLSPIRVHeader);
     code.code_size_bytes = code.header_size_bytes + metallib_bytes.size();
     const std::size_t word_count =
         (code.code_size_bytes + sizeof(std::uint32_t) - 1u)
         / sizeof(std::uint32_t);
-    const std::uint64_t exact_request = bioseq::parallelism::saturating_mul(
+    const std::uint64_t exact_request = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(word_count), sizeof(std::uint32_t));
-    const std::uint64_t peak_request = bioseq::parallelism::saturating_mul(
+    const std::uint64_t peak_request = bioseq::common::saturating_mul(
         exact_request,
-        bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (exact_request == (std::numeric_limits<std::uint64_t>::max)()
         || peak_request == (std::numeric_limits<std::uint64_t>::max)()) {
         return std::unexpected("metallib module admission size saturated");
@@ -4975,7 +4724,7 @@ make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes)
     code.admission_count = 1u;
     code.peak_admitted_bytes = peak_request;
     code.words.resize(word_count);
-    const std::uint64_t retained = bioseq::parallelism::saturating_mul(
+    const std::uint64_t retained = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(code.words.capacity()),
         sizeof(std::uint32_t));
     if (retained == (std::numeric_limits<std::uint64_t>::max)()
@@ -4998,7 +4747,7 @@ make_moltenvk_metallib_module_code(std::span<const std::byte> metallib_bytes)
     return std::move(code);
 }
 
-[[nodiscard]] inline std::expected<MoltenVkShaderModuleCode, std::string>
+[[nodiscard]] inline std::expected<moltenvk_shader_module_code, std::string>
 make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 {
     auto bytes = sealed_shader_cache_detail::read_regular_file(
@@ -5009,11 +4758,11 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 
 [[nodiscard]] inline std::expected<void, std::string> compile_variant_to_cache(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
-    MslVersion msl_version,
+    const shader_variant_key& key,
+    msl_version msl_version,
     bool force_semantic_rebuild = false)
 {
-    if (!valid_shader_variant_key(key)) {
+    if (!is_shader_variant_key_valid(key)) {
         return std::unexpected(shader_cache_message(
             "invalid shader variant ", cache_file_stem(key)));
     }
@@ -5081,8 +4830,8 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (!msl) {
         return std::unexpected(msl.error());
     }
-    const ShaderWorkgroupSize expected_workgroup = expected_shader_workgroup_size(key);
-    const ShaderWorkgroupSize compiled_workgroup{
+    const shader_workgroup_size expected_workgroup = expected_shader_workgroup_size(key);
+    const shader_workgroup_size compiled_workgroup{
         msl->wg_x == 0 ? 1u : msl->wg_x,
         msl->wg_y == 0 ? 1u : msl->wg_y,
         msl->wg_z == 0 ? 1u : msl->wg_z};
@@ -5118,7 +4867,7 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
         return renamed;
     }
 
-    ShaderCacheMeta meta{};
+    shader_cache_metadata meta{};
     meta.key = key;
     meta.wg_x = compiled_workgroup.x;
     meta.wg_y = compiled_workgroup.y;
@@ -5143,8 +4892,8 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 
 [[nodiscard]] inline std::expected<void, std::string> ensure_compiled(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
-    MslVersion version)
+    const shader_variant_key& key,
+    msl_version version)
 {
     if (cache_entry_complete(cache_dir, key)) {
         return {};
@@ -5160,8 +4909,8 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
 [[nodiscard]] inline std::expected<void, std::string>
 ensure_compiled_for_sealed_seed(
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
-    MslVersion version)
+    const shader_variant_key& key,
+    msl_version version)
 {
     auto compiled = compile_variant_to_cache(
         cache_dir, key, version, true);
@@ -5174,10 +4923,10 @@ ensure_compiled_for_sealed_seed(
     return {};
 }
 
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string> load_cached_module(
+[[nodiscard]] inline std::expected<shader_module_load, std::string> load_cached_module(
     VkDevice device,
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
+    const shader_variant_key& key,
     PFN_vkCreateShaderModule create_shader_module)
 {
     if (create_shader_module == nullptr) {
@@ -5199,7 +4948,7 @@ ensure_compiled_for_sealed_seed(
         return std::unexpected(meta.error());
     }
 
-    ShaderModuleLoad result{
+    shader_module_load result{
         .module = VK_NULL_HANDLE,
         .entry_name = std::move(entry),
         .wg_x = meta->wg_x,
@@ -5217,14 +4966,14 @@ ensure_compiled_for_sealed_seed(
             "vkCreateShaderModule(metallib): VkResult ",
             static_cast<int>(vk_result)));
     }
-    return std::expected<ShaderModuleLoad, std::string>{
+    return std::expected<shader_module_load, std::string>{
         std::in_place, std::move(result)};
 }
 
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string>
+[[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_image(
     VkDevice device,
-    const SealedShaderCacheKeyImage& image,
+    const sealed_shader_cache_key_image& image,
     PFN_vkCreateShaderModule create_shader_module)
 {
     if (create_shader_module == nullptr) {
@@ -5237,7 +4986,7 @@ create_shader_module_from_sealed_key_image(
     auto code = make_moltenvk_metallib_module_code(image.metallib_bytes);
     if (!code) return std::unexpected(code.error());
 
-    ShaderModuleLoad result{
+    shader_module_load result{
         .module = VK_NULL_HANDLE,
         .entry_name = image.entry_name,
         .wg_x = image.meta.wg_x,
@@ -5255,14 +5004,14 @@ create_shader_module_from_sealed_key_image(
             "vkCreateShaderModule(sealed metallib): VkResult ",
             static_cast<int>(vk_result)));
     }
-    return std::expected<ShaderModuleLoad, std::string>{
+    return std::expected<shader_module_load, std::string>{
         std::in_place, std::move(result)};
 }
 
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string>
+[[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_view(
     VkDevice device,
-    const SealedShaderCacheKeyView& view,
+    const sealed_shader_cache_key_view& view,
     PFN_vkCreateShaderModule create_shader_module)
 {
     if (create_shader_module == nullptr) {
@@ -5275,7 +5024,7 @@ create_shader_module_from_sealed_key_view(
     auto code = make_moltenvk_metallib_module_code(view.metallib_bytes);
     if (!code) return std::unexpected(code.error());
 
-    ShaderModuleLoad result{
+    shader_module_load result{
         .module = VK_NULL_HANDLE,
         .entry_name = view.entry_name,
         .wg_x = view.meta.wg_x,
@@ -5293,18 +5042,18 @@ create_shader_module_from_sealed_key_view(
             "vkCreateShaderModule(sealed seed metallib): VkResult ",
             static_cast<int>(vk_result)));
     }
-    return std::expected<ShaderModuleLoad, std::string>{
+    return std::expected<shader_module_load, std::string>{
         std::in_place, std::move(result)};
 }
 
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string>
+[[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(
     VkDevice device,
-    const SealedShaderCacheSeedImage& seed,
-    const ShaderVariantKey& key,
+    const sealed_shader_cache_seed_image& seed,
+    const shader_variant_key& key,
     PFN_vkCreateShaderModule create_shader_module)
 {
-    auto view = sealed_shader_cache_key_view(seed, key);
+    auto view = make_sealed_shader_cache_key_view(seed, key);
     if (!view) {
         return std::unexpected(shader_cache_message(
             "sealed shader cache process image rejected ",
@@ -5314,13 +5063,13 @@ load_sealed_cached_module(
         device, *view, create_shader_module);
 }
 
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string>
+[[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(
     VkDevice device,
     const std::filesystem::path& cache_dir,
     std::string_view cache_digest,
-    std::span<const ShaderVariantKey> exact_aot_keys,
-    const ShaderVariantKey& key,
+    std::span<const shader_variant_key> exact_aot_keys,
+    const shader_variant_key& key,
     PFN_vkCreateShaderModule create_shader_module)
 {
     auto image = load_sealed_shader_cache_key_image(
@@ -5334,13 +5083,13 @@ load_sealed_cached_module(
         device, *image, create_shader_module);
 }
 
-template <is_runtime_compile_service Service>
-[[nodiscard]] inline std::expected<ShaderModuleLoad, std::string> load_module(
+template <is_runtime_compile_service p_service>
+[[nodiscard]] inline std::expected<shader_module_load, std::string> load_module(
     VkDevice device,
     const std::filesystem::path& cache_dir,
-    const ShaderVariantKey& key,
+    const shader_variant_key& key,
     PFN_vkCreateShaderModule create_shader_module,
-    Service& service)
+    p_service& service)
 {
     if (!cache_entry_complete(cache_dir, key)) {
         auto compile = service.ensure_variant_compiled(key);

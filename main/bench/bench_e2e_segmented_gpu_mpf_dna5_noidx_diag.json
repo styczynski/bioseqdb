@@ -23,7 +23,7 @@
         "minimap2_split_bp": 150000480, "seed": 4471902,
         "skip_minimap2_baseline_setup": true,
         "just_index_setup_only": "minimizers_per_fragment" },
-      "description": "dna5 150 Mbp MPF diagnostic: ~13 segments, instrument Phase-B sketch dispatch timing/retries" }
+      "description": "dna5 150 Mbp MPF diagnostic: ~13 segments, instrument segmented GPU sketch dispatch timing/retries" }
   },
 
   "bench_e2e": {

@@ -1,140 +1,133 @@
-/*-------------------------------------------------------------------------
- *
- * table/io/reader_chunk.cppm
- *
- * Chunk-group loading, deserialization, and per-chunk row materialisation for
- * the bioseq table reader.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Chunk loading, decoding, and row materialization for table reads.
  */
 module;
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.table.io:read_chunk;
+export module bioseq.postgres.table.io:read_chunk;
 
-import bioseq.common.mlogging;
-import bioseq.vector.types;
-import bioseq.storage.compression;
-import bioseq.storage.physical;
-import bioseq.storage.metadata;
-import bioseq.pg_utils;
-import bioseq.pg_support;
-import bioseq.config;
+import bioseq.common.logging;
+import bioseq.postgres.vectorization.types;
+import bioseq.postgres.storage.compression;
+import bioseq.postgres.storage.physical;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.support;
+import bioseq.postgres.configuration.core;
 import :buffers;
 import :cache;
 import :pruning;
-import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_try_as<Const>
 
-using namespace bioseq::pg_utils;   // DOC0333 — node view helpers live in bioseq::pg_utils
+using namespace bioseq::postgres::support;
 
 static void
-DeserializeBoolArray(StringInfo boolArrayBuffer, bool *boolArray,
-					 uint32_t boolArrayLength)
+deserialize_boolean_array(StringInfo bool_array_buffer, bool *bool_array,
+					 uint32_t bool_array_length)
 {
-	uint32_t boolArrayIndex = 0;
+	uint32_t bool_array_index = 0;
 
-	uint32_t maximumBoolCount = boolArrayBuffer->len * 8;
-	if (boolArrayLength > maximumBoolCount)
+	uint32_t maximum_bool_count = bool_array_buffer->len * 8;
+	if (bool_array_length > maximum_bool_count)
 	{
-		bioseq_log<ERR, PG>("insufficient data for reading boolean array");
+		bioseq_log<logging_level::error, logging_target::postgres>("insufficient data for reading boolean array");
 	}
 
-	for (boolArrayIndex = 0; boolArrayIndex < boolArrayLength; boolArrayIndex++)
+	for (bool_array_index = 0; bool_array_index < bool_array_length; bool_array_index++)
 	{
-		uint32_t byteIndex = boolArrayIndex / 8;
-		uint32_t bitIndex = boolArrayIndex % 8;
-		uint8_t bitmask = (1 << bitIndex);
+		uint32_t byte_index = bool_array_index / 8;
+		uint32_t bit_index = bool_array_index % 8;
+		uint8_t bitmask = (1 << bit_index);
 
-		uint8_t shiftedBit = (boolArrayBuffer->data[byteIndex] & bitmask);
-		if (shiftedBit == 0)
+		uint8_t shifted_bit = (bool_array_buffer->data[byte_index] & bitmask);
+		if (shifted_bit == 0)
 		{
-			boolArray[boolArrayIndex] = false;
+			bool_array[bool_array_index] = false;
 		}
 		else
 		{
-			boolArray[boolArrayIndex] = true;
+			bool_array[bool_array_index] = true;
 		}
 	}
 }
 
 static void
-DeserializeDatumArray(StringInfo datumBuffer, bool *existsArray, uint32_t datumCount,
-					  bool datumTypeByValue, int datumTypeLength,
-					  char datumTypeAlign, Datum *datumArray)
+deserialize_datum_array(StringInfo datum_buffer, bool *present_values, uint32_t datum_count,
+					  bool datum_type_by_value, int datum_type_length,
+					  char datum_type_align, Datum *datum_array)
 {
-	uint32_t datumIndex = 0;
-	uint32_t currentDatumDataOffset = 0;
+	uint32_t datum_index = 0;
+	uint32_t current_datum_data_offset = 0;
 
-	for (datumIndex = 0; datumIndex < datumCount; datumIndex++)
+	for (datum_index = 0; datum_index < datum_count; datum_index++)
 	{
-		if (!existsArray[datumIndex])
+		if (!present_values[datum_index])
 		{
 			continue;
 		}
 
-		char *currentDatumDataPointer = datumBuffer->data + currentDatumDataOffset;
+		char *current_datum_data_pointer = datum_buffer->data + current_datum_data_offset;
 
-		datumArray[datumIndex] = fetch_att(currentDatumDataPointer, datumTypeByValue,
-										   datumTypeLength);
-		currentDatumDataOffset = att_addlength_datum(currentDatumDataOffset,
-													 datumTypeLength,
-													 datumArray[datumIndex]);
-		currentDatumDataOffset = att_align_nominal(currentDatumDataOffset,
-												   datumTypeAlign);
+		datum_array[datum_index] = fetch_att(current_datum_data_pointer, datum_type_by_value,
+										   datum_type_length);
+		current_datum_data_offset = att_addlength_datum(current_datum_data_offset,
+													 datum_type_length,
+													 datum_array[datum_index]);
+		current_datum_data_offset = att_align_nominal(current_datum_data_offset,
+												   datum_type_align);
 
-		if (currentDatumDataOffset > datumBuffer->len)
+		if (current_datum_data_offset > datum_buffer->len)
 		{
-			bioseq_log<ERR, PG>("insufficient data left in datum buffer: {}, {}",
-								currentDatumDataOffset, datumBuffer->len);
+			bioseq_log<logging_level::error, logging_target::postgres>("insufficient data left in datum buffer: {}, {}",
+								current_datum_data_offset, datum_buffer->len);
 		}
 	}
 }
 
 static Datum
-ColumnDefaultValue(TupleConstr *tupleConstraints, Form_pg_attribute attributeForm)
+get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attribute_form)
 {
-	Node *defaultValueNode = NULL;
-	int defValIndex = 0;
+	Node *default_value_node = NULL;
+	int def_val_index = 0;
 
-	for (defValIndex = 0; defValIndex < tupleConstraints->num_defval; defValIndex++)
+	for (def_val_index = 0; def_val_index < tuple_constraints->num_defval; def_val_index++)
 	{
-		AttrDefault attrDefault = tupleConstraints->defval[defValIndex];
-		if (attrDefault.adnum == attributeForm->attnum)
+		AttrDefault attr_default = tuple_constraints->defval[def_val_index];
+		if (attr_default.adnum == attribute_form->attnum)
 		{
-			defaultValueNode = static_cast<Node*>(stringToNode(attrDefault.adbin));
+			default_value_node = static_cast<Node*>(stringToNode(attr_default.adbin));
 			break;
 		}
 	}
 
-	Assert(defaultValueNode != NULL);
+	Assert(default_value_node != NULL);
 
 	/* try reducing the default value node to a const node */
-	defaultValueNode = eval_const_expressions(NULL, defaultValueNode);
-	if (Const *constNode = pg_node_try_as<Const>(defaultValueNode))
+	default_value_node = eval_const_expressions(NULL, default_value_node);
+	if (Const *const_node = pg_node_try_as<Const>(default_value_node))
 	{
-		return constNode->constvalue;
+		return const_node->constvalue;
 	}
 	else
 	{
-		const char *columnName = NameStr(attributeForm->attname);
-		bioseq_report<ERR, PG>().msg("unsupported default value for column \"{}\"", columnName)
-					   .hint("Expression is either mutable or "
+		const char *column_name = NameStr(attribute_form->attname);
+		bioseq_report<logging_level::error, logging_target::postgres>().with_message("unsupported default value for column \"{}\"", column_name)
+					   .with_hint("Expression is either mutable or "
 							 "does not evaluate to constant value");
 	}
 }
 
-static ColumnBuffers *
-LoadColumnBuffers(Relation relation, ColumnChunkSkipNode *chunkSkipNodeArray,
-				  uint32_t chunkCount, uint64_t stripeOffset,
-				  Form_pg_attribute attributeForm)
+static column_buffers *
+load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
+				  uint32_t chunk_count, uint64_t stripe_offset,
+				  Form_pg_attribute attribute_form)
 {
-	uint32_t chunkIndex = 0;
-	ColumnChunkBuffers **chunkBuffersArray =
-		make_array<ColumnChunkBuffers*>(chunkCount);
+	uint32_t chunk_index = 0;
+	chunk_buffers **chunks =
+		bioseq::postgres::support::allocate_zeroed_array<chunk_buffers*>(chunk_count);
 
-	for (chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
 	{
-		chunkBuffersArray[chunkIndex] = make0<ColumnChunkBuffers>();
+		chunks[chunk_index] = bioseq::postgres::support::allocate_zeroed_object<chunk_buffers>();
 	}
 
 	/*
@@ -142,315 +135,315 @@ LoadColumnBuffers(Relation relation, ColumnChunkSkipNode *chunkSkipNodeArray,
 	 * because "exists" chunks are stored sequentially on disk, and we want to
 	 * minimize disk seeks.
 	 */
-	for (chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
 	{
-		ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
-		uint64_t existsOffset = stripeOffset + chunkSkipNode->existsChunkOffset;
-		StringInfo rawExistsBuffer = makeStringInfo();
+		chunk_skip_node *chunk_skip_node = &chunk_skip_nodes[chunk_index];
+		uint64_t exists_offset = stripe_offset + chunk_skip_node->exists_stream_offset;
+		StringInfo raw_exists_buffer = makeStringInfo();
 
-		enlargeStringInfo(rawExistsBuffer, chunkSkipNode->existsLength);
-		rawExistsBuffer->len = chunkSkipNode->existsLength;
-		BioseqColumnStorageRead(relation, existsOffset, rawExistsBuffer->data,
-							chunkSkipNode->existsLength);
+		enlargeStringInfo(raw_exists_buffer, chunk_skip_node->exists_stream_length);
+		raw_exists_buffer->len = chunk_skip_node->exists_stream_length;
+		read_column_storage(relation, exists_offset, raw_exists_buffer->data,
+							chunk_skip_node->exists_stream_length);
 
-		chunkBuffersArray[chunkIndex]->existsBuffer = rawExistsBuffer;
+		chunks[chunk_index]->presence_buffer = raw_exists_buffer;
 	}
 
 	/* then read "values" chunks, which are also stored sequentially on disk */
-	for (chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
 	{
-		ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
-		CompressionType compressionType = chunkSkipNode->valueCompressionType;
-		uint64_t valueOffset = stripeOffset + chunkSkipNode->valueChunkOffset;
-		StringInfo rawValueBuffer = makeStringInfo();
+		chunk_skip_node *chunk_skip_node = &chunk_skip_nodes[chunk_index];
+		bioseq::compression_algorithm compression_algorithm = chunk_skip_node->value_compression_algorithm;
+		uint64_t value_offset = stripe_offset + chunk_skip_node->value_stream_offset;
+		StringInfo raw_value_buffer = makeStringInfo();
 
-		enlargeStringInfo(rawValueBuffer, chunkSkipNode->valueLength);
-		rawValueBuffer->len = chunkSkipNode->valueLength;
-		BioseqColumnStorageRead(relation, valueOffset, rawValueBuffer->data,
-							chunkSkipNode->valueLength);
+		enlargeStringInfo(raw_value_buffer, chunk_skip_node->value_stream_length);
+		raw_value_buffer->len = chunk_skip_node->value_stream_length;
+		read_column_storage(relation, value_offset, raw_value_buffer->data,
+							chunk_skip_node->value_stream_length);
 
-		chunkBuffersArray[chunkIndex]->valueBuffer = rawValueBuffer;
-		chunkBuffersArray[chunkIndex]->valueCompressionType = compressionType;
-		chunkBuffersArray[chunkIndex]->decompressedValueSize =
-			chunkSkipNode->decompressedValueSize;
+		chunks[chunk_index]->value_buffer = raw_value_buffer;
+		chunks[chunk_index]->value_compression_algorithm = compression_algorithm;
+		chunks[chunk_index]->value_decompressed_length =
+			chunk_skip_node->value_decompressed_length;
 	}
 
-	ColumnBuffers *columnBuffers = make0<ColumnBuffers>();
-	columnBuffers->chunkBuffersArray = chunkBuffersArray;
+	column_buffers *loaded_column_buffers = bioseq::postgres::support::allocate_zeroed_object<column_buffers>();
+	loaded_column_buffers->chunks = chunks;
 
-	return columnBuffers;
+	return loaded_column_buffers;
 }
 
-export StripeBuffers *
-LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
-						  TupleDesc tupleDescriptor, List *projectedColumnList,
-						  List *whereClauseList, List *whereClauseVars,
-						  int64 *chunkGroupsFiltered, Snapshot snapshot)
+export stripe_buffers *
+load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata,
+						  TupleDesc tuple_descriptor, List *projected_columns,
+						  List *filter_clauses, List *filter_variables,
+						  int64 *filtered_chunk_groups, Snapshot snapshot)
 {
-	uint32_t columnIndex = 0;
-	uint32_t columnCount = tupleDescriptor->natts;
+	uint32_t column_index = 0;
+	uint32_t column_count = tuple_descriptor->natts;
 
-	bool *projectedColumnMask = ProjectedColumnMask(columnCount, projectedColumnList);
+	bool *projected_column_mask = build_projected_column_mask(column_count, projected_columns);
 
-	StripeSkipList *stripeSkipList = ReadStripeSkipList(relation->rd_locator,
-														stripeMetadata->id,
-														tupleDescriptor,
-														stripeMetadata->chunkCount,
+	stripe_skip_list *skip_list = read_stripe_skip_list(relation->rd_locator,
+														stripe_metadata->id,
+														tuple_descriptor,
+														stripe_metadata->chunk_count,
 														snapshot);
-	StripeSkipList *selectedChunkSkipList = stripeSkipList;
+	stripe_skip_list *selected_chunk_skip_list = skip_list;
 
-	if (list_length(whereClauseVars) > 0)
+	if (list_length(filter_variables) > 0)
 	{
-		bool *selectedChunkMask = SelectedChunkMask(stripeSkipList, whereClauseList,
-													whereClauseVars, chunkGroupsFiltered);
+		bool *selected_chunk_mask = select_chunk_mask(skip_list, filter_clauses,
+													filter_variables, filtered_chunk_groups);
 
-		selectedChunkSkipList = SelectedChunkSkipList(stripeSkipList, projectedColumnMask,
-													 selectedChunkMask);
+		selected_chunk_skip_list = select_chunk_skip_list(skip_list, projected_column_mask,
+													 selected_chunk_mask);
 	}
 
 	/* load column data for projected columns */
-	ColumnBuffers **columnBuffersArray = make_array<ColumnBuffers*>(columnCount);
+	column_buffers **columns = bioseq::postgres::support::allocate_zeroed_array<column_buffers*>(column_count);
 
-	for (columnIndex = 0; columnIndex < stripeMetadata->columnCount; columnIndex++)
+	for (column_index = 0; column_index < stripe_metadata->column_count; column_index++)
 	{
-		if (projectedColumnMask[columnIndex])
+		if (projected_column_mask[column_index])
 		{
-			ColumnChunkSkipNode *chunkSkipNode =
-				selectedChunkSkipList->chunkSkipNodeArray[columnIndex];
-			Form_pg_attribute attributeForm = TupleDescAttr(tupleDescriptor, columnIndex);
-			uint32_t chunkCount = selectedChunkSkipList->chunkCount;
+			chunk_skip_node *chunk_skip_node =
+				selected_chunk_skip_list->chunk_skip_nodes[column_index];
+			Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, column_index);
+			uint32_t chunk_count = selected_chunk_skip_list->chunk_count;
 
-			ColumnBuffers *columnBuffers = LoadColumnBuffers(relation, chunkSkipNode,
-															 chunkCount,
-															 stripeMetadata->fileOffset,
-															 attributeForm);
+			column_buffers *column_buffers = load_column_buffers(relation, chunk_skip_node,
+															 chunk_count,
+															 stripe_metadata->file_offset,
+															 attribute_form);
 
-			columnBuffersArray[columnIndex] = columnBuffers;
+			columns[column_index] = column_buffers;
 		}
 	}
 
-	StripeBuffers *stripeBuffers = make0<StripeBuffers>();
-	stripeBuffers->columnCount = columnCount;
-	stripeBuffers->chunkCount = selectedChunkSkipList->chunkCount;
-	stripeBuffers->rowCount = StripeSkipListRowCount(selectedChunkSkipList);
-	stripeBuffers->columnBuffersArray = columnBuffersArray;
-	stripeBuffers->selectedChunkGroupRowCounts =
-		selectedChunkSkipList->chunkGroupRowCounts;
-	stripeBuffers->selectedChunkGroupRowOffset =
-		selectedChunkSkipList->chunkGroupRowOffset;
-	stripeBuffers->selectedChunkGroupDeletedRows =
-		selectedChunkSkipList->chunkGroupDeletedRows;
+	stripe_buffers *buffers = bioseq::postgres::support::allocate_zeroed_object<stripe_buffers>();
+	buffers->column_count = column_count;
+	buffers->chunk_count = selected_chunk_skip_list->chunk_count;
+	buffers->row_count = count_stripe_skip_rows(selected_chunk_skip_list);
+	buffers->columns = columns;
+	buffers->selected_chunk_group_row_counts =
+		selected_chunk_skip_list->chunk_group_row_counts;
+	buffers->selected_chunk_group_row_offsets =
+		selected_chunk_skip_list->chunk_group_row_offsets;
+	buffers->selected_chunk_group_deleted_rows =
+		selected_chunk_skip_list->chunk_group_deleted_rows;
 
-	return stripeBuffers;
+	return buffers;
 }
 
-static ChunkData *
-DeserializeChunkData(StripeBuffers *stripeBuffers, uint64_t chunkIndex,
-					 uint32_t rowCount, TupleDesc tupleDescriptor,
-					 List *projectedColumnList, StripeReadState *state, uint64_t stripeId)
+static chunk_data *
+deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
+					 uint32_t row_count, TupleDesc tuple_descriptor,
+					 List *projected_columns, stripe_read_state *state, uint64_t stripe_id)
 {
-	int columnIndex = 0;
-	bool *columnMask = ProjectedColumnMask(tupleDescriptor->natts, projectedColumnList);
+	int column_index = 0;
+	bool *column_mask = build_projected_column_mask(tuple_descriptor->natts, projected_columns);
 
-	ChunkData *chunkData = CreateEmptyChunkData(tupleDescriptor->natts, columnMask,
-												rowCount);
+	chunk_data *pending_chunk = allocate_chunk_data(tuple_descriptor->natts, column_mask,
+												row_count);
 
-	for (columnIndex = 0; columnIndex < stripeBuffers->columnCount; columnIndex++)
+	for (column_index = 0; column_index < buffers->column_count; column_index++)
 	{
-		Form_pg_attribute attributeForm = TupleDescAttr(tupleDescriptor, columnIndex);
-		ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
-		bool columnAdded = false;
+		Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, column_index);
+		column_buffers *column_buffers = buffers->columns[column_index];
+		bool column_added = false;
 
-		if (columnBuffers == NULL && columnMask[columnIndex])
+		if (column_buffers == NULL && column_mask[column_index])
 		{
-			columnAdded = true;
+			column_added = true;
 		}
 
-		if (columnBuffers != NULL)
+		if (column_buffers != NULL)
 		{
-			ColumnChunkBuffers *chunkBuffers =
-				columnBuffers->chunkBuffersArray[chunkIndex];
-			bool shouldCache = bioseq::settings::enable_column_cache == true &&
-				chunkBuffers->valueCompressionType != COMPRESSION_NONE;
+			chunk_buffers *chunk_buffers =
+				column_buffers->chunks[chunk_index];
+			bool should_cache = bioseq::settings::column_cache::enabled == true &&
+				chunk_buffers->value_compression_algorithm != bioseq::compression_algorithm::none;
 
-			if (shouldCache)
+			if (should_cache)
 			{
-				BioseqColumnMarkChunkGroupInUse(state->relation->rd_id, stripeId, chunkIndex);
+				mark_chunk_group_in_use(state->relation->rd_id, stripe_id, chunk_index);
 			}
 
 			/* decompress and deserialize current chunk's data */
-			StringInfo valueBuffer = NULL;
-			bool valueBufferOwned = true;
+			StringInfo value_buffer = NULL;
+			bool value_buffer_owned = true;
 
-			if (shouldCache)
+			if (should_cache)
 			{
-				valueBuffer = static_cast<StringInfo>(BioseqColumnRetrieveCache(
-					state->relation->rd_id, stripeId, chunkIndex, columnIndex));
+				value_buffer = static_cast<StringInfo>(retrieve_column_cache_entry(
+					state->relation->rd_id, stripe_id, chunk_index, column_index));
 			}
 
-			if (valueBuffer == NULL)
+			if (value_buffer == NULL)
 			{
-				if (chunkBuffers->valueCompressionType == COMPRESSION_NONE && !shouldCache)
+				if (chunk_buffers->value_compression_algorithm == bioseq::compression_algorithm::none && !should_cache)
 				{
 					/* Shared raw stripe buffer: use in place and leave owner unchanged. */
-					valueBuffer = chunkBuffers->valueBuffer;
-					valueBufferOwned = false;
+					value_buffer = chunk_buffers->value_buffer;
+					value_buffer_owned = false;
 				}
 				else
 				{
-					MemoryContext oldMemoryContext;
-					if (shouldCache)
+					MemoryContext old_memory_context;
+					if (should_cache)
 					{
-						oldMemoryContext = MemoryContextSwitchTo(BioseqColumnCacheMemoryContext());
+						old_memory_context = MemoryContextSwitchTo(get_column_cache_memory_context());
 					}
 
-					valueBuffer = DecompressBuffer(chunkBuffers->valueBuffer,
-									 chunkBuffers->valueCompressionType,
-									 chunkBuffers->decompressedValueSize);
+					value_buffer = decompress_column_buffer(chunk_buffers->value_buffer,
+									 chunk_buffers->value_compression_algorithm,
+									 chunk_buffers->value_decompressed_length);
 
-					valueBuffer = static_cast<StringInfo>(repalloc(valueBuffer, sizeof(cached_StringInfo)));
-					reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = false;
+					value_buffer = static_cast<StringInfo>(repalloc(value_buffer, sizeof(cached_string_info)));
+					reinterpret_cast<cached_string_info *>(value_buffer)->cached = false;
 
-					if (shouldCache)
+					if (should_cache)
 					{
-						reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = true;
+						reinterpret_cast<cached_string_info *>(value_buffer)->cached = true;
 
-						BioseqColumnAddCacheEntry(state->relation->rd_id, stripeId, chunkIndex,
-												  columnIndex, valueBuffer);
-						MemoryContextSwitchTo(oldMemoryContext);
+						add_column_cache_entry(state->relation->rd_id, stripe_id, chunk_index,
+												  column_index, value_buffer);
+						MemoryContextSwitchTo(old_memory_context);
 					}
 				}
 			}
 
-			DeserializeBoolArray(chunkBuffers->existsBuffer,
-								 chunkData->existsArray[columnIndex],
-								 rowCount);
-			DeserializeDatumArray(valueBuffer, chunkData->existsArray[columnIndex],
-								  rowCount, attributeForm->attbyval,
-								  attributeForm->attlen, attributeForm->attalign,
-								  chunkData->valueArray[columnIndex]);
+			deserialize_boolean_array(chunk_buffers->presence_buffer,
+								 pending_chunk->present_values[column_index],
+								 row_count);
+			deserialize_datum_array(value_buffer, pending_chunk->present_values[column_index],
+								  row_count, attribute_form->attbyval,
+								  attribute_form->attlen, attribute_form->attalign,
+								  pending_chunk->values_by_column[column_index]);
 
 			/* Never pass the shared raw stripe buffer to the chunk free path. */
-			chunkData->valueBufferArray[columnIndex] = valueBufferOwned ? valueBuffer : NULL;
+			pending_chunk->referenced_value_buffers[column_index] = value_buffer_owned ? value_buffer : NULL;
 		}
-		else if (columnAdded)
+		else if (column_added)
 		{
 			/*
 			 * This is a column that was added after creation of this stripe.
 			 * So we use either the default value or NULL.
 			 */
-			if (attributeForm->atthasdef)
+			if (attribute_form->atthasdef)
 			{
-				int rowIndex = 0;
+				int row_index = 0;
 
-				Datum defaultValue = ColumnDefaultValue(tupleDescriptor->constr,
-														attributeForm);
+				Datum default_value = get_column_default_value(tuple_descriptor->constr,
+														attribute_form);
 
-				for (rowIndex = 0; rowIndex < rowCount; rowIndex++)
+				for (row_index = 0; row_index < row_count; row_index++)
 				{
-					chunkData->existsArray[columnIndex][rowIndex] = true;
-					chunkData->valueArray[columnIndex][rowIndex] = defaultValue;
+					pending_chunk->present_values[column_index][row_index] = true;
+					pending_chunk->values_by_column[column_index][row_index] = default_value;
 				}
 			}
 			else
 			{
-				memset(chunkData->existsArray[columnIndex], false,
-					   rowCount * sizeof(bool));
+				memset(pending_chunk->present_values[column_index], false,
+					   row_count * sizeof(bool));
 			}
 		}
 	}
 
-	return chunkData;
+	return pending_chunk;
 }
 
-export ChunkGroupReadState *
-BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupleDesc,
-					List *projectedColumnList, MemoryContext cxt, StripeReadState *state,
-					uint64_t stripeId)
+export chunk_group_read_state *
+begin_chunk_group_read(stripe_buffers *buffers, int chunk_index, TupleDesc tuple_desc,
+					List *projected_columns, MemoryContext cxt, stripe_read_state *state,
+					uint64_t stripe_id)
 {
-	if (chunkIndex < 0 || static_cast<uint32_t>(chunkIndex) >= stripeBuffers->chunkCount)
+	if (chunk_index < 0 || static_cast<uint32_t>(chunk_index) >= buffers->chunk_count)
 	{
-		bioseq_log<ERR, PG>("chunk group index {} is outside selected chunk count {}",
-			   chunkIndex, stripeBuffers->chunkCount);
+		bioseq_log<logging_level::error, logging_target::postgres>("chunk group index {} is outside selected chunk count {}",
+			   chunk_index, buffers->chunk_count);
 	}
 
-	uint32_t chunkGroupRowCount =
-		stripeBuffers->selectedChunkGroupRowCounts[chunkIndex];
-	uint32_t chunkGroupRowOffset =
-		stripeBuffers->selectedChunkGroupRowOffset[chunkIndex];
-	uint32_t chunkGroupDeletedRows =
-		stripeBuffers->selectedChunkGroupDeletedRows[chunkIndex];
+	uint32_t chunk_group_row_count =
+		buffers->selected_chunk_group_row_counts[chunk_index];
+	uint32_t chunk_group_row_offsets =
+		buffers->selected_chunk_group_row_offsets[chunk_index];
+	uint32_t chunk_group_deleted_rows =
+		buffers->selected_chunk_group_deleted_rows[chunk_index];
 
-	bioseq::pg_support::MemoryContextScope ctx_guard{cxt};
-	ChunkGroupReadState *chunkGroupReadState = make0<ChunkGroupReadState>();
+	bioseq::postgres::support::memory_context_scope ctx_guard{cxt};
+	chunk_group_read_state *chunk_group_state = bioseq::postgres::support::allocate_zeroed_object<chunk_group_read_state>();
 
-	chunkGroupReadState->currentRow = 0;
-	chunkGroupReadState->rowCount = chunkGroupRowCount;
-	chunkGroupReadState->chunkStripeRowOffset = chunkGroupRowOffset;
-	chunkGroupReadState->chunkGroupDeletedRows = chunkGroupDeletedRows;
-	chunkGroupReadState->columnCount = tupleDesc->natts;
-	chunkGroupReadState->projectedColumnList = projectedColumnList;
+	chunk_group_state->current_row = 0;
+	chunk_group_state->row_count = chunk_group_row_count;
+	chunk_group_state->stripe_row_offset = chunk_group_row_offsets;
+	chunk_group_state->chunk_group_deleted_rows = chunk_group_deleted_rows;
+	chunk_group_state->column_count = tuple_desc->natts;
+	chunk_group_state->projected_columns = projected_columns;
 
-	chunkGroupReadState->chunkGroupData = DeserializeChunkData(stripeBuffers, chunkIndex,
-															   chunkGroupRowCount,
-															   tupleDesc,
-															   projectedColumnList, state, stripeId);
+	chunk_group_state->chunk_group_data = deserialize_chunk_data(buffers, chunk_index,
+															   chunk_group_row_count,
+															   tuple_desc,
+															   projected_columns, state, stripe_id);
 
-	return chunkGroupReadState;
+	return chunk_group_state;
 }
 
 export void
-EndChunkGroupRead(ChunkGroupReadState *chunkGroupReadState)
+end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 {
-	FreeChunkBufferValueArray(chunkGroupReadState->chunkGroupData);
-	FreeChunkData(chunkGroupReadState->chunkGroupData);
-	if (chunkGroupReadState->rowMask != NULL && !chunkGroupReadState->rowMaskCached)
-		pfree(chunkGroupReadState->rowMask);
-	chunkGroupReadState->rowMask = NULL;
-	pfree(chunkGroupReadState);
+	free_chunk_value_buffers(chunk_group_state->chunk_group_data);
+	free_chunk_data(chunk_group_state->chunk_group_data);
+	if (chunk_group_state->row_mask != NULL && !chunk_group_state->row_mask_cached)
+		pfree(chunk_group_state->row_mask);
+	chunk_group_state->row_mask = NULL;
+	pfree(chunk_group_state);
 }
 
 export bool
-ReadChunkGroupNextRow(ChunkGroupReadState *chunkGroupReadState, Datum *columnValues,
-					  bool *columnNulls, int32_t *deletedColumnsNumber)
+read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *column_values,
+					  bool *column_nulls, int32_t *deleted_columns_number)
 {
 	/*
 	 * Initialize to all-NULL. Only non-NULL projected attributes will be set.
 	 */
-	memset(columnNulls, true, sizeof(bool) * chunkGroupReadState->columnCount);
+	memset(column_nulls, true, sizeof(bool) * chunk_group_state->column_count);
 
-	while (chunkGroupReadState->currentRow < chunkGroupReadState->rowCount)
+	while (chunk_group_state->current_row < chunk_group_state->row_count)
 	{
-		if (chunkGroupReadState->rowMask != NULL)
+		if (chunk_group_state->row_mask != NULL)
 		{
-			int8_t checkColumnMask = 1 << (chunkGroupReadState->currentRow % 8);
-			int8_t checkLookupMask =
-				VARDATA(chunkGroupReadState->rowMask)[chunkGroupReadState->currentRow / 8 ];
+			int8_t check_column_mask = 1 << (chunk_group_state->current_row % 8);
+			int8_t check_lookup_mask =
+				VARDATA(chunk_group_state->row_mask)[chunk_group_state->current_row / 8 ];
 
-			if (checkLookupMask & checkColumnMask)
+			if (check_lookup_mask & check_column_mask)
 			{
-				chunkGroupReadState->currentRow++;
-				*deletedColumnsNumber += 1;
+				chunk_group_state->current_row++;
+				*deleted_columns_number += 1;
 				continue;
 			}
 		}
 
-		for (auto attno : PIntList{chunkGroupReadState->projectedColumnList})
+		for (auto attno : bioseq::postgres::support::postgres_integer_list{chunk_group_state->projected_columns})
 		{
-			const ChunkData *chunkGroupData = chunkGroupReadState->chunkGroupData;
-			const int rowIndex = chunkGroupReadState->currentRow;
+			const chunk_data *chunk_group_data = chunk_group_state->chunk_group_data;
+			const int row_index = chunk_group_state->current_row;
 
-			/* attno is 1-indexed; existsArray is 0-indexed */
-			const uint32_t columnIndex = attno - 1;
+			/* attno is 1-indexed; present_values is 0-indexed */
+			const uint32_t column_index = attno - 1;
 
-			if (chunkGroupData->existsArray[columnIndex][rowIndex])
+			if (chunk_group_data->present_values[column_index][row_index])
 			{
-				columnValues[columnIndex] = chunkGroupData->valueArray[columnIndex][rowIndex];
-				columnNulls[columnIndex] = false;
+				column_values[column_index] = chunk_group_data->values_by_column[column_index][row_index];
+				column_nulls[column_index] = false;
 			}
 		}
 
-		chunkGroupReadState->currentRow++;
+		chunk_group_state->current_row++;
 		return true;
 	}
 
@@ -458,73 +451,74 @@ ReadChunkGroupNextRow(ChunkGroupReadState *chunkGroupReadState, Datum *columnVal
 }
 
 export bool
-ReadChunkGroupNextVector(ChunkGroupReadState *chunkGroupReadState, Datum *columnValues,
-						 bool *columnNulls, TupleDesc tupleDesc,
-						 int32_t *columnValueOffset, int *chunkReadRows,
-						 uint64 *rowNumber,
-						 uint64 stripeFirstRowNumber)
+read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *column_values,
+						 bool *column_nulls, TupleDesc tuple_desc,
+						 int32_t *column_value_offset, int *chunk_read_rows,
+						 uint64 *row_number,
+						 uint64 stripe_first_row_number)
 {
-	(void) tupleDesc;
-	(void) columnValueOffset;
+	(void) tuple_desc;
+	(void) column_value_offset;
 
-	if (chunkGroupReadState->currentRow >= chunkGroupReadState->rowCount)
+	if (chunk_group_state->current_row >= chunk_group_state->row_count)
 	{
-		Assert(chunkGroupReadState->currentRow == chunkGroupReadState->rowCount);
+		Assert(chunk_group_state->current_row == chunk_group_state->row_count);
 		return false;
 	}
 
 	/*
 	 * Initialize to all-NULL. Only non-NULL projected attributes will be set.
 	 */
-	memset(columnNulls, true, sizeof(bool) * chunkGroupReadState->columnCount);
+	memset(column_nulls, true, sizeof(bool) * chunk_group_state->column_count);
 
 	int i;
-	int rowNumberIndex = 0;
+	int row_number_index = 0;
 
-	for (i = 0; i < chunkGroupReadState->rowCount; i ++)
+	for (i = 0; i < chunk_group_state->row_count; i ++)
 	{
-		if (chunkGroupReadState->currentRow >= chunkGroupReadState->rowCount)
+		if (chunk_group_state->current_row >= chunk_group_state->row_count)
 			return false;
 
-		if (*chunkReadRows >= BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE)
+		if (*chunk_read_rows >= vector_column_capacity)
 			break;
 
-		if (chunkGroupReadState->rowMask != NULL)
+		if (chunk_group_state->row_mask != NULL)
 		{
-			int8_t checkColumnMask = 1 << (chunkGroupReadState->currentRow % 8);
-			int8_t checkLookupMask =
-				VARDATA(chunkGroupReadState->rowMask)[chunkGroupReadState->currentRow / 8];
+			int8_t check_column_mask = 1 << (chunk_group_state->current_row % 8);
+			int8_t check_lookup_mask =
+				VARDATA(chunk_group_state->row_mask)[chunk_group_state->current_row / 8];
 
-			if (checkLookupMask & checkColumnMask)
+			if (check_lookup_mask & check_column_mask)
 			{
-				chunkGroupReadState->currentRow++;
+				chunk_group_state->current_row++;
 				continue;
 			}
 		}
 
-		for (auto attno : PIntList{chunkGroupReadState->projectedColumnList})
+		for (auto attno : bioseq::postgres::support::postgres_integer_list{chunk_group_state->projected_columns})
 		{
-			const ChunkData *chunkGroupData = chunkGroupReadState->chunkGroupData;
-			const int rowIndex = chunkGroupReadState->currentRow;
+			const chunk_data *chunk_group_data = chunk_group_state->chunk_group_data;
+			const int row_index = chunk_group_state->current_row;
 
-			/* attno is 1-indexed; existsArray is 0-indexed */
-			const uint32_t columnIndex = attno - 1;
+			/* attno is 1-indexed; present_values is 0-indexed */
+			const uint32_t column_index = attno - 1;
 
-			VectorColumn* vectorColumn = reinterpret_cast<VectorColumn*>(columnValues[columnIndex]);
+			auto* vector_column = reinterpret_cast<vector_column_storage*>(
+				column_values[column_index]);
 			const bool is_null =
-				!chunkGroupData->existsArray[columnIndex][rowIndex];
-			WriteDatumToVectorColumn(
-				vectorColumn,
+				!chunk_group_data->present_values[column_index][row_index];
+			write_datum_to_vector_column(
+				vector_column,
 				is_null
 					? static_cast<Datum>(0)
-					: chunkGroupData->valueArray[columnIndex][rowIndex],
+					: chunk_group_data->values_by_column[column_index][row_index],
 				is_null,
-				vectorColumn->dimension);
+				vector_column->lane_count);
 		}
 
-		(*chunkReadRows)++;
-		chunkGroupReadState->currentRow++;
-		rowNumber[rowNumberIndex++] = stripeFirstRowNumber + chunkGroupReadState->currentRow - 1;
+		(*chunk_read_rows)++;
+		chunk_group_state->current_row++;
+		row_number[row_number_index++] = stripe_first_row_number + chunk_group_state->current_row - 1;
 	}
 
 	return true;

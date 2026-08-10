@@ -4,7 +4,7 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
 extern "C" {
 #include "executor/executor.h"
@@ -18,11 +18,11 @@ module bioseq.postgres.extension:alignment_hook_core_stack;
 
 namespace bioseq::pg::detail {
 
-struct AlignmentExecutorFrame;
+struct alignment_executor_frame;
 
 void erase_frame_pointer(
-		std::vector<AlignmentExecutorFrame*>& frames,
-		AlignmentExecutorFrame* frame) noexcept
+		std::vector<alignment_executor_frame*>& frames,
+		alignment_executor_frame* frame) noexcept
 {
 	frames.erase(
 		std::remove(frames.begin(), frames.end(), frame),
@@ -30,8 +30,8 @@ void erase_frame_pointer(
 }
 
 void pop_exact_alignment_stack(
-		std::vector<AlignmentExecutorFrame*>& stack,
-		AlignmentExecutorFrame* frame,
+		std::vector<alignment_executor_frame*>& stack,
+		alignment_executor_frame* frame,
 		const char* stack_name)
 {
 	if (stack.empty() || stack.back() != frame) {
@@ -44,8 +44,8 @@ void pop_exact_alignment_stack(
 }
 
 void pop_alignment_stack_on_error(
-		std::vector<AlignmentExecutorFrame*>& stack,
-		AlignmentExecutorFrame* frame) noexcept
+		std::vector<alignment_executor_frame*>& stack,
+		alignment_executor_frame* frame) noexcept
 {
 	if (!stack.empty() && stack.back() == frame) {
 		stack.pop_back();

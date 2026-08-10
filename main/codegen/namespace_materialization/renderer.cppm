@@ -19,7 +19,7 @@ export module bioseq.codegen.namespace_materialization:renderer;
 import :manifest;
 import :model;
 import :validator;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
@@ -27,22 +27,22 @@ export namespace bioseq::codegen::namespace_materialization {
 namespace detail {
 
 [[nodiscard]] inline bool nonempty_range(
-    const clang_structural::source_range& range) noexcept {
+    const structural_analysis::source_range& range) noexcept {
     return range.end.byte_offset > range.begin.byte_offset;
 }
 
-[[nodiscard]] inline const clang_structural::source_range& declaration_range(
-    const clang_structural::declaration_record& declaration) noexcept {
+[[nodiscard]] inline const structural_analysis::source_range& declaration_range(
+    const structural_analysis::declaration_record& declaration) noexcept {
     return nonempty_range(declaration.declaration_range)
         ? declaration.declaration_range
         : declaration.range;
 }
 
-[[nodiscard]] inline const clang_structural::source_range& attribute_range(
-    const clang_structural::attribute_record& attribute) noexcept {
-    return nonempty_range(attribute.complete_range)
-        ? attribute.complete_range
-        : attribute.range;
+[[nodiscard]] inline const structural_analysis::source_range& attribute_range(
+    const structural_analysis::attribute_record& attribute) noexcept {
+    return nonempty_range(attribute.removal_range)
+        ? attribute.removal_range
+        : attribute.spelling_range;
 }
 
 [[nodiscard]] inline bool policy_attribute(
@@ -54,15 +54,15 @@ namespace detail {
 }
 
 [[nodiscard]] inline bool contains(
-    const clang_structural::source_range& outer,
-    const clang_structural::source_range& inner) noexcept {
+    const structural_analysis::source_range& outer,
+    const structural_analysis::source_range& inner) noexcept {
     return outer.begin.byte_offset <= inner.begin.byte_offset
         && inner.end.byte_offset <= outer.end.byte_offset;
 }
 
 [[nodiscard]] inline std::string slice(
     std::string_view source,
-    const clang_structural::source_range& range,
+    const structural_analysis::source_range& range,
     std::string_view role) {
     if (range.begin.byte_offset > range.end.byte_offset
         || range.end.byte_offset > source.size()) {
@@ -76,18 +76,18 @@ namespace detail {
 }
 
 [[nodiscard]] inline std::vector<source_edit> policy_attribute_edits(
-    const clang_structural::declaration_record& declaration,
-    const clang_structural::source_range& containing_range) {
+    const structural_analysis::declaration_record& declaration,
+    const structural_analysis::source_range& containing_range) {
     std::vector<source_edit> edits;
-    for (const clang_structural::attribute_record& attribute
+    for (const structural_analysis::attribute_record& attribute
          : declaration.attributes) {
         if (!policy_attribute(attribute.qualified_name)) continue;
-        const clang_structural::source_range& range = attribute_range(attribute);
+        const structural_analysis::source_range& range = attribute_range(attribute);
         if (!contains(containing_range, range)) continue;
         edits.push_back(source_edit{
             .begin_byte = range.begin.byte_offset,
             .end_byte = range.end.byte_offset,
-            .provenance_id = declaration.provenance_id,
+            .source_identity = declaration.source_identity,
             .purpose = "strip policy attribute " + attribute.qualified_name,
         });
     }
@@ -166,27 +166,27 @@ inline void render_imports(
 }
 
 [[nodiscard]] inline std::string provenance_attribute(
-    const clang_structural::declaration_record& declaration,
+    const structural_analysis::declaration_record& declaration,
     const materialization_coordinate& coordinate) {
     return "[[bioseq::template_flatten_provenance(\""
-        + cpp_escape(declaration.provenance_id) + "\", \""
+        + escape_cpp_string_literal(declaration.source_identity) + "\", \""
         + std::to_string(coordinate.ordinal) + "\")]]";
 }
 
 [[nodiscard]] inline std::string provenance_marker(
-    const clang_structural::declaration_record& declaration,
+    const structural_analysis::declaration_record& declaration,
     const materialization_coordinate& coordinate) {
     return provenance_attribute(declaration, coordinate) + "\n";
 }
 
 [[nodiscard]] inline bool append_inline_provenance(
     std::vector<source_edit>& edits,
-    const clang_structural::declaration_record& declaration,
-    const clang_structural::source_range& containing_range,
+    const structural_analysis::declaration_record& declaration,
+    const structural_analysis::source_range& containing_range,
     const materialization_coordinate& coordinate) {
-    if (declaration.kind != clang_structural::declaration_kind::record
-        && declaration.kind != clang_structural::declaration_kind::enum_
-        && declaration.kind != clang_structural::declaration_kind::alias) {
+    if (declaration.kind != structural_analysis::declaration_kind::record
+        && declaration.kind != structural_analysis::declaration_kind::enumeration
+        && declaration.kind != structural_analysis::declaration_kind::alias) {
         return false;
     }
     if (!nonempty_range(declaration.name_range)
@@ -195,17 +195,17 @@ inline void render_imports(
             "record/enum/alias probe name range is outside its declaration head");
     }
     const std::size_t insertion_offset =
-        declaration.kind == clang_structural::declaration_kind::alias
+        declaration.kind == structural_analysis::declaration_kind::alias
         ? declaration.name_range.end.byte_offset
         : declaration.name_range.begin.byte_offset;
     edits.push_back(source_edit{
         .begin_byte = insertion_offset,
         .end_byte = insertion_offset,
         .replacement = declaration.kind
-                == clang_structural::declaration_kind::alias
+                == structural_analysis::declaration_kind::alias
             ? " " + provenance_attribute(declaration, coordinate)
             : provenance_attribute(declaration, coordinate) + " ",
-        .provenance_id = declaration.provenance_id,
+        .source_identity = declaration.source_identity,
         .purpose = "place record/enum/alias probe provenance",
     });
     return true;
@@ -216,7 +216,7 @@ inline void render_imports(
     const binding_record& binding,
     const materialization_coordinate& coordinate,
     const bool synthetic_provenance) {
-    const clang_structural::source_range& range =
+    const structural_analysis::source_range& range =
         declaration_range(binding.declaration);
     std::vector<source_edit> edits =
         policy_attribute_edits(binding.declaration, range);
@@ -227,7 +227,7 @@ inline void render_imports(
         .begin_byte = binding.declaration.body_or_initializer_range.begin.byte_offset,
         .end_byte = binding.declaration.body_or_initializer_range.end.byte_offset,
         .replacement = replacement_for(binding, coordinate).spelling,
-        .provenance_id = binding.declaration.provenance_id,
+        .source_identity = binding.declaration.source_identity,
         .purpose = "select binding case",
     });
     std::string rendered = apply_exact_edits(
@@ -247,7 +247,7 @@ inline void render_imports(
     const materialization_coordinate& coordinate,
     const bool synthetic_provenance,
     std::string_view replacement_name = {}) {
-    const clang_structural::source_range& range =
+    const structural_analysis::source_range& range =
         entry.declaration.declaration_head_range;
     std::vector<source_edit> edits =
         policy_attribute_edits(entry.declaration, range);
@@ -263,7 +263,7 @@ inline void render_imports(
             .begin_byte = entry.declaration.name_range.begin.byte_offset,
             .end_byte = entry.declaration.name_range.end.byte_offset,
             .replacement = std::string{replacement_name},
-            .provenance_id = entry.declaration.provenance_id,
+            .source_identity = entry.declaration.source_identity,
             .purpose = "selector entry name",
         });
     }
@@ -308,7 +308,8 @@ inline void render_imports(
 
 [[nodiscard]] inline const owned_declaration& root_entry(
     const generation_plan& plan) {
-    const auto result = std::ranges::find_if(
+    const std::vector<owned_declaration>::const_iterator result =
+        std::ranges::find_if(
         plan.topology.region.controlled_declarations,
         [](const owned_declaration& declaration) {
             return declaration.generated_api_entry
@@ -329,9 +330,14 @@ enabled_root_identities(const generation_plan& plan) {
         const materialization_coordinate& coordinate =
             coordinate_at(plan.topology, ordinal);
         if (coordinate_matches(coordinate, root.clauses)) {
-            const auto [_, inserted] =
+            const std::pair<
+                std::map<
+                    std::string,
+                    const materialization_coordinate*,
+                    std::less<>>::iterator,
+                bool> insertion =
                 result.emplace(identity_key(coordinate), &coordinate);
-            if (!inserted) {
+            if (!insertion.second) {
                 throw std::runtime_error(
                     "enabled identity has multiple root entry owners");
             }
@@ -339,7 +345,11 @@ enabled_root_identities(const generation_plan& plan) {
     }
     std::vector<const materialization_coordinate*> identities;
     identities.reserve(result.size());
-    for (const auto& [_, coordinate] : result) identities.push_back(coordinate);
+    for (const std::pair<
+             const std::string,
+             const materialization_coordinate*>& entry : result) {
+        identities.push_back(entry.second);
+    }
     std::ranges::sort(
         identities,
         {},
@@ -352,7 +362,8 @@ enabled_root_identities(const generation_plan& plan) {
 [[nodiscard]] inline const axis_case_assignment& assignment_for(
     const materialization_coordinate& coordinate,
     std::string_view group) {
-    const auto assignment = std::ranges::find(
+    const std::vector<axis_case_assignment>::const_iterator assignment =
+        std::ranges::find(
         coordinate.assignments, group, &axis_case_assignment::group);
     if (assignment == coordinate.assignments.end()) {
         throw std::runtime_error(
@@ -379,7 +390,7 @@ enabled_root_identities(const generation_plan& plan) {
         plan.topology.region.bindings.at(group.binding_indices.front());
     const axis_case_assignment& assignment =
         assignment_for(coordinate, group.name);
-    if (binding.declaration.kind == clang_structural::declaration_kind::alias) {
+    if (binding.declaration.kind == structural_analysis::declaration_kind::alias) {
         return std::to_string(assignment.case_ordinal);
     }
     return replacement_for(binding, coordinate).spelling;
@@ -395,7 +406,7 @@ enabled_root_identities(const generation_plan& plan) {
     for (std::size_t index = 0;
          index < root.declaration.parameters.size();
          ++index) {
-        const clang_structural::parameter_record& parameter =
+        const structural_analysis::parameter_record& parameter =
             root.declaration.parameters[index];
         if (parameter.name.empty()) {
             throw std::runtime_error(
@@ -471,7 +482,7 @@ inline void render_selector_switch(
             + relative_path.string());
     }
     if (!content.ends_with('\n')) content.push_back('\n');
-    const std::string content_digest = sha256_hex(content);
+    const std::string content_digest = bioseq::common::sha256_hex(content);
     return materialization_artifact{
         .artifact_kind = kind,
         .relative_path = std::move(relative_path),
@@ -509,11 +520,13 @@ inline void render_selector_switch(
         if (edit.begin_byte < previous_end) {
             throw std::runtime_error(
                 "overlapping exact source edits near provenance '"
-                + edit.provenance_id + "'");
+                + edit.source_identity + "'");
         }
         previous_end = edit.end_byte;
     }
-    for (auto iterator = edits.rbegin(); iterator != edits.rend(); ++iterator) {
+    for (std::vector<source_edit>::reverse_iterator iterator = edits.rbegin();
+         iterator != edits.rend();
+         ++iterator) {
         source.replace(
             iterator->begin_byte - source_origin,
             iterator->end_byte - iterator->begin_byte,
@@ -526,7 +539,7 @@ inline void render_selector_switch(
     const generation_plan& plan) {
     std::ostringstream output;
     output << detail::global_module_fragment(plan)
-           << "// Generated by " << generator_version << ".\n"
+           << "// Generated by " << materialization_generator_identity << ".\n"
            << "module "
            << plan.topology.region.configured_output_module_name
            << ":typed_flat_api;\n\n";
@@ -539,7 +552,7 @@ inline void render_selector_switch(
         for (const binding_record& binding : plan.topology.region.bindings) {
             if (binding.role == axis_role::identity
                 && binding.declaration.kind
-                    == clang_structural::declaration_kind::alias) {
+                    == structural_analysis::declaration_kind::alias) {
                 output << detail::render_binding_declaration(
                     plan, binding, coordinate, false)
                        << '\n';
@@ -560,19 +573,19 @@ inline void render_selector_switch(
 [[nodiscard]] inline std::string render_implementation_unit(
     const generation_plan& plan,
     const materialization_coordinate& coordinate) {
-    const clang_structural::source_range& body_range =
+    const structural_analysis::source_range& body_range =
         plan.topology.region.boundary.body_range;
     std::vector<source_edit> edits;
     for (const binding_record& binding : plan.topology.region.bindings) {
-        const clang_structural::source_range& range =
+        const structural_analysis::source_range& range =
             detail::declaration_range(binding.declaration);
         if (binding.role == axis_role::identity
             && binding.declaration.kind
-                == clang_structural::declaration_kind::alias) {
+                == structural_analysis::declaration_kind::alias) {
             edits.push_back(source_edit{
                 .begin_byte = range.begin.byte_offset,
                 .end_byte = range.end.byte_offset,
-                .provenance_id = binding.declaration.provenance_id,
+                .source_identity = binding.declaration.source_identity,
                 .purpose = "remove API-owned identity alias",
             });
             continue;
@@ -587,19 +600,19 @@ inline void render_selector_switch(
             .begin_byte = binding.declaration.body_or_initializer_range.begin.byte_offset,
             .end_byte = binding.declaration.body_or_initializer_range.end.byte_offset,
             .replacement = replacement_for(binding, coordinate).spelling,
-            .provenance_id = binding.declaration.provenance_id,
+            .source_identity = binding.declaration.source_identity,
             .purpose = "select coordinate binding",
         });
     }
     for (const owned_declaration& declaration
          : plan.topology.region.controlled_declarations) {
-        const clang_structural::source_range& range =
+        const structural_analysis::source_range& range =
             detail::declaration_range(declaration.declaration);
         if (!coordinate_matches(coordinate, declaration.clauses)) {
             edits.push_back(source_edit{
                 .begin_byte = range.begin.byte_offset,
                 .end_byte = range.end.byte_offset,
-                .provenance_id = declaration.declaration.provenance_id,
+                .source_identity = declaration.declaration.source_identity,
                 .purpose = "prune declaration for coordinate",
             });
             continue;
@@ -697,7 +710,7 @@ inline void render_selector_switch(
     const materialization_coordinate& representative = *identities.front();
     std::ostringstream output;
     output << detail::global_module_fragment(plan)
-           << "// Generated by " << generator_version << ".\n"
+           << "// Generated by " << materialization_generator_identity << ".\n"
            << "module "
            << plan.topology.region.configured_output_module_name
            << ":typed_flat_selector;\n\n";
@@ -747,6 +760,7 @@ inline void render_selector_switch(
     return output.str();
 }
 
+/// Renders the complete artifact set for one validated generation plan.
 [[nodiscard]] inline generation_result render_generation(
     generation_plan plan,
     const bool render_manifests = true) {
@@ -818,7 +832,7 @@ inline void render_selector_switch(
         .relative_path = "topology.json",
         .validation = validation_class::body_free,
         .content = result.topology_manifest_json,
-        .content_sha256 = sha256_hex(result.topology_manifest_json),
+        .content_sha256 = bioseq::common::sha256_hex(result.topology_manifest_json),
     });
     std::ranges::sort(
         result.artifacts,
@@ -841,7 +855,7 @@ inline void render_selector_switch(
                 + ": template_flatten marker escaped into production output");
         }
     }
-    rendered_artifact_manifest rendered_manifest = render_artifact_manifest(
+    rendered_publication_manifest rendered_manifest = render_artifact_manifest(
         plan, result.artifacts, plan.previous_manifest_identity);
     result.artifact_manifest_json = std::move(rendered_manifest.json);
     result.manifest_identity = std::move(rendered_manifest.manifest_identity);

@@ -2,14 +2,14 @@
  * @file fasta.cppm
  * @brief Per-record FASTA FSM driver.
  *
- * Walks the slab via `bioseq_io.simd_kernels::scan_first_byte` to find
+ * Walks the slab via `bioseq.io.simd` to find
  * record boundaries. The encoder pipeline lives in
- * `bioseq_sequences.simd` (see `encode_body_chunk` and the dna4 SIMD
+ * `bioseq.sequences.simd` (see `encode_body_chunk` and the dna4 SIMD
  * primitives); this module is the FSM glue.
  *
- * v2 storage model: the FSM appends header bytes directly into the
+ * The FSM appends header bytes directly into the
  * batch's shared `_header_storage`, and the encoder pushes packed
- * sequence words directly into the batch's shared `_seq_storage`. The
+ * sequence words directly into the batch's shared `_sequence_storage`. The
  * emit-record callback only records the per-record offset / padding
  * triple. There is NO per-record `std::string` or `std::vector`
  * allocation on this path — the batch's three backing vectors grow
@@ -23,9 +23,7 @@
  */
 module;
 
-//include <hwy/highway.h>
-
-#include "common.h"
+#include <libassert/assert.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -37,63 +35,60 @@ module;
 
 export module bioseq.io.fasta;
 
-import bioseq.common.mlogging;
-import bioseq.common.sequan_compat;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.io.options;
 import bioseq.io.errors;
-import bioseq.io.simd_kernels;
+import bioseq.io.simd;
 
 export namespace bioseq::io {
 
 /// FASTA per-record FSM progress marker. Used to resume parsing after a
-/// refill. Spec §7.4.
-enum class fasta_progress : std::uint8_t {
-    AT_HEADER_SIGIL = 0,
-    IN_HEADER,
-    AT_BODY_LINE_START,
-    FINISHED_RECORD,
+/// refill.
+enum class fasta_parser_progress : std::uint8_t {
+    at_header_sigil = 0,
+    in_header,
+    at_body_line_start,
+    finished_record,
 };
 
 /// Outcome of a single `parse_one_fasta_record` call.
 enum class parse_outcome : std::uint8_t {
-    COMPLETE = 0,    ///< A record was emitted; cursor advanced past it.
-    INCOMPLETE,      ///< Need more bytes; refill and call again.
-    AT_EOF,          ///< Slab is empty and EOF — no more records.
-    ABORT,           ///< failure_fn invoked; abort the pipeline.
+    complete = 0,       ///< A record was emitted; cursor advanced past it.
+    incomplete,         ///< Need more bytes; refill and call again.
+    at_end_of_file,     ///< Slab is empty and EOF — no more records.
+    abort,              ///< The failure callback requested termination.
 };
 
 /// Returned by `parse_one_fasta_record` / `parse_one_fastq_record` to
-/// avoid an out-pointer for the cursor (main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1 / §5
-/// forbids output pointer parameters). The caller does
+/// avoid an output pointer for the cursor. The caller does
 /// `auto step = parse_one_*_record(...); slab.parse_cursor =
 /// step.cursor;` after each call.
-struct parse_step_result {
-    parse_outcome outcome = parse_outcome::INCOMPLETE;
+struct record_parse_result {
+    parse_outcome outcome = parse_outcome::incomplete;
     std::size_t   cursor  = 0;
 };
 
 /// Per-record FASTA parser state. Aligned to a cache line so a future
-/// multi-parser pipeline (spec §13.4) can store one state per parser
+/// multi-parser pipeline can store one state per parser
 /// thread without false-sharing the partial-encoding fields.
 template <typename storage_unit_t,
           std::size_t BitsPerChar,
           std::size_t LettersPerUnit>
 struct alignas(64) fasta_parser_state {
-    fasta_progress progress = fasta_progress::AT_HEADER_SIGIL;
+    fasta_parser_progress progress = fasta_parser_progress::at_header_sigil;
     /// Offset into the batch's `_header_storage` where the current
-    /// record's header bytes start. Captured at the AT_HEADER_SIGIL →
-    /// IN_HEADER transition. Used by the emit_record callback.
+    /// record's header bytes start. Captured when header parsing begins
+    /// and used by the emit-record callback.
     std::size_t header_start_offset = 0;
     bioseq::simd::active_target::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
     /// Borrowed pointer to the batch's shared header buffer. The FSM
-    /// pushes header bytes into this directly to avoid the v1
-    /// per-record `std::string` allocation.
+    /// pushes header bytes into this directly to avoid per-record allocation.
     std::vector<char>* header_storage = nullptr;
 
     void reset_for_next_record() noexcept {
-        progress = fasta_progress::AT_HEADER_SIGIL;
+        progress = fasta_parser_progress::at_header_sigil;
         body.reset();
     }
 
@@ -126,7 +121,7 @@ template <
     typename storage_unit_t = std::uint64_t,
     typename emit_record_fn_t,
     typename failure_fn_t>
-[[nodiscard]] parse_step_result parse_one_fasta_record(
+[[nodiscard]] record_parse_result parse_one_fasta_record(
     fasta_parser_state<storage_unit_t,
         compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::bits_per_char,
         compact_sequence_range<sequence_custom_alphabet<alphabet_t, storage_unit_t>>::traits::letters_per_unit>& state,
@@ -150,10 +145,10 @@ template <
                  "fasta_parser_state must be attached to a batch via attach_to_batch");
 
     // Step 1: AT_HEADER_SIGIL — expect '>' or EOF.
-    if (state.progress == fasta_progress::AT_HEADER_SIGIL) {
+    if (state.progress == fasta_parser_progress::at_header_sigil) {
         if (cursor >= slab_size) {
-            return parse_step_result{
-                is_eof ? parse_outcome::AT_EOF : parse_outcome::INCOMPLETE,
+            return record_parse_result{
+                is_eof ? parse_outcome::at_end_of_file : parse_outcome::incomplete,
                 cursor};
         }
         if (slab_data[cursor] != '>') {
@@ -161,17 +156,17 @@ template <
                          "expected '>' at file position {}, got byte 0x{:02x}",
                          global_offset + cursor,
                          static_cast<unsigned>(slab_data[cursor]));
-            return parse_step_result{parse_outcome::ABORT, cursor};
+            return record_parse_result{parse_outcome::abort, cursor};
         }
         // Snapshot offsets at the start of the record for emit_record.
         state.header_start_offset = state.header_storage->size();
         state.body.record_start_offset = state.body.output_storage->size();
         cursor += 1;  // consume '>'
-        state.progress = fasta_progress::IN_HEADER;
+        state.progress = fasta_parser_progress::in_header;
     }
 
     // Step 2: IN_HEADER — scan to '\n', strip optional '\r'.
-    if (state.progress == fasta_progress::IN_HEADER) {
+    if (state.progress == fasta_parser_progress::in_header) {
         const std::size_t remaining = slab_size - cursor;
         const std::size_t newline_offset = simd::scan_first_byte(
             '\n', slab_data + cursor, remaining);
@@ -180,7 +175,7 @@ template <
                 state.header_storage->end(),
                 reinterpret_cast<const char*>(slab_data + cursor),
                 reinterpret_cast<const char*>(slab_data + cursor + remaining));
-            return parse_step_result{parse_outcome::INCOMPLETE, slab_size};
+            return record_parse_result{parse_outcome::incomplete, slab_size};
         }
         std::size_t header_size = newline_offset;
         if (header_size > 0 && slab_data[cursor + header_size - 1] == '\r') {
@@ -191,7 +186,7 @@ template <
             reinterpret_cast<const char*>(slab_data + cursor),
             reinterpret_cast<const char*>(slab_data + cursor + header_size));
         cursor += newline_offset + 1;  // consume '\n'
-        state.progress = fasta_progress::AT_BODY_LINE_START;
+        state.progress = fasta_parser_progress::at_body_line_start;
     }
 
     // Step 3 & 4: body lines, looking for the next '>' that terminates this record.
@@ -207,24 +202,24 @@ template <
     //     this is ~3 M state-machine iterations collapsed to one
     //     pass.
     //   * Other alphabets / storage units: fall back to the per-line
-    //     loop with the scalar encoder. This path is unchanged from
-    //     v2 — the multiline encoder is a dna4-uint64 specialisation.
+    //     loop with the scalar encoder. The multiline encoder is a
+    //     dna4-uint64 specialisation.
     constexpr bool use_multiline_encoder =
         std::is_same_v<alphabet_t, seq::dna4>
         && std::is_same_v<storage_unit_t, std::uint64_t>
         && bits_per_char == 2 && letters_per_unit == 32;
 
     if constexpr (use_multiline_encoder) {
-        while (state.progress == fasta_progress::AT_BODY_LINE_START) {
+        while (state.progress == fasta_parser_progress::at_body_line_start) {
             if (cursor >= slab_size) {
                 if (is_eof) {
-                    state.progress = fasta_progress::FINISHED_RECORD;
+                    state.progress = fasta_parser_progress::finished_record;
                     break;
                 }
-                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+                return record_parse_result{parse_outcome::incomplete, cursor};
             }
             if (slab_data[cursor] == '>') {
-                state.progress = fasta_progress::FINISHED_RECORD;
+                state.progress = fasta_parser_progress::finished_record;
                 break;
             }
             const std::size_t remaining = slab_size - cursor;
@@ -243,28 +238,28 @@ template <
                         /*newline_count_out=*/nullptr);
             cursor += consumed;
             if (consumed < remaining) {
-                state.progress = fasta_progress::FINISHED_RECORD;
+                state.progress = fasta_parser_progress::finished_record;
                 break;
             }
             // No '>' found — either EOF closes the record or we need
             // a refill.
             if (is_eof) {
-                state.progress = fasta_progress::FINISHED_RECORD;
+                state.progress = fasta_parser_progress::finished_record;
                 break;
             }
-            return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+            return record_parse_result{parse_outcome::incomplete, cursor};
         }
     } else {
-        while (state.progress == fasta_progress::AT_BODY_LINE_START) {
+        while (state.progress == fasta_parser_progress::at_body_line_start) {
             if (cursor >= slab_size) {
                 if (is_eof) {
-                    state.progress = fasta_progress::FINISHED_RECORD;
+                    state.progress = fasta_parser_progress::finished_record;
                     break;
                 }
-                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+                return record_parse_result{parse_outcome::incomplete, cursor};
             }
             if (slab_data[cursor] == '>') {
-                state.progress = fasta_progress::FINISHED_RECORD;
+                state.progress = fasta_parser_progress::finished_record;
                 break;
             }
             const std::size_t remaining = slab_size - cursor;
@@ -282,10 +277,10 @@ template <
                         storage_unit_t, bits_per_char, letters_per_unit>(
                             state.body, slab_data + cursor, line_size);
                     cursor += remaining;
-                    state.progress = fasta_progress::FINISHED_RECORD;
+                    state.progress = fasta_parser_progress::finished_record;
                     break;
                 }
-                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+                return record_parse_result{parse_outcome::incomplete, cursor};
             }
             std::size_t line_size = newline_offset;
             if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
@@ -301,7 +296,7 @@ template <
     }
 
     // Step 5: FINISHED_RECORD — finalise, emit, reset.
-    if (state.progress == fasta_progress::FINISHED_RECORD) {
+    if (state.progress == fasta_parser_progress::finished_record) {
         const std::size_t header_size =
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
@@ -315,10 +310,10 @@ template <
                     seq_word_count,
                     padding);
         state.reset_for_next_record();
-        return parse_step_result{parse_outcome::COMPLETE, cursor};
+        return record_parse_result{parse_outcome::complete, cursor};
     }
 
-    return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+    return record_parse_result{parse_outcome::incomplete, cursor};
 }
 
 }  // namespace bioseq::io

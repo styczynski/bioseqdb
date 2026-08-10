@@ -49,7 +49,7 @@ static_assert(!std::is_copy_constructible_v<tx::transfer_service_passkey>,
 }  // namespace
 
 TEST_CASE("transfer_service_ref dispatches only through the erasure",
-          "[external][provider][unit][transfer]") {
+          "[component:external_api][layer:contract][feature:external_source]") {
     spy_service spy;
     tx::transfer_service_ref ref = tx::make_transfer_service_ref(spy);
     REQUIRE(ref.object == &spy);
@@ -76,7 +76,7 @@ TEST_CASE("transfer_service_ref dispatches only through the erasure",
 }
 
 TEST_CASE("a hand-rolled transfer_service_ref has null thunks",
-          "[external][provider][unit][transfer]") {
+          "[component:external_api][layer:contract][feature:external_source]") {
     tx::transfer_service_ref ref{};
     REQUIRE(ref.object == nullptr);
     REQUIRE(ref.validate_fn == nullptr);

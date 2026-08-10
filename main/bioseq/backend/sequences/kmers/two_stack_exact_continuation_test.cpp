@@ -2,7 +2,7 @@
 // neutral fragment-source ABI.  No comparison in this file sorts or uniques:
 // hash, position, strand, order, and duplicate multiplicity are all observable.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include <algorithm>
 #include <array>
@@ -25,27 +25,27 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
-import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.kmers.two_stack_minimizers;
 
 namespace {
 
-using bioseq::minimizers::MinimapSketchData;
-using bioseq::minimizers::MinimizerKernelAlgorithm;
-using bioseq::minimizers::MinimizerKernelInvocation;
-using bioseq::minimizers::MinimizerKernelResult;
-using bioseq::minimizers::MinimizerKernelStatus;
-using bioseq::minimizers::MinimizerOutputLayout;
-using bioseq::minimizers::MinimizerRepr;
-using bioseq::minimizers::MinimizerSink;
-using bioseq::minimizers::MinimizerSinkBatchView;
-using bioseq::minimizers::PackedSequenceFragmentSource;
-using bioseq::minimizers::PackedSequenceKernelFragment;
-using bioseq::minimizers::PackedSequenceKernelView;
-using bioseq::minimizers::TwoStackContinuationStatus;
-using bioseq::minimizers::TwoStackExecutionProof;
-using bioseq::minimizers::TwoStackRoute;
-using bioseq::minimizers::two_stack_exact_max_kmer;
-using bioseq::minimizers::two_stack_max_window;
+using bioseq::minimizers::minimap_sketch_data;
+using bioseq::minimizers::minimizer_kernel_algorithm;
+using bioseq::minimizers::minimizer_kernel_invocation;
+using bioseq::minimizers::minimizer_kernel_result;
+using bioseq::minimizers::minimizer_kernel_status;
+using bioseq::minimizers::minimizer_output_layout;
+using bioseq::minimizers::minimizer_representation;
+using bioseq::minimizers::minimizer_sink;
+using bioseq::minimizers::minimizer_sink_batch_view;
+using bioseq::minimizers::packed_sequence_fragment_source;
+using bioseq::minimizers::packed_sequence_kernel_fragment;
+using bioseq::minimizers::packed_sequence_kernel_view;
+using bioseq::minimizers::two_stack_continuation_status;
+using bioseq::minimizers::two_stack_execution_stats;
+using bioseq::minimizers::two_stack_route;
+using bioseq::minimizers::k_max_exact_two_stack_kmer;
+using bioseq::minimizers::k_max_two_stack_window;
 
 struct exact_minimizer final {
     std::uint64_t hash = 0u;
@@ -54,12 +54,12 @@ struct exact_minimizer final {
     [[nodiscard]] bool operator==(const exact_minimizer&) const = default;
 };
 
-template<class MinimizerT>
+template<class p_minimizer_type>
 class exact_sink final {
 public:
-    static constexpr std::size_t batch_capacity = 256u;
+    static constexpr std::size_t k_batch_capacity = 256u;
 
-    [[nodiscard]] MinimizerSink contract() noexcept {
+    [[nodiscard]] minimizer_sink contract() noexcept {
         return {
             .state = this,
             .acquire = &acquire,
@@ -77,37 +77,37 @@ public:
         return result;
     }
 
-    std::vector<MinimizerT> records;
+    std::vector<p_minimizer_type> records;
     bool protocol_ok = true;
     bool reject = false;
 
 private:
-    [[nodiscard]] static MinimizerSinkBatchView acquire(
+    [[nodiscard]] static minimizer_sink_batch_view acquire(
         void* opaque, const std::size_t minimum)
     {
         auto& self = *static_cast<exact_sink*>(opaque);
-        if (self.reject || self.pending_ || minimum > batch_capacity) {
+        if (self.reject || self.pending_ || minimum > k_batch_capacity) {
             self.protocol_ok = false;
             return {};
         }
         self.pending_ = true;
         return {
             .data = self.storage_.data(),
-            .capacity = batch_capacity,
-            .layout = bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
-            .record_size = sizeof(MinimizerT),
-            .record_alignment = alignof(MinimizerT),
+            .capacity = k_batch_capacity,
+            .layout = bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>,
+            .record_size = sizeof(p_minimizer_type),
+            .record_alignment = alignof(p_minimizer_type),
         };
     }
 
     static void commit(void* opaque, const std::size_t initialized) noexcept {
         auto& self = *static_cast<exact_sink*>(opaque);
-        if (!self.pending_ || initialized > batch_capacity) {
+        if (!self.pending_ || initialized > k_batch_capacity) {
             self.protocol_ok = false;
             return;
         }
         auto* const first = std::launder(
-            reinterpret_cast<MinimizerT*>(self.storage_.data()));
+            reinterpret_cast<p_minimizer_type*>(self.storage_.data()));
         try {
             if (self.reject) throw std::bad_alloc{};
             self.records.insert(self.records.end(), first, first + initialized);
@@ -120,24 +120,24 @@ private:
 
     [[nodiscard]] static bool append_raw_u64(
         void* opaque,
-        const MinimizerOutputLayout layout,
+        const minimizer_output_layout layout,
         const std::uint64_t* raw,
         const std::size_t count) noexcept
     {
         auto& self = *static_cast<exact_sink*>(opaque);
         if (self.reject || self.pending_
             || layout
-                != bioseq::minimizers::minimizer_output_layout_v<MinimizerT>
+                != bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>
             || (count != 0u && raw == nullptr)) {
             self.protocol_ok = false;
             return false;
         }
-        if constexpr (std::same_as<typename MinimizerT::storage_t,
+        if constexpr (std::same_as<typename p_minimizer_type::storage_type,
                                    std::uint64_t>) {
             try {
                 const auto decoded = std::span<const std::uint64_t>{raw, count}
                     | std::views::transform([](const std::uint64_t value) {
-                        return MinimizerT::from_raw_storage(value);
+                        return p_minimizer_type::from_raw_storage(value);
                     });
                 self.records.insert(
                     self.records.end(), decoded.begin(), decoded.end());
@@ -152,8 +152,8 @@ private:
         }
     }
 
-    alignas(MinimizerT) std::array<
-        std::byte, batch_capacity * sizeof(MinimizerT)> storage_;
+    alignas(p_minimizer_type) std::array<
+        std::byte, k_batch_capacity * sizeof(p_minimizer_type)> storage_;
     bool pending_ = false;
 };
 
@@ -161,10 +161,10 @@ private:
     return bioseq::simd_dispatch::highway_test_kernel_table();
 }
 
-template<sequence_alphabet Alphabet>
+template<sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint8_t alphabet_code() {
     const auto* identity = fixed_table().template resolve_alphabet_identity<
-        Alphabet>();
+        p_alphabet>();
     if (identity == nullptr) {
         throw std::logic_error{"fixed target lacks requested alphabet"};
     }
@@ -172,7 +172,7 @@ template<sequence_alphabet Alphabet>
 }
 
 template<class Range>
-[[nodiscard]] PackedSequenceKernelView packed_view(const Range& range) {
+[[nodiscard]] packed_sequence_kernel_view packed_view(const Range& range) {
     using traits = typename Range::traits;
     return {
         .storage = range.size() == 0u ? nullptr
@@ -199,7 +199,7 @@ template<class Range>
     return result;
 }
 
-template<class MinimizerT = MinimapSketchData>
+template<class p_minimizer_type = minimap_sketch_data>
 [[nodiscard]] std::vector<exact_minimizer> scalar_oracle(
     const std::vector<seq::dna4>& data,
     const std::size_t window,
@@ -218,9 +218,9 @@ template<class MinimizerT = MinimapSketchData>
         data.begin() + static_cast<std::ptrdiff_t>(bounded_end));
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     compact_sequence_range<config> range(slice);
-    bioseq::minimizers::sketch_collector_t<MinimizerT> collector;
+    bioseq::minimizers::basic_sketch_collector<p_minimizer_type> collector;
     bioseq::simd::collect_minimizers_view<
-        bioseq::simd::minimap_int_hasher, MinimizerT>(
+        bioseq::simd::minimap_int_hasher, p_minimizer_type>(
             collector, range, range.begin(), range.end(), window, kmer);
     std::vector<exact_minimizer> result;
     for (const auto& record : collector.extract_sketches_data()) {
@@ -250,7 +250,7 @@ struct fragment_source final {
     std::vector<owned_fragment> fragments;
     std::size_t releases = 0u;
 
-    [[nodiscard]] static PackedSequenceKernelFragment read(
+    [[nodiscard]] static packed_sequence_kernel_fragment read(
         void* opaque, const std::size_t index)
     {
         const auto& value = static_cast<fragment_source*>(opaque)->fragments.at(
@@ -296,13 +296,13 @@ struct fragment_source final {
 
 struct run_result final {
     std::vector<exact_minimizer> records;
-    TwoStackExecutionProof proof{};
-    MinimizerKernelResult kernel{};
+    two_stack_execution_stats stats{};
+    minimizer_kernel_result kernel{};
     std::size_t releases = 0u;
     bool sink_ok = false;
 };
 
-template<class MinimizerT = MinimapSketchData>
+template<class p_minimizer_type = minimap_sketch_data>
 [[nodiscard]] run_result run_fragmented(
     const std::vector<seq::dna4>& data,
     const std::vector<fragment_spec>& specs,
@@ -318,9 +318,9 @@ template<class MinimizerT = MinimapSketchData>
     }
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using traits = compact_sequence_range<config>::traits;
-    exact_sink<MinimizerT> sink;
+    exact_sink<p_minimizer_type> sink;
     sink.reject = reject_sink;
-    MinimizerKernelInvocation invocation{
+    minimizer_kernel_invocation invocation{
         .sequence = {
             .storage = nullptr,
             .storage_units = (data.size() + traits::letters_per_unit - 1u)
@@ -343,12 +343,12 @@ template<class MinimizerT = MinimapSketchData>
         .kmer = kmer,
         .emitted_position_base = position_base,
         .output_layout =
-            bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
+            bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>,
         .output_hash_mask = static_cast<std::uint64_t>(
-            MinimizerT::hash_field_mask),
+            p_minimizer_type::k_hash_field_mask),
         .output_position_mask = static_cast<std::uint64_t>(
-            MinimizerT::pos_field_mask),
-        .two_stack_route = TwoStackRoute::chronological_continuation,
+            p_minimizer_type::k_position_field_mask),
+        .two_stack_route = two_stack_route::chronological_continuation,
         .sink = sink.contract(),
     };
     const auto kernel = fixed_table().minimizers.two_stack_nthash;
@@ -356,14 +356,14 @@ template<class MinimizerT = MinimapSketchData>
     auto result = kernel(invocation);
     return {
         .records = sink.decoded(),
-        .proof = result.proof.two_stack,
+        .stats = result.stats.two_stack,
         .kernel = result,
         .releases = source.releases,
         .sink_ok = sink.protocol_ok,
     };
 }
 
-template<class MinimizerT = MinimapSketchData>
+template<class p_minimizer_type = minimap_sketch_data>
 [[nodiscard]] run_result run_resident(
     const std::vector<seq::dna4>& data,
     const std::size_t window,
@@ -372,19 +372,19 @@ template<class MinimizerT = MinimapSketchData>
 {
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     compact_sequence_range<config> packed{std::vector<seq::dna4>(data)};
-    exact_sink<MinimizerT> sink;
-    MinimizerKernelInvocation invocation{
+    exact_sink<p_minimizer_type> sink;
+    minimizer_kernel_invocation invocation{
         .sequence = packed_view(packed),
         .window = window,
         .kmer = kmer,
         .emitted_position_base = position_base,
         .output_layout =
-            bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
+            bioseq::minimizers::k_minimizer_output_layout<p_minimizer_type>,
         .output_hash_mask = static_cast<std::uint64_t>(
-            MinimizerT::hash_field_mask),
+            p_minimizer_type::k_hash_field_mask),
         .output_position_mask = static_cast<std::uint64_t>(
-            MinimizerT::pos_field_mask),
-        .two_stack_route = TwoStackRoute::chronological_continuation,
+            p_minimizer_type::k_position_field_mask),
+        .two_stack_route = two_stack_route::chronological_continuation,
         .sink = sink.contract(),
     };
     const auto kernel = fixed_table().minimizers.two_stack_nthash;
@@ -392,7 +392,7 @@ template<class MinimizerT = MinimapSketchData>
     auto result = kernel(invocation);
     return {
         .records = sink.decoded(),
-        .proof = result.proof.two_stack,
+        .stats = result.stats.two_stack,
         .kernel = result,
         .sink_ok = sink.protocol_ok,
     };
@@ -414,25 +414,25 @@ void require_success(
     const std::vector<exact_minimizer>& expected,
     const bool require_vector_work = true)
 {
-    REQUIRE(result.kernel.status == MinimizerKernelStatus::ok);
+    REQUIRE(result.kernel.status == minimizer_kernel_status::ok);
     REQUIRE(result.kernel.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::ok));
-    REQUIRE(result.kernel.proof.algorithm
-        == MinimizerKernelAlgorithm::two_stack_nthash);
-    REQUIRE(result.kernel.proof.target
+        two_stack_continuation_status::ok));
+    REQUIRE(result.kernel.stats.algorithm
+        == minimizer_kernel_algorithm::two_stack_nthash);
+    REQUIRE(result.kernel.stats.target
         == bioseq::simd_dispatch::highway_test_target_binding().target);
     REQUIRE(result.sink_ok);
     REQUIRE(result.kernel.emitted == result.records.size());
     REQUIRE(result.records == expected);
-    REQUIRE(result.proof.scalar_backend_branches == 0u);
-    REQUIRE(result.proof.scalar_tail_symbols == 0u);
-    REQUIRE(result.proof.scalar_hash_symbols == 0u);
-    REQUIRE(result.proof.scalar_window_transitions == 0u);
-    REQUIRE(result.proof.scalar_event_records == 0u);
-    REQUIRE(result.proof.scalar_sort_records == 0u);
-    REQUIRE(result.proof.scalar_dedup_records == 0u);
-    REQUIRE(result.proof.fail_closed_rejections == 0u);
-    REQUIRE(result.proof.accepted(require_vector_work));
+    REQUIRE(result.stats.scalar_backend_branches == 0u);
+    REQUIRE(result.stats.scalar_tail_symbols == 0u);
+    REQUIRE(result.stats.scalar_hash_symbols == 0u);
+    REQUIRE(result.stats.scalar_window_transitions == 0u);
+    REQUIRE(result.stats.scalar_event_records == 0u);
+    REQUIRE(result.stats.scalar_sort_records == 0u);
+    REQUIRE(result.stats.scalar_dedup_records == 0u);
+    REQUIRE(result.stats.fail_closed_rejections == 0u);
+    REQUIRE(result.stats.is_internally_consistent(require_vector_work));
 }
 
 TEST_CASE("two_stack continuation — exact runtime and constexpr contiguous parity",
@@ -447,8 +447,8 @@ TEST_CASE("two_stack continuation — exact runtime and constexpr contiguous par
     require_success(resident, expected);
     require_success(fragmented, expected);
     REQUIRE(resident.records == fragmented.records);
-    REQUIRE(fragmented.proof.bp_consumed == data.size());
-    REQUIRE(fragmented.proof.masked_tail_lanes > 0u);
+    REQUIRE(fragmented.stats.bp_consumed == data.size());
+    REQUIRE(fragmented.stats.masked_tail_lanes > 0u);
 }
 
 TEST_CASE("two_stack continuation — every early split has exact ownership",
@@ -462,7 +462,7 @@ TEST_CASE("two_stack continuation — every early split has exact ownership",
         const auto result = run_fragmented(
             data, adjacent_specs({{0u, split}, {split, data.size()}}), w, k);
         require_success(result, expected);
-        REQUIRE(result.proof.bp_consumed == data.size());
+        REQUIRE(result.stats.bp_consumed == data.size());
         REQUIRE(result.releases == 2u);
     }
 }
@@ -479,8 +479,8 @@ TEST_CASE("two_stack continuation — empty and one-symbol fragments",
     }
     const auto result = run_fragmented(data, adjacent_specs(ranges), w, k);
     require_success(result, scalar_oracle(data, w, k));
-    REQUIRE(result.proof.bp_consumed == data.size());
-    REQUIRE(result.proof.fragment_symbols_staged == data.size());
+    REQUIRE(result.stats.bp_consumed == data.size());
+    REQUIRE(result.stats.fragment_symbols_staged == data.size());
     REQUIRE(result.releases == ranges.size());
 }
 
@@ -505,7 +505,7 @@ TEST_CASE("two_stack continuation — randomized fragmentation exact parity",
         }
         const auto result = run_fragmented(data, adjacent_specs(ranges), w, k);
         require_success(result, expected);
-        REQUIRE(result.proof.bp_consumed == data.size());
+        REQUIRE(result.stats.bp_consumed == data.size());
     }
 }
 
@@ -527,7 +527,7 @@ TEST_CASE("two_stack continuation — bounded range preserves global coordinates
     }};
     const auto whole = run_fragmented(data, bounded, w, k, base);
     require_success(whole, expected);
-    REQUIRE(whole.proof.bp_consumed == end - begin);
+    REQUIRE(whole.stats.bp_consumed == end - begin);
 
     std::vector<seq::dna4> slice(
         data.begin() + static_cast<std::ptrdiff_t>(begin),
@@ -552,7 +552,7 @@ TEST_CASE("two_stack continuation — tie minimum crossing split is owned once",
     const auto result = run_fragmented(
         data, adjacent_specs({{0u, 48u}, {48u, data.size()}}), w, k);
     require_success(result, scalar_oracle(data, w, k));
-    REQUIRE(result.proof.first_window_tie_events > 0u);
+    REQUIRE(result.stats.first_window_tie_events > 0u);
 }
 
 TEST_CASE("two_stack continuation — every short length and final flush",
@@ -566,18 +566,18 @@ TEST_CASE("two_stack continuation — every short length and final flush",
         const auto result = run_fragmented(
             data, adjacent_specs({{0u, length}}), w, k);
         require_success(result, expected, length >= k);
-        REQUIRE(result.proof.bp_consumed == length);
-        REQUIRE(result.proof.final_flush_records
+        REQUIRE(result.stats.bp_consumed == length);
+        REQUIRE(result.stats.final_flush_records
             == (expected.empty() ? 0u : 1u));
         if (length < k) {
             REQUIRE(result.records.empty());
-            REQUIRE(result.proof.vector_batches == 0u);
-            REQUIRE(result.proof.minimizers_emitted == 0u);
+            REQUIRE(result.stats.vector_batches == 0u);
+            REQUIRE(result.stats.minimizers_emitted == 0u);
         }
     }
 }
 
-TEST_CASE("two_stack continuation — even-K palindromes consume sentinel slots",
+TEST_CASE("two_stack continuation — even-p_kmer_size palindromes consume sentinel slots",
           "[two_stack][exact][continuation][palindrome]") {
     constexpr std::size_t w = 3u;
     constexpr std::size_t k = 4u;
@@ -591,7 +591,7 @@ TEST_CASE("two_stack continuation — even-K palindromes consume sentinel slots"
                         {47u, data.size()}}),
         w, k);
     require_success(result, scalar_oracle(data, w, k));
-    REQUIRE(result.proof.palindrome_lanes > 0u);
+    REQUIRE(result.stats.palindrome_lanes > 0u);
 }
 
 TEST_CASE("two_stack continuation — equal entering multiplicity is preserved",
@@ -611,7 +611,7 @@ TEST_CASE("two_stack continuation — equal entering multiplicity is preserved",
         duplicate = duplicate || result.records[index] == result.records[index - 1u];
     }
     REQUIRE(duplicate);
-    REQUIRE(result.proof.entering_min_transitions > 0u);
+    REQUIRE(result.stats.entering_min_transitions > 0u);
 }
 
 TEST_CASE("two_stack continuation — expiry rescans use rightmost minima",
@@ -625,10 +625,10 @@ TEST_CASE("two_stack continuation — expiry rescans use rightmost minima",
                         {511u, data.size()}}),
         w, k);
     require_success(result, scalar_oracle(data, w, k));
-    REQUIRE(result.proof.expiry_rescan_transitions > 0u);
+    REQUIRE(result.stats.expiry_rescan_transitions > 0u);
 }
 
-TEST_CASE("two_stack continuation — W and K supported boundaries",
+TEST_CASE("two_stack continuation — p_window_size and p_kmer_size supported boundaries",
           "[two_stack][exact][continuation][boundaries]") {
     SECTION("W1 K1") {
         constexpr std::size_t w = 1u;
@@ -641,9 +641,9 @@ TEST_CASE("two_stack continuation — W and K supported boundaries",
         require_success(result, scalar_oracle(data, w, k));
     }
 
-    SECTION("maximum supported W and K") {
-        constexpr std::size_t w = two_stack_max_window;
-        constexpr std::size_t k = two_stack_exact_max_kmer;
+    SECTION("maximum supported p_window_size and p_kmer_size") {
+        constexpr std::size_t w = k_max_two_stack_window;
+        constexpr std::size_t k = k_max_exact_two_stack_kmer;
         const auto data = fixture(k + w + 41u);
         const auto result = run_fragmented(
             data,
@@ -670,12 +670,12 @@ TEST_CASE("two_stack continuation — unaligned packed source range",
     }};
     const auto result = run_fragmented(data, specs, w, k, base);
     require_success(result, scalar_oracle(data, w, k, begin, end, base));
-    REQUIRE(result.proof.packed_word_boundary_merges > 0u);
+    REQUIRE(result.stats.packed_word_boundary_merges > 0u);
 }
 
 TEST_CASE("two_stack continuation — real hash sentinel is never emitted",
           "[two_stack][exact][continuation][sentinel]") {
-    using representation = MinimizerRepr<33u, 15u>;
+    using representation = minimizer_representation<33u, 15u>;
     constexpr std::string_view sentinel_kmer = "AACATATAAATTCAA";
     std::vector<seq::dna4> data;
     data.reserve(sentinel_kmer.size());
@@ -692,40 +692,40 @@ TEST_CASE("two_stack continuation — real hash sentinel is never emitted",
     const std::uint32_t canonical = std::min(forward, reverse);
     REQUIRE((bioseq::simd::minimap_int_hasher<seq::dna4>::template
         scramble<std::uint32_t>(canonical, std::uint32_t{0x3fffffffu}))
-        == representation::hash_field_mask);
+        == representation::k_hash_field_mask);
     const auto expected = scalar_oracle<representation>(data, 1u, 15u);
     const auto result = run_fragmented<representation>(
         data, adjacent_specs({{0u, 3u}, {3u, data.size()}}), 1u, 15u);
     require_success(result, expected);
     REQUIRE(result.records.empty());
-    REQUIRE(result.proof.final_flush_records == 0u);
+    REQUIRE(result.stats.final_flush_records == 0u);
 }
 
-TEST_CASE("two_stack continuation — unsupported layout rejects before proof work",
+TEST_CASE("two_stack continuation — unsupported layout rejects before stats work",
           "[two_stack][exact][continuation][representation][neutral-boundary]") {
     const auto data = fixture(32u);
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     compact_sequence_range<config> packed{std::vector<seq::dna4>(data)};
-    exact_sink<MinimapSketchData> sink;
-    MinimizerKernelInvocation invocation{
+    exact_sink<minimap_sketch_data> sink;
+    minimizer_kernel_invocation invocation{
         .sequence = packed_view(packed),
         .window = 5u,
         .kmer = 7u,
-        .output_layout = MinimizerOutputLayout::unsupported,
-        .output_hash_mask = MinimapSketchData::hash_field_mask,
-        .output_position_mask = MinimapSketchData::pos_field_mask,
-        .two_stack_route = TwoStackRoute::chronological_continuation,
+        .output_layout = minimizer_output_layout::unsupported,
+        .output_hash_mask = minimap_sketch_data::k_hash_field_mask,
+        .output_position_mask = minimap_sketch_data::k_position_field_mask,
+        .two_stack_route = two_stack_route::chronological_continuation,
         .sink = sink.contract(),
     };
     const auto kernel = fixed_table().minimizers.two_stack_nthash;
     REQUIRE(kernel != nullptr);
     const auto result = kernel(invocation);
-    REQUIRE(result.status == MinimizerKernelStatus::invalid_configuration);
+    REQUIRE(result.status == minimizer_kernel_status::invalid_configuration);
     REQUIRE(result.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::unsupported_representation));
+        two_stack_continuation_status::unsupported_representation));
     REQUIRE(result.emitted == 0u);
     REQUIRE(sink.records.empty());
-    REQUIRE(result.proof.two_stack == TwoStackExecutionProof{});
+    REQUIRE(result.stats.two_stack == two_stack_execution_stats{});
 }
 
 } // namespace

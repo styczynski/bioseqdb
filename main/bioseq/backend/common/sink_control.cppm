@@ -1,20 +1,27 @@
+/**
+ * @file
+ * @brief Dependency-free flow signal shared by streaming sinks.
+ */
 module;
 
 #include <cstdint>
 
 export module bioseq.common.sink_control;
 
-// DOC0372: the single dependency-free continue/stop signal shared by generated
-// transport, provider writers, archive callbacks, and IO sinks. Each layer keeps
-// its own `std::expected<..., error_type>`; no adapter maps between duplicate
-// control enums. This module owns the type once and imports nothing beyond the
-// standard library so isolated generated targets can consume it without pulling
-// in any provider, IO, sequence, alphabet, or PostgreSQL edge.
 export namespace bioseq {
 
+/**
+ * @brief Tells a producer whether its sink accepts another item.
+ *
+ * The enum has an explicit one-byte representation so generated and manually
+ * authored adapters share the same layout without importing either domain.
+ */
 enum class sink_control : std::uint8_t {
+    /// Continue producing items.
     continue_,
+
+    /// Stop production successfully.
     stop
 };
 
-}  // namespace bioseq
+} // namespace bioseq

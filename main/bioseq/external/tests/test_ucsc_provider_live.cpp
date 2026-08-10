@@ -52,9 +52,9 @@ provider_message_sink_ref make_sink(catalog_collector& collector) {
 }  // namespace
 
 TEST_CASE("UCSC provider session normalizes live genome catalog",
-          "[external][ucsc-provider][live]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     context::context memory;
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto& pool = bioseq::parallelism::global_pool::instance();
 
     ucsc_plan plan;
     plan.target = query_target::catalog;

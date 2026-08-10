@@ -1,19 +1,23 @@
+/**
+ * @file
+ * @brief Lightweight public declarations for the Bioseq table module.
+ */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 #include <string_view>
 
-export module bioseq.table:api;
+export module bioseq.postgres.table:api;
 
 /*
- * Public table-module surface used outside bioseq.table.
+ * Public table-module surface used outside bioseq.postgres.table.
  *
  * C++ module partitions are only importable by units of the same named module,
- * so external modules import bioseq.table and see this small API partition
+ * so external modules import bioseq.postgres.table and see this small API partition
  * re-exported by the primary interface. The heavy implementation partitions stay
  * out of the primary module's re-export graph for GCC 16.1.
  */
-export const TableAmRoutine* GetBioseqColumnTableAmRoutine(void);
+export const TableAmRoutine* column_table_access_method(void);
 export void bioseq_tableam_init(void);
 
 export const CustomScanMethods* bioseq_customscan_methods(void);
@@ -34,5 +38,5 @@ export void bioseq_validate_raw_mmsearch_options(Query* query);
 export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement);
 export void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode);
 
-export CustomScan* bioseq_create_indexscan_node(void);
-export void bioseq_register_indexscan_node(void);
+export CustomScan* bioseq_create_index_scan_node(void);
+export void bioseq_register_index_scan_node(void);

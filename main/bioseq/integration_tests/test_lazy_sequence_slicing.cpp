@@ -1,7 +1,7 @@
 // DOC0377: SQL-level slicing/letter/algebra/bridge and durable-boundary tests.
 
-#include "common_tests_integration.h"
-#include "headers/pg_build_config.h"
+#include <tests/support/postgres.hpp>
+#include <bioseq/pg_build_profile.h>
 
 #include <algorithm>
 #include <array>

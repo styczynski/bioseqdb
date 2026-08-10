@@ -1,4 +1,4 @@
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 
 #include "../../../bench/prefilter_pipeline_metrics.hpp"
 

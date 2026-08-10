@@ -3,7 +3,8 @@
 // These exercise `run_ncbi_sequence_stream` (the bounded-memory replacement for
 // the whole-body efetch download that the PG custom scan drives for sequence
 // targets) against real NCBI E-utilities, plus deterministic offline bounded
-// channel accounting/backpressure. Live cases are tagged [live].
+// channel accounting/backpressure. Provider-backed cases select the network
+// resource explicitly.
 
 #include <atomic>
 #include <chrono>
@@ -53,11 +54,11 @@ struct payload_collector {
 }  // namespace
 
 TEST_CASE("run_ncbi_sequence_stream chunks NC_012920.1 as one final chunk",
-          "[external][streaming][live]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
     auto stats = exio::run_ncbi_sequence_stream(
         "NC_012920.1", prov::query_target::sequence_chunk,
-        exio::kDefaultChunkBases, collector.ref(), std::stop_token{});
+        exio::k_default_chunk_bases, collector.ref(), std::stop_token{});
     INFO("error: " << (stats.has_value() ? std::string{}
                                          : std::string(stats.error().message.view())));
     REQUIRE(stats.has_value());
@@ -69,9 +70,9 @@ TEST_CASE("run_ncbi_sequence_stream chunks NC_012920.1 as one final chunk",
 }
 
 TEST_CASE("run_ncbi_sequence_stream streams a 4.6 Mbp genome as ordered chunks",
-          "[external][streaming][live]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
-    const std::uint64_t chunk_bases = exio::kDefaultChunkBases;  // 1048572
+    const std::uint64_t chunk_bases = exio::k_default_chunk_bases;  // 1048572
     auto stats = exio::run_ncbi_sequence_stream(
         "NC_000913.3", prov::query_target::sequence_chunk, chunk_bases,
         collector.ref(), std::stop_token{});
@@ -96,10 +97,10 @@ TEST_CASE("run_ncbi_sequence_stream streams a 4.6 Mbp genome as ordered chunks",
 }
 
 TEST_CASE("run_ncbi_sequence_stream whole-record sequence target",
-          "[external][streaming][live]") {
+          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
     auto stats = exio::run_ncbi_sequence_stream(
-        "NC_012920.1", prov::query_target::sequence, exio::kDefaultChunkBases,
+        "NC_012920.1", prov::query_target::sequence, exio::k_default_chunk_bases,
         collector.ref(), std::stop_token{});
     REQUIRE(stats.has_value());
     REQUIRE(collector.rows.size() == 1);
@@ -108,7 +109,7 @@ TEST_CASE("run_ncbi_sequence_stream whole-record sequence target",
 }
 
 TEST_CASE("bounded_channel charges bytes/items and enforces backpressure",
-          "[external][streaming]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     SECTION("single-threaded charge accounting") {
         prov::bounded_channel<int> channel(/*bytes=*/1000, /*items=*/8);
         REQUIRE(channel.push(1, 100, std::stop_token{}).has_value());

@@ -5,7 +5,7 @@
 // k-way merged, must equal a single-pass sort+unique over all runs. No SIMD here.
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>

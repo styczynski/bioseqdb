@@ -3,8 +3,6 @@
  * @brief Runtime-gated helpers for coarse pipeline parallel regions.
  */
 module;
-#include "common.h"
-
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -18,59 +16,61 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::parallelism {
 
-enum class TaskParallelRegion : std::uint8_t {
+enum class task_parallel_region : std::uint8_t {
     query_batch,
     align_regions,
     segment_recompute,
     fragment_build,
 };
 
-struct TaskParallelMinTriggers {
-    static constexpr std::size_t MIN_QUERY_COUNT = 4;
-    static constexpr std::size_t MIN_REGIONS_COUNT = 4;
-    static constexpr std::size_t MIN_SEEDS_COUNT = 64;
-    static constexpr std::size_t MIN_FRAGMENTS_COUNT = 4;
+/// Minimum item counts that justify entering each coarse TBB region.
+struct task_parallel_minimums {
+    static constexpr std::size_t k_query_count = 4;
+    static constexpr std::size_t k_region_count = 4;
+    static constexpr std::size_t k_seed_count = 64;
+    static constexpr std::size_t k_fragment_count = 4;
 };
 
-class TaskParallelScope {
+/// Non-nesting guard for coarse pipeline parallel regions.
+class task_parallel_scope {
 public:
-    explicit TaskParallelScope(TaskParallelRegion) noexcept {
+    explicit task_parallel_scope(task_parallel_region) noexcept {
         unsigned expected = 0;
-        acquired_ = active_regions_.compare_exchange_strong(
+        is_acquired_ = active_regions_.compare_exchange_strong(
             expected, 1, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
-    TaskParallelScope(const TaskParallelScope&) = delete;
-    TaskParallelScope& operator=(const TaskParallelScope&) = delete;
-    ~TaskParallelScope() {
-        if (acquired_) {
+    task_parallel_scope(const task_parallel_scope&) = delete;
+    task_parallel_scope& operator=(const task_parallel_scope&) = delete;
+    ~task_parallel_scope() {
+        if (is_acquired_) {
             active_regions_.store(0, std::memory_order_release);
         }
     }
 
-    [[nodiscard]] bool acquired() const noexcept {
-        return acquired_;
+    [[nodiscard]] bool is_acquired() const noexcept {
+        return is_acquired_;
     }
 
-    [[nodiscard]] static bool active() noexcept {
+    [[nodiscard]] static bool is_active() noexcept {
         return active_regions_.load(std::memory_order_acquire) != 0;
     }
 
 private:
     inline static std::atomic<unsigned> active_regions_{0};
-    bool acquired_ = false;
+    bool is_acquired_ = false;
 };
 
-template <class Body>
+template <class p_body>
 inline void parallel_for_pipeline(
         std::size_t begin,
         std::size_t end,
         std::size_t grain,
         std::size_t min_items,
-        TaskParallelRegion region,
-        Body&& body) {
-    auto& pool = GlobalPool::instance();
-    if (!task_parallel(pool.mode())
-        || pool.max_concurrency() <= 1
+        task_parallel_region region,
+        p_body&& body) {
+    auto& pool = global_pool::instance();
+    if (!has_parallel_tasks(pool.get_mode())
+        || pool.maximum_concurrency() <= 1
         || end <= begin
         || (end - begin) < min_items) {
         if (end > begin) {
@@ -79,8 +79,8 @@ inline void parallel_for_pipeline(
         return;
     }
 
-    TaskParallelScope scope(region);
-    if (!scope.acquired()) {
+    task_parallel_scope scope(region);
+    if (!scope.is_acquired()) {
         body(begin, end);
         return;
     }
@@ -92,18 +92,18 @@ inline void parallel_for_pipeline(
         }});
 }
 
-template <class Body, class SerialFallback>
+template <class p_body, class p_serial_fallback>
 inline void parallel_for_pipeline_budgeted(
         std::size_t begin,
         std::size_t end,
         std::size_t min_items,
         std::uint64_t peak_bytes_per_item,
-        TaskParallelRegion region,
-        Body&& body,
-        SerialFallback&& serial_fallback) {
-    auto& pool = GlobalPool::instance();
-    if (!task_parallel(pool.mode())
-        || pool.max_concurrency() <= 1
+        task_parallel_region region,
+        p_body&& body,
+        p_serial_fallback&& serial_fallback) {
+    auto& pool = global_pool::instance();
+    if (!has_parallel_tasks(pool.get_mode())
+        || pool.maximum_concurrency() <= 1
         || end <= begin
         || (end - begin) < min_items) {
         if (end > begin) {
@@ -112,17 +112,17 @@ inline void parallel_for_pipeline_budgeted(
         return;
     }
 
-    TaskParallelScope scope(region);
-    if (!scope.acquired()) {
+    task_parallel_scope scope(region);
+    if (!scope.is_acquired()) {
         serial_fallback(begin, end);
         return;
     }
 
     for (std::size_t lo = begin; lo < end;) {
-        auto wave = try_reserve_budgeted_wave(pool.max_concurrency(), peak_bytes_per_item);
+        auto wave = try_reserve_budgeted_wave(pool.maximum_concurrency(), peak_bytes_per_item);
         const std::size_t hi = std::min(
             end, lo + static_cast<std::size_t>(wave.fanout));
-        if (!wave.admitted) {
+        if (!wave.is_admitted) {
             serial_fallback(lo, hi);
             lo = hi;
             continue;

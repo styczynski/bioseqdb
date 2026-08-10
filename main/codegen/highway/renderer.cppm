@@ -50,7 +50,7 @@ build_target_coordinates(const target_manifest& inventory) {
                     .case_ordinal = ordinal,
                 },
             },
-            .identity_namespace = target.name_space,
+            .identity_namespace = target.target_namespace,
             .module_name = generated_module_name(target),
             .relative_path = std::filesystem::path{target.platform}
                 / target.slug / "index.cppm",
@@ -200,7 +200,7 @@ build_target_coordinates(const target_manifest& inventory) {
 
 [[nodiscard]] inline std::string replace_target_namespace(
     std::string expression,
-    std::string_view name_space) {
+    std::string_view target_namespace) {
     constexpr std::string_view marker = "{target_namespace}";
     const std::size_t position = expression.find(marker);
     if (position == std::string::npos
@@ -209,7 +209,7 @@ build_target_coordinates(const target_manifest& inventory) {
         throw std::runtime_error(
             "slot expression lost its unique target namespace placeholder");
     }
-    expression.replace(position, marker.size(), name_space);
+    expression.replace(position, marker.size(), target_namespace);
     return expression;
 }
 
@@ -229,9 +229,8 @@ inline void replace_all(
     const generation_plan& plan,
     const target_spec& target,
     const namespace_materialization::materialization_coordinate& coordinate,
-    const probe_spec& probe,
-    const std::string_view role) {
-    std::string body = read_file(probe.path);
+    const probe_spec& probe) {
+    std::string body = read_artifact_bytes(probe.path);
     replace_all(
         body, "@BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@", coordinate.module_name);
     replace_all(
@@ -248,28 +247,28 @@ inline void replace_all(
         || body.contains("HWY_STATIC_DISPATCH")
         || body.contains("HWY_EXPORT(")) {
         throw std::runtime_error(
-            std::string{role} + " probe template '" + probe.key
+            "unit probe template '" + probe.key
             + "' did not materialize as a private ordinary implementation "
               "unit of the fixed-target primary");
     }
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
-           << "// Generated " << role << " probe from "
+           << "// Generated unit probe from "
            << diagnostic_source_path(probe.path) << "; do not edit.\n"
            << body;
     if (body.empty() || body.back() != '\n') output << '\n';
     return output.str();
 }
 
-[[nodiscard]] inline std::string render_minimizer_repr_instantiation(
+[[nodiscard]] inline std::string render_minimizer_representation_instantiation(
     const generation_plan& plan,
     const target_spec& target,
     const namespace_materialization::materialization_coordinate& coordinate,
-    const minimizer_repr_instance_spec& instance,
+    const minimizer_representation_instance_spec& instance,
     const source_spec& source) {
-    const std::string prefix = instance.algorithm == "reference"
-        ? "reference_minimap_int_repr_"
-        : "paper_nthash_repr_";
+    const std::string prefix = instance.algorithm == "minimap2_reference"
+        ? "minimap2_reference_repr_"
+        : "bounded_nthash_repr_";
     const std::string algorithm_prefix = instance.algorithm + "_";
     if (!instance.owner_key.starts_with(algorithm_prefix)) {
         throw std::runtime_error(
@@ -283,8 +282,8 @@ inline void replace_all(
            << "// Generated bounded minimizer representation owner; do not edit.\n"
            << "module " << coordinate.module_name << ";\n\n"
            << "import std;\n"
-           << "import bioseq.common.sequan_compat;\n"
-           << "import bioseq.sequences.kmers.highway_contract;\n"
+           << "import bioseq.common.seqan_adapter;\n"
+           << "import bioseq.sequences.kmers.highway_minimizer_contract;\n"
            << "import :" << source.partition << ";\n\n"
            << "namespace bioseq::simd::" << coordinate.identity_namespace
            << " {\n\n";
@@ -295,16 +294,16 @@ inline void replace_all(
         output
             << "[[nodiscard]] HWY_ATTR bool " << prefix << identity << "_"
             << storage << "(\n"
-            << "    ::bioseq::minimizers::MinimizerKernelInvocation& invocation,\n"
-            << "    ::bioseq::minimizers::MinimizerKernelResult& result)\n"
+            << "    ::bioseq::minimizers::minimizer_kernel_invocation& invocation,\n"
+            << "    ::bioseq::minimizers::minimizer_kernel_result& result)\n"
             << "{\n    return ";
-        if (instance.algorithm == "reference") {
+        if (instance.algorithm == "minimap2_reference") {
             output << "minimizer_kernel_detail::run_reference<\n"
                    << "        " << instance.representation_type
                    << ", ::seq::dna4, " << cpp_storage
                    << ">(invocation, result);\n";
         } else {
-            output << "coarse_paper_detail::run_paper<\n"
+            output << "bounded_nthash_kernel_detail::run_bounded_nthash<\n"
                    << "        " << instance.representation_type << ", "
                    << cpp_storage << ">(invocation, result);\n";
         }
@@ -354,7 +353,7 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
  * Extract the sole simple type argument from a target callable template-id.
  *
  * Alignment function pointers are alphabet-specific, so the generated binder
- * materializes one strongly typed AlignmentKernels<Alphabet> object per
+ * materializes one strongly typed alignment_kernels<Alphabet> object per
  * scheduler alphabet. Restricting the registry spelling to a qualified type
  * name keeps manifest data from becoming arbitrary generated C++.
  */
@@ -402,12 +401,12 @@ struct alignment_family_binding final {
 
 inline constexpr std::array<std::string_view, 6>
     alignment_required_members{
-        "ksw2_z2",
-        "ksw2_d2",
-        "ksw2_batched",
-        "block_prepare",
-        "block_try_certified_gap",
-        "block_align",
+        "align_ksw2_single_affine",
+        "align_ksw2_dual_affine",
+        "align_ksw2_batched",
+        "prepare_block_global_gap_certificate",
+        "try_block_certified_gap",
+        "align_block",
     };
 
 [[nodiscard]] inline std::vector<alignment_family_binding>
@@ -487,9 +486,9 @@ struct minimizer_required_member final {
 
 inline constexpr std::array<minimizer_required_member, 3>
     minimizer_required_members{{
-        {"reference_minimap_int", "minimizer_reference"},
-        {"two_stack_nthash", "minimizer_two_stack"},
-        {"paper_nthash", "minimizer_paper"},
+        {"minimap2_reference", "minimizer_minimap2_reference"},
+        {"two_stack_nthash", "minimizer_two_stack_nthash"},
+        {"bounded_nthash", "minimizer_bounded_nthash"},
     }};
 
 struct minimizer_case_binding final {
@@ -864,7 +863,7 @@ collect_alphabet_identities(
 
 [[nodiscard]] inline std::string minimizer_wrapper_name(
     const std::string_view member) {
-    return "MinimizerDispatch_" + std::string{member};
+    return "minimizer_dispatch_" + std::string{member};
 }
 
 [[nodiscard]] inline std::string minimizer_callable_expression(
@@ -890,9 +889,9 @@ inline void render_minimizer_wrapper(
 
     output
         << "[[nodiscard]] HWY_ATTR "
-           "::bioseq::minimizers::MinimizerKernelResult "
+           "::bioseq::minimizers::minimizer_kernel_result "
         << minimizer_wrapper_name(member.slot) << "(\n"
-        << "    ::bioseq::minimizers::MinimizerKernelInvocation& "
+        << "    ::bioseq::minimizers::minimizer_kernel_invocation& "
            "invocation) {\n"
         << "    switch (invocation.sequence.alphabet_code) {\n";
 
@@ -927,14 +926,14 @@ inline void render_minimizer_wrapper(
         << "        default:\n"
         << "            break;\n"
         << "    }\n"
-        << "    ::bioseq::minimizers::MinimizerKernelResult result{};\n"
-        << "    result.proof.algorithm = "
-           "::bioseq::minimizers::MinimizerKernelAlgorithm::"
+        << "    ::bioseq::minimizers::minimizer_kernel_result result{};\n"
+        << "    result.stats.algorithm = "
+           "::bioseq::minimizers::minimizer_kernel_algorithm::"
         << member.slot << ";\n"
-        << "    result.proof.target = "
+        << "    result.stats.target = "
            "static_cast<::std::int64_t>(HWY_TARGET);\n"
         << "    result.status = "
-           "::bioseq::minimizers::MinimizerKernelStatus::"
+           "::bioseq::minimizers::minimizer_kernel_status::"
            "invalid_configuration;\n"
         << "    return result;\n"
         << "}\n\n";
@@ -942,16 +941,15 @@ inline void render_minimizer_wrapper(
 
 [[nodiscard]] inline std::string_view kernel_enumerator_for_owner(
     std::string_view owner) {
-    if (owner == "minimizer_reference") {
-        return "minimizer_reference_minimap_int";
+    if (owner == "minimizer_minimap2_reference") {
+        return "minimizer_minimap2_reference";
     }
-    if (owner == "minimizer_two_stack") {
+    if (owner == "minimizer_two_stack_nthash") {
         return "minimizer_two_stack_nthash";
     }
-    if (owner == "minimizer_paper") {
-        return "minimizer_paper_nthash";
+    if (owner == "minimizer_bounded_nthash") {
+        return "minimizer_bounded_nthash";
     }
-    if (owner == "indexing") return "indexing_grouped32_validate";
     if (owner == "chaining") return "chaining_chain_anchors_simd";
     if (owner == "prefilter") {
         return "prefilter_sneaky_snake_simd_batch";
@@ -961,12 +959,12 @@ inline void render_minimizer_wrapper(
     if (owner == "block_aligner") return "alignment_block_aligner";
     throw std::runtime_error(
         "Highway table slot owner '" + std::string{owner}
-        + "' has no HighwayKernelId mapping");
+        + "' has no highway_kernel mapping");
 }
 
 [[nodiscard]] inline std::string population_name(
     const std::string_view owner) {
-    return "Populate_" + std::string{owner};
+    return "populate_" + std::string{owner};
 }
 
 [[nodiscard]] inline std::string alignment_population_name(
@@ -1011,14 +1009,14 @@ collect_slot_owners(const source_manifest& inventory) {
            << "export module " << coordinate.module_name << ";\n\n"
            << "import " << inventory.contract_module << ";\n";
     if (!alignment_families.empty()) {
-        output << "import bioseq.common.sequan_compat;\n"
+        output << "import bioseq.common.seqan_adapter;\n"
                << "import bioseq.sequences;\n";
     }
     output << "\n"
            << "export namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << " {\n"
-           << "[[nodiscard]] const HighwayTargetBinding* "
-              "BindHighwayTarget();\n"
+           << "[[nodiscard]] const highway_target_binding* "
+              "bind_highway_target();\n"
            << "}  // namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << "\n\n"
            << "namespace bioseq::simd_dispatch::"
@@ -1033,7 +1031,7 @@ collect_slot_owners(const source_manifest& inventory) {
             });
         if (has_root_slots) {
             output << "void " << population_name(owner)
-                   << "(::bioseq::simd_dispatch::HighwayKernelTable& table) "
+                   << "(::bioseq::simd_dispatch::highway_kernel_table& table) "
                       "noexcept;\n";
         }
         for (const alignment_family_binding& family : alignment_families) {
@@ -1046,7 +1044,7 @@ collect_slot_owners(const source_manifest& inventory) {
                 output << "void "
                        << alignment_population_name(
                               owner, family.alphabet_code)
-                       << "(::bioseq::simd::AlignmentKernels<"
+                       << "(::bioseq::simd::alignment_kernels<"
                        << family.alphabet_type << ">& table) noexcept;\n";
             }
         }
@@ -1085,7 +1083,7 @@ collect_slot_owners(const source_manifest& inventory) {
     output << "namespace " << source.enclosing_namespace << "::"
            << coordinate.identity_namespace << " {\n"
            << "#line " << source.body_first_line << " \""
-           << cpp_escape(diagnostic_source_path(source.source.path)) << "\"\n"
+           << escape_cpp_string_literal(diagnostic_source_path(source.source.path)) << "\"\n"
            << body_with_highway_attributes(source);
     if (source.body.empty() || source.body.back() != '\n') output << '\n';
     output << "}  // namespace " << source.enclosing_namespace << "::"
@@ -1137,7 +1135,7 @@ collect_slot_owners(const source_manifest& inventory) {
             [](const slot_spec* slot) {
                 return is_alignment_family(slot->family_field);
             })) {
-        output << "import bioseq.common.sequan_compat;\n"
+        output << "import bioseq.common.seqan_adapter;\n"
                << "import bioseq.sequences;\n";
     }
     output << "import :" << source.partition << ";\n\n"
@@ -1159,7 +1157,7 @@ collect_slot_owners(const source_manifest& inventory) {
         });
     if (has_root_slots) {
         output << "HWY_ATTR void " << population_name(owner)
-               << "(::bioseq::simd_dispatch::HighwayKernelTable& table) "
+               << "(::bioseq::simd_dispatch::highway_kernel_table& table) "
                   "noexcept {\n";
         if (owns_typed_minimizer) {
             output << "    table.minimizers." << minimizer_member->slot
@@ -1197,7 +1195,7 @@ collect_slot_owners(const source_manifest& inventory) {
             [](const slot_spec* slot) { return slot->slot_field; });
         output << "HWY_ATTR void "
                << alignment_population_name(owner, family.alphabet_code)
-               << "(::bioseq::simd::AlignmentKernels<"
+               << "(::bioseq::simd::alignment_kernels<"
                << family.alphabet_type << ">& table) noexcept {\n";
         for (const slot_spec* slot : owned_members) {
             output << "    table." << slot->slot_field << " = "
@@ -1233,7 +1231,7 @@ collect_slot_owners(const source_manifest& inventory) {
     for (const slot_spec& slot : plan.source_inventory.slots) {
         if (is_alignment_family(slot.family_field)
             || is_minimizer_case_family(slot.family_field)) {
-            output << "import bioseq.common.sequan_compat;\n"
+            output << "import bioseq.common.seqan_adapter;\n"
                    << "import bioseq.sequences;\n";
             break;
         }
@@ -1249,10 +1247,10 @@ collect_slot_owners(const source_manifest& inventory) {
             static_cast<void>(member);
             family_owners.insert(slot->owner_key);
         }
-        output << "HWY_ATTR ::bioseq::simd::AlignmentKernels<"
-               << family.alphabet_type << "> MakeAlignment_" << code
+        output << "HWY_ATTR ::bioseq::simd::alignment_kernels<"
+               << family.alphabet_type << "> make_alignment_" << code
                << "() noexcept {\n"
-               << "    ::bioseq::simd::AlignmentKernels<"
+               << "    ::bioseq::simd::alignment_kernels<"
                << family.alphabet_type << "> table{};\n";
         for (const std::string& owner : family_owners) {
             output << "    binding_detail::"
@@ -1263,8 +1261,8 @@ collect_slot_owners(const source_manifest& inventory) {
                << "}\n\n";
     }
 
-    output << "HWY_ATTR HighwayKernelTable MakeHighwayKernelTable() noexcept {\n"
-           << "    HighwayKernelTable table{};\n";
+    output << "HWY_ATTR highway_kernel_table make_highway_kernel_table() noexcept {\n"
+           << "    highway_kernel_table table{};\n";
 
     std::set<std::string, std::less<>> available_kernel_ids;
     for (const slot_spec& slot : plan.source_inventory.slots) {
@@ -1277,7 +1275,7 @@ collect_slot_owners(const source_manifest& inventory) {
         std::size_t index = 0;
         for (const std::string& kernel : available_kernel_ids) {
             output << (index++ == 0 ? "        " : "        | ")
-                   << "highway_kernel_set(HighwayKernelId::" << kernel << ")\n";
+                   << "highway_kernel_mask_for(highway_kernel::" << kernel << ")\n";
         }
         output << "        ;\n";
     }
@@ -1285,13 +1283,13 @@ collect_slot_owners(const source_manifest& inventory) {
     if (!alphabet_identities.empty()) {
         output
             << "    static const ::bioseq::simd_dispatch::"
-               "HighwayAlphabetIdentityEntry alphabet_identities[]{\n";
+               "highway_alphabet_identity_entry alphabet_identities[]{\n";
         for (const alphabet_identity_binding& identity
              : alphabet_identities) {
             output
                 << "        {.type_identity = "
                    "::bioseq::simd_dispatch::"
-                   "highway_alphabet_type_identity<"
+                   "highway_alphabet_identity_for<"
                 << identity.alphabet_type << ">(), .alphabet_code = "
                 << static_cast<unsigned int>(identity.alphabet_code)
                 << "u},\n";
@@ -1302,18 +1300,18 @@ collect_slot_owners(const source_manifest& inventory) {
 
     for (const alignment_family_binding& family : alignment_families) {
         const auto code = static_cast<unsigned int>(family.alphabet_code);
-        output << "    static const ::bioseq::simd::AlignmentKernels<"
+        output << "    static const ::bioseq::simd::alignment_kernels<"
                << family.alphabet_type << "> alignment_" << code
-               << " = MakeAlignment_" << code << "();\n";
+               << " = make_alignment_" << code << "();\n";
     }
     if (!alignment_families.empty()) {
-        output << "    static const ::bioseq::simd::AlignmentTableEntry "
+        output << "    static const ::bioseq::simd::alignment_table_entry "
                   "alignment_by_alphabet[]{\n";
         for (const alignment_family_binding& family : alignment_families) {
             const auto code = static_cast<unsigned int>(family.alphabet_code);
             output << "        {.alphabet_code = " << code
                    << "u, .typed_table_complete = "
-                      "::bioseq::simd::alignment_kernels_complete("
+                      "::bioseq::simd::is_alignment_kernel_table_complete("
                       "alignment_"
                    << code << "), .typed_table = &alignment_" << code
                    << "},\n";
@@ -1337,13 +1335,13 @@ collect_slot_owners(const source_manifest& inventory) {
     }
     output << "    return table;\n"
            << "}\n\n"
-           << "HWY_ATTR const HighwayTargetBinding* BindHighwayTarget() {\n"
-           << "    static const HighwayKernelTable kernels = "
-              "MakeHighwayKernelTable();\n"
-           << "    if (!kernels.complete()) {\n"
+           << "HWY_ATTR const highway_target_binding* bind_highway_target() {\n"
+           << "    static const highway_kernel_table kernels = "
+              "make_highway_kernel_table();\n"
+           << "    if (!kernels.is_complete()) {\n"
            << "        return nullptr;\n"
            << "    }\n"
-           << "    static const HighwayTargetBinding binding{\n"
+           << "    static const highway_target_binding binding{\n"
            << "        .target = HWY_TARGET,\n"
            << "        .target_name = hwy::TargetName(HWY_TARGET),\n"
            << "        .kernels = &kernels,\n"
@@ -1371,9 +1369,9 @@ collect_slot_owners(const source_manifest& inventory) {
         output << "import " << coordinate.module_name << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
-           << "HWY_EXPORT(BindHighwayTarget);\n\n"
-           << "const HighwayTargetBinding& select_highway_target_once(\n"
-              "    const HighwayDispatchInfo& plan) {\n"
+           << "HWY_EXPORT(bind_highway_target);\n\n"
+           << "const highway_target_binding& select_highway_target_once(\n"
+              "    const highway_dispatch_plan& plan) {\n"
            << "    if (plan.planned_target == 0\n"
               "        || (plan.runnable_targets & plan.planned_target) == 0) {\n"
            << "        throw std::logic_error{\n"
@@ -1382,11 +1380,11 @@ collect_slot_owners(const source_manifest& inventory) {
            << "    hwy::GetChosenTarget().Update(\n"
               "        plan.cpu_supported_targets);\n"
            << "    const auto* binding = "
-              "HWY_DYNAMIC_DISPATCH(BindHighwayTarget)();\n"
+              "HWY_DYNAMIC_DISPATCH(bind_highway_target)();\n"
            << "    if (binding == nullptr || binding->target == 0\n"
               "        || binding->target_name == nullptr\n"
               "        || binding->kernels == nullptr\n"
-              "        || !binding->kernels->complete()) {\n"
+              "        || !binding->kernels->is_complete()) {\n"
            << "        throw std::logic_error{"
               "\"Highway target binder returned an incomplete table\"};\n"
            << "    }\n"
@@ -1414,27 +1412,27 @@ collect_slot_owners(const source_manifest& inventory) {
         output << "import " << generated_module_name(target) << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
-           << "HighwayDispatchInfo registered_highway_dispatch_info() noexcept {\n"
-           << "    return highway_dispatch_info(static_cast<std::int64_t>("
+           << "highway_dispatch_plan registered_highway_dispatch_plan() noexcept {\n"
+           << "    return make_highway_dispatch_plan(static_cast<std::int64_t>("
            << compiled_mask << "ULL));\n"
            << "}\n\n"
-           << "const HighwayTargetBinding& registered_highway_target_binding(\n"
+           << "const highway_target_binding& registered_highway_target_binding(\n"
               "    const std::int64_t exact_target) {\n"
            << "    const auto target = static_cast<std::uint64_t>(exact_target);\n"
-           << "    const HighwayDispatchInfo plan =\n"
-              "        registered_highway_dispatch_info();\n"
+           << "    const highway_dispatch_plan plan =\n"
+              "        registered_highway_dispatch_plan();\n"
            << "    if (exact_target <= 0 || (target & (target - 1ULL)) != 0\n"
               "        || (plan.compiled_targets & exact_target) == 0\n"
               "        || (plan.runnable_targets & exact_target) == 0) {\n"
            << "        throw std::logic_error{\n"
               "            \"Highway exact-target rebind requires one compiled runnable bit\"};\n"
            << "    }\n"
-           << "    const HighwayTargetBinding* binding = nullptr;\n"
+           << "    const highway_target_binding* binding = nullptr;\n"
            << "    switch (target) {\n";
     for (const target_spec& target : plan.target_inventory.targets) {
         output << "        case " << target.bit << "ULL:\n"
-               << "            binding = " << target.name_space
-               << "::BindHighwayTarget();\n"
+               << "            binding = " << target.target_namespace
+               << "::bind_highway_target();\n"
                << "            break;\n";
     }
     output << "        default:\n"
@@ -1444,7 +1442,7 @@ collect_slot_owners(const source_manifest& inventory) {
            << "    if (binding == nullptr || binding->target != exact_target\n"
               "        || binding->target_name == nullptr\n"
               "        || binding->kernels == nullptr\n"
-              "        || !binding->kernels->complete()) {\n"
+              "        || !binding->kernels->is_complete()) {\n"
            << "        throw std::logic_error{\n"
               "            \"Highway exact-target binder returned an invalid table\"};\n"
            << "    }\n"
@@ -1478,21 +1476,21 @@ collect_slot_owners(const source_manifest& inventory) {
            << "import " << plan.source_inventory.contract_module << ";\n"
            << "import " << coordinate.module_name << ";\n\n"
            << "export namespace bioseq::simd_dispatch {\n\n"
-           << "[[nodiscard]] const HighwayTargetBinding& "
+           << "[[nodiscard]] const highway_target_binding& "
               "highway_test_target_binding() {\n"
-           << "    const HighwayTargetBinding* binding = "
-           << coordinate.identity_namespace << "::BindHighwayTarget();\n"
+           << "    const highway_target_binding* binding = "
+           << coordinate.identity_namespace << "::bind_highway_target();\n"
            << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
            << "        throw std::logic_error{"
               "\"generated fixed-target test binding is incomplete\"};\n"
            << "    }\n"
-           << "    if (!binding->kernels->complete()) {\n"
+           << "    if (!binding->kernels->is_complete()) {\n"
            << "        throw std::logic_error{"
               "\"generated fixed-target test table is incomplete\"};\n"
            << "    }\n"
            << "    return *binding;\n"
            << "}\n\n"
-           << "[[nodiscard]] const HighwayKernelTable& "
+           << "[[nodiscard]] const highway_kernel_table& "
               "highway_test_kernel_table() {\n"
            << "    return *highway_test_target_binding().kernels;\n"
            << "}\n\n"
@@ -1539,7 +1537,7 @@ inline void validate_rendered_artifact(
         if (count_text(artifact.content, "HWY_EXPORT(") != 1
             || count_text(artifact.content, "HWY_DYNAMIC_DISPATCH(") != 1
             || artifact.content.contains(
-                "registered_highway_dispatch_info")) {
+                "registered_highway_dispatch_plan")) {
             throw std::runtime_error(
                 "generated dispatch registry partition must own exactly one "
                 "export/dispatch and no cold inventory");
@@ -1553,7 +1551,7 @@ inline void validate_rendered_artifact(
     if (artifact.kind
         == artifact_kind::dispatch_inventory_implementation) {
         if (!artifact.content.contains(
-                "registered_highway_dispatch_info() noexcept")
+                "registered_highway_dispatch_plan() noexcept")
             || !artifact.content.contains(
                 "registered_highway_target_binding(")
             || artifact.content.contains("select_highway_target_once")
@@ -1582,29 +1580,28 @@ inline void validate_rendered_artifact(
     if (artifact.kind == artifact_kind::kernel_instantiation
         && (!artifact.content.contains("#define HWY_TARGET ")
             || !artifact.content.contains("import :")
-            || !artifact.content.contains("HWY_ATTR void Populate_")
-            || artifact.content.contains("BindHighwayTarget"))) {
+            || !artifact.content.contains("HWY_ATTR void populate_")
+            || artifact.content.contains("bind_highway_target"))) {
         throw std::runtime_error(
             artifact.relative_path.string()
             + ": kernel instantiation must own one target/partition binding");
     }
-    if (artifact.kind == artifact_kind::minimizer_repr_instantiation
+    if (artifact.kind == artifact_kind::minimizer_representation_instantiation
         && (!artifact.content.contains("#define HWY_TARGET ")
             || !artifact.content.contains("import :minimizer_")
             || !artifact.content.contains("_repr_")
-            || artifact.content.contains("Populate_")
-            || artifact.content.contains("BindHighwayTarget"))) {
+            || artifact.content.contains("populate_")
+            || artifact.content.contains("bind_highway_target"))) {
         throw std::runtime_error(
             artifact.relative_path.string()
             + ": minimizer representation owner must remain one bounded "
               "ordinary target implementation");
     }
-    if ((artifact.kind == artifact_kind::unit_probe_implementation
-         || artifact.kind == artifact_kind::bench_probe_implementation)
+    if (artifact.kind == artifact_kind::unit_probe_implementation
         && (!artifact.content.contains("#define HWY_TARGET ")
             || !artifact.content.contains("import :")
             || artifact.content.contains("export module")
-            || artifact.content.contains("BindHighwayTarget"))) {
+            || artifact.content.contains("bind_highway_target"))) {
         throw std::runtime_error(
             artifact.relative_path.string()
             + ": target-private probe escaped its ordinary implementation "
@@ -1676,8 +1673,8 @@ inline void validate_rendered_artifact(
                     *source->second),
             });
         }
-        for (const minimizer_repr_instance_spec& instance :
-             plan.source_inventory.minimizer_repr_instances) {
+        for (const minimizer_representation_instance_spec& instance :
+             plan.source_inventory.minimizer_representation_instances) {
             const auto source = sources_by_key.find(instance.source_key);
             if (source == sources_by_key.end()) {
                 throw std::runtime_error(
@@ -1687,12 +1684,12 @@ inline void validate_rendered_artifact(
             }
             result.artifacts.push_back(generated_artifact{
                 .relative_path = root / "instances"
-                    / ("minimizer_repr_" + instance.owner_key + ".cppm"),
+                    / ("minimizer_representation_" + instance.owner_key + ".cppm"),
                 .module_name = coordinate.module_name,
                 .target_token = target.token,
                 .source_key = instance.source_key,
-                .kind = artifact_kind::minimizer_repr_instantiation,
-                .content = detail::render_minimizer_repr_instantiation(
+                .kind = artifact_kind::minimizer_representation_instantiation,
+                .content = detail::render_minimizer_representation_instantiation(
                     plan, target, coordinate, instance, *source->second),
             });
         }
@@ -1719,20 +1716,7 @@ inline void validate_rendered_artifact(
                     .source_key = probe.key,
                     .kind = artifact_kind::unit_probe_implementation,
                     .content = detail::render_probe_implementation(
-                        plan, target, coordinate, probe, "unit"),
-                });
-            }
-            for (const probe_spec& probe :
-                 plan.source_inventory.bench_probes) {
-                result.artifacts.push_back(generated_artifact{
-                    .relative_path = root / "probes"
-                        / ("bench_" + probe.key + ".cppm"),
-                    .module_name = coordinate.module_name,
-                    .target_token = target.token,
-                    .source_key = probe.key,
-                    .kind = artifact_kind::bench_probe_implementation,
-                    .content = detail::render_probe_implementation(
-                        plan, target, coordinate, probe, "benchmark"),
+                        plan, target, coordinate, probe),
                 });
             }
         }
@@ -1787,7 +1771,7 @@ inline void validate_rendered_artifact(
     }
     result.policy_evidence_json =
         render_policy_evidence(plan, result.artifacts);
-    result.publication_topology_digest = sha256_hex(
+    result.publication_topology_digest = bioseq::common::sha256_hex(
         "bioseq_highway_publication_topology/v1\n"
         + result.policy_evidence_json);
     return result;
@@ -1804,7 +1788,7 @@ make_publication_artifacts(
             namespace_materialization::publication_artifact{
                 .relative_path = artifact.relative_path,
                 .content = artifact.content,
-                .content_sha256 = sha256_hex(artifact.content),
+                .content_sha256 = bioseq::common::sha256_hex(artifact.content),
                 .artifact_class = namespace_materialization::
                     publication_artifact_class::production_cppm,
             });
@@ -1822,7 +1806,7 @@ render_highway_publication_manifest(
         publication) {
     const std::string expected_policy_evidence =
         render_policy_evidence(plan, result.artifacts);
-    const std::string expected_topology_digest = sha256_hex(
+    const std::string expected_topology_digest = bioseq::common::sha256_hex(
         "bioseq_highway_publication_topology/v1\n"
         + expected_policy_evidence);
     if (result.policy_evidence_json != expected_policy_evidence
@@ -1837,7 +1821,7 @@ render_highway_publication_manifest(
             publication[index];
         if (published.relative_path != generated.relative_path
             || published.content != generated.content
-            || published.content_sha256 != sha256_hex(generated.content)
+            || published.content_sha256 != bioseq::common::sha256_hex(generated.content)
             || published.artifact_class
                 != namespace_materialization::publication_artifact_class::
                     production_cppm) {

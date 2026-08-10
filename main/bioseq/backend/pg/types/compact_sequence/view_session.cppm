@@ -18,31 +18,31 @@ module;
 #include <type_traits>
 #include <utility>
 
-#include "headers/pg_build_config.h"
-#include "headers/pg_compat.h"
+#include <bioseq/pg_build_profile.h>
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/expandeddatum.h"
 }
 
-export module bioseq.types.pg_compact_sequence:view_session;
+export module bioseq.postgres.types.compact_sequence:view_session;
 
 import :flat_abi;
 import :source_abi;
 import :tree_types;
 import :tree_ops;
-import bioseq.storage.bucket_math;
+import bioseq.storage.layout;
 import bioseq.storage.coordinates;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 
 #ifdef BIOSEQ_TEST_INDEXES
-export enum class PgSequenceFacadeTestPoison : std::uint8_t {
+export enum class sequence_facade_test_fault : std::uint8_t {
   none = 0u,
   resident_probe = 1u,
   materialization = 2u,
   contiguous_access = 3u,
 };
 
-export struct PgSequenceFacadeTestCounters {
+export struct sequence_facade_test_counters {
   std::uint64_t source_stream_callbacks = 0u;
   std::uint64_t source_resident_probes = 0u;
   std::uint64_t declared_materializations = 0u;
@@ -50,24 +50,24 @@ export struct PgSequenceFacadeTestCounters {
   std::uint64_t poison_hits = 0u;
 };
 
-inline thread_local PgSequenceFacadeTestPoison
-    g_pg_sequence_facade_test_poison = PgSequenceFacadeTestPoison::none;
-inline thread_local PgSequenceFacadeTestCounters
+inline thread_local sequence_facade_test_fault
+    g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
+inline thread_local sequence_facade_test_counters
     g_pg_sequence_facade_test_counters{};
 
 [[nodiscard]] inline bool
-pg_sequence_facade_test_poison_has(PgSequenceFacadeTestPoison bit) noexcept {
+pg_sequence_facade_test_poison_has(sequence_facade_test_fault bit) noexcept {
   return (static_cast<std::uint8_t>(g_pg_sequence_facade_test_poison) &
           static_cast<std::uint8_t>(bit)) != 0u;
 }
 
 export inline void
-arm_pg_sequence_facade_test_poison(PgSequenceFacadeTestPoison poison) noexcept {
+arm_pg_sequence_facade_test_poison(sequence_facade_test_fault poison) noexcept {
   g_pg_sequence_facade_test_poison = poison;
 }
 
 export inline void disarm_pg_sequence_facade_test_poison() noexcept {
-  g_pg_sequence_facade_test_poison = PgSequenceFacadeTestPoison::none;
+  g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
 }
 
 export inline void reset_pg_sequence_facade_test_counters() noexcept {
@@ -75,7 +75,7 @@ export inline void reset_pg_sequence_facade_test_counters() noexcept {
   g_pg_sequence_facade_test_counters = {};
 }
 
-export [[nodiscard]] inline PgSequenceFacadeTestCounters
+export [[nodiscard]] inline sequence_facade_test_counters
 pg_sequence_facade_test_counters() noexcept {
   return g_pg_sequence_facade_test_counters;
 }
@@ -87,14 +87,14 @@ export inline void note_pg_sequence_facade_source_stream_callback() noexcept {
 export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
   ++g_pg_sequence_facade_test_counters.source_resident_probes;
   if (pg_sequence_facade_test_poison_has(
-          PgSequenceFacadeTestPoison::resident_probe)) {
+          sequence_facade_test_fault::resident_probe)) {
     ++g_pg_sequence_facade_test_counters.poison_hits;
   }
 }
 
 export inline void note_pg_sequence_facade_contiguous_access() noexcept {
   if (pg_sequence_facade_test_poison_has(
-          PgSequenceFacadeTestPoison::contiguous_access)) {
+          sequence_facade_test_fault::contiguous_access)) {
     ++g_pg_sequence_facade_test_counters.poison_hits;
   }
 }
@@ -102,7 +102,7 @@ export inline void note_pg_sequence_facade_contiguous_access() noexcept {
 export inline void note_pg_sequence_facade_materialization_begin() {
   ++g_pg_sequence_facade_test_counters.declared_materializations;
   if (pg_sequence_facade_test_poison_has(
-          PgSequenceFacadeTestPoison::materialization)) {
+          sequence_facade_test_fault::materialization)) {
     ++g_pg_sequence_facade_test_counters.poison_hits;
     throw std::runtime_error(
         "poisoned PostgreSQL sequence facade materialization");
@@ -268,18 +268,18 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
         case pg_sequence_flat_kind::locator: {
             if (VARSIZE(flat)
                 != bioseq::pg_types::seq::header_bytes()
-                    + sizeof(bioseq::storage::seq_locator)) {
+                    + sizeof(bioseq::storage::sequence_locator)) {
                 invalid_flat_sequence("locator framing size mismatch");
             }
             const auto payload = std::span<std::byte const>{
                 reinterpret_cast<std::byte const*>(flat->data),
-                sizeof(bioseq::storage::seq_locator)};
+                sizeof(bioseq::storage::sequence_locator)};
             const auto locator =
-                bioseq::storage::decode_seq_locator_payload(payload);
+                bioseq::storage::decode_sequence_locator_payload(payload);
             const std::uint8_t width = static_cast<std::uint8_t>(
                 flat->storage_unit_byte_width) & pgseq_physical_width_mask;
             if (!locator.has_value() || locator->source_epoch == 0u
-                || locator->total_bp_size
+                || locator->logical_length
                     > static_cast<std::uint64_t>(INT64_MAX)
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(flat->alphabet_code))
@@ -293,7 +293,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
                     static_cast<std::uint8_t>(flat->alphabet_code),
                 .storage_unit_byte_width = width,
                 .alphabet_bound = true,
-                .bp_length = locator->total_bp_size,
+                .bp_length = locator->logical_length,
             };
         }
         case pg_sequence_flat_kind::invalid:
@@ -393,7 +393,7 @@ classify_and_describe_sequence_header(Datum input)
                     header->storage_unit_byte_width)
                 & pgseq_physical_width_mask;
             if (raw_size != bioseq::pg_types::seq::header_bytes()
-                    + sizeof(bioseq::storage::seq_locator)
+                    + sizeof(bioseq::storage::sequence_locator)
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(header->alphabet_code))
                 || !pgseq_supported_storage_unit_byte_widths::
@@ -438,7 +438,7 @@ template<class Alphabet>
 [[nodiscard]] inline std::uint8_t complement_rank(std::uint8_t rank)
 {
     return static_cast<std::uint8_t>(
-        bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+        bioseq::storage::lazy_sequence_traits<Alphabet>::
             letter_complement(rank));
 }
 
@@ -678,9 +678,9 @@ template <class Alphabet>
                                          bioseq::storage::sequence_size_t from,
                                          bioseq::storage::sequence_size_t to,
                                          std::uint8_t requested_width) noexcept
-    -> typename bioseq::storage::basic_lazy_sequence_view<
-        Alphabet>::resident_probe_result {
-  using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
+    -> typename bioseq::storage::lazy_sequence_view<
+        Alphabet>::resident_packed_result {
+  using view = bioseq::storage::lazy_sequence_view<Alphabet>;
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   if (state.flat == nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -694,12 +694,12 @@ template <class Alphabet>
 #ifdef BIOSEQ_TEST_INDEXES
   note_pg_sequence_facade_contiguous_access();
 #endif
-  using descriptor = typename view::resident_packed_region;
+  using descriptor = typename view::resident_packed_sequence;
   const auto length = to - from;
   if (length == 0u) {
     return descriptor{};
   }
-  constexpr std::uint64_t bits = bioseq::storage::lazy_rank_stream_traits<
+  constexpr std::uint64_t bits = bioseq::storage::lazy_sequence_traits<
       Alphabet>::logical_bits_per_symbol;
   const std::uint64_t letters_per_unit = requested_width * 8u / bits;
   const std::uint64_t first_unit = from / letters_per_unit;
@@ -711,28 +711,28 @@ template <class Alphabet>
   return descriptor{
       .units = state.flat->data + first_unit * requested_width,
       .unit_count = static_cast<std::size_t>(unit_count),
-      .bp_length = length,
-      .storage_unit_byte_width = requested_width,
+      .logical_length = length,
+      .storage_unit_width = requested_width,
       .bits_per_symbol = static_cast<std::uint8_t>(bits),
       .leading_symbol_offset = static_cast<std::uint16_t>(leading),
-      .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
-      .bit_order = view::packed_bit_order::least_significant_symbol_first,
+      .trailing_padding = static_cast<std::uint16_t>(trailing),
+      .bit_order = view::packed_symbol_order::least_significant_symbol_first,
   };
 }
 
 template<class Alphabet>
 struct facade_adapter {
-    using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
+    using view = bioseq::storage::lazy_sequence_view<Alphabet>;
     static inline const typename view::backend_ops ops{
         .bp_size = &facade_bp_size,
-        .ptr_at = {
+        .read_at = {
             &facade_ptr_at_callback<Alphabet, false, false>,
             &facade_ptr_at_callback<Alphabet, false, true>,
             &facade_ptr_at_callback<Alphabet, true, false>,
             &facade_ptr_at_callback<Alphabet, true, true>,
         },
         .try_resident_packed = &facade_resident_probe<Alphabet>,
-        .copy_full_packed = nullptr,
+        .copy_packed_sequence = nullptr,
         .worker_shareable = &facade_worker_shareable,
     };
 };
@@ -741,7 +741,7 @@ template<class Alphabet, std::size_t StorageUnitByteWidth>
 consteval bool facade_adapter_profile_contract()
 {
     using adapter = facade_adapter<Alphabet>;
-    using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
+    using view = bioseq::storage::lazy_sequence_view<Alphabet>;
     return pgseq_supported_storage_unit_byte_widths::
                contains<StorageUnitByteWidth>
         && std::is_same_v<typename adapter::view, view>
@@ -769,7 +769,7 @@ static_assert(facade_adapter_profile_contract<seq::dna5, 4u>());
 template<class Alphabet>
 inline void release_facade_owner(void* opaque) noexcept
 {
-    using owner = bioseq::storage::lazy_sequence_call_owner<Alphabet>;
+    using owner = bioseq::storage::retained_lazy_sequence_view<Alphabet>;
     static_cast<owner*>(opaque)->~owner();
 }
 
@@ -802,11 +802,11 @@ void record_orientation_matches(
   std::array<std::uint8_t, kProbeSymbols> expected{};
   std::array<std::uint8_t, kProbeSymbols> flat_observed{};
   std::array<std::uint8_t, kProbeSymbols> source_observed{};
-  baseline.template to_encoded_into<IsReversed, WriteReversed>(
+  baseline.template copy_ranks<IsReversed, WriteReversed>(
       expected, from, to);
-  flat_facade.template to_encoded_into<IsReversed, WriteReversed>(
+  flat_facade.template copy_ranks<IsReversed, WriteReversed>(
       flat_observed, from, to);
-  source_facade.template to_encoded_into<IsReversed, WriteReversed>(
+  source_facade.template copy_ranks<IsReversed, WriteReversed>(
       source_observed, from, to);
   constexpr std::uint8_t orientation =
       (IsReversed ? 2u : 0u) | (WriteReversed ? 1u : 0u);
@@ -822,7 +822,7 @@ void record_orientation_matches(
 } // namespace
 
 export template <sequence_alphabet Alphabet>
-[[nodiscard]] inline bioseq::storage::lazy_sequence_call_owner<Alphabet>*
+[[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<Alphabet>*
 make_pg_sequence_call_owner(
     pg_sequence_read_session& session,
     Datum detoasted_or_expanded,
@@ -855,7 +855,7 @@ make_pg_sequence_call_owner(
     }
 
     using adapter = facade_adapter<Alphabet>;
-    using owner = bioseq::storage::lazy_sequence_call_owner<Alphabet>;
+    using owner = bioseq::storage::retained_lazy_sequence_view<Alphabet>;
     auto facade = typename adapter::view{state, std::addressof(adapter::ops)};
     void* storage = MemoryContextAllocZero(
         session.payload_context, sizeof(owner));
@@ -934,7 +934,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
             using alphabet = typename range::traits::alphabet_type;
             compact_sequence_range<Instance> baseline_range{*flat};
             const auto baseline =
-                bioseq::storage::as_lazy_sequence_view(baseline_range);
+                bioseq::storage::make_lazy_sequence_view(baseline_range);
             auto* flat_owner = make_pg_sequence_call_owner<alphabet>(
                 *local_session, flat_datum, flat_descriptor);
             auto* source_owner = make_pg_sequence_call_owner<alphabet>(
@@ -1274,7 +1274,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                     auto* owner = make_pg_sequence_call_owner<alphabet>(
                         *local_session, dispatch, descriptor);
                     std::array<std::uint8_t, 1> scratch{};
-                    owner->view().template to_encoded_into<false, false>(
+                    owner->view().template copy_ranks<false, false>(
                         std::span<std::uint8_t>{scratch},
                         static_cast<std::size_t>(index),
                         static_cast<std::size_t>(index + 1u));

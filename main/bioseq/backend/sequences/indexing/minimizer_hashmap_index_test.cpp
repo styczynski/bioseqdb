@@ -9,7 +9,7 @@
 // The bioseq::indexing::* types are named fully-qualified.
 
 #include "common_simd.h"
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common.h"
 
 #include <algorithm>
@@ -7020,7 +7020,7 @@ TEST_CASE("admitted grouped32 directory reserves exact allocation headroom befor
 		+ fixture.generation.directory.entries().size()
 			* sizeof(MinimizerBucketDirEntry);
 	const std::uint64_t exact_headroom = logical
-		* bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+		* bioseq::parallelism::k_vector_preallocation_headroom_factor;
 
 	{
 		bioseq::parallelism::MemoryAdmissionController one_short;
@@ -7407,7 +7407,7 @@ TEST_CASE("grouped32 physical stream is fail-closed, admitted, movable, and mult
 			first_position.bytes.size()
 			* (sizeof(std::uint64_t)
 				/ kMinimizerGrouped32PositionEncodedBytes)
-			* bioseq::parallelism::kVectorPreallocationHeadroomFactor;
+			* bioseq::parallelism::k_vector_preallocation_headroom_factor;
 		REQUIRE(admission.reserved_bytes()
 			<= before_positions + first_chunk_retained_headroom);
 		for (std::uint32_t chunk = 1;
@@ -10369,7 +10369,7 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         REQUIRE(adversarial->projected_bytes == 800'000'017u);
         REQUIRE(adversarial->projected_bytes - 17u
             < adversarial->retained_position_bytes
-                * bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+                * bioseq::parallelism::k_vector_preallocation_headroom_factor);
         constexpr std::uint64_t adversarial_query_count = 100'000'000u;
         constexpr std::uint64_t prior_query_owned_bytes =
             adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));

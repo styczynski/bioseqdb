@@ -22,7 +22,7 @@ export module bioseq.codegen.sql.collector;
 export import :model;
 export import :options;
 export import :gucs;
-import bioseq.codegen.clang_structural;
+import bioseq.codegen.structural_analysis;
 
 export namespace bioseq::codegen::sql {
 
@@ -30,8 +30,6 @@ namespace detail {
 
 [[nodiscard]] inline std::optional<entity_kind> annotation_entity_kind(
     std::string_view name) {
-    if (name == "alter") return entity_kind::alter;
-    if (name == "comment") return entity_kind::comment;
     if (name == "schema") return entity_kind::schema;
     if (name == "session_setting") return entity_kind::session_setting;
     if (name == "sequence") return entity_kind::sequence;
@@ -60,8 +58,6 @@ namespace detail {
     if (name == "phase") return entity_kind::phase;
     if (name == "am_catalog_dependencies")
         return entity_kind::catalog_dependencies;
-    if (name == "install_action")
-        return entity_kind::install_action;
     if (name == "type_input" || name == "type_output"
         || name == "type_receive" || name == "type_send"
         || name == "type_typmod_in" || name == "type_typmod_out"
@@ -190,7 +186,12 @@ logical_vector_sql_type(std::string_view cpp_type) {
             logical_vector_sql_type(cpp_type)) {
         return *logical;
     }
-    if (contains("sql_timestamptz")) return "timestamptz";
+    if (contains("timestamp_with_time_zone")) return "timestamptz";
+    if (contains("interval_value")) return "interval";
+    if (contains("jsonb_value")) return "jsonb";
+    if (contains("bytea_value")) return "bytea";
+    if (contains("bigint_array")) return "bigint[]";
+    if (contains("tuple_identifier")) return "tid";
     if (contains("bool")) return "boolean";
     if (contains("TimestampTz")) return "timestamptz";
     if (contains("Timestamp")) return "timestamp";
@@ -238,8 +239,9 @@ logical_vector_sql_type(std::string_view cpp_type) {
     while (compact.starts_with("const")) {
         compact.erase(0, std::string_view{"const"}.size());
     }
-    return compact == "bioseq::pg_utils::sql_call_context"
-        || compact == "sql_call_context";
+    return compact
+            == "bioseq::postgres::support::function_call_context"
+        || compact == "function_call_context";
 }
 
 struct parameter_sql_contract final {
@@ -248,10 +250,10 @@ struct parameter_sql_contract final {
 };
 
 [[nodiscard]] inline parameter_sql_contract parameter_sql_override(
-    const clang_structural::parameter_record& parameter) {
+    const structural_analysis::parameter_record& parameter) {
     parameter_sql_contract result;
     bool saw_parameter_annotation = false;
-    for (const clang_structural::attribute_record& attribute :
+    for (const structural_analysis::attribute_record& attribute :
          parameter.attributes) {
         if (attribute.vendor_namespace != "bioseq_sql"
             || attribute.name != "param") {
@@ -290,10 +292,10 @@ struct parameter_sql_contract final {
 }
 
 [[nodiscard]] inline std::string result_sql_override(
-    const clang_structural::declaration_record& declaration) {
+    const structural_analysis::declaration_record& declaration) {
     bool saw_result_annotation = false;
     std::string result;
-    for (const clang_structural::attribute_record& attribute :
+    for (const structural_analysis::attribute_record& attribute :
          declaration.attributes) {
         if (attribute.vendor_namespace != "bioseq_sql"
             || attribute.name != "result") {
@@ -322,7 +324,7 @@ struct parameter_sql_contract final {
 
 [[nodiscard]] inline std::string named_child_name(
     entity_kind kind,
-    const clang_structural::declaration_record& declaration,
+    const structural_analysis::declaration_record& declaration,
     const std::vector<option_value>& options) {
     if (kind == entity_kind::access_method
         && declaration.name.ends_with("_handler")) {
@@ -350,29 +352,20 @@ struct parameter_sql_contract final {
 
 [[nodiscard]] inline std::string entity_diagnostic(
     const std::filesystem::path& path,
-    const clang_structural::source_range& range) {
+    const structural_analysis::source_range& range) {
     return path.string() + ":" + std::to_string(range.begin.line)
         + ":" + std::to_string(range.begin.column);
 }
 
 inline void validate_annotation_target(
     entity_kind kind,
-    const clang_structural::declaration_record& declaration,
-    const clang_structural::attribute_record& attribute,
-    bool typed_install_owner) {
-    using clang_structural::declaration_kind;
-    if (typed_install_owner) {
-        if (declaration.kind != declaration_kind::variable) {
-            throw std::runtime_error(
-                "generated typed install-owner annotations require a "
-                "compiler-checked variable descriptor");
-        }
-        return;
-    }
+    const structural_analysis::declaration_record& declaration,
+    const structural_analysis::attribute_record& attribute) {
+    using structural_analysis::declaration_kind;
     const auto fail = [&attribute, &declaration] {
         throw std::runtime_error(
             "bioseq_sql::" + attribute.name + " is not valid on a "
-            + clang_structural::kind_name(declaration.kind)
+            + structural_analysis::spell_declaration_kind(declaration.kind)
             + " declaration");
     };
     if ((kind == entity_kind::function
@@ -416,7 +409,7 @@ inline void validate_annotation_target(
     }
     if (kind == entity_kind::guc_value
         && attribute.placement
-            != clang_structural::attribute_placement::enumerator_tail) {
+            != structural_analysis::attribute_placement::enumerator_tail) {
         throw std::runtime_error(
             "[BIOSEQ_SQL_E_GUC_ENUMERATOR_PLACEMENT] "
             "bioseq_sql::guc_value must follow the enumerator identifier");
@@ -428,13 +421,13 @@ inline void validate_annotation_target(
     if (kind == entity_kind::type
         && declaration.kind == declaration_kind::record
         && attribute.placement
-            != clang_structural::attribute_placement::class_head) {
+            != structural_analysis::attribute_placement::class_head) {
         throw std::runtime_error(
             "[BIOSEQ_SQL_E_CLASS_HEAD_PLACEMENT] "
             "bioseq_sql::type on a class must use class-head placement");
     }
     if (kind == entity_kind::schema
-        && declaration.kind != declaration_kind::namespace_
+        && declaration.kind != declaration_kind::namespace_declaration
         && declaration.kind != declaration_kind::variable) {
         fail();
     }
@@ -443,8 +436,7 @@ inline void validate_annotation_target(
 inline void validate_options(
     entity_kind kind,
     const std::vector<option_value>& options,
-    const clang_structural::attribute_record& attribute,
-    bool typed_install_owner) {
+    const structural_analysis::attribute_record& attribute) {
     std::set<std::string, std::less<>> names;
     for (const option_value& option : options) {
         names.insert(option.name);
@@ -545,68 +537,48 @@ inline void validate_options(
                     "privileges", "from", "scope", "grant_option"});
             case entity_kind::catalog_dependencies:
                 return one_of(name, {"roots"});
-            case entity_kind::alter:
             case entity_kind::comment:
             case entity_kind::session_setting:
             case entity_kind::config_dump:
             case entity_kind::phase:
-            case entity_kind::install_action:
                 return false;
         }
         return false;
     };
-    const auto typed_install_option = [&](std::string_view name) {
-        if (kind == entity_kind::install_action) {
-            return one_of(name, {
-                "baseline_physical_id",
-                "sql_identity",
-                "migration_ledger_reason"});
-        }
-        return one_of(name, {
-            "baseline_physical_id", "sql_identity",
-            "create_or_replace", "language", "c_symbol",
-            "argument_declarations", "returns",
-            "volatility_value", "null_input", "security",
-            "parallel", "configuration", "cost", "rows",
-            "support"});
-    };
     for (const option_value& option : options) {
-        const bool accepted = typed_install_owner
-            ? typed_install_option(option.name)
-            : natural_option(option.name);
-        if (!accepted) {
+        if (!natural_option(option.name)) {
             throw std::runtime_error(
                 "bioseq_sql::" + attribute.name
                 + " has unknown option '." + option.name + "'");
         }
     }
-    if (!typed_install_owner && routine_kind(kind)
+    if (routine_kind(kind)
         && (names.contains("name") || names.contains("c_symbol"))) {
         throw std::runtime_error(
             "bioseq_sql::" + attribute.name
             + " derives its SQL name and C symbol from the C++ declaration");
     }
-    if (!typed_install_owner && kind == entity_kind::aggregate
+    if (kind == entity_kind::aggregate
         && (names.contains("name") || names.contains("schema")
             || names.contains("arguments") || names.contains("state_type")
             || names.contains("implementation"))) {
         throw std::runtime_error(
             "bioseq_sql::aggregate contains redundant derived metadata");
     }
-    if (!typed_install_owner && kind == entity_kind::aggregate
+    if (kind == entity_kind::aggregate
         && !names.contains("transition")) {
         throw std::runtime_error(
             "bioseq_sql::aggregate requires a direct .transition "
             "function declaration");
     }
-    if (!typed_install_owner && kind == entity_kind::opclass
+    if (kind == entity_kind::opclass
         && (names.contains("name") || names.contains("schema")
             || names.contains("indexed_type")
             || names.contains("implementation"))) {
         throw std::runtime_error(
             "bioseq_sql::opclass contains redundant derived metadata");
     }
-    if (!typed_install_owner && kind == entity_kind::opclass
+    if (kind == entity_kind::opclass
         && (!names.contains("access_method")
             || !names.contains("operators")
             || !names.contains("functions"))) {
@@ -614,27 +586,15 @@ inline void validate_options(
             "bioseq_sql::opclass requires direct .access_method, "
             ".operators, and .functions declarations");
     }
-    if (!typed_install_owner && kind == entity_kind::config_dump
+    if (kind == entity_kind::config_dump
         && !options.empty()) {
         throw std::runtime_error(
             "bioseq_sql::config_dump does not accept arguments");
     }
-    if (!typed_install_owner
-        && kind == entity_kind::catalog_dependencies
+    if (kind == entity_kind::catalog_dependencies
         && !names.contains("roots")) {
         throw std::runtime_error(
             "bioseq_sql::am_catalog_dependencies requires typed .roots");
-    }
-    if (kind == entity_kind::install_action
-        && attribute.name == "install_action") {
-        if (!names.contains("baseline_physical_id")
-            || !names.contains("sql_identity")
-            || !names.contains("migration_ledger_reason")) {
-            throw std::runtime_error(
-                "migration install_action requires "
-                ".baseline_physical_id, .sql_identity, and "
-                ".migration_ledger_reason");
-        }
     }
 }
 
@@ -783,8 +743,8 @@ struct cpp_template_use {
         result.sql_type = sql_type_from_cpp(cpp_type);
         return result;
     }
-    if (wrapper == "setof") {
-        result.form = routine_result_form::setof;
+    if (wrapper == "set_of") {
+        result.form = routine_result_form::set_of;
         result.cpp_type = template_use.argument;
         result.sql_type =
             sql_override.empty()
@@ -792,9 +752,9 @@ struct cpp_template_use {
             : std::string{sql_override};
         return result;
     }
-    if (wrapper == "returns_table"
-        || wrapper == "named_out"
-        || wrapper == "setof_named_out") {
+    if (wrapper == "table_rows"
+        || wrapper == "named_output"
+        || wrapper == "named_output_set") {
         if (!sql_override.empty()) {
             throw std::runtime_error(
                 std::string{diagnostic}
@@ -802,15 +762,15 @@ struct cpp_template_use {
                   "the Row aggregate and cannot use bioseq_sql::result");
         }
         result.form =
-            wrapper == "returns_table"
-            ? routine_result_form::returns_table
-            : wrapper == "named_out"
-            ? routine_result_form::named_out
-            : routine_result_form::setof_named_out;
+            wrapper == "table_rows"
+            ? routine_result_form::table_rows
+            : wrapper == "named_output"
+            ? routine_result_form::named_output
+            : routine_result_form::named_output_set;
         result.cpp_type = template_use.argument;
         result.row_cpp_name = template_use.argument;
         result.sql_type =
-            wrapper == "returns_table" ? "table" : "record";
+            wrapper == "table_rows" ? "table" : "record";
         return result;
     }
 
@@ -823,15 +783,15 @@ struct cpp_template_use {
 }
 
 [[nodiscard]] inline std::string field_sql_override(
-    const clang_structural::aggregate_field_record& field,
+    const structural_analysis::aggregate_field_record& field,
     const std::filesystem::path& source_path) {
     std::string result;
     bool saw_column = false;
-    for (const clang_structural::attribute_record& attribute :
+    for (const structural_analysis::attribute_record& attribute :
          field.attributes) {
         if (attribute.vendor_namespace == "bioseq::sql") {
             throw std::runtime_error(
-                entity_diagnostic(source_path, attribute.range)
+                entity_diagnostic(source_path, attribute.spelling_range)
                 + ": [BIOSEQ_SQL_E_ATTRIBUTE_NAMESPACE] "
                   "invalid nested SQL attribute namespace '"
                 + attribute.qualified_name
@@ -840,13 +800,13 @@ struct cpp_template_use {
         if (attribute.vendor_namespace != "bioseq_sql") continue;
         if (attribute.name != "column") {
             throw std::runtime_error(
-                entity_diagnostic(source_path, attribute.range)
+                entity_diagnostic(source_path, attribute.spelling_range)
                 + ": result-row fields only accept "
                   "bioseq_sql::column({.sql_type = ...})");
         }
         if (saw_column) {
             throw std::runtime_error(
-                entity_diagnostic(source_path, attribute.range)
+                entity_diagnostic(source_path, attribute.spelling_range)
                 + ": repeated bioseq_sql::column result-field override");
         }
         saw_column = true;
@@ -855,7 +815,7 @@ struct cpp_template_use {
         if (options.size() != 1
             || options.front().name != "sql_type") {
             throw std::runtime_error(
-                entity_diagnostic(source_path, attribute.range)
+                entity_diagnostic(source_path, attribute.spelling_range)
                 + ": result-row bioseq_sql::column accepts exactly "
                   "one .sql_type option");
         }
@@ -867,7 +827,7 @@ struct cpp_template_use {
             if (open == std::string::npos
                 || close == std::string::npos || close <= open) {
                 throw std::runtime_error(
-                    entity_diagnostic(source_path, attribute.range)
+                    entity_diagnostic(source_path, attribute.spelling_range)
                     + ": malformed type_of result-field SQL type");
             }
             result = expression;
@@ -898,14 +858,14 @@ struct cpp_template_use {
 }
 
 struct aggregate_location {
-    const clang_structural::translation_unit* unit{};
-    const clang_structural::aggregate_record* aggregate{};
+    const structural_analysis::translation_unit* unit{};
+    const structural_analysis::aggregate_record* aggregate{};
 };
 
 [[nodiscard]] inline aggregate_location resolve_result_row(
     std::string_view requested_name,
     const collected_entity& owner,
-    const std::vector<clang_structural::translation_unit>& units) {
+    const std::vector<structural_analysis::translation_unit>& units) {
     std::string requested = compact_cpp_type(requested_name);
     std::string owner_scope = owner.cpp_qualified_name;
     if (const std::size_t separator = owner_scope.rfind("::");
@@ -922,8 +882,8 @@ struct aggregate_location {
     }
     for (const std::string& candidate : candidates) {
         aggregate_location match;
-        for (const clang_structural::translation_unit& unit : units) {
-            for (const clang_structural::aggregate_record& aggregate :
+        for (const structural_analysis::translation_unit& unit : units) {
+            for (const structural_analysis::aggregate_record& aggregate :
                  unit.aggregate_records) {
                 if (aggregate.qualified_name != candidate) continue;
                 if (match.aggregate) {
@@ -941,8 +901,8 @@ struct aggregate_location {
 
     aggregate_location suffix_match;
     const std::string suffix = "::" + requested;
-    for (const clang_structural::translation_unit& unit : units) {
-        for (const clang_structural::aggregate_record& aggregate :
+    for (const structural_analysis::translation_unit& unit : units) {
+        for (const structural_analysis::aggregate_record& aggregate :
              unit.aggregate_records) {
             if (aggregate.qualified_name != requested
                 && !aggregate.qualified_name.ends_with(suffix)) {
@@ -973,14 +933,14 @@ struct aggregate_location {
     return std::ranges::any_of(
         location.unit->declarations,
         [&location](
-            const clang_structural::declaration_record& declaration) {
+            const structural_analysis::declaration_record& declaration) {
             return declaration.kind
-                    == clang_structural::declaration_kind::record
+                    == structural_analysis::declaration_kind::record
                 && declaration.qualified_name
                     == location.aggregate->qualified_name
                 && std::ranges::any_of(
                     declaration.attributes,
-                    [](const clang_structural::attribute_record& attribute) {
+                    [](const structural_analysis::attribute_record& attribute) {
                         return attribute.vendor_namespace
                             == "bioseq_sql";
                     });
@@ -996,7 +956,7 @@ struct aggregate_location {
 [[nodiscard]] inline collected_result_row collect_result_row(
     const aggregate_location& location,
     const collected_entity& owner) {
-    const clang_structural::aggregate_record& aggregate =
+    const structural_analysis::aggregate_record& aggregate =
         *location.aggregate;
     const std::string diagnostic =
         entity_diagnostic(owner.source_path, owner.source_range);
@@ -1037,10 +997,10 @@ struct aggregate_location {
         .source_range = aggregate.range,
     };
     std::set<std::string, std::less<>> folded_names;
-    for (const clang_structural::aggregate_field_record& field :
+    for (const structural_analysis::aggregate_field_record& field :
          aggregate.fields) {
         if (field.access
-            != clang_structural::member_access::public_) {
+            != structural_analysis::member_access::public_access) {
             throw std::runtime_error(
                 diagnostic + ": result Row field '"
                 + field.qualified_name + "' must be public");
@@ -1110,7 +1070,7 @@ struct aggregate_location {
     return result;
 }
 
-[[nodiscard]] inline std::string returns_table_sql_type(
+[[nodiscard]] inline std::string table_rows_sql_type(
         const collected_result_row& row) {
     std::string result{"table ("};
     for (std::size_t index = 0; index < row.fields.size(); ++index) {
@@ -1232,8 +1192,7 @@ parse_natural_session_setting_action(
 inline void lower_natural_session_settings(
     std::vector<collected_entity>& entities) {
     for (collected_entity& entity : entities) {
-        if (entity.kind != entity_kind::session_setting
-            || entity.typed_install_owner) {
+        if (entity.kind != entity_kind::session_setting) {
             continue;
         }
         const std::string diagnostic =
@@ -1257,8 +1216,7 @@ inline void lower_natural_session_settings(
         }
         std::vector<const collected_entity*> matches;
         for (const collected_entity& candidate : entities) {
-            if (candidate.kind != entity_kind::guc
-                || candidate.typed_install_owner) {
+            if (candidate.kind != entity_kind::guc) {
                 continue;
             }
             const bool exact =
@@ -1297,8 +1255,7 @@ inline void bind_routine_companion_metadata(
     std::map<std::string, const collected_entity*, std::less<>>
         routines_by_cpp_name;
     for (const collected_entity& entity : entities) {
-        if (!routine_kind(entity.kind)
-            || entity.typed_install_owner) {
+        if (!routine_kind(entity.kind)) {
             continue;
         }
         const auto [routine, inserted] =
@@ -1310,9 +1267,8 @@ inline void bind_routine_companion_metadata(
     }
 
     for (collected_entity& entity : entities) {
-        if (entity.typed_install_owner
-            || (entity.kind != entity_kind::cast
-                && entity.kind != entity_kind::operator_)) {
+        if (entity.kind != entity_kind::cast
+            && entity.kind != entity_kind::operator_) {
             continue;
         }
         const auto routine =
@@ -1374,8 +1330,7 @@ inline void bind_routine_companion_metadata(
         compact_cpp_type(sql_type.substr(begin, end - begin));
     std::vector<const collected_entity*> matches;
     for (const collected_entity& candidate : entities) {
-        if (candidate.kind != entity_kind::type
-            || candidate.typed_install_owner) {
+        if (candidate.kind != entity_kind::type) {
             continue;
         }
         const bool exact =
@@ -1423,8 +1378,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     }
 
     for (collected_entity& entity : program.entities) {
-        if (!routine_kind(entity.kind)
-            || entity.typed_install_owner) {
+        if (!routine_kind(entity.kind)) {
             continue;
         }
         const std::string diagnostic =
@@ -1443,7 +1397,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
             program.entities,
             diagnostic + " result");
         switch (entity.result.form) {
-            case routine_result_form::setof:
+            case routine_result_form::set_of:
                 entity.result_sql_type =
                     "setof " + entity.result.sql_type;
                 break;
@@ -1451,7 +1405,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
             case routine_result_form::void_:
                 entity.result_sql_type = entity.result.sql_type;
                 break;
-            case routine_result_form::returns_table: {
+            case routine_result_form::table_rows: {
                 const collected_result_row* row = nullptr;
                 for (const collected_result_row& candidate :
                      program.result_rows) {
@@ -1466,15 +1420,15 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                         diagnostic
                         + " has no registered result-row aggregate");
                 }
-                entity.result_sql_type = returns_table_sql_type(*row);
+                entity.result_sql_type = table_rows_sql_type(*row);
                 entity.result.sql_type = entity.result_sql_type;
                 break;
             }
-            case routine_result_form::setof_named_out:
+            case routine_result_form::named_output_set:
                 entity.result_sql_type = "setof record";
                 entity.result.sql_type = "record";
                 break;
-            case routine_result_form::named_out:
+            case routine_result_form::named_output:
                 entity.result_sql_type = "record";
                 entity.result.sql_type = "record";
                 break;
@@ -1490,31 +1444,21 @@ inline void resolve_type_of_sql_types(collected_program& program) {
 }
 
 [[nodiscard]] inline collected_program collect_translation_units(
-    std::vector<clang_structural::translation_unit> translation_units) {
+    std::vector<structural_analysis::translation_unit> translation_units) {
     collected_program result{
         .translation_units = std::move(translation_units)};
-    for (const clang_structural::translation_unit& unit :
+    for (const structural_analysis::translation_unit& unit :
          result.translation_units) {
-        if (unit.module_name.ends_with(".install_owner")
-            && unit.module_name != "bioseq.sql.install_owner") {
-            throw std::runtime_error(
-                unit.source_path.string()
-                + ": [BIOSEQ_SQL_E_MIGRATION_OWNER_PROVENANCE] "
-                  "migration install owners are generated only in "
-                  "bioseq.sql.install_owner");
-        }
-        const bool typed_install_owner =
-            unit.module_name == "bioseq.sql.install_owner";
         std::set<std::string, std::less<>> natural_row_records;
-        for (const clang_structural::declaration_record& declaration :
+        for (const structural_analysis::declaration_record& declaration :
              unit.declarations) {
             if (declaration.kind
-                != clang_structural::declaration_kind::record) {
+                != structural_analysis::declaration_kind::record) {
                 continue;
             }
             const bool row_owner = std::ranges::any_of(
                 declaration.attributes,
-                [&unit](const clang_structural::attribute_record& attribute) {
+                [&unit](const structural_analysis::attribute_record& attribute) {
                     return attribute.vendor_namespace == "bioseq_sql"
                         && (attribute.name == "table"
                             || (attribute.name == "type"
@@ -1525,14 +1469,14 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 natural_row_records.insert(declaration.qualified_name);
             }
         }
-        for (const clang_structural::declaration_record& declaration :
+        for (const structural_analysis::declaration_record& declaration :
              unit.declarations) {
             const bool natural_row_field =
                 natural_row_records.contains(
                     declaration.enclosing_qualified_name);
             bool explicit_column_override = false;
             if (natural_row_field) {
-                for (const clang_structural::attribute_record& attribute :
+                for (const structural_analysis::attribute_record& attribute :
                      declaration.attributes) {
                     if (attribute.vendor_namespace != "bioseq_sql"
                         || attribute.name != "column") {
@@ -1541,7 +1485,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                     if (parse_options(attribute).empty()) {
                         throw std::runtime_error(
                             detail::entity_diagnostic(
-                                unit.source_path, attribute.range)
+                                unit.source_path, attribute.spelling_range)
                             + ": redundant bioseq_sql::column marker on "
                               "an unambiguous natural row field");
                     }
@@ -1577,12 +1521,12 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 }
             }
             std::vector<dependency_reference> declaration_dependencies;
-            for (const clang_structural::attribute_record& attribute :
+            for (const structural_analysis::attribute_record& attribute :
                  declaration.attributes) {
                 if (attribute.vendor_namespace == "bioseq::sql") {
                     throw std::runtime_error(
                         detail::entity_diagnostic(
-                            unit.source_path, attribute.range)
+                            unit.source_path, attribute.spelling_range)
                         + ": [BIOSEQ_SQL_E_ATTRIBUTE_NAMESPACE] "
                           "invalid nested SQL attribute namespace '"
                         + attribute.qualified_name
@@ -1600,7 +1544,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
 
             std::map<std::string, std::string, std::less<>>
                 annotation_arguments;
-            for (const clang_structural::attribute_record& attribute :
+            for (const structural_analysis::attribute_record& attribute :
                  declaration.attributes) {
                 if (attribute.vendor_namespace != "bioseq_sql"
                     || attribute.name == "depends"
@@ -1613,16 +1557,16 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 if (!kind) {
                     throw std::runtime_error(
                         detail::entity_diagnostic(
-                            unit.source_path, attribute.range)
+                            unit.source_path, attribute.spelling_range)
                         + ": unsupported SQL annotation '"
                         + attribute.qualified_name + "'");
                 }
                 detail::validate_annotation_target(
-                    *kind, declaration, attribute, typed_install_owner);
+                    *kind, declaration, attribute);
                 std::vector<option_value> options =
                     parse_options(attribute);
                 detail::validate_options(
-                    *kind, options, attribute, typed_install_owner);
+                    *kind, options, attribute);
                 const std::string canonical =
                     detail::canonical_expression(attribute.argument_text);
                 std::string annotation_key = attribute.name;
@@ -1655,20 +1599,11 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 if (!inserted) {
                     throw std::runtime_error(
                         detail::entity_diagnostic(
-                            unit.source_path, attribute.range)
+                            unit.source_path, attribute.spelling_range)
                         + (previous->second == canonical
                                ? ": redundant repeated SQL annotation '"
                                : ": conflicting repeated SQL annotation '")
                         + attribute.qualified_name + "'");
-                }
-                if (attribute.name == "install_action"
-                    && !unit.module_name.ends_with(
-                        ".install_owner")) {
-                    throw std::runtime_error(
-                        detail::entity_diagnostic(
-                            unit.source_path, attribute.range)
-                        + ": generic install_action is restricted to the "
-                          "checked install-owner module");
                 }
                 collected_entity entity{
                     .kind = *kind,
@@ -1697,11 +1632,9 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                         std::string{"bioseq_sql_public_api"}),
                     .companion = detail::companion_kind(*kind)
                         || attribute.name == "am_catalog_dependencies",
-                    .typed_install_owner = typed_install_owner,
                 };
-                if (detail::routine_kind(*kind)
-                    && !typed_install_owner) {
-                    for (const clang_structural::parameter_record& parameter :
+                if (detail::routine_kind(*kind)) {
+                    for (const structural_analysis::parameter_record& parameter :
                          declaration.parameters) {
                         const detail::parameter_sql_contract contract =
                             detail::parameter_sql_override(parameter);
@@ -1748,17 +1681,17 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                                 unit.source_path,
                                 declaration.range));
                     switch (entity.result.form) {
-                        case routine_result_form::setof:
+                        case routine_result_form::set_of:
                             entity.result_sql_type =
                                 "setof " + entity.result.sql_type;
                             break;
-                        case routine_result_form::setof_named_out:
+                        case routine_result_form::named_output_set:
                             entity.result_sql_type = "setof record";
                             break;
-                        case routine_result_form::returns_table:
+                        case routine_result_form::table_rows:
                             entity.result_sql_type = "table";
                             break;
-                        case routine_result_form::named_out:
+                        case routine_result_form::named_output:
                             entity.result_sql_type = "record";
                             break;
                         case routine_result_form::scalar:
@@ -1792,17 +1725,16 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     std::map<std::string, std::size_t, std::less<>>
         registered_result_rows;
     for (collected_entity& entity : result.entities) {
-        if (!detail::routine_kind(entity.kind)
-            || entity.typed_install_owner) {
+        if (!detail::routine_kind(entity.kind)) {
             continue;
         }
         const bool row_result =
             entity.result.form
-                == routine_result_form::returns_table
+                == routine_result_form::table_rows
             || entity.result.form
-                == routine_result_form::named_out
+                == routine_result_form::named_output
             || entity.result.form
-                == routine_result_form::setof_named_out;
+                == routine_result_form::named_output_set;
         if (!row_result) continue;
 
         const detail::aggregate_location location =
@@ -1823,12 +1755,12 @@ inline void resolve_type_of_sql_types(collected_program& program) {
         const collected_result_row& row =
             result.result_rows[registered->second];
         if (entity.result.form
-            == routine_result_form::returns_table) {
+            == routine_result_form::table_rows) {
             entity.result_sql_type =
-                detail::returns_table_sql_type(row);
+                detail::table_rows_sql_type(row);
             entity.result.sql_type = entity.result_sql_type;
         } else if (entity.result.form
-                   == routine_result_form::setof_named_out) {
+                   == routine_result_form::named_output_set) {
             entity.result_sql_type = "setof record";
             entity.result.sql_type = "record";
         } else {
@@ -1876,8 +1808,8 @@ inline void resolve_type_of_sql_types(collected_program& program) {
             "Clang compile database, PCM root, and compiler profile");
     }
     try {
-        clang_structural::module_graph module_graph =
-            clang_structural::scan_module_graph_from_database(
+        structural_analysis::module_graph module_graph =
+            structural_analysis::scan_module_graph_from_database(
                 source_paths,
                 environment.compile_database,
                 environment.compiler_profile,
@@ -1888,11 +1820,11 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 "SQL owner");
         }
         std::set<std::string, std::less<>> provided_modules;
-        for (const clang_structural::module_graph_unit& unit :
+        for (const structural_analysis::module_graph_unit& unit :
              module_graph.units) {
             if (unit.provided_module.empty()) {
                 throw std::runtime_error(
-                    unit.source_path
+                    unit.source_identity
                     + ": registered SQL owner does not provide a named "
                       "module");
             }
@@ -1902,13 +1834,13 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                     + unit.provided_module);
             }
         }
-        clang_structural::structural_index index =
-            clang_structural::scan_translation_units_from_database(
+        structural_analysis::structural_index index =
+            structural_analysis::scan_translation_units_from_database(
                 source_paths,
                 environment.compile_database,
                 environment.compiler_profile,
                 environment.pcm_root);
-        if (module_graph.clang_version != index.clang_version
+        if (module_graph.clang_release != index.clang_release
             || module_graph.compilation_signature
                 != index.compilation_signature) {
             throw std::runtime_error(
@@ -1941,11 +1873,11 @@ inline void resolve_type_of_sql_types(collected_program& program) {
 /// calls this entry point.
 [[nodiscard]] inline collected_program collect_fixture_sources(
     const std::vector<std::filesystem::path>& source_paths) {
-    std::vector<clang_structural::translation_unit> units;
+    std::vector<structural_analysis::translation_unit> units;
     units.reserve(source_paths.size());
     for (const std::filesystem::path& path : source_paths) {
         units.push_back(
-            clang_structural::scan_translation_unit(path));
+            structural_analysis::scan_translation_unit(path));
     }
     return collect_translation_units(std::move(units));
 }
@@ -1953,17 +1885,17 @@ inline void resolve_type_of_sql_types(collected_program& program) {
 [[nodiscard]] inline collected_program collect_source_text(
     std::filesystem::path source_path,
     std::string_view source) {
-    std::vector<clang_structural::translation_unit> units;
+    std::vector<structural_analysis::translation_unit> units;
     units.push_back(
-        clang_structural::scan_translation_unit(source_path, source));
+        structural_analysis::scan_translation_unit(source_path, source));
     return collect_translation_units(std::move(units));
 }
 
 [[nodiscard]] inline bool contains_structural_terminal_identifier(
-    const clang_structural::translation_unit& unit,
+    const structural_analysis::translation_unit& unit,
     std::string_view identifier) {
     bool module_or_import_name = false;
-    for (const clang_structural::lexical_token& token : unit.tokens) {
+    for (const structural_analysis::lexical_token& token : unit.tokens) {
         if (module_or_import_name) {
             if (token.spelling == ";") {
                 module_or_import_name = false;
@@ -1999,8 +1931,8 @@ collect_provenance_checked_fixture(
             "provenance fixture is not a regular file: "
             + source_path.string());
     }
-    clang_structural::translation_unit unit =
-        clang_structural::scan_translation_unit(source_path);
+    structural_analysis::translation_unit unit =
+        structural_analysis::scan_translation_unit(source_path);
     const bool uses_catalog_handle =
         contains_structural_terminal_identifier(
             unit, "relation_entity_handle");
@@ -2037,7 +1969,7 @@ collect_provenance_checked_fixture(
             "PostgreSQL enum registration lacks configured generated-path "
             "authority");
     }
-    std::vector<clang_structural::translation_unit> units;
+    std::vector<structural_analysis::translation_unit> units;
     units.push_back(std::move(unit));
     return collect_translation_units(std::move(units));
 }

@@ -1,94 +1,90 @@
 /*-------------------------------------------------------------------------
  *
- * write_state_management.cppm
+ * write_state.cppm
  *
- * Transaction-scoped management of BioseqColumnWriteState objects. Keyed by
- * relfilenode, one entry holds a stack of per-subtransaction write states
+ * Transaction-scoped management of column_write_state objects. Keyed by
+ * relation file number, one entry holds a stack of per-subtransaction write states
  * so that nested subtransactions can commit / abort their writes
  * independently before the enclosing transaction sees them.
  *
- * Backing storage is a pg_utils::TxnScopedHtab; the helper takes care of
- * lazy HTAB creation, MemoryContext ownership and the transaction-end
- * reset callback.
+ * Backing storage is a transaction_scoped_hash_table, which owns lazy HTAB
+ * creation, its MemoryContext, and the transaction-end reset callback.
  *
  *-------------------------------------------------------------------------
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.storage.metadata:write_state;
+export module bioseq.postgres.storage.metadata:write_state;
 
 import :core;
-import bioseq.pg_utils;
-import bioseq.common.mlogging;
+import bioseq.postgres.support;
+import bioseq.common.logging;
 
-// DOC0322 §7.3 (hook realization) — the writer (BioseqColumnBeginWrite/EndWrite/
-// FlushPendingWrites/ContainsPendingWrites) and the seq_caches teardown
-// (bioseq_storage) used to be reached directly from this module, forming a
-// cross-module cycle (storage_metadata <-> bioseq_table_io / bioseq_storage).
-// We now invert those dependencies: the owning modules register function
-// pointers at init (see register_write_state_hooks), and this partition calls
-// through them. These statics are module-internal and default to nullptr until
-// access_method wires them in bioseq_tableam_init.
-using begin_write_fn      = BioseqColumnWriteState* (*)(RelFileLocator, BioseqColumnOptions, TupleDesc);
-using end_write_fn        = void (*)(BioseqColumnWriteState*);
-using flush_writes_fn     = void (*)(BioseqColumnWriteState*);
-using contains_pending_fn = bool (*)(BioseqColumnWriteState*);
-using seq_caches_close_fn = void (*)(void* seq_caches, bool commit);   // does close_all + destroy + null
+// Registered callbacks keep transaction-state ownership independent from the
+// writer and sequence-storage implementations that it coordinates.
+using begin_write_hook_type =
+	column_write_state* (*)(RelFileLocator, column_options, TupleDesc);
+using end_write_hook_type = void (*)(column_write_state*);
+using flush_writes_hook_type = void (*)(column_write_state*);
+using contains_pending_hook_type = bool (*)(column_write_state*);
+using close_sequence_caches_hook_type = void (*)(void*, bool);
 
-static begin_write_fn      g_begin_write      = nullptr;
-static end_write_fn        g_end_write        = nullptr;
-static flush_writes_fn     g_flush_writes     = nullptr;
-static contains_pending_fn g_contains_pending = nullptr;
-static seq_caches_close_fn g_seq_caches_close = nullptr;
+static begin_write_hook_type begin_write_hook = nullptr;
+static end_write_hook_type end_write_hook = nullptr;
+static flush_writes_hook_type flush_writes_hook = nullptr;
+static contains_pending_hook_type contains_pending_hook = nullptr;
+static close_sequence_caches_hook_type close_sequence_caches_hook = nullptr;
 
+/// @brief Registers writer callbacks invoked by transaction-state lifecycle events.
 export void
-register_write_state_hooks(begin_write_fn begin_write,
-						   end_write_fn end_write,
-						   flush_writes_fn flush_writes,
-						   contains_pending_fn contains_pending,
-						   seq_caches_close_fn seq_caches_close)
+register_column_write_state_hooks(begin_write_hook_type begin_write,
+						   end_write_hook_type end_write,
+						   flush_writes_hook_type flush_writes,
+						   contains_pending_hook_type contains_pending,
+						   close_sequence_caches_hook_type close_sequence_caches)
 {
-	g_begin_write      = begin_write;
-	g_end_write        = end_write;
-	g_flush_writes     = flush_writes;
-	g_contains_pending = contains_pending;
-	g_seq_caches_close = seq_caches_close;
+	begin_write_hook      = begin_write;
+	end_write_hook        = end_write;
+	flush_writes_hook     = flush_writes;
+	contains_pending_hook = contains_pending;
+	close_sequence_caches_hook = close_sequence_caches;
 }
 
 /*
- * Per-subtransaction node. Contains the BioseqColumnWriteState for inserts
+ * Per-subtransaction node. Contains the column_write_state for inserts
  * performed inside the given subtransaction.
  */
-struct BioseqColumnSubXidWriteFrame
+struct subtransaction_write_frame
 {
-	SubTransactionId subXid;
-	BioseqColumnWriteState* writeState;
-	BioseqColumnSubXidWriteFrame* next;
+	SubTransactionId subtransaction_id;
+	column_write_state* write_state;
+	subtransaction_write_frame* next;
 };
 
 
 /*
- * Per-relfilenode map entry. dropped/dropSubXid record that the relation
- * has been dropped inside a subtransaction so subsequent commit/abort of
- * that subtransaction either elevates or undoes the drop.
+ * Per-relation-file map entry. dropped/drop_subtransaction_id record that the
+ * relation was dropped inside a subtransaction so its commit or abort can
+ * propagate or undo the marker.
  */
-struct WriteStateMapEntry
+struct write_state_map_entry
 {
-	Oid relfilenode;
+	Oid relation_file_number;
 
 	bool dropped;
-	SubTransactionId dropSubXid;
+	SubTransactionId drop_subtransaction_id;
 
-	BioseqColumnSubXidWriteFrame* writeStateStack;
+	subtransaction_write_frame* write_state_stack;
 };
 
 
-static TxnScopedHtab<WriteStateMapEntry> WriteStateCache{"column store write state map"};
+static bioseq::postgres::support::transaction_scoped_hash_table<
+	write_state_map_entry> write_state_cache{"column store write state map"};
 
 static void
-PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
+pop_current_write_state_entry(write_state_map_entry* entry,
 							SubTransactionId current_sub_xid,
 							SubTransactionId parent_sub_xid,
 							bool commit)
@@ -102,16 +98,16 @@ PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
 	 * A relation can be dropped after its last write frame was popped by an
 	 * earlier commit.  The drop marker is still transactional state and must be
 	 * elevated or reverted even when there is no current write frame.  Checking
-	 * writeStateStack first strands dropped=true after a failed DROP, making the
+	 * write_state_stack first strands dropped=true after a failed DROP, making the
 	 * restored relation appear permanently empty in this backend.
 	 */
 	if (entry->dropped)
 	{
-		if (entry->dropSubXid == current_sub_xid)
+		if (entry->drop_subtransaction_id == current_sub_xid)
 		{
 			if (commit)
 			{
-				entry->dropSubXid = parent_sub_xid;
+				entry->drop_subtransaction_id = parent_sub_xid;
 			}
 			else
 			{
@@ -121,80 +117,77 @@ PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
 		return;
 	}
 
-	if (entry->writeStateStack == nullptr)
+	if (entry->write_state_stack == nullptr)
 	{
 		return;
 	}
 
-	BioseqColumnSubXidWriteFrame* stack_head = entry->writeStateStack;
-	if (stack_head->subXid != current_sub_xid)
+	subtransaction_write_frame* stack_head = entry->write_state_stack;
+	if (stack_head->subtransaction_id != current_sub_xid)
 	{
 		return;
 	}
 
-	// DOC0260 Phase A — flush per-(parent, column, bucket, shard)
-	// bytes_written deltas via the lazily-allocated seq_caches. The teardown
-	// (close_all + destroy + null) is owned by bioseq_storage and invoked
-	// through the registered hook (DOC0322 §7.3) to avoid a module cycle.
-	if (stack_head->writeState->seq_caches && g_seq_caches_close)
+	// Commit or discard sequence-cache deltas before ending the write state.
+	if (stack_head->write_state->seq_caches && close_sequence_caches_hook)
 	{
-		g_seq_caches_close(stack_head->writeState->seq_caches, commit);
-		stack_head->writeState->seq_caches = nullptr;
+		close_sequence_caches_hook(stack_head->write_state->seq_caches, commit);
+		stack_head->write_state->seq_caches = nullptr;
 	}
 	if (commit)
 	{
-		g_end_write(stack_head->writeState);
+		end_write_hook(stack_head->write_state);
 	}
-	entry->writeStateStack = stack_head->next;
+	entry->write_state_stack = stack_head->next;
 }
 
-/*
- * bioseq_init_write_state locates or creates a write state for the given
- * relation and subtransaction. Returns the existing state when the top of
- * the stack matches the current subtransaction; otherwise pushes a fresh
- * BioseqColumnWriteState that inherits columnar options from tupSlotRelationId
- * (to support table-rewrite scenarios where source and target differ).
+/** @brief Finds or creates a relation write state for one subtransaction.
+ *
+ * Returns the existing state when the stack head belongs to the current
+ * subtransaction. Otherwise, pushes a state whose column options come from
+ * source_relation_oid so table rewrites may write a different target relation.
  */
-export BioseqColumnWriteState*
-bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
-						Oid tuple_slot_relation_id, SubTransactionId current_sub_xid)
+export column_write_state*
+initialize_column_write_state(Relation relation, TupleDesc tuple_descriptor,
+						Oid source_relation_oid, SubTransactionId current_sub_xid)
 {
-	bioseq_log<DBG>("[bioseq] pg: bioseq_init_write_state() sub_xid={} tup_slot_rel={}", current_sub_xid, tuple_slot_relation_id);
+	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_write_state() sub_xid={} tup_slot_rel={}", current_sub_xid, source_relation_oid);
 
-	bool found_existing = false;
-	WriteStateMapEntry* hash_entry =
-		WriteStateCache.find_or_insert(&relation->rd_locator.relNumber, &found_existing);
+	const bioseq::postgres::support::transaction_hash_insert_result<
+		write_state_map_entry> insertion =
+			write_state_cache.find_or_insert(&relation->rd_locator.relNumber);
+	write_state_map_entry* hash_entry = insertion.entry;
 
-	if (!found_existing)
+	if (!insertion.was_present)
 	{
-		hash_entry->writeStateStack = nullptr;
+		hash_entry->write_state_stack = nullptr;
 		hash_entry->dropped = false;
 	}
 
 	Assert(!hash_entry->dropped);
 
-	if (hash_entry->writeStateStack != nullptr &&
-		hash_entry->writeStateStack->subXid == current_sub_xid)
+	if (hash_entry->write_state_stack != nullptr &&
+		hash_entry->write_state_stack->subtransaction_id == current_sub_xid)
 	{
-		return hash_entry->writeStateStack->writeState;
+		return hash_entry->write_state_stack->write_state;
 	}
 
-	BioseqColumnOptions bioseq_column_options = { 0 };
+	column_options bioseq_column_options = { 0 };
 	/*
 	 * In case of a table rewrite, we need to fetch table options based on the
 	 * relation id of the source tuple slot. For normal writes this is the
 	 * same as the target relation.
 	 */
 	bioseq_column_options =
-		read_bioseq_column_options(tuple_slot_relation_id)
-			.value_or(BioseqColumnOptions{});
+		read_column_options(source_relation_oid)
+			.value_or(column_options{});
 
-	BioseqColumnWriteState* fresh_write_state = nullptr;
-	fresh_write_state = bioseq::pg_utils::invoke_pg_as_cpp(
+	column_write_state* fresh_write_state =
+		bioseq::postgres::support::invoke_pg_as_cpp(
 		[relation, bioseq_column_options, tuple_descriptor] {
 		const MemoryContext previous =
-			MemoryContextSwitchTo(WriteStateCache.context());
-		BioseqColumnWriteState* result = g_begin_write(
+			MemoryContextSwitchTo(write_state_cache.get_memory_context());
+		column_write_state* result = begin_write_hook(
 			relation->rd_locator, bioseq_column_options, tuple_descriptor);
 		MemoryContextSwitchTo(previous);
 		return result;
@@ -202,118 +195,112 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 	// Sequence caches are initialised lazily by the tuple rewrite path.
 	fresh_write_state->seq_caches = nullptr;
 
-	BioseqColumnSubXidWriteFrame* stack_entry = WriteStateCache.alloc_in_context<BioseqColumnSubXidWriteFrame>();
-	stack_entry->writeState = fresh_write_state;
-	stack_entry->subXid = current_sub_xid;
-	stack_entry->next = hash_entry->writeStateStack;
-	hash_entry->writeStateStack = stack_entry;
+	subtransaction_write_frame* stack_entry =
+		write_state_cache.allocate_in_context<subtransaction_write_frame>();
+	stack_entry->write_state = fresh_write_state;
+	stack_entry->subtransaction_id = current_sub_xid;
+	stack_entry->next = hash_entry->write_state_stack;
+	hash_entry->write_state_stack = stack_entry;
 
-	return stack_entry->writeState;
+	return stack_entry->write_state;
 }
 
 
-/*
- * FlushWriteStateForRelfilenode flushes (but does not pop) the top-of-stack
- * write state of the given relation if it belongs to the current
- * subtransaction. No-op if the relation has no pending writes.
+/** @brief Flushes the current subtransaction's relation write state in place.
+ *
+ * No-op if the relation has no state owned by the current subtransaction.
  */
 export void
-FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId current_sub_xid)
+flush_relation_write_state(Oid relation_file_number, SubTransactionId current_sub_xid)
 {
-	WriteStateMapEntry* entry = WriteStateCache.find(&relfilenode);
+	write_state_map_entry* entry = write_state_cache.find(&relation_file_number);
 	Assert(!entry || !entry->dropped);
 
-	if (entry != nullptr && entry->writeStateStack != nullptr)
+	if (entry != nullptr && entry->write_state_stack != nullptr)
 	{
-		BioseqColumnSubXidWriteFrame* stack_entry = entry->writeStateStack;
-		if (stack_entry->subXid == current_sub_xid)
+		subtransaction_write_frame* stack_entry = entry->write_state_stack;
+		if (stack_entry->subtransaction_id == current_sub_xid)
 		{
-			g_flush_writes(stack_entry->writeState);
+			flush_writes_hook(stack_entry->write_state);
 		}
 	}
 }
 
 
-/*
- * BioseqColumnPopWriteStateForAllRels pops the top-of-stack write state for
- * every relation whose top matches the current subtransaction. Either
- * flushes them (commit == true) or discards them (commit == false). Drops
- * that occurred in the current subtransaction are either elevated to the
- * parent or reverted depending on commit.
+/** @brief Finalizes the current write frame for every touched relation.
+ *
+ * Flushes matching frames on commit and discards them on abort. Drop markers
+ * owned by this subtransaction propagate to the parent on commit and are
+ * reverted on abort.
  */
 export void
-BioseqColumnPopWriteStateForAllRels(SubTransactionId current_sub_xid,
+pop_all_column_write_states(SubTransactionId current_sub_xid,
 								SubTransactionId parent_sub_xid,
 								bool commit)
 {
-	WriteStateCache.for_each(
+	write_state_cache.for_each(
 		[current_sub_xid, parent_sub_xid, commit](
-				WriteStateMapEntry* entry) {
-			PopWriteStateEntryIfCurrent(
+				write_state_map_entry* entry) {
+			pop_current_write_state_entry(
 				entry, current_sub_xid, parent_sub_xid, commit);
 		});
 }
 
 export void
-BioseqColumnPopWriteStateForRelfilenode(Oid relfilenode,
+pop_relation_column_write_state(Oid relation_file_number,
 									SubTransactionId current_sub_xid,
 									SubTransactionId parent_sub_xid,
 									bool commit)
 {
-	WriteStateMapEntry* entry = WriteStateCache.find(&relfilenode);
-	PopWriteStateEntryIfCurrent(entry, current_sub_xid, parent_sub_xid, commit);
+	write_state_map_entry* entry = write_state_cache.find(&relation_file_number);
+	pop_current_write_state_entry(entry, current_sub_xid, parent_sub_xid, commit);
 }
 
 
-/*
- * BioseqColumnMarkRelfilenodeDroppedBioseqColumn records that the given relation
- * has been dropped inside the given subtransaction, so later lifecycle
- * hooks can decide whether to commit or revert the drop.
+/** @brief Marks a relation write state as dropped in a subtransaction.
  */
 export void
-BioseqColumnMarkRelfilenodeDroppedBioseqColumn(Oid relfilenode, SubTransactionId current_sub_xid)
+mark_column_write_state_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
 {
-	WriteStateMapEntry* entry = WriteStateCache.find(&relfilenode);
+	write_state_map_entry* entry = write_state_cache.find(&relation_file_number);
 	if (entry == nullptr || entry->dropped)
 	{
 		return;
 	}
 
 	entry->dropped = true;
-	entry->dropSubXid = current_sub_xid;
+	entry->drop_subtransaction_id = current_sub_xid;
 }
 
 
-/*
- * BioseqColumnNonTransactionDropWriteState removes the entry for a relation
- * that has been dropped outside of any subtransaction lifecycle (for
- * example TRUNCATE).
+/** @brief Removes state for a relation dropped outside subtransaction cleanup.
  */
 export void
-BioseqColumnNonTransactionDropWriteState(Oid relfilenode)
+drop_column_write_state_outside_transaction(Oid relation_file_number)
 {
-	WriteStateCache.remove(&relfilenode);
+	write_state_cache.remove(&relation_file_number);
 }
 
 
-/*
- * BioseqColumnPendingWritesInUpperTransactions returns true if any ancestor
- * subtransaction (not the current one) has pending writes for the given
- * relation. Used to decide whether a read would bypass uncommitted rows.
+/** @brief Tests whether an ancestor subtransaction owns pending column writes.
  */
 export bool
-BioseqColumnPendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId current_sub_xid)
+column_writes_pending_in_parent_transactions(
+	Oid relation_file_number,
+	SubTransactionId current_sub_xid)
 {
-	WriteStateMapEntry* entry = WriteStateCache.find(&relfilenode);
-	if (entry == nullptr || entry->writeStateStack == nullptr)
+	write_state_map_entry* entry = write_state_cache.find(&relation_file_number);
+	if (entry == nullptr || entry->write_state_stack == nullptr)
 	{
 		return false;
 	}
 
-	for (auto* stack_entry : IntrusiveList<BioseqColumnSubXidWriteFrame>(entry->writeStateStack))
+	for (subtransaction_write_frame* stack_entry :
+		 bioseq::postgres::support::intrusive_list<subtransaction_write_frame>{
+			 entry->write_state_stack})
 	{
-		if (stack_entry->subXid != current_sub_xid &&
-			g_contains_pending(stack_entry->writeState))
+		if (stack_entry->subtransaction_id != current_sub_xid &&
+			contains_pending_hook(stack_entry->write_state))
 		{
 			return true;
 		}
@@ -323,12 +310,9 @@ BioseqColumnPendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId c
 }
 
 
-/*
- * GetBioseqColumnWriteContextForDebug exposes the internal WriteStateContext
- * for diagnostics (e.g. the memory-statistics SRF in columnar_debug).
- */
+/// @brief Returns the memory context owning transaction-scoped write states.
 export MemoryContext
-GetBioseqColumnWriteContextForDebug()
+column_write_memory_context()
 {
-	return WriteStateCache.context();
+	return write_state_cache.get_memory_context();
 }

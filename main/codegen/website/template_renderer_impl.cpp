@@ -18,48 +18,48 @@
 
 namespace bioseq::codegen::website::detail {
 
-int render_jinja(const std::string& template_text,
+int render_inline_template_impl(const std::string& template_text,
                  const std::vector<std::pair<std::string, std::string>>& bindings,
-                 std::string& out_result,
-                 std::string& out_error) {
-    jinja2::Template document;
-    const auto loaded = document.Load(template_text);
+                 std::string& rendered_output,
+                 std::string& diagnostic_output) {
+    jinja2::Template template_instance;
+    const auto loaded = template_instance.Load(template_text);
     if (!loaded) {
-        out_error = loaded.error().ToString();
+        diagnostic_output = loaded.error().ToString();
         return 1;
     }
     jinja2::ValuesMap values;
     for (const auto& [key, value] : bindings) {
         values.emplace(key, value);
     }
-    const auto rendered = document.RenderAsString(values);
+    const auto rendered = template_instance.RenderAsString(values);
     if (!rendered) {
-        out_error = rendered.error().ToString();
+        diagnostic_output = rendered.error().ToString();
         return 2;
     }
-    out_result = rendered.value();
+    rendered_output = rendered.value();
     return 0;
 }
 
-int render_jinja_json(const std::string& template_text,
+int render_inline_json_template_impl(const std::string& template_text,
                       const std::string& json_context,
-                      std::string& out_result,
-                      std::string& out_error) {
-    jinja2::Template document;
-    const auto loaded = document.Load(template_text);
+                      std::string& rendered_output,
+                      std::string& diagnostic_output) {
+    jinja2::Template template_instance;
+    const auto loaded = template_instance.Load(template_text);
     if (!loaded) {
-        out_error = loaded.error().ToString();
+        diagnostic_output = loaded.error().ToString();
         return 1;
     }
     boost::json::value context;
     try {
         context = boost::json::parse(json_context);
     } catch (const std::exception& error) {
-        out_error = std::string("invalid JSON context: ") + error.what();
+        diagnostic_output = std::string("invalid JSON context: ") + error.what();
         return 3;
     }
     if (!context.is_object()) {
-        out_error = "JSON render context must be an object";
+        diagnostic_output = "JSON render context must be an object";
         return 3;
     }
     // context must outlive the render: Jinja reflects it lazily by reference.
@@ -67,29 +67,29 @@ int render_jinja_json(const std::string& template_text,
     for (const auto& member : context.as_object()) {
         values.emplace(std::string(member.key()), jinja2::Reflect(member.value()));
     }
-    const auto rendered = document.RenderAsString(values);
+    const auto rendered = template_instance.RenderAsString(values);
     if (!rendered) {
-        out_error = rendered.error().ToString();
+        diagnostic_output = rendered.error().ToString();
         return 2;
     }
-    out_result = rendered.value();
+    rendered_output = rendered.value();
     return 0;
 }
 
-int render_jinja_file(const std::string& templates_dir,
+int render_template_file_impl(const std::string& templates_dir,
                       const std::string& template_name,
                       const std::string& json_context,
-                      std::string& out_result,
-                      std::string& out_error) {
+                      std::string& rendered_output,
+                      std::string& diagnostic_output) {
     boost::json::value context;
     try {
         context = boost::json::parse(json_context);
     } catch (const std::exception& error) {
-        out_error = std::string("invalid JSON context: ") + error.what();
+        diagnostic_output = std::string("invalid JSON context: ") + error.what();
         return 3;
     }
     if (!context.is_object()) {
-        out_error = "JSON render context must be an object";
+        diagnostic_output = "JSON render context must be an object";
         return 3;
     }
     jinja2::TemplateEnv env;
@@ -105,15 +105,15 @@ int render_jinja_file(const std::string& templates_dir,
     }
     auto loaded = env.LoadTemplate(template_name);
     if (!loaded) {
-        out_error = loaded.error().ToString();
+        diagnostic_output = loaded.error().ToString();
         return 1;
     }
     const auto rendered = loaded.value().RenderAsString(jinja2::ValuesMap{});
     if (!rendered) {
-        out_error = rendered.error().ToString();
+        diagnostic_output = rendered.error().ToString();
         return 2;
     }
-    out_result = rendered.value();
+    rendered_output = rendered.value();
     return 0;
 }
 

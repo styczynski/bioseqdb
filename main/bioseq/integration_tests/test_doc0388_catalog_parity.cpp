@@ -1,4 +1,4 @@
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 
 #include <cerrno>
 #include <cstring>
@@ -103,8 +103,6 @@ TEST_CASE(
       BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY,
       "--approved-delta",
       BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA,
-      "--guc-parity-ledger",
-      BIOSEQ_DOC0388_CATALOG_PARITY_GUC_LEDGER,
       "--active-profile",
       BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE,
       "--timeout-seconds",

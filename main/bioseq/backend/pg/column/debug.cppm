@@ -1,1 +1,1 @@
-export module bioseq.storage.debug;
+export module bioseq.postgres.storage.debug;

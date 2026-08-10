@@ -3,7 +3,7 @@
  * write_state_interface.cppm
  *
  * Top-level dispatcher that forwards transaction-lifecycle events
- * (flush/discard on subtransaction commit or abort, relfilenode drop,
+ * (flush/discard on subtransaction commit or abort, relation-file drop,
  * pending-write checks) to both the columnar write-state module and the
  * row-mask write-state module. Exists so higher layers only have to call
  * one function per event.
@@ -12,29 +12,25 @@
  */
 module;
 
-#include "common.h"
+#include <bioseq/pg_compat.h>
 
-export module bioseq.storage.metadata:write_state_interface;
+export module bioseq.postgres.storage.metadata:write_state_interface;
 
-import :write_state;            // BioseqColumnPopWriteStateForAllRels, FlushWriteStateForRelfilenode, ...
-import :write_state_row_mask;   // RowMaskPopWriteStateForAllRels, RowMaskMarkRelfilenodeDropped, ...
-import bioseq.pg_utils;
+import :write_state;            // pop_all_column_write_states, flush_relation_write_state, ...
+import :write_state_row_mask;   // pop_all_row_mask_write_states, mark_row_mask_relation_dropped, ...
+import bioseq.postgres.support;
 
-/*
- * FlushWriteStateWithNewSnapshot flushes pending writes for the given
- * relfilenode in the current subtransaction. If the caller supplied an
- * MVCC snapshot, it is replaced with a copy whose curcid equals the
- * current command id so the just-flushed rows are visible to subsequent
- * reads. Uses output parameters rather than a return struct because the
- * function is declared with a matching C prototype in columnar.h that
- * external callers depend on.
+/** @brief Flushes relation writes and refreshes an owned MVCC snapshot.
+ *
+ * If the caller supplied an MVCC snapshot, replaces it with a registered copy
+ * whose curcid includes the just-flushed rows.
  */
 export void
-FlushWriteStateWithNewSnapshot(Oid relfilenode,
+flush_write_state_with_fresh_snapshot(Oid relation_file_number,
 							   Snapshot* snapshot,
 							   bool* snapshot_registered_by_us)
 {
-	FlushWriteStateForRelfilenode(relfilenode, GetCurrentSubTransactionId());
+	flush_relation_write_state(relation_file_number, GetCurrentSubTransactionId());
 
 	if (*snapshot == InvalidSnapshot || !IsMVCCSnapshot(*snapshot))
 	{
@@ -44,7 +40,7 @@ FlushWriteStateWithNewSnapshot(Oid relfilenode,
 	/*
 	 * Ensure the flushed writes are visible to us by bumping the active
 	 * snapshot's curcid. We push a copy only so UpdateActiveSnapshotCommandId
-	 * is legal; we pop it immediately because BioseqColumnReadState holds the
+	 * is legal; we pop it immediately because column_read_state holds the
 	 * reference and RegisterSnapshot keeps it alive.
 	 */
 	PushCopiedSnapshot(*snapshot);
@@ -60,63 +56,54 @@ FlushWriteStateWithNewSnapshot(Oid relfilenode,
 }
 
 
-/*
- * FlushWriteStateForAllRels is the commit-side lifecycle hook. It flushes
- * pending writes for every relation that the current subtransaction touched
- * (both column writes and row-mask writes).
+/** @brief Commits pending column and row-mask writes for a subtransaction.
  */
 export void
-FlushWriteStateForAllRels(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
+flush_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
 {
-	BioseqColumnPopWriteStateForAllRels(current_sub_xid, parent_sub_xid, true);
-	RowMaskPopWriteStateForAllRels(current_sub_xid, parent_sub_xid, true);
+	pop_all_column_write_states(current_sub_xid, parent_sub_xid, true);
+	pop_all_row_mask_write_states(current_sub_xid, parent_sub_xid, true);
 }
 
 
-/*
- * DiscardWriteStateForAllRels is the abort-side lifecycle hook. It drops
- * pending writes for every relation that the current subtransaction touched.
+/** @brief Discards pending column and row-mask writes for a subtransaction.
  */
 export void
-DiscardWriteStateForAllRels(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
+discard_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
 {
-	BioseqColumnPopWriteStateForAllRels(current_sub_xid, parent_sub_xid, false);
-	RowMaskPopWriteStateForAllRels(current_sub_xid, parent_sub_xid, false);
+	pop_all_column_write_states(current_sub_xid, parent_sub_xid, false);
+	pop_all_row_mask_write_states(current_sub_xid, parent_sub_xid, false);
 }
 
 
-/*
- * MarkRelfilenodeDropped is called when the given relfilenode has been
- * dropped in the current subtransaction. The write-state modules record the
- * drop so later lifecycle hooks skip the relation.
+/** @brief Marks both write-state stores as dropped for a relation.
  */
 export void
-MarkRelfilenodeDropped(Oid relfilenode, SubTransactionId current_sub_xid)
+mark_write_state_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
 {
-	BioseqColumnMarkRelfilenodeDroppedBioseqColumn(relfilenode, current_sub_xid);
-	RowMaskMarkRelfilenodeDropped(relfilenode, current_sub_xid);
+	mark_column_write_state_relation_dropped(relation_file_number, current_sub_xid);
+	mark_row_mask_relation_dropped(relation_file_number, current_sub_xid);
 }
 
 
-/*
- * NonTransactionDropWriteState handles the TRUNCATE-style drop path where
- * the relfilenode disappears without going through subtransaction commit.
+/** @brief Removes relation state outside subtransaction lifecycle callbacks.
  */
 export void
-NonTransactionDropWriteState(Oid relfilenode)
+drop_write_state_outside_transaction(Oid relation_file_number)
 {
-	BioseqColumnNonTransactionDropWriteState(relfilenode);
-	RowMaskNonTransactionDrop(relfilenode);
+	drop_column_write_state_outside_transaction(relation_file_number);
+	drop_row_mask_state_outside_transaction(relation_file_number);
 }
 
-/*
- * PendingWritesInUpperTransactions returns true if a higher-level
- * subtransaction still has pending writes for the given relation. Used to
- * detect situations where we'd be bypassing uncommitted writes on read.
+/** @brief Tests whether an ancestor subtransaction owns pending writes.
  */
 export bool
-PendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId current_sub_xid)
+writes_pending_in_parent_transactions(
+	Oid relation_file_number,
+	SubTransactionId current_sub_xid)
 {
-	return (BioseqColumnPendingWritesInUpperTransactions(relfilenode, current_sub_xid) ||
-			RowMaskPendingWritesInUpperTransactions(relfilenode, current_sub_xid));
+	return column_writes_pending_in_parent_transactions(
+			relation_file_number, current_sub_xid)
+		|| row_mask_writes_pending_in_parent_transactions(
+			relation_file_number, current_sub_xid);
 }

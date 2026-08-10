@@ -4,7 +4,7 @@
       "_": {
         "type": "integer",
         "default": 0,
-        "description": "DOC0377 nonzero sliced/concat mmsearch coordinate-rebasing proof"
+        "description": "Nonzero sliced/concat mmsearch coordinate-rebasing validation"
       },
       "minimizer_index": {
         "type": "string",
@@ -49,8 +49,8 @@
     }
   },
   "bench_e2e": {
-    "tags": ["e2e", "doc0377", "slice", "mmsearch"],
-    "description": "Selective DOC0377 nonzero target-slice/concat mmsearch run; slice-local hits are rebased and checked against generated logical coordinates, strand, and CIGAR truth.",
+    "tags": ["e2e", "slice", "mmsearch"],
+    "description": "Selective nonzero target-slice/concat mmsearch run; slice-local hits are rebased and checked against generated logical coordinates, strand, and CIGAR truth.",
     "fast": false,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "matrix": {

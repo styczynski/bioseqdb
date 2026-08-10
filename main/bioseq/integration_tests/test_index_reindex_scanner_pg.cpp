@@ -3,7 +3,7 @@
 // reindex path (each row's distinct sub_keys == its fragment count, filed under the
 // rowno the query path resolves), and (b) strict assemble==recompute on the genuinely
 // new scanner_pg fragmented-globalisation path (dna4, single segment).
-#include "common_tests_integration.h"
+#include <tests/support/postgres.hpp>
 #include <libpq-fe.h>
 #include <chrono>
 #include <set>

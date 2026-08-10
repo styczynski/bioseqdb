@@ -1,9 +1,9 @@
 // Locked output fixtures for the retained legacy two-stack SIMD API. The two
 // u32 W10/K15 cases use its already-bound resident route; the u8 W10/K4 wrap
-// case uses a test-private fixed-target probe. Chronological ExactSimd output
+// case uses a test-private fixed-target probe. Chronological two_stack_nthash output
 // is a distinct contract tested in two_stack_exact_continuation_test.cpp.
 
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "common/simd/highway_test_probes/contract.h"
 
 #include <algorithm>
@@ -22,26 +22,26 @@ import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.kmers.two_stack_minimizers;
 
 namespace {
 
 using namespace seq::literals;
-using bioseq::minimizers::MinimapSketchData;
-using bioseq::minimizers::MinimizerKernelAlgorithm;
-using bioseq::minimizers::MinimizerKernelInvocation;
-using bioseq::minimizers::MinimizerKernelStatus;
-using bioseq::minimizers::MinimizerSink;
-using bioseq::minimizers::MinimizerSinkBatchView;
-using bioseq::minimizers::PackedSequenceKernelView;
-using bioseq::minimizers::TwoStackContinuationStatus;
-using bioseq::minimizers::TwoStackRoute;
+using bioseq::minimizers::minimap_sketch_data;
+using bioseq::minimizers::minimizer_kernel_algorithm;
+using bioseq::minimizers::minimizer_kernel_invocation;
+using bioseq::minimizers::minimizer_kernel_status;
+using bioseq::minimizers::minimizer_sink;
+using bioseq::minimizers::minimizer_sink_batch_view;
+using bioseq::minimizers::packed_sequence_kernel_view;
+using bioseq::minimizers::two_stack_continuation_status;
+using bioseq::minimizers::two_stack_route;
 
 class resident_output_sink final {
 public:
-    static constexpr std::size_t batch_capacity = 256u;
+    static constexpr std::size_t k_batch_capacity = 256u;
 
-    [[nodiscard]] MinimizerSink contract() noexcept {
+    [[nodiscard]] minimizer_sink contract() noexcept {
         return {
             .state = this,
             .acquire = &acquire,
@@ -49,37 +49,37 @@ public:
         };
     }
 
-    std::vector<MinimapSketchData> records;
+    std::vector<minimap_sketch_data> records;
     bool protocol_ok = true;
 
 private:
-    [[nodiscard]] static MinimizerSinkBatchView acquire(
+    [[nodiscard]] static minimizer_sink_batch_view acquire(
         void* opaque, const std::size_t minimum)
     {
         auto& self = *static_cast<resident_output_sink*>(opaque);
-        if (self.pending_ || minimum > batch_capacity) {
+        if (self.pending_ || minimum > k_batch_capacity) {
             self.protocol_ok = false;
             return {};
         }
         self.pending_ = true;
         return {
             .data = self.storage_.data(),
-            .capacity = batch_capacity,
+            .capacity = k_batch_capacity,
             .layout = bioseq::minimizers::
-                minimizer_output_layout_v<MinimapSketchData>,
-            .record_size = sizeof(MinimapSketchData),
-            .record_alignment = alignof(MinimapSketchData),
+                k_minimizer_output_layout<minimap_sketch_data>,
+            .record_size = sizeof(minimap_sketch_data),
+            .record_alignment = alignof(minimap_sketch_data),
         };
     }
 
     static void commit(void* opaque, const std::size_t initialized) noexcept {
         auto& self = *static_cast<resident_output_sink*>(opaque);
-        if (!self.pending_ || initialized > batch_capacity) {
+        if (!self.pending_ || initialized > k_batch_capacity) {
             self.protocol_ok = false;
             return;
         }
         auto* const first = std::launder(
-            reinterpret_cast<MinimapSketchData*>(self.storage_.data()));
+            reinterpret_cast<minimap_sketch_data*>(self.storage_.data()));
         try {
             self.records.insert(self.records.end(), first, first + initialized);
         } catch (...) {
@@ -89,8 +89,8 @@ private:
         self.pending_ = false;
     }
 
-    alignas(MinimapSketchData) std::array<
-        std::byte, batch_capacity * sizeof(MinimapSketchData)> storage_{};
+    alignas(minimap_sketch_data) std::array<
+        std::byte, k_batch_capacity * sizeof(minimap_sketch_data)> storage_{};
     bool pending_ = false;
 };
 
@@ -105,7 +105,7 @@ private:
 }
 
 template<class Range>
-[[nodiscard]] PackedSequenceKernelView packed_view(const Range& range) {
+[[nodiscard]] packed_sequence_kernel_view packed_view(const Range& range) {
     using traits = typename Range::traits;
     return {
         .storage = reinterpret_cast<const std::byte*>(
@@ -122,7 +122,7 @@ template<class Range>
 }
 
 [[nodiscard]] std::vector<std::pair<std::size_t, std::uint64_t>>
-run_resident_legacy_pairs(
+run_resident_vector_stream_pairs(
     const std::vector<seq::dna4>& data,
     const std::size_t window,
     const std::size_t kmer)
@@ -130,25 +130,25 @@ run_resident_legacy_pairs(
     using config = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     compact_sequence_range<config> range{std::vector<seq::dna4>(data)};
     resident_output_sink sink;
-    MinimizerKernelInvocation invocation{
+    minimizer_kernel_invocation invocation{
         .sequence = packed_view(range),
         .window = window,
         .kmer = kmer,
         .output_layout = bioseq::minimizers::
-            minimizer_output_layout_v<MinimapSketchData>,
-        .output_hash_mask = MinimapSketchData::hash_field_mask,
-        .output_position_mask = MinimapSketchData::pos_field_mask,
-        .two_stack_route = TwoStackRoute::resident_report76,
+            k_minimizer_output_layout<minimap_sketch_data>,
+        .output_hash_mask = minimap_sketch_data::k_hash_field_mask,
+        .output_position_mask = minimap_sketch_data::k_position_field_mask,
+        .two_stack_route = two_stack_route::resident_vector_stream,
         .sink = sink.contract(),
     };
     const auto kernel = fixed_table().minimizers.two_stack_nthash;
     REQUIRE(kernel != nullptr);
     const auto result = kernel(invocation);
-    REQUIRE(result.status == MinimizerKernelStatus::ok);
+    REQUIRE(result.status == minimizer_kernel_status::ok);
     REQUIRE(result.family_status == static_cast<std::uint32_t>(
-        TwoStackContinuationStatus::ok));
-    REQUIRE(result.proof.algorithm == MinimizerKernelAlgorithm::two_stack_nthash);
-    REQUIRE(result.proof.target
+        two_stack_continuation_status::ok));
+    REQUIRE(result.stats.algorithm == minimizer_kernel_algorithm::two_stack_nthash);
+    REQUIRE(result.stats.target
         == bioseq::simd_dispatch::highway_test_target_binding().target);
     REQUIRE(result.emitted == sink.records.size());
     REQUIRE(sink.protocol_ok);
@@ -172,7 +172,7 @@ run_two_stack_pairs(
     const std::size_t kmer)
 {
     static_assert(std::same_as<UnitType, std::uint32_t>);
-    return run_resident_legacy_pairs(data, window, kmer);
+    return run_resident_vector_stream_pairs(data, window, kmer);
 }
 
 #if defined(BIOSEQ_TEST_INDEXES)
@@ -198,8 +198,8 @@ run_two_stack_pairs<std::uint8_t>(
         ranks.push_back(static_cast<std::uint8_t>(symbol.to_rank()));
     }
 
-    BioseqHighwayTwoStackLegacyOutputReceipt receipt{};
-    REQUIRE(bioseq_highway_probe_two_stack_legacy_output(
+    bioseq_highway_two_stack_output_receipt receipt{};
+    REQUIRE(bioseq_highway_probe_two_stack_output(
         ranks.data(),
         static_cast<std::uint64_t>(ranks.size()),
         sizeof(std::uint8_t),
@@ -212,7 +212,7 @@ run_two_stack_pairs<std::uint8_t>(
     REQUIRE(receipt.window == window);
     REQUIRE(receipt.kmer == kmer);
     REQUIRE(receipt.pair_count
-        <= BIOSEQ_HIGHWAY_TWO_STACK_LEGACY_OUTPUT_CAPACITY);
+        <= BIOSEQ_HIGHWAY_TWO_STACK_OUTPUT_CAPACITY);
 
     std::vector<std::pair<std::size_t, std::uint64_t>> pairs;
     pairs.reserve(static_cast<std::size_t>(receipt.pair_count));

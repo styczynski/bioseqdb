@@ -1,4 +1,4 @@
-#include "common_tests.h"
+#include <tests/support/common.hpp>
 #include "highway_test_probes/contract.h"
 
 import bioseq.highway.test_support;

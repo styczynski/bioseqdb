@@ -2,8 +2,8 @@
  * @file parallel_gzip_source.cppm
  * @brief `io_source`-conforming adapter on top of `parallel_gzip_decoder`.
  *
- * PIMPL via `std::unique_ptr<impl>` (the one place main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1
- * explicitly allows). The PIMPL holds the mmap source (which keeps the
+ * PIMPL via `std::unique_ptr<impl>`. The implementation holds the mmap source
+ * (which keeps the
  * fd alive for the duration of the parse), the decoder, and the
  * trailing error message. Constructed via
  * `try_open_from_mmap(mmap_source, options)` so the dispatcher can
@@ -11,7 +11,6 @@
  */
 module;
 
-#include "common.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +23,6 @@ module;
 
 export module bioseq.io.compression.parallel_gzip_source;
 
-import bioseq.common.mlogging;
 import bioseq.io.sources;
 import bioseq.io.options;
 import bioseq.io.compression.parallel_gzip_decoder;
@@ -60,7 +58,7 @@ public:
         // Compute chunk target / worker count from options.
         std::size_t chunk_bytes = options.io.parallel_gzip_chunk_bytes;
         if (chunk_bytes == 0) {
-            chunk_bytes = 4 * 1024 * 1024;  // kDefaultParallelGzipChunkSize
+            chunk_bytes = 4 * 1024 * 1024;  // default_parallel_gzip_chunk_size
         }
         std::size_t worker_count = options.io.parallel_gzip_thread_count;
         if (worker_count == 0) {
@@ -77,10 +75,10 @@ public:
         return source;
     }
 
-    [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
+    [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_impl == nullptr) {
             _last_error_message = "parallel_gzip_source: not initialised";
-            return read_result{0, false, true};
+            return source_read_result{0, false, true};
         }
         const auto outcome = _impl->decoder->read_into(dst, cap);
         if (outcome.has_error) {

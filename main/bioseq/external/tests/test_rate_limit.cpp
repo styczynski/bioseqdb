@@ -57,7 +57,8 @@ struct policy_fixture {
 };
 }  // namespace
 
-TEST_CASE("gcra enforces global spacing", "[external][provider][unit][rate]") {
+TEST_CASE("gcra enforces global spacing",
+          "[component:external_api][layer:unit][feature:external_source]") {
     fake_clock clock;
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/0, /*max_in_flight=*/0);
@@ -77,7 +78,7 @@ TEST_CASE("gcra enforces global spacing", "[external][provider][unit][rate]") {
 }
 
 TEST_CASE("gcra allows an initial burst then throttles",
-          "[external][provider][unit][rate]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     fake_clock clock;
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/3, /*max_in_flight=*/0);
@@ -94,7 +95,7 @@ TEST_CASE("gcra allows an initial burst then throttles",
 }
 
 TEST_CASE("gcra caps concurrent in-flight requests",
-          "[external][provider][unit][rate]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     fake_clock clock;
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/100, /*max_in_flight=*/2);
@@ -120,7 +121,7 @@ TEST_CASE("gcra caps concurrent in-flight requests",
 }
 
 TEST_CASE("gcra rolls back the in-flight slot when it throttles",
-          "[external][provider][unit][rate]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     fake_clock clock;
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/0, /*max_in_flight=*/2);
@@ -142,7 +143,7 @@ TEST_CASE("gcra rolls back the in-flight slot when it throttles",
 }
 
 TEST_CASE("gcra applies a Retry-After penalty floor",
-          "[external][provider][unit][rate]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     fake_clock clock;
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/100, /*max_in_flight=*/0);
@@ -166,7 +167,7 @@ TEST_CASE("gcra applies a Retry-After penalty floor",
 }
 
 TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
-          "[external][provider][unit][rate]") {
+          "[component:external_api][layer:unit][feature:external_source]") {
     struct steady_clock_src {
         static std::chrono::nanoseconds mono(void*) noexcept {
             return std::chrono::steady_clock::now().time_since_epoch();

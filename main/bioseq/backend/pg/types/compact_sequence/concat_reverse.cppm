@@ -1,4 +1,4 @@
-/* Scalar concat and O(1) logical transform SQL adapters. */
+/* scalar concat and O(1) logical transform SQL adapters. */
 module;
 
 #include <cstddef>
@@ -6,12 +6,12 @@ module;
 #include <string>
 #include <string_view>
 
-#include "headers/pg_compat.h"
+#include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/builtins.h"
 }
 
-export module bioseq.types.pg_compact_sequence:concat_reverse;
+export module bioseq.postgres.types.compact_sequence:concat_reverse;
 
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
@@ -20,7 +20,7 @@ import :tree_types;
 import :view_session;
 import :packed_output;
 import bioseq.storage.coordinates;
-import bioseq.storage.lazy;
+import bioseq.storage.lazy_sequence;
 
 namespace {
 

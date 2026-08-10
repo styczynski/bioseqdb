@@ -3,7 +3,6 @@
  * @brief Device-free SPIR-V decoration scanner for Vulkan shader ABI checks.
  */
 module;
-#include "common.h"
 
 #include <array>
 #include <cstddef>
@@ -16,18 +15,20 @@ export module bioseq.gpu.vulkan.shader_layout;
 
 export namespace bioseq::gpu::vulkan {
 
+/// @brief Sentinel used when a SPIR-V decoration has no resolved unsigned value.
 inline constexpr std::uint32_t k_spirv_layout_unknown = 0xffffffffu;
 
-struct SpirvStructLayout {
+/// @brief Member-offset decorations resolved for one SPIR-V structure type.
+struct spirv_struct_layout {
     std::uint32_t id = 0;
     std::vector<std::uint32_t> member_offsets;
 };
 
-/// Layout resolved through one descriptor variable, its pointer/block type,
+/// @brief Layout resolved through one descriptor variable, its pointer/block type,
 /// and the binding's array element type. `member_offsets` are therefore
 /// binding-specific instead of an unsafe global "some struct looked right"
 /// match. Empty offsets mean a scalar/vector array element.
-struct SpirvBindingLayout {
+struct spirv_binding_layout {
     std::uint32_t descriptor_set = 0;
     std::uint32_t binding = 0;
     std::uint32_t array_stride = 0;
@@ -35,17 +36,18 @@ struct SpirvBindingLayout {
     std::vector<std::uint32_t> member_offsets;
 };
 
-/// Decoded SPIR-V layout decorations used to validate storage-buffer and push
-/// constant ABIs. Legacy global views remain for established callers, while
-/// new ABI checks use binding-specific resolution and arbitrary member counts.
-struct SpirvLayoutScan {
+/// @brief Decoded SPIR-V decorations used to validate storage-buffer and push-constant
+/// ABIs. Aggregate views support broad checks; binding-specific records support
+/// exact descriptor validation with arbitrary member counts.
+struct spirv_layout_scan {
     std::vector<std::uint32_t> array_strides;
     std::vector<std::array<std::uint32_t, 4>> structs4;
     std::vector<std::uint32_t> bindings;
-    std::vector<SpirvStructLayout> structs;
-    std::vector<SpirvBindingLayout> binding_layouts;
+    std::vector<spirv_struct_layout> structs;
+    std::vector<spirv_binding_layout> binding_layouts;
     std::vector<std::uint32_t> push_constant_offsets;
 
+    /// @brief Return whether any reflected array uses `stride` bytes per element.
     [[nodiscard]] bool has_array_stride(std::uint32_t stride) const noexcept {
         for (const std::uint32_t candidate : array_strides) {
             if (candidate == stride) return true;
@@ -53,6 +55,7 @@ struct SpirvLayoutScan {
         return false;
     }
 
+    /// @brief Return whether any four-member structure has the requested offsets.
     [[nodiscard]] bool has_struct_offsets(
         const std::array<std::uint32_t, 4>& offsets) const noexcept {
         for (const auto& candidate : structs4) {
@@ -61,6 +64,7 @@ struct SpirvLayoutScan {
         return false;
     }
 
+    /// @brief Return whether any descriptor variable uses `binding`.
     [[nodiscard]] bool has_binding(std::uint32_t binding) const noexcept {
         for (const std::uint32_t candidate : bindings) {
             if (candidate == binding) return true;
@@ -68,7 +72,8 @@ struct SpirvLayoutScan {
         return false;
     }
 
-    [[nodiscard]] const SpirvBindingLayout* binding_layout(
+    /// @brief Resolve the layout for one descriptor-set binding, or return null.
+    [[nodiscard]] const spirv_binding_layout* binding_layout(
         std::uint32_t descriptor_set,
         std::uint32_t binding) const noexcept
     {
@@ -79,6 +84,7 @@ struct SpirvLayoutScan {
         return nullptr;
     }
 
+    /// @brief Return whether one descriptor binding has the requested array stride.
     [[nodiscard]] bool has_binding_array_stride(
         std::uint32_t descriptor_set,
         std::uint32_t binding,
@@ -88,6 +94,7 @@ struct SpirvLayoutScan {
         return layout != nullptr && layout->array_stride == stride;
     }
 
+    /// @brief Return whether one descriptor binding exposes the requested member offsets.
     [[nodiscard]] bool has_binding_struct_offsets(
         std::uint32_t descriptor_set,
         std::uint32_t binding,
@@ -103,6 +110,7 @@ struct SpirvLayoutScan {
         return true;
     }
 
+    /// @brief Return whether the push-constant block exposes the requested offsets.
     [[nodiscard]] bool has_push_constant_offsets(
         std::span<const std::uint32_t> offsets) const noexcept
     {
@@ -114,31 +122,35 @@ struct SpirvLayoutScan {
     }
 };
 
-/// Scan a compiled SPIR-V module and resolve descriptor variables through
-/// OpVariable -> OpTypePointer -> block OpTypeStruct -> array element. This is
-/// intentionally device-free so archive validation can fail before Vulkan or
-/// spirv-cross sees a malformed ABI.
-[[nodiscard]] inline SpirvLayoutScan scan_spirv_layout(
+/// @brief Scan a compiled SPIR-V module and resolve descriptor variables through
+/// OpVariable -> OpTypePointer -> block OpTypeStruct -> array element.
+///
+/// @param spirv Compiled SPIR-V words, including the five-word module header.
+/// @return Reflected descriptor, structure, and push-constant decorations.
+///
+/// The scan is device-free so malformed layouts are rejected before Vulkan or
+/// SPIRV-Cross consumes the module.
+[[nodiscard]] inline spirv_layout_scan scan_spirv_layout(
     std::span<const std::uint32_t> spirv)
 {
-    SpirvLayoutScan scan;
-    constexpr std::uint32_t kMagic = 0x07230203u;
-    constexpr std::uint16_t kOpTypeArray = 28;
-    constexpr std::uint16_t kOpTypeRuntimeArray = 29;
-    constexpr std::uint16_t kOpTypeStruct = 30;
-    constexpr std::uint16_t kOpTypePointer = 32;
-    constexpr std::uint16_t kOpVariable = 59;
-    constexpr std::uint16_t kOpDecorate = 71;
-    constexpr std::uint16_t kOpMemberDecorate = 72;
-    constexpr std::uint32_t kDecorationArrayStride = 6;
-    constexpr std::uint32_t kDecorationBinding = 33;
-    constexpr std::uint32_t kDecorationDescriptorSet = 34;
-    constexpr std::uint32_t kDecorationOffset = 35;
-    constexpr std::uint32_t kStorageClassPushConstant = 9;
+    spirv_layout_scan scan;
+    constexpr std::uint32_t k_spirv_magic = 0x07230203u;
+    constexpr std::uint16_t k_op_type_array = 28;
+    constexpr std::uint16_t k_op_type_runtime_array = 29;
+    constexpr std::uint16_t k_op_type_struct = 30;
+    constexpr std::uint16_t k_op_type_pointer = 32;
+    constexpr std::uint16_t k_op_variable = 59;
+    constexpr std::uint16_t k_op_decorate = 71;
+    constexpr std::uint16_t k_op_member_decorate = 72;
+    constexpr std::uint32_t k_decoration_array_stride = 6;
+    constexpr std::uint32_t k_decoration_binding = 33;
+    constexpr std::uint32_t k_decoration_descriptor_set = 34;
+    constexpr std::uint32_t k_decoration_offset = 35;
+    constexpr std::uint32_t k_storage_class_push_constant = 9;
 
-    if (spirv.size() < 5 || spirv[0] != kMagic) return scan;
+    if (spirv.size() < 5 || spirv[0] != k_spirv_magic) return scan;
 
-    struct DecorationRecord {
+    struct decoration_record {
         std::uint32_t id = 0;
         std::uint32_t binding = k_spirv_layout_unknown;
         std::uint32_t descriptor_set = 0;
@@ -147,51 +159,51 @@ struct SpirvLayoutScan {
         bool has_descriptor_set = false;
         bool has_array_stride = false;
     };
-    struct MemberDecorationRecord {
+    struct member_decoration_record {
         std::uint32_t struct_id = 0;
         std::vector<std::uint32_t> offsets;
     };
-    struct StructTypeRecord {
+    struct struct_type_record {
         std::uint32_t id = 0;
         std::vector<std::uint32_t> member_types;
     };
-    struct ArrayTypeRecord {
+    struct array_type_record {
         std::uint32_t id = 0;
         std::uint32_t element_type = 0;
     };
-    struct PointerTypeRecord {
+    struct pointer_type_record {
         std::uint32_t id = 0;
         std::uint32_t storage_class = 0;
         std::uint32_t pointee_type = 0;
     };
-    struct VariableRecord {
+    struct variable_record {
         std::uint32_t id = 0;
         std::uint32_t result_type = 0;
         std::uint32_t storage_class = 0;
     };
 
-    std::vector<DecorationRecord> decorations;
-    std::vector<MemberDecorationRecord> member_decorations;
-    std::vector<StructTypeRecord> struct_types;
-    std::vector<ArrayTypeRecord> array_types;
-    std::vector<PointerTypeRecord> pointer_types;
-    std::vector<VariableRecord> variables;
+    std::vector<decoration_record> decorations;
+    std::vector<member_decoration_record> member_decorations;
+    std::vector<struct_type_record> struct_types;
+    std::vector<array_type_record> array_types;
+    std::vector<pointer_type_record> pointer_types;
+    std::vector<variable_record> variables;
 
     const auto decoration_for = [&decorations](std::uint32_t id)
-        -> DecorationRecord& {
+        -> decoration_record& {
         for (auto& candidate : decorations) {
             if (candidate.id == id) return candidate;
         }
-        decorations.push_back(DecorationRecord{});
+        decorations.push_back(decoration_record{});
         decorations.back().id = id;
         return decorations.back();
     };
     const auto member_decoration_for = [&member_decorations](std::uint32_t id)
-        -> MemberDecorationRecord& {
+        -> member_decoration_record& {
         for (auto& candidate : member_decorations) {
             if (candidate.struct_id == id) return candidate;
         }
-        member_decorations.push_back(MemberDecorationRecord{});
+        member_decorations.push_back(member_decoration_record{});
         member_decorations.back().struct_id = id;
         return member_decorations.back();
     };
@@ -203,25 +215,25 @@ struct SpirvLayoutScan {
         const auto word_count = static_cast<std::uint16_t>(word >> 16);
         if (word_count == 0 || word_index + word_count > spirv.size()) break;
 
-        if (op == kOpDecorate && word_count >= 3) {
+        if (op == k_op_decorate && word_count >= 3) {
             const std::uint32_t target = spirv[word_index + 1];
             const std::uint32_t decoration = spirv[word_index + 2];
             auto& record = decoration_for(target);
-            if (decoration == kDecorationArrayStride && word_count >= 4) {
+            if (decoration == k_decoration_array_stride && word_count >= 4) {
                 record.array_stride = spirv[word_index + 3];
                 record.has_array_stride = true;
                 scan.array_strides.push_back(record.array_stride);
-            } else if (decoration == kDecorationBinding && word_count >= 4) {
+            } else if (decoration == k_decoration_binding && word_count >= 4) {
                 record.binding = spirv[word_index + 3];
                 record.has_binding = true;
                 scan.bindings.push_back(record.binding);
-            } else if (decoration == kDecorationDescriptorSet
+            } else if (decoration == k_decoration_descriptor_set
                        && word_count >= 4) {
                 record.descriptor_set = spirv[word_index + 3];
                 record.has_descriptor_set = true;
             }
-        } else if (op == kOpMemberDecorate && word_count >= 5
-                   && spirv[word_index + 3] == kDecorationOffset) {
+        } else if (op == k_op_member_decorate && word_count >= 5
+                   && spirv[word_index + 3] == k_decoration_offset) {
             auto& record = member_decoration_for(spirv[word_index + 1]);
             const std::uint32_t member = spirv[word_index + 2];
             if (record.offsets.size() <= member) {
@@ -230,26 +242,26 @@ struct SpirvLayoutScan {
                     k_spirv_layout_unknown);
             }
             record.offsets[member] = spirv[word_index + 4];
-        } else if (op == kOpTypeArray && word_count >= 4) {
-            array_types.push_back(ArrayTypeRecord{
+        } else if (op == k_op_type_array && word_count >= 4) {
+            array_types.push_back(array_type_record{
                 spirv[word_index + 1], spirv[word_index + 2]});
-        } else if (op == kOpTypeRuntimeArray && word_count >= 3) {
-            array_types.push_back(ArrayTypeRecord{
+        } else if (op == k_op_type_runtime_array && word_count >= 3) {
+            array_types.push_back(array_type_record{
                 spirv[word_index + 1], spirv[word_index + 2]});
-        } else if (op == kOpTypeStruct && word_count >= 2) {
-            StructTypeRecord record{};
+        } else if (op == k_op_type_struct && word_count >= 2) {
+            struct_type_record record{};
             record.id = spirv[word_index + 1];
             record.member_types.reserve(word_count - 2u);
             for (std::uint16_t i = 2; i < word_count; ++i) {
                 record.member_types.push_back(spirv[word_index + i]);
             }
             struct_types.push_back(std::move(record));
-        } else if (op == kOpTypePointer && word_count >= 4) {
-            pointer_types.push_back(PointerTypeRecord{
+        } else if (op == k_op_type_pointer && word_count >= 4) {
+            pointer_types.push_back(pointer_type_record{
                 spirv[word_index + 1], spirv[word_index + 2],
                 spirv[word_index + 3]});
-        } else if (op == kOpVariable && word_count >= 4) {
-            variables.push_back(VariableRecord{
+        } else if (op == k_op_variable && word_count >= 4) {
+            variables.push_back(variable_record{
                 spirv[word_index + 2], spirv[word_index + 1],
                 spirv[word_index + 3]});
         }
@@ -257,7 +269,7 @@ struct SpirvLayoutScan {
     }
 
     const auto find_decoration = [&decorations](std::uint32_t id)
-        -> const DecorationRecord* {
+        -> const decoration_record* {
         for (const auto& candidate : decorations) {
             if (candidate.id == id) return &candidate;
         }
@@ -271,21 +283,21 @@ struct SpirvLayoutScan {
         return nullptr;
     };
     const auto find_struct = [&struct_types](std::uint32_t id)
-        -> const StructTypeRecord* {
+        -> const struct_type_record* {
         for (const auto& candidate : struct_types) {
             if (candidate.id == id) return &candidate;
         }
         return nullptr;
     };
     const auto find_array = [&array_types](std::uint32_t id)
-        -> const ArrayTypeRecord* {
+        -> const array_type_record* {
         for (const auto& candidate : array_types) {
             if (candidate.id == id) return &candidate;
         }
         return nullptr;
     };
     const auto find_pointer = [&pointer_types](std::uint32_t id)
-        -> const PointerTypeRecord* {
+        -> const pointer_type_record* {
         for (const auto& candidate : pointer_types) {
             if (candidate.id == id) return &candidate;
         }
@@ -293,7 +305,7 @@ struct SpirvLayoutScan {
     };
 
     for (const auto& type : struct_types) {
-        SpirvStructLayout layout{};
+        spirv_struct_layout layout{};
         layout.id = type.id;
         layout.member_offsets.assign(
             type.member_types.size(), k_spirv_layout_unknown);
@@ -320,7 +332,7 @@ struct SpirvLayoutScan {
         const auto* pointer = find_pointer(variable.result_type);
         if (pointer == nullptr) continue;
         const auto* variable_decoration = find_decoration(variable.id);
-        if (variable.storage_class == kStorageClassPushConstant) {
+        if (variable.storage_class == k_storage_class_push_constant) {
             if (const auto* offsets = find_member_offsets(pointer->pointee_type)) {
                 scan.push_constant_offsets = *offsets;
             }
@@ -331,7 +343,7 @@ struct SpirvLayoutScan {
         }
 
         std::uint32_t array_type_id = 0;
-        const ArrayTypeRecord* array = find_array(pointer->pointee_type);
+        const array_type_record* array = find_array(pointer->pointee_type);
         if (array != nullptr) {
             array_type_id = array->id;
         } else if (const auto* block = find_struct(pointer->pointee_type)) {
@@ -346,7 +358,7 @@ struct SpirvLayoutScan {
         if (array == nullptr) continue;
         const auto* array_decoration = find_decoration(array_type_id);
 
-        SpirvBindingLayout layout{};
+        spirv_binding_layout layout{};
         layout.descriptor_set = variable_decoration->has_descriptor_set
             ? variable_decoration->descriptor_set : k_spirv_layout_unknown;
         layout.binding = variable_decoration->binding;
